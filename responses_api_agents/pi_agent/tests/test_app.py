@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
+from fastapi import Request
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
@@ -55,10 +56,7 @@ def _config(**kwargs) -> PiAgentConfig:
 
 
 def _make_agent(**kwargs) -> PiAgent:
-    with patch("responses_api_agents.pi_agent.app.PiAgent.model_post_init"):
-        agent = PiAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
-    return agent
+    return PiAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def _msg_end(role, content, **extra) -> str:
@@ -79,6 +77,90 @@ class TestSanity:
     def test_semaphore_initialized(self) -> None:
         agent = _make_agent(concurrency=4)
         assert agent.sem._value == 4
+
+
+class TestLocalRuntimeSetup:
+    def test_startup_does_not_install_host_pi(self) -> None:
+        with patch("responses_api_agents.pi_agent.app.ensure_pi") as install:
+            agent = PiAgent(config=_config(concurrency=4), server_client=MagicMock(spec=ServerClient))
+        install.assert_not_called()
+        assert agent.sem._value == 4
+
+    async def test_local_calls_install_once_before_subprocess(self, tmp_path) -> None:
+        agent = _make_agent(workspace_root=str(tmp_path), pi_version="0.80.2")
+        process = MagicMock(returncode=0)
+        output = _msg_end("assistant", [{"type": "text", "text": "done"}]).encode()
+        process.communicate = AsyncMock(return_value=(output, b""))
+        module = "responses_api_agents.pi_agent.app"
+        with (
+            patch(f"{module}.ensure_pi") as install,
+            patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn,
+        ):
+
+            async def launch(*args, **kwargs):
+                install.assert_called_once_with("0.80.2")
+                return process
+
+            spawn.side_effect = launch
+            # These consumers construct Request without session middleware.
+            # Their direct-call contract must still work with lazy installation.
+            responses = await asyncio.gather(
+                agent.responses(
+                    Request({"type": "http", "path_params": {}}),
+                    NeMoGymResponseCreateParamsNonStreaming(input="first"),
+                ),
+                agent.responses(
+                    Request({"type": "http", "path_params": {}}),
+                    NeMoGymResponseCreateParamsNonStreaming(input="second"),
+                ),
+            )
+            install.assert_called_once_with("0.80.2")
+            assert spawn.await_count == 2
+            assert all(response.output[0].content[0].text == "done" for response in responses)
+
+    async def test_failed_local_setup_can_retry(self, tmp_path) -> None:
+        agent = _make_agent(workspace_root=str(tmp_path))
+        module = "responses_api_agents.pi_agent.app"
+        process = MagicMock(returncode=0)
+        process.communicate = AsyncMock(return_value=(b"", b""))
+        with (
+            patch(f"{module}.ensure_pi", side_effect=[RuntimeError("npm unavailable"), None]) as install,
+            patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn,
+        ):
+            with pytest.raises(RuntimeError, match="npm unavailable"):
+                await agent._run_pi("task", None, collect_observations=False)
+            spawn.assert_not_awaited()
+            await agent._run_pi("task", None, collect_observations=False)
+            assert install.call_count == 2
+            spawn.assert_awaited_once()
+
+    async def test_cancelled_caller_does_not_cancel_shared_install(self, tmp_path) -> None:
+        agent = _make_agent(workspace_root=str(tmp_path))
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def install(*args):
+            started.set()
+            await release.wait()
+
+        module = "responses_api_agents.pi_agent.app"
+        process = MagicMock(returncode=0)
+        process.communicate = AsyncMock(return_value=(b"", b""))
+        with (
+            patch(f"{module}.asyncio.to_thread", AsyncMock(side_effect=install)) as setup,
+            patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn,
+        ):
+            first = asyncio.create_task(agent._run_pi("first", None, collect_observations=False))
+            await asyncio.wait_for(started.wait(), timeout=2)
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            assert not agent._local_setup_task.done()
+            spawn.assert_not_awaited()
+            release.set()
+            await asyncio.wait_for(agent._run_pi("second", None, collect_observations=False), timeout=2)
+            setup.assert_awaited_once()
+            spawn.assert_awaited_once()
 
 
 class TestExtractInstruction:
