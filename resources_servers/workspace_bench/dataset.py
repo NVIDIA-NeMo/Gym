@@ -24,6 +24,6 @@ def snapshot_root(source_dir: str) -> Path:
 
 
 def resolve_task_path(path: str) -> Path:
-    # Dataset rows store paths relative to the pinned snapshot, so they resolve on any machine.
+    # Rows store paths relative to the pinned snapshot so they work on any machine.
     task_path = Path(path)
     return task_path if task_path.is_absolute() else snapshot_root(task_path.parts[0]) / task_path

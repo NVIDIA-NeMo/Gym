@@ -1,8 +1,6 @@
 # Workspace-Bench
 
-The 100-task English Workspace-Bench-Lite split, run with `harness_agent` using Claude Code, Codex, Pi, or Hermes.
-Outputs are graded by the pinned upstream agent-as-a-judge. See
-[the resources server](../../resources_servers/workspace_bench/README.md) for how grading works.
+The 100 English Workspace-Bench-Lite tasks, run with `harness_agent`.
 
 ```bash
 gym eval prepare --benchmark workspace_bench/claude_code
@@ -17,12 +15,13 @@ gym eval run \
   --output results/workspace_bench_lite.jsonl
 ```
 
-Replace `claude_code` with `codex`, `pi`, or `hermes` to change the harness.
+Use `codex`, `pi`, or `hermes` in place of `claude_code` to change the harness.
 
-- Sandboxes run on OpenSandbox: set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`.
-- Set `WORKSPACE_BENCH_JUDGE_BASE_URL`, `WORKSPACE_BENCH_JUDGE_API_KEY`, and `WORKSPACE_BENCH_JUDGE_MODEL` to an
-  Anthropic-compatible judge endpoint reachable from the sandbox. Keep it fixed across compared runs.
-- Set `WORKSPACE_BENCH_IMAGE` to an image built from upstream `evaluation/docker/Dockerfile` at commit
-  `3fbd0f1a136720fece86786545983e26642c3db2`, with that commit's `evaluation/` directory at
-  `/workspace/Workspace-Bench/evaluation` (plus `npm ci` there) and `python3` with Gym's dependencies for
-  `harness_agent`.
+Set these before running:
+
+- `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` for the sandboxes.
+- `WORKSPACE_BENCH_JUDGE_BASE_URL`, `WORKSPACE_BENCH_JUDGE_API_KEY`, and `WORKSPACE_BENCH_JUDGE_MODEL` for an
+  Anthropic-compatible judge. Keep the judge fixed across compared runs.
+- `WORKSPACE_BENCH_IMAGE` for an image built from upstream `evaluation/docker/Dockerfile` at commit
+  `3fbd0f1a136720fece86786545983e26642c3db2`. It also needs that commit's `evaluation/` directory at
+  `/workspace/Workspace-Bench/evaluation` with `npm ci` run there, and `python3` with Gym's dependencies.

@@ -210,7 +210,7 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
         judged = json.loads((case_dir / "rubrics_judge--gym-judge.json").read_text(encoding="utf-8"))
         graph = json.loads((case_dir / "dependency_graph--gym-judge.json").read_text(encoding="utf-8"))
         judge_error = (judged.get("judge") or {}).get("error")
-        # A received but unparseable verdict remains a wrong answer, not an infrastructure failure.
+        # Unparseable verdicts fail their rubrics, as upstream does. Other judge errors are infrastructure failures.
         if judge_error and judge_error != "Judge output parse failed":
             raise JudgeError(f"Workspace-Bench judge failed: {judge_error}")
         return judged["rubrics"], graph
@@ -262,7 +262,7 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
 
                 def prepare_judge_input() -> None:
                     with tarfile.open(archive, "r:gz") as tar:
-                        # Collect artifacts, not links into the agent's runtime filesystem.
+                        # Grade only real files under output/, never symlinks into the sandbox.
                         members = (
                             member
                             for member in tar
@@ -303,7 +303,7 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
                                     )
                                     if key in (judged.get("judge") or {})
                                 }
-                                # Endpoint/config fields can contain credentials; retain verdict evidence only.
+                                # Keep only verdict fields. Endpoint fields can contain credentials.
                                 with (saved / f"judge-receipt-{uuid4().hex}.json").open(
                                     "x", encoding="utf-8"
                                 ) as stream:
