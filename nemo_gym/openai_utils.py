@@ -1016,6 +1016,9 @@ class NeMoGymChoice(Choice):
 
 class NeMoGymChatCompletion(ChatCompletion):
     choices: List[NeMoGymChoice]
+    # OpenAI-compatible providers and gateways report processing tiers outside OpenAI's enum (Vertex AI and
+    # Anthropic return "standard"); the value is informational, so accept any string rather than fail the call.
+    service_tier: Optional[str] = None
 
 
 ########################################

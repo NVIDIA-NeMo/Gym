@@ -1,0 +1,17 @@
+config_paths:
+  - resources_servers/facts_parametric/configs/facts_parametric.yaml
+
+facts_parametric_public:
+  _inherit_from: facts_parametric_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: facts_parametric
+          type: benchmark
+          jsonl_fpath: benchmarks/facts_parametric/data/facts_parametric_public.jsonl
+          prepare_script: benchmarks/facts_parametric/prepare.py
+          # Identical to the official starter notebook's QUERY_TEMPLATE = "{question}": the raw query is
+          # the whole user message and there is no system prompt.
+          prompt_config: benchmarks/prompts/generic/default.yaml
+          num_repeats: 1
+          license: Apache 2.0
