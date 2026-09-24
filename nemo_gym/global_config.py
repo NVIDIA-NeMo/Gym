@@ -1102,9 +1102,15 @@ the check."""
             if not isinstance(servers, DictConfig):
                 continue
             for server in servers.values():
-                reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-                if isinstance(reference, DictConfig):
-                    with_environment_server.add(reference.get("name"))
+                if not isinstance(server, DictConfig):
+                    continue
+                for reference in server.values():
+                    if (
+                        isinstance(reference, DictConfig)
+                        and reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME
+                        and reference.get("name") is not None
+                    ):
+                        with_environment_server.add(reference["name"])
 
         without_environment_server = sorted(
             agent.name
