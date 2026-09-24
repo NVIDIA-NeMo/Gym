@@ -1,0 +1,29 @@
+# LeanCat's prompt as shipped in the upstream repo (`prompts/static_passk.md` at the pinned
+# commit 4e136a13e5d0b94829c813e6f612fd991e670096), which is what upstream's own
+# `scripts/passk.py` reads. Transcribed verbatim into Gym's prompt-config form; the round-trip
+# is pinned in resources_servers/leancat/tests/test_app.py, which refetches the pinned file and
+# compares.
+#
+# NOT the benchmark default -- see `paper.yaml`, the template printed in the paper's Appendix
+# D.1, which is what the published Table 1/Table 3 numbers correspond to. This one is shipped so
+# the difference stays measurable: run it with
+#
+#     gym eval run --benchmark leancat \
+#         --prompt-config benchmarks/prompts/eval/leancat/upstream-repo.yaml
+#
+# Measured with Goedel-Prover-V2-32B at pass@32: this prompt had 26% of submissions omit
+# `import Mathlib` outright despite the instruction to include the complete header, median
+# output at 3015 tokens with visible degeneration, and Easy at 1/10 against a published 20.0%.
+# `paper.yaml` reproduced Table 3. Same 100 rows either way, so a per-problem diff of the two
+# runs isolates the prompt's contribution exactly.
+user: |-
+  You are an expert in Lean 4 and Mathematics. Please finish the following proof in Lean4 code.
+  Do not change the original statement. Copy the final statement to prove exactly.
+  Please include the complete header, including imports and namespaces, so that your code can pass the Lean4 compiler.
+  You may introduce auxiliary definitions, instances, and lemmas before the target statement if needed. The target statement and all auxiliary code must contain no sorry, admit, axiom, or unsafe declarations.
+
+  The statement for you to complete is:
+
+  ```lean4
+  {formal_statement}
+  ```

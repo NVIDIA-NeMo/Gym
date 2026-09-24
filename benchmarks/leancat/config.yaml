@@ -1,0 +1,31 @@
+# Chain to the existing resources server + agent config.
+config_paths:
+  - resources_servers/leancat/configs/leancat.yaml
+
+# `_inherit_from` keeps this benchmark config isolated from the generic one above.
+leancat_leancat_resources_server:
+  _inherit_from: leancat
+  resources_servers:
+    leancat:
+      # Off for reproduction: upstream's verifier has no statement check, so leaving it on
+      # yields a number below the paper's. `statement_preserved` is still reported as a score.
+      require_statement_preserved: false
+
+leancat_leancat_simple_agent:
+  _inherit_from: leancat_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: leancat_leancat_resources_server
+      datasets:
+      - name: leancat
+        type: benchmark
+        jsonl_fpath: benchmarks/leancat/data/leancat_benchmark.jsonl
+        prepare_script: benchmarks/leancat/prepare.py
+        license: CC-BY-4.0
+        # The paper's Appendix D.1 prompt.
+        prompt_config: benchmarks/prompts/eval/leancat/paper.yaml
+        # Paper v2: k=4, the generalist-model budget of Table 1 and one of upstream's
+        # `recommended_k_values`. Table 3's specialized provers use k=32 -- override with
+        # --num-repeats. Applied at preprocessing; --num-repeats multiplies on top of it.
+        num_repeats: 4
