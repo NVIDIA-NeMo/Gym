@@ -274,3 +274,66 @@ class TestApp:
 
         assert observation.outcome == "sandbox_error"
         assert observation.error_type == "RuntimeError"
+
+
+@pytest.mark.parametrize("model_patch", ["", "diff --git a/example.py b/example.py\n+return 42\n"])
+async def test_only_executed_patch_is_scored(monkeypatch: MonkeyPatch, model_patch: str) -> None:
+    from resources_servers.swebench.app import SWEBenchInstanceRequest, SWEBenchVerifyRequest
+
+    server = SwebenchResourcesServer(
+        config=SwebenchResourcesServerConfig(
+            host="127.0.0.1",
+            port=8080,
+            entrypoint="app.py",
+            name="indic_swebench_verified_opencode_resources_server",
+            sandbox_provider="test",
+            sandbox_config={},
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    agent_sandbox = make_sandbox(exec_result=SandboxExecResult(stdout=model_patch, stderr="", return_code=0))
+    eval_sandbox = make_sandbox(exec_result=SandboxExecResult(stdout="/testbed\n", stderr="", return_code=0))
+    server._session_id_to_sandbox["reasoning-test"] = agent_sandbox
+    monkeypatch.setattr(SwebenchResourcesServer, "_create_sandbox", AsyncMock(return_value=eval_sandbox))
+    monkeypatch.setattr(
+        SwebenchResourcesServer, "_make_test_spec", MagicMock(return_value=SimpleNamespace(instance_id="test-1"))
+    )
+    evaluate = AsyncMock(return_value={"completed": True, "resolved": bool(model_patch)})
+    monkeypatch.setattr("resources_servers.swebench.app.run_instance", evaluate)
+    body = SWEBenchVerifyRequest.model_validate(
+        {
+            **dict.fromkeys(SWEBenchInstanceRequest.model_fields, "unused"),
+            "instance_id": "test-1",
+            "patch": "GOLD_PATCH_MUST_NOT_BE_SCORED",
+            "responses_create_params": {"input": []},
+            "response": {
+                "id": "response-test",
+                "created_at": 0,
+                "model": "test",
+                "object": "response",
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "id": "thinking",
+                        "summary": [{"type": "summary_text", "text": "THINKING_PATCH_MUST_NOT_BE_SCORED"}],
+                    },
+                    {
+                        "type": "message",
+                        "id": "answer",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "All tests pass!", "annotations": []}],
+                    },
+                ],
+            },
+        }
+    )
+    result = await server.verify(MagicMock(session={"session_id": "reasoning-test"}), body)
+    assert evaluate.call_args.kwargs["pred"] == {"instance_id": "test-1", "model_patch": model_patch}
+    agent_sandbox.exec.assert_awaited_once_with("cd /testbed && git --no-pager diff")
+    assert result.model_patch == (model_patch or None)
+    assert result.reward == int(bool(model_patch))
+    assert result.evaluation_completed is True

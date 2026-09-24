@@ -8,16 +8,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from datasets import load_dataset
-from huggingface_hub import get_token, hf_hub_download
-
-from nemo_gym.global_config import get_hf_token
 
 
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "swebench_benchmark.jsonl"
 PROMPT_PATH = BENCHMARK_DIR.parents[1] / "swebench/minimax_prompt.txt"
 SOURCE_ID = "ai4bharat/indic-swe-bench"
-SOURCE_REVISION = "f03e95b7749c7f06b8aa1a2ba75360d9fcb26a43"
 EXPECTED_INSTANCES = 500
 LANGUAGE_NAMES = {
     "as": "Assamese",
@@ -57,7 +53,6 @@ def build_rows(
     records: Sequence[Mapping[str, str]],
     *,
     languages: Sequence[str] = DEFAULT_LANGUAGES,
-    instance_ids: Sequence[str] | None = None,
 ) -> list[dict]:
     """Select translated issues while preserving the original test and sandbox inputs."""
     if (
@@ -70,32 +65,19 @@ def build_rows(
         raise ValueError("languages must be unique")
     if len(records) != EXPECTED_INSTANCES:
         raise ValueError(f"Expected {EXPECTED_INSTANCES} SWE-bench Verified instances, got {len(records)}")
-    indexed = {}
-    for record in records:
-        if any(not isinstance(record.get(key), str) for key in INSTANCE_FIELDS):
-            raise ValueError("Missing or invalid SWE-bench instance fields")
-        identity = record["instance_id"]
-        if not identity.strip() or identity in indexed:
-            raise ValueError(f"Empty or duplicate instance_id: {identity!r}")
-        indexed[identity] = record
-    if instance_ids is not None:
-        if isinstance(instance_ids, str) or not instance_ids or len(set(instance_ids)) != len(instance_ids):
-            raise ValueError("instance_ids must be a nonempty sequence of unique IDs")
-        if set(instance_ids) - indexed.keys():
-            raise ValueError(f"Unknown instance_ids: {sorted(set(instance_ids) - indexed.keys())}")
-    selected = set(indexed if instance_ids is None else instance_ids)
+    if len({record["instance_id"] for record in records}) != len(records):
+        raise ValueError("Duplicate instance_id in SWE-bench Verified")
     template = PROMPT_PATH.read_text()
     rows = []
     for language in languages:
         column = (
             "problem_statement" if language == "en" else f"problem_statement_{LANGUAGE_NAMES[language]}_translation"
         )
-        for identity, record in indexed.items():
+        for record in records:
+            identity = record["instance_id"]
             problem = record.get(column)
             if not isinstance(problem, str) or not problem.strip():
                 raise ValueError(f"Missing problem statement: {language}/{identity}")
-            if identity not in selected:
-                continue
             prompt = (
                 template.replace("{{ workspace_path }}", "/testbed")
                 .replace("{{ instance.problem_statement }}", problem)
@@ -109,7 +91,7 @@ def build_rows(
                     "subset": "verified",
                     "split": "test",
                     "language": language,
-                    "uuid": f"{SOURCE_ID}/{SOURCE_REVISION}/{language}/{identity}",
+                    "uuid": f"{SOURCE_ID}/{language}/{identity}",
                 }
             )
     return rows
@@ -118,19 +100,11 @@ def build_rows(
 def prepare(
     *,
     languages: Sequence[str] = DEFAULT_LANGUAGES,
-    instance_ids: Sequence[str] | None = None,
     output_fpath: str | None = None,
 ) -> Path:
-    """Download the pinned dataset and write rows for the existing SWE-bench verifier."""
-    source = hf_hub_download(
-        repo_id=SOURCE_ID,
-        filename="test.parquet",
-        repo_type="dataset",
-        revision=SOURCE_REVISION,
-        token=get_hf_token() or get_token(),
-    )
-    dataset = load_dataset("parquet", data_files={"test": source}, split="test")
-    rows = build_rows(dataset.to_list(), languages=languages, instance_ids=instance_ids)
+    """Load the test split and write rows for the existing SWE-bench verifier."""
+    dataset = load_dataset(SOURCE_ID, split="test")
+    rows = build_rows(list(dataset), languages=languages)
     output = Path(output_fpath) if output_fpath else OUTPUT_FPATH
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as stream:
@@ -142,7 +116,6 @@ def prepare(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--languages", nargs="+", default=DEFAULT_LANGUAGES)
-    parser.add_argument("--instance-ids", nargs="+")
+    parser.add_argument("--languages", nargs="+", choices=(*DEFAULT_LANGUAGES, "en"), default=DEFAULT_LANGUAGES)
     parser.add_argument("--output-fpath")
     prepare(**vars(parser.parse_args()))

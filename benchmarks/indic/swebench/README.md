@@ -3,32 +3,27 @@
 
 # Indic SWE-bench
 
-Translated SWE-bench Verified from `ai4bharat/indic-swe-bench`: 500 software issues
-in each of 14 Indic languages. Reuses the [English Verified configuration](../../swebench/verified/opencode.yaml),
-its prompt, OpenCode agent, repository images, and test verifier. Only the issue
-text changes; repository commits, patches, and test lists remain unchanged.
+Translated SWE-bench Verified from `ai4bharat/indic-swe-bench`: 500 issues per
+language across all 14 Indic languages (7,000 tasks). Uses the
+[English Verified configuration](../../swebench/verified/opencode.yaml)'s prompt,
+OpenCode agent, sandbox images, test verifier, and three attempts per issue.
+Only the problem statement changes; repository commits, patches, and tests are preserved.
 
-## Configuration
-
-The default is three attempts per issue, matching English Verified. Each attempt
-receives reward 1 when the existing SWE-bench harness reports `resolved`, otherwise
-0. Report mean resolved rate for comparison with English; success in any of three
-attempts is pass@3 and is a different metric. Compare languages using identical
-model, sampling, agent, context, and sandbox settings. Check `evaluation_completed`
-and rollout coverage before reporting scores.
-
-Configure model access and follow the existing [OpenCode prerequisites](../../../responses_api_agents/opencode_sandboxed_agent/README.md).
-OpenCode's context window must match the model being evaluated.
+Indic has separate agent and resources-server names, so English and Indic can
+run in the same Gym stack without replacing either dataset.
 
 ## Prepare data
 
+Preparation loads the dataset's `test` split with Hugging Face `load_dataset`.
+All languages are included by default: `as`, `bn`, `gu`, `hi`, `kn`, `ml`, `mr`,
+`ne`, `or`, `pa`, `sa`, `ta`, `te`, and `ur`.
+
 ```bash
-gym eval prepare --benchmark indic/swebench
+gym eval prepare --benchmark indic/swebench +use_cached_prepared_benchmarks=false
 ```
 
-Defaults to `as`, `bn`, `gu`, `hi`, `kn`, `ml`, `mr`, `ne`, `or`, `pa`, `sa`, `ta`,
-`te`, and `ur` (7,000 tasks). For per-language results, prepare and run one language
-at a time. English is available as `en`:
+For per-language evaluation, select a language during preparation. English is
+also available as `en`:
 
 ```bash
 gym eval prepare --benchmark indic/swebench \
@@ -36,11 +31,11 @@ gym eval prepare --benchmark indic/swebench \
   +use_cached_prepared_benchmarks=false
 ```
 
-Use `instance_ids` in `prepare_script_args` to select tasks for a smoke test.
-Source data is pinned to revision `f03e95b7749c7f06b8aa1a2ba75360d9fcb26a43`.
-Missing translations are rejected. Generated data remains local.
-
 ## Collect rollouts
+
+Complete the [OpenCode prerequisites](../../../responses_api_agents/opencode_sandboxed_agent/README.md)
+and configure the model endpoint and OpenSandbox access. Set OpenCode's
+`opencode_max_context_window` to match the served model's context limit.
 
 ```bash
 gym eval run --benchmark indic/swebench \
@@ -51,7 +46,15 @@ gym eval run --benchmark indic/swebench \
   --model-api-key dummy \
   --split benchmark \
   --output results/indic_swebench/rollouts.jsonl \
-  --concurrency 1
+  --concurrency 1 \
+  +use_cached_prepared_benchmarks=true
 ```
 
-The dataset declares Apache-2.0. Underlying repositories retain their own licenses.
+Use the same model and generation settings for English and Indic comparisons.
+For thinking models, configure vLLM's reasoning and tool-call parsers to separate
+post-thinking content and structured tool calls. The SWE-bench verifier scores
+the executed repository patch against the original tests.
+
+Start with `--limit 1 --num-repeats 1` to check sandbox execution and verification.
+The dataset declares Apache-2.0; underlying repositories retain their own licenses.
+Prepared data is generated locally and excluded from Git.

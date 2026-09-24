@@ -67,82 +67,52 @@ def test_exact_english_prompt_and_verifier_fields(records, monkeypatch, tmp_path
 
 def test_all_languages_and_stable_ids(records):
     rows = module.build_rows(records)
+    languages = {"as", "bn", "gu", "hi", "kn", "ml", "mr", "ne", "or", "pa", "sa", "ta", "te", "ur"}
     assert len(rows) == 28
-    assert {row["language"] for row in rows} == set(module.DEFAULT_LANGUAGES)
+    assert {row["language"] for row in rows} == languages
     assert len({row["uuid"] for row in rows}) == 28
-    selected = module.build_rows(records, languages=["hi"], instance_ids=["repo__project-2"])
-    assert selected == [row for row in rows if row["language"] == "hi" and row["instance_id"] == "repo__project-2"]
+    selected = module.build_rows(records, languages=["hi"])
+    assert selected == [row for row in rows if row["language"] == "hi"]
     assert all(row["subset"] == "verified" and row["split"] == "test" for row in rows)
 
 
 @pytest.mark.parametrize("value", [None, "", " "])
-def test_missing_translation_rejected_even_outside_selected_subset(records, value):
+def test_missing_translation_rejected(records, value):
     records[0]["problem_statement_Hindi_translation"] = value
     with pytest.raises(ValueError, match="Missing problem statement: hi/repo__project-1"):
-        module.build_rows(records, languages=["hi"], instance_ids=["repo__project-2"])
+        module.build_rows(records, languages=["hi"])
 
 
-@pytest.mark.parametrize(
-    "kwargs,error",
-    [
-        ({"languages": "hi"}, "nonempty sequence"),
-        ({"languages": []}, "nonempty sequence"),
-        ({"languages": ["xx"]}, "nonempty sequence"),
-        ({"languages": ["hi", "hi"]}, "unique"),
-        ({"instance_ids": "repo__project-1"}, "unique IDs"),
-        ({"instance_ids": []}, "unique IDs"),
-        ({"instance_ids": ["repo__project-1", "repo__project-1"]}, "unique IDs"),
-        ({"instance_ids": ["missing"]}, "Unknown instance_ids"),
-    ],
-)
-def test_invalid_selection(records, kwargs, error):
-    with pytest.raises(ValueError, match=error):
-        module.build_rows(records, **kwargs)
+@pytest.mark.parametrize("languages", ["hi", [], ["xx"], ["hi", "hi"]])
+def test_invalid_languages(records, languages):
+    with pytest.raises(ValueError, match="languages must"):
+        module.build_rows(records, languages=languages)
 
 
-def test_missing_duplicate_and_malformed_tasks_rejected(records):
+def test_incomplete_or_duplicate_source_rejected(records):
     with pytest.raises(ValueError, match="Expected 2"):
         module.build_rows(records[:1])
-    with pytest.raises(ValueError, match="duplicate instance_id"):
+    with pytest.raises(ValueError, match="Duplicate instance_id"):
         module.build_rows([records[0], records[0]])
-    records[0]["test_patch"] = None
-    with pytest.raises(ValueError, match="instance fields"):
-        module.build_rows(records)
 
 
-def test_prepare_pins_source_and_validates_before_writing(records, monkeypatch, tmp_path):
+def test_prepare_loads_test_split_and_writes_all_languages(records, monkeypatch, tmp_path):
     calls = []
 
-    def download(**kwargs):
-        calls.append(kwargs)
-        return "pinned.parquet"
-
-    def load(*args, **kwargs):
-        assert args == ("parquet",)
-        assert kwargs == {"data_files": {"test": "pinned.parquet"}, "split": "test"}
+    def load(repo_id, *, split):
+        calls.append((repo_id, split))
         return Dataset.from_list(records)
 
-    monkeypatch.setattr(module, "hf_hub_download", download)
     monkeypatch.setattr(module, "load_dataset", load)
-    monkeypatch.setattr(module, "get_hf_token", lambda: None)
-    monkeypatch.setattr(module, "get_token", lambda: "test-token")
     output = tmp_path / "nested" / "tasks.jsonl"
-    assert module.prepare(languages=["hi"], output_fpath=str(output)) == output
-    assert calls == [
-        {
-            "repo_id": module.SOURCE_ID,
-            "filename": "test.parquet",
-            "repo_type": "dataset",
-            "revision": module.SOURCE_REVISION,
-            "token": "test-token",
-        }
-    ]
+    assert module.prepare(output_fpath=str(output)) == output
+    assert calls == [("ai4bharat/indic-swe-bench", "test")]
     rows = [json.loads(line) for line in output.read_text().splitlines()]
-    assert rows == module.build_rows(records, languages=["hi"])
+    assert rows == module.build_rows(records)
     original = output.read_bytes()
     records[0]["problem_statement_Hindi_translation"] = ""
     with pytest.raises(ValueError, match="Missing problem statement"):
-        module.prepare(languages=["hi"], output_fpath=str(output))
+        module.prepare(output_fpath=str(output))
     assert output.read_bytes() == original
 
 
@@ -168,24 +138,52 @@ def test_config_inherits_english_agent_verifier_and_repeats():
             )
         )
     en, indic = configs
-    assert indic.swebench_verified_opencode_resources_server == en.swebench_verified_opencode_resources_server
+    assert indic.indic_swebench_verified_opencode_resources_server == en.swebench_verified_opencode_resources_server
     expected_agent = OmegaConf.to_container(en.swebench_verified_opencode_sandboxed_agent, resolve=True)
-    actual_agent = OmegaConf.to_container(indic.swebench_verified_opencode_sandboxed_agent, resolve=True)
+    actual_agent = OmegaConf.to_container(indic.indic_swebench_verified_opencode_sandboxed_agent, resolve=True)
     expected_config = expected_agent["responses_api_agents"]["opencode_sandboxed_agent"]
     actual_config = actual_agent["responses_api_agents"]["opencode_sandboxed_agent"]
     assert actual_config["datasets"][0]["num_repeats"] == expected_config["datasets"][0]["num_repeats"] == 3
     expected_config["datasets"] = actual_config["datasets"]
+    assert actual_config["resources_server"]["name"] == "indic_swebench_verified_opencode_resources_server"
+    expected_config["resources_server"] = actual_config["resources_server"]
     assert actual_agent == expected_agent
     assert {server.name for server in parser.filter_for_server_instance_configs(indic)} == {
         "policy_model",
-        "swebench_verified_opencode_resources_server",
-        "swebench_verified_opencode_sandboxed_agent",
+        "indic_swebench_verified_opencode_resources_server",
+        "indic_swebench_verified_opencode_sandboxed_agent",
     }
     benchmark = BenchmarkConfig.from_config_path(module.BENCHMARK_DIR / "config.yaml")
-    assert benchmark.agent_name == "swebench_verified_opencode_sandboxed_agent"
+    assert benchmark.agent_name == "indic_swebench_verified_opencode_sandboxed_agent"
     manifest = load_manifest(module.BENCHMARK_DIR / "manifest.yaml")
     assert manifest.resources_server == "swebench"
     assert manifest.agent_server == "opencode_sandboxed_agent"
     assert manifest.datasets[0].model_dump(exclude_none=True) == {
         key: value for key, value in actual_config["datasets"][0].items() if key != "license"
     }
+
+
+@pytest.mark.parametrize("indic_first", [False, True])
+def test_english_and_indic_can_run_together(indic_first):
+    paths = ["benchmarks/swebench/verified/opencode.yaml", "benchmarks/indic/swebench/config.yaml"]
+    if indic_first:
+        paths.reverse()
+    config = GlobalConfigDictParser().parse_no_environment(
+        initial_global_config_dict=OmegaConf.create(
+            {"config_paths": paths, **GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT}
+        )
+    )
+    for prefix, dataset, path in (
+        ("", "swebench_verified", "benchmarks/swebench/data/swebench_verified_benchmark.jsonl"),
+        ("indic_", "indic_swebench", "benchmarks/indic/swebench/data/swebench_benchmark.jsonl"),
+    ):
+        agent = config[
+            f"{prefix}swebench_verified_opencode_sandboxed_agent"
+        ].responses_api_agents.opencode_sandboxed_agent
+        assert agent.datasets[0].name == dataset
+        assert agent.datasets[0].jsonl_fpath == path
+        assert agent.datasets[0].num_repeats == 3
+        assert agent.resources_server.name == f"{prefix}swebench_verified_opencode_resources_server"
+        verifier = config[agent.resources_server.name].resources_servers.swebench
+        assert verifier.apply_anti_cheating is False
+        assert verifier.allowed_agents == ["opencode_sandboxed_agent"]
