@@ -33,6 +33,7 @@ from pydantic import ValidationError
 
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
+from nemo_gym import rollout_collection
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
@@ -927,6 +928,14 @@ class TestRolloutCollection:
             return FakeResponse(200, compute_aggregate_metrics(aggregated["verify_responses"]).model_dump())
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        # The outcome counter is recorded where the verdict is final, once per rollout.
+        outcomes: list[tuple] = []
+        monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(
+            rollout_collection,
+            "record_rollout_completed",
+            lambda outcome, **kw: outcomes.append((outcome, kw.get("failure_class"), kw.get("failure_reason"))),
+        )
 
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
@@ -937,6 +946,7 @@ class TestRolloutCollection:
         results = await RolloutCollectionHelper().run_from_config(config)
 
         assert len(results) == 2
+        assert sorted(o[:2] for o in outcomes) == [("dropped", AGENT_RUN_ERROR_FAILURE_CLASS), ("scored", None)]
 
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
         assert [r[TASK_INDEX_KEY_NAME] for r in persisted] == [1]
