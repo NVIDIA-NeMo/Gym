@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Add this deployment overlay to the benchmark recipe only for OpenSandbox
+# services exposing these unrelated mount points. Requires Linux root and
+# user/mount namespace support. Task files remain shared with the verifier.
+# If tmux is not already installed in the task images, set remote_tmux_binary_path
+# via a CLI override or deployment configuration. The agent copies that binary
+# before hiding the service mounts from terminals.
+config_paths:
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+terminal_bench_2_1_terminus_2_sandboxed_agent:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      terminal_hidden_mounts:
+        - /mnt/s3-data
+        - /mnt/.s3-gate
+
+terminal_bench_2_1_terminus_2_sandboxed_resources_server:
+  resources_servers:
+    terminal_bench_2_1:
+      sandbox_config:
+        metadata:
+          nemo.nvidia.com/resources: custom
