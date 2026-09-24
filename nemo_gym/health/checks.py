@@ -49,6 +49,12 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.AGENT_TURNS}),
     ),
     CheckSpec(
+        id="rollout_ended_on_failed_model_call",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.ROLLOUT,
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OBSERVED_MODEL_CALLS}),
+    ),
+    CheckSpec(
         id="agent_turn_hollow",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.AGENT_TURN,
@@ -592,6 +598,43 @@ def _model_call_failed(bindings: _CallBindings, subject: dict[str, int | str]) -
     ]
 
 
+def _ended_on_failed_call(calls: Sequence[dict[str, Any]]) -> bool:
+    """Whether the rollout's last observed model call failed."""
+    return bool(calls and _is_failed(calls[-1]))
+
+
+def _rollout_ended_on_failed_model_call(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+    """Flag a rollout whose last observed model call failed.
+
+    The bound-call checks cannot see this: binding resolves a reference by
+    `(model_ref, response_id)` or `model_call_id`, and a call that failed came
+    back with none of them, so it is absent from `matched_calls` no matter what
+    the producer claims. Reading the captured calls directly also covers the
+    agents that publish no trajectory at all.
+
+    Only the last call is judged, so a failure the client retried successfully
+    stays healthy -- the signal is that the rollout ENDED on a failure, which is
+    what makes its reward indistinguishable from a genuine zero.
+    """
+    calls = _normalized_trajectory_calls(trajectory)
+    if not _ended_on_failed_call(calls):
+        return []
+    last = calls[-1]
+    return [
+        Finding(
+            check="rollout_ended_on_failed_model_call",
+            subject=subject,
+            locator=_call_locator(last, len(calls) - 1),
+            detail={
+                "status": last.get("status_code"),
+                "error_category": last.get("error_category"),
+                "observed_calls": len(calls),
+                "successful_calls": sum(1 for call in calls if _is_successful(call)),
+            },
+        )
+    ]
+
+
 def _rollout_token_count_mismatch(
     record: dict[str, Any], bindings: _CallBindings, subject: dict[str, int | str]
 ) -> list[Finding]:
@@ -643,21 +686,24 @@ _ROLLOUT_CHECKS: dict[
     "rollout_missing_agent_turns": lambda record, trajectory, bindings, subject: _rollout_missing_agent_turns(
         trajectory, subject
     ),
+    "rollout_ended_on_failed_model_call": lambda record, trajectory, bindings, subject: (
+        _rollout_ended_on_failed_model_call(trajectory, subject)
+    ),
     "agent_turn_hollow": lambda record, trajectory, bindings, subject: _agent_turn_hollow(trajectory, subject),
     "model_call_zero_completion_tokens": lambda record, trajectory, bindings, subject: (
         _model_call_zero_completion_tokens(bindings, subject)
     ),
-    "model_call_missing_token_counts": lambda record, trajectory, bindings, subject: (
-        _model_call_missing_token_counts(bindings, subject)
+    "model_call_missing_token_counts": lambda record, trajectory, bindings, subject: _model_call_missing_token_counts(
+        bindings, subject
     ),
-    "trajectory_capture_mismatch": lambda record, trajectory, bindings, subject: (
-        _trajectory_capture_mismatch(trajectory, bindings, subject)
+    "trajectory_capture_mismatch": lambda record, trajectory, bindings, subject: _trajectory_capture_mismatch(
+        trajectory, bindings, subject
     ),
     "model_call_failed": lambda record, trajectory, bindings, subject: _model_call_failed(bindings, subject),
-    "rollout_token_count_mismatch": lambda record, trajectory, bindings, subject: (
-        _rollout_token_count_mismatch(record, bindings, subject)
+    "rollout_token_count_mismatch": lambda record, trajectory, bindings, subject: _rollout_token_count_mismatch(
+        record, bindings, subject
     ),
-    "model_call_runaway_generation": lambda record, trajectory, bindings, subject: (
-        _model_call_runaway_generation(bindings, subject)
+    "model_call_runaway_generation": lambda record, trajectory, bindings, subject: _model_call_runaway_generation(
+        bindings, subject
     ),
 }

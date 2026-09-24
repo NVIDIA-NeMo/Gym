@@ -228,10 +228,12 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     tools: list[TrajectoryToolCall] = []
     model_calls: list[TrajectoryModelCall] = []
 
+    producer_turns_observed = False
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
     if isinstance(raw_trajectory, dict):
         try:
             trajectory = TrajectoryRecord.model_validate(raw_trajectory)
+            producer_turns_observed = True
             mismatches = [
                 field
                 for field, producer, canonical in (
@@ -361,7 +363,11 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 gaps.append(ObservationGap(code="model_call_capture_gap_invalid"))
     if not model_calls:
         gaps.append(ObservationGap(code="model_calls_unavailable"))
-    if not turns:
+    if not turns and not producer_turns_observed:
+        # A producer that published a trajectory and reported no turns has told
+        # us something; only the absence of a producer leaves turns unavailable.
+        # Without this, `rollout_missing_agent_turns` is skipped in exactly the
+        # case it exists to catch.
         gaps.append(ObservationGap(code="turns_unavailable"))
     if not any(invocation.conversation for invocation in invocations):
         gaps.append(ObservationGap(code="conversation_unavailable"))
