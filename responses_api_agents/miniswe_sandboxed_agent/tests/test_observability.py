@@ -5,8 +5,6 @@
 
 import asyncio
 import json
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import Body, FastAPI
@@ -21,14 +19,13 @@ from nemo_gym.base_responses_api_model import (
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.sandbox import SandboxExecResult
-from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig, MiniSWEHarness
+from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
 
 
 @pytest.mark.parametrize(
-    "scenario", ["success", "rejection", "http_error", "missing_usage", "missing_details", "tool_error", "tool_cancel"]
+    "scenario", ["success", "rejection", "http_error", "missing_usage", "missing_details", "tool_error"]
 )
-async def test_captured_loop_preserves_evidence(tmp_path, scenario):
+async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenario):
     app = FastAPI()
     requests = []
 
@@ -44,7 +41,15 @@ async def test_captured_loop_preserves_evidence(tmp_path, scenario):
                 "type": "function_call",
                 "call_id": f"tool-{index}",
                 "name": "bash",
-                "arguments": json.dumps({"command": command}),
+                "arguments": json.dumps(
+                    {
+                        "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT; echo finished"
+                        if command == "submit"
+                        else "echo inspected; exit 7"
+                        if scenario == "tool_error"
+                        else "echo inspected"
+                    }
+                ),
             }
         ]
         if scenario == "rejection" and index == 1:
@@ -94,15 +99,7 @@ async def test_captured_loop_preserves_evidence(tmp_path, scenario):
         response.raise_for_status()
         return NeMoGymResponse.model_validate(response.json())
 
-    async def execute(command, **kwargs):
-        if scenario == "tool_cancel":
-            raise asyncio.CancelledError
-        if "submit" in command:
-            return SandboxExecResult("COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\nfinished", "", 0)
-        return SandboxExecResult("inspected", "", 7 if scenario == "tool_error" else 0)
-
-    harness = MiniSWEHarness(
-        sandbox=SimpleNamespace(exec=AsyncMock(side_effect=execute)),
+    harness = await runner_factory(
         context=HarnessContext(
             session_id="invocation", task_id="0", rollout_id="0-0", instruction="inspect then submit"
         ),
@@ -113,8 +110,7 @@ async def test_captured_loop_preserves_evidence(tmp_path, scenario):
         directory=tmp_path,
         observability_enabled=True,
     )
-    harness.system_info = {"system": "Linux", "release": "6", "version": "test", "machine": "x86_64"}
-    response, outcome, extra = await harness.execute(5)
+    response, outcome, extra = await harness.execute(15)
     client.close()
     record = {
         "_ng_task_index": 0,
@@ -152,9 +148,6 @@ async def test_captured_loop_preserves_evidence(tmp_path, scenario):
         assert trajectory["turns"][0]["answer"][0]["id"] == "rejected"
         assert trajectory["turns"][0]["step_count"] == 0
         assert "No tool calls" in requests[1]["input"][-1]["content"]
-    elif scenario == "tool_cancel":
-        assert trajectory["tool_calls"][0]["status"] == "cancelled"
-        assert trajectory["tool_calls"][0]["duration_ms"] is not None
     else:
         assert response.usage.total_tokens == 30
         assert response.usage.input_tokens_details.cached_tokens == 2

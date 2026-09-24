@@ -5,32 +5,27 @@
 
 import asyncio
 import json
+import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from shlex import quote
-from threading import Lock
 from time import monotonic, time
 from typing import Any
 from uuid import uuid4
 
 import yaml
 from aiohttp import ClientResponseError
-from minisweagent import __version__ as mini_swe_version
-from minisweagent.agents.default import DefaultAgent
 from minisweagent.config import builtin_config_dir
-from minisweagent.environments.local import LocalEnvironment
-from minisweagent.exceptions import LimitsExceeded
 from minisweagent.models.utils.actions_toolcall import (
     BASH_TOOL,
-    format_toolcall_observation_messages,
-    parse_toolcall_actions,
 )
 from pydantic import BaseModel, Field, TypeAdapter
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
-    NeMoGymChatCompletionMessageToolCall,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputItem,
     NeMoGymResponseUsage,
 )
@@ -47,6 +42,7 @@ from nemo_gym.sandbox import AsyncSandbox
 
 
 MINI_CONFIG = yaml.safe_load((builtin_config_dir / "mini.yaml").read_text())
+LOGGER = logging.getLogger(__name__)
 
 
 def responses_input(messages):
@@ -88,83 +84,6 @@ class HarnessContext(BaseModel):
     skills_dir: str | None = None
 
 
-class WorkerBridge:
-    """Synchronous mini-SWE loop, asynchronous Gym I/O, explicit cancellation."""
-
-    def __init__(self):
-        self.loop = asyncio.get_running_loop()
-        self.closed = False
-        self.pending = set()
-        self.lock = Lock()
-
-    def call(self, factory):
-        with self.lock:
-            if self.closed:
-                raise RuntimeError("Episode is closed")
-            future = asyncio.run_coroutine_threadsafe(factory(), self.loop)
-            self.pending.add(future)
-        try:
-            return future.result()
-        finally:
-            with self.lock:
-                self.pending.discard(future)
-
-    def close(self):
-        with self.lock:
-            self.closed = True
-            pending = list(self.pending)
-        for future in pending:
-            future.cancel()
-
-
-class GymModel:
-    def __init__(self, bridge, query):
-        self.bridge, self._query = bridge, query
-
-    def query(self, messages):
-        return self.bridge.call(lambda: self._query(messages))
-
-    def format_message(self, **kwargs):
-        return kwargs
-
-    def format_observation_messages(self, message, outputs, template_vars=None):
-        messages = format_toolcall_observation_messages(
-            actions=message.get("extra", {}).get("actions", []),
-            outputs=[{"exception_info": None, **output} for output in outputs],
-            observation_template=MINI_CONFIG["model"]["observation_template"],
-            template_vars=template_vars,
-        )
-        for observation, output in zip(messages, outputs):
-            if output.get("images"):
-                observation["content"] = [{"type": "input_text", "text": observation["content"]}] + [
-                    {"type": "input_image", "image_url": uri} for uri in output["images"]
-                ]
-        return messages
-
-    def get_template_vars(self):
-        return {}
-
-    def serialize(self):
-        return {"info": {"model_transport": "nemo_gym_responses"}}
-
-
-class SandboxEnvironment:
-    def __init__(self, bridge, execute, system_info):
-        self.bridge, self._execute = bridge, execute
-        self.system_info = system_info
-
-    def execute(self, action):
-        output = self.bridge.call(lambda: self._execute(action))
-        LocalEnvironment._check_finished(self, output)
-        return output
-
-    def get_template_vars(self):
-        return self.system_info
-
-    def serialize(self):
-        return {"info": {"environment_type": "gym_sandbox"}}
-
-
 class MiniSWEHarness:
     """Execute only: the caller provisions, grades, and destroys the sandbox."""
 
@@ -174,12 +93,12 @@ class MiniSWEHarness:
         sandbox: AsyncSandbox,
         context: HarnessContext,
         config: MiniSWEConfig,
-        params,
-        query,
+        params: NeMoGymResponseCreateParamsNonStreaming,
+        query: Callable[[dict], Awaitable[NeMoGymResponse]],
         model_name: str,
         directory: Path,
         observability_enabled: bool = False,
-    ):
+    ) -> None:
         self.sandbox = sandbox
         self.context = context
         self.config = config
@@ -189,28 +108,176 @@ class MiniSWEHarness:
         self.directory = directory
         self.observability_enabled = observability_enabled
         self.extra_instruction = ""
-        self.system_info = {}
         self.result = None
+        self.remote_directory = f"/tmp/nemo-gym-miniswe-{uuid4().hex}"
 
-    async def setup(self):
+    async def setup(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
+        await self._install_runner()
         result = await self.sandbox.exec("command -v setsid", user=self.context.user, cwd=self.context.workdir)
         if result.return_code:
             raise RuntimeError("mini-SWE requires setsid for process cleanup")
+        if self.context.skills_dir:
+            self.extra_instruction += (
+                f"\nTask skills are in {self.context.skills_dir}. Read the relevant SKILL.md files.\n"
+            )
+        if self.context.mcp_servers:
+            (self.directory / "mcp.json").write_text(json.dumps(self.context.mcp_servers))
+            remote = f"/tmp/{self.context.session_id}-mcp"
+            command = f"python3 -m venv {remote} && {remote}/bin/pip -q install mcp==1.29.0 httpx-aiohttp==0.2.0"
+            result = await self.sandbox.exec(
+                command, user=self.context.user, cwd=self.context.workdir, timeout_s=self.context.setup_timeout_sec
+            )
+            if result.return_code:
+                raise RuntimeError(f"Task MCP client setup failed: {result.stderr}")
+            await self.sandbox.upload(Path(__file__).with_name("mcp_client.py"), remote + "/client.py")
+            await self.sandbox.upload(self.directory / "mcp.json", remote + "/servers.json")
+            cli = f"{remote}/bin/python {remote}/client.py"
+            daemon = (
+                f"echo $$ >> /tmp/{self.context.session_id}.pids; "
+                f"echo $$ >> {self.remote_directory}/processes; exec {cli} serve"
+            )
+            started = await self.sandbox.exec(
+                "bash -c "
+                + quote(
+                    f"setsid --fork bash -c {quote(daemon)} > {remote}/server.log 2>&1 < /dev/null; "
+                    f"for i in $(seq 1 60); do [ -S {remote}/server.sock ] && exit 0; sleep 1; done; "
+                    f"cat {remote}/server.log; exit 1"
+                ),
+                user=self.context.user,
+                cwd=self.context.workdir,
+                timeout_s=65,
+            )
+            if started.return_code:
+                raise RuntimeError(f"Task MCP session setup failed: {started.stdout}")
+            listed = await self.sandbox.exec(
+                cli + " list", user=self.context.user, cwd=self.context.workdir, timeout_s=60
+            )
+            if listed.return_code:
+                raise RuntimeError(f"Task MCP discovery failed: {listed.stderr}")
+            self.extra_instruction += (
+                f"\nTask MCP tools (JSON schemas): {listed.stdout}\n"
+                f"Call with: {cli} call SERVER TOOL 'JSON_ARGUMENTS'.\n"
+            )
+
+    async def _install_runner(self) -> None:
+        remote = self.remote_directory
+        # Bootstrap for the sandbox's architecture, independently of the Gym host.
+        script = (
+            "import io,pathlib,platform,tarfile,urllib.request; "
+            "arch={'x86_64':'x86_64','aarch64':'aarch64'}[platform.machine()]; "
+            "url=f'https://github.com/astral-sh/uv/releases/download/0.10.12/uv-{arch}-unknown-linux-musl.tar.gz'; "
+            "archive=tarfile.open(fileobj=io.BytesIO(urllib.request.urlopen(url,timeout=120).read()),mode='r:gz'); "
+            "member=next(m for m in archive if m.name.endswith('/uv')); "
+            f"target=pathlib.Path('{remote}/uv'); "
+            "target.write_bytes(archive.extractfile(member).read()); target.chmod(0o755)"
+        )
         result = await self.sandbox.exec(
-            "uname -s; uname -r; uname -v; uname -m", user=self.context.user, cwd=self.context.workdir
+            f"mkdir -p {remote} && python3 -c {quote(script)} && "
+            f"{remote}/uv venv {remote}/venv --python 3.13 && "
+            f"{remote}/uv pip install --python {remote}/venv/bin/python mini-swe-agent==2.4.6",
+            user=self.context.user,
+            cwd=self.context.workdir,
+            timeout_s=self.context.setup_timeout_sec,
         )
-        if result.return_code or len(result.stdout.splitlines()) != 4:
-            raise RuntimeError("Could not read task environment system information")
-        self.system_info.update(
-            zip(("system", "release", "version", "machine"), result.stdout.splitlines(), strict=True)
+        if result.return_code:
+            raise RuntimeError(f"mini-SWE runner installation failed: {result.stdout}\n{result.stderr}")
+        await self.sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), remote + "/runner.py")
+
+    async def _upload_json(self, name: str, payload: dict) -> None:
+        local = self.directory / name
+        local.write_text(json.dumps(payload))
+        remote = f"{self.remote_directory}/{name}"
+        await self.sandbox.upload(local, remote + ".tmp")
+        result = await self.sandbox.exec(f"mv {quote(remote + '.tmp')} {quote(remote)}", user=self.context.user)
+        local.unlink()
+        if result.return_code:
+            raise RuntimeError(f"mini-SWE relay write failed: {result.stderr}")
+
+    async def _start_runner(self, budget: float) -> None:
+        await self._upload_json(
+            "input.json",
+            {
+                "instruction": self.context.instruction + self.extra_instruction,
+                "workdir": self.context.workdir,
+                "step_limit": self.config.step_limit,
+                "step_timeout_sec": min(budget, self.config.step_timeout_sec),
+                "process_registry": f"/tmp/{self.context.session_id}.pids",
+            },
         )
-        from nemo_gym.sandbox.task_tools import prepare_task_tools
+        remote = self.remote_directory
+        command = (
+            f"echo $$ > {remote}/runner.pid; echo $$ >> {remote}/processes; "
+            f"echo $$ >> /tmp/{self.context.session_id}.pids; "
+            f"exec {remote}/venv/bin/python {remote}/runner.py {remote}"
+        )
+        result = await self.sandbox.exec(
+            f"setsid --fork bash -c {quote(command)} > {remote}/runner.log 2>&1 < /dev/null",
+            user=self.context.user,
+            cwd=self.context.workdir,
+            timeout_s=30,
+        )
+        if result.return_code:
+            raise RuntimeError(f"mini-SWE runner launch failed: {result.stdout}\n{result.stderr}")
 
-        self.extra_instruction = await prepare_task_tools(self.sandbox, self.context, self.directory)
+    async def _download_json(self, name: str) -> dict:
+        local = self.directory / name
+        await self.sandbox.download(f"{self.remote_directory}/{name}", local)
+        try:
+            return json.loads(local.read_text())
+        finally:
+            local.unlink(missing_ok=True)
 
-    async def execute(self, budget):
-        bridge = WorkerBridge()
+    async def _next_event(self, index: int) -> dict:
+        remote = self.remote_directory
+        result = await self.sandbox.exec(
+            f"if [ -f {remote}/output.json ]; then echo output; "
+            f"elif [ -f {remote}/request-{index}.json ]; then echo request; "
+            f"elif [ -f {remote}/runner.pid ] && ! kill -0 $(cat {remote}/runner.pid) 2>/dev/null; then "
+            "echo exited; else echo waiting; fi",
+            user=self.context.user,
+            timeout_s=30,
+        )
+        if result.return_code:
+            raise RuntimeError(f"mini-SWE relay read failed: {result.stderr}")
+        kind = result.stdout.strip()
+        if kind == "output":
+            return {"kind": "output", "payload": await self._download_json("output.json")}
+        if kind == "request":
+            return await self._download_json(f"request-{index}.json")
+        return {"kind": kind}
+
+    async def close(self) -> None:
+        """Stop runner and tool process groups before resources begins verification."""
+        remote = self.remote_directory
+        result = await self.sandbox.exec(
+            f"if [ -f {remote}/processes ]; then "
+            f"while read pid; do kill -TERM -- -$pid 2>/dev/null || true; done < {remote}/processes; "
+            "sleep 0.2; "
+            f"while read pid; do kill -KILL -- -$pid 2>/dev/null || true; done < {remote}/processes; fi",
+            user=self.context.user,
+            timeout_s=10,
+        )
+        if result.return_code:
+            raise RuntimeError(f"mini-SWE process cleanup failed: {result.stderr}")
+
+    async def _read_result(self) -> dict:
+        remote = self.remote_directory
+        result = await self.sandbox.exec(
+            f"if [ -f {remote}/output.json ]; then echo output; "
+            f"elif [ -f {remote}/trajectory.json ]; then echo trajectory; fi",
+            user=self.context.user,
+            timeout_s=30,
+        )
+        if result.return_code:
+            raise RuntimeError(f"mini-SWE result read failed: {result.stderr}")
+        if result.stdout.strip() == "output":
+            return await self._download_json("output.json")
+        if result.stdout.strip() == "trajectory":
+            return {"mini_swe_trajectory": await self._download_json("trajectory.json")}
+        return {}
+
+    async def execute(self, budget: float) -> tuple[NeMoGymResponse, HarnessOutcome, dict]:
         responses = []
         output_items = []
         invocation = observations = trajectory = conversation_adapter = None
@@ -233,27 +300,7 @@ class MiniSWEHarness:
             params["tools"] = [{"type": "function", **BASH_TOOL["function"], "strict": False}]
             if self.observability_enabled:
                 invocation.conversation = conversation_adapter.validate_python(params["input"])
-            try:
-                response = await self.query(params)
-            except ClientResponseError as exc:
-                detail = getattr(exc, "response_content", b"").decode(errors="replace")
-                context_overflow = exc.status == 400 and (
-                    "context_length_exceeded" in detail
-                    or "context length" in detail.lower()
-                    or "maximum model length" in detail.lower()
-                    or ("max_tokens" in detail and "too large" in detail.lower())
-                )
-                if not context_overflow:
-                    raise
-                # An overfull transcript cannot be repaired by format-error retries.
-                # End the agent normally so the caller can still verify its work.
-                raise LimitsExceeded(
-                    {
-                        "role": "exit",
-                        "content": detail,
-                        "extra": {"exit_status": "ContextWindowExceeded", "submission": ""},
-                    }
-                ) from exc
+            response = await self.query(params)
             responses.append(response)
             output_items.extend(response.output)
             if self.observability_enabled:
@@ -293,149 +340,88 @@ class MiniSWEHarness:
                         model_calls=turn_model_calls,
                     )
                 )
-            content = "\n".join(
-                part.text
-                for item in response.output
-                if item.type == "message"
-                for part in item.content
-                if part.type == "output_text"
-            )
-            calls = [
-                NeMoGymChatCompletionMessageToolCall(
-                    id=item.call_id, type="function", function={"name": item.name, "arguments": item.arguments}
-                )
-                for item in response.output
-                if item.type == "function_call"
-            ]
-            actions = parse_toolcall_actions(
-                calls,
-                format_error_template=MINI_CONFIG["model"]["format_error_template"],
-                template_kwargs={
-                    "finish_reason": "length"
-                    if response.incomplete_details and response.incomplete_details.reason == "max_output_tokens"
-                    else "stop",
-                },
-            )
-            return {
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [call.model_dump() for call in calls],
-                "extra": {
-                    "actions": actions,
-                    "response_output": [item.model_dump(exclude_none=True) for item in response.output],
-                },
-            }
+            return {"response": response.model_dump(mode="json", exclude_none=True)}
 
-        async def command(action: dict[str, str]) -> dict[str, Any]:
-            nonlocal step_count
-            observation = None
-            if self.observability_enabled:
-                observation = ToolCallObservation(
-                    invocation_id=invocation.invocation_id,
-                    tool_call_id=action["tool_call_id"],
-                    tool_name="bash",
-                    started_at=time(),
-                    timing_source="executor",
-                    status="incomplete",
-                )
-                observations.records.append(observation)
-                started = monotonic()
-            try:
-                result = await self.sandbox.exec(
-                    "setsid --wait bash -c "
-                    + quote(f"echo $$ >> /tmp/{self.context.session_id}.pids; " + action["command"]),
-                    user=self.context.user,
-                    cwd=self.context.workdir,
-                    env=MINI_CONFIG["environment"]["env"],
-                    timeout_s=min(budget, self.config.step_timeout_sec),
-                )
-                if observation is not None:
-                    observation.status = (
-                        "timeout"
-                        if result.error_type == "timeout"
-                        else "failed"
-                        if result.error_type or result.return_code != 0
-                        else "completed"
-                    )
-                    observation.error_type = result.error_type
-            except asyncio.CancelledError:
-                if observation is not None:
-                    observation.status = "cancelled"
-                    observation.error_type = "CancelledError"
-                raise
-            except Exception as exc:
-                if observation is not None:
-                    observation.status = "failed"
-                    observation.error_type = type(exc).__name__
-                raise
-            finally:
-                if observation is not None:
-                    completed_at = time()
-                    if completed_at >= observation.started_at:
-                        observation.completed_at = completed_at
-                    else:
-                        observations.gaps.append(
-                            ObservationGap(code="tool_clock_moved_backwards", invocation_id=invocation.invocation_id)
-                        )
-                    observation.duration_ms = (monotonic() - started) * 1000
-                    step_count += 1
-                    if trajectory.turns:
-                        trajectory.turns[-1].step_count = step_count
-            if result.error_type and result.error_type != "timeout":
-                raise RuntimeError(f"Sandbox execution failed: {result.error_type}")
-            output = (result.stdout or "") + (result.stderr or "")
-            images = []
-            try:
-                tool_result = json.loads(output)
-                for part in tool_result.get("content", []):
-                    if part.get("type") == "image":
-                        images.append(f"data:{part['mimeType']};base64,{part.pop('data')}")
-                if images:
-                    output = json.dumps(tool_result)
-            except (ValueError, AttributeError, KeyError, TypeError):
-                pass
-            outcome = {
-                "output": output,
-                "returncode": result.return_code,
-                "images": images,
-                "exception_info": (
-                    f"Command timed out after {min(budget, self.config.step_timeout_sec)} seconds."
-                    if result.error_type == "timeout"
-                    else None
-                ),
-            }
-            # Observe before LocalEnvironment._check_finished raises Submitted.
-            # mini-SWE deliberately omits that final ordinary tool message.
-            messages = model.format_observation_messages({"extra": {"actions": [action]}}, [outcome])
-            item = NeMoGymFunctionCallOutput.model_validate(responses_input(messages)[0])
-            output_items.append(item)
-            if self.observability_enabled:
-                invocation.conversation.append(item)
-            return outcome
-
-        model = GymModel(bridge, query)
-        agent = DefaultAgent(
-            model,
-            SandboxEnvironment(bridge, command, self.system_info),
-            system_template=MINI_CONFIG["agent"]["system_template"],
-            instance_template=MINI_CONFIG["agent"]["instance_template"],
-            step_limit=self.config.step_limit,
-            cost_limit=0,
-            output_path=self.directory / "trajectory.json",
-        )
-        worker = asyncio.create_task(asyncio.to_thread(agent.run, self.context.instruction + self.extra_instruction))
+        active_tool = None
+        active_started = None
+        result = {}
         termination = HarnessOutcome(reason="completed")
         try:
-            info = await asyncio.wait_for(asyncio.shield(worker), budget)
-            if info.get("exit_status") == "RepeatedFormatError" and all(
-                response.incomplete_details and response.incomplete_details.reason == "max_output_tokens"
-                for response in responses[-agent.n_consecutive_format_errors :]
-            ):
-                info["exit_status"] = "OutputTokenLimitExceeded"
-                agent.messages[-1]["content"] = "OutputTokenLimitExceeded"
-                agent.save(agent.config.output_path)
-            if info.get("exit_status") != "Submitted":
-                termination = HarnessOutcome(reason="nonzero_exit", detail=info.get("exit_status"))
+            async with asyncio.timeout(budget):
+                await self._start_runner(budget)
+                index = 0
+                while True:
+                    event = await self._next_event(index)
+                    kind = event["kind"]
+                    if kind == "waiting":
+                        await asyncio.sleep(0.05)
+                        continue
+                    if kind == "exited":
+                        logs = await self.sandbox.exec(f"cat {self.remote_directory}/runner.log", timeout_s=30)
+                        raise RuntimeError(f"mini-SWE runner exited without a result: {logs.stdout}")
+                    if kind == "output":
+                        result = event["payload"]
+                        termination = HarnessOutcome.model_validate(result["termination"])
+                        break
+                    reply = {}
+                    if kind == "query":
+                        try:
+                            reply = await query(event["messages"])
+                        except Exception as error:
+                            detail = getattr(error, "response_content", b"").decode(errors="replace")
+                            overflow = (
+                                isinstance(error, ClientResponseError)
+                                and error.status == 400
+                                and (
+                                    "context_length_exceeded" in detail
+                                    or "context length" in detail.lower()
+                                    or "maximum model length" in detail.lower()
+                                    or ("max_tokens" in detail and "too large" in detail.lower())
+                                )
+                            )
+                            reply = {
+                                "error": {
+                                    "type": "ContextWindowExceeded" if overflow else type(error).__name__,
+                                    "detail": detail or str(error),
+                                }
+                            }
+                    elif kind == "tool_started":
+                        if self.observability_enabled:
+                            active_tool = ToolCallObservation(
+                                invocation_id=invocation.invocation_id,
+                                tool_call_id=event["action"]["tool_call_id"],
+                                tool_name="bash",
+                                started_at=event["started_at"],
+                                timing_source="executor",
+                                status="incomplete",
+                            )
+                            active_started = monotonic()
+                            observations.records.append(active_tool)
+                    elif kind == "tool_finished":
+                        item = NeMoGymFunctionCallOutput.model_validate(responses_input([event["message"]])[0])
+                        output_items.append(item)
+                        if self.observability_enabled:
+                            invocation.conversation.append(item)
+                            active_tool.status = event["status"]
+                            active_tool.error_type = event["error_type"]
+                            active_tool.duration_ms = event["duration_ms"]
+                            if event["completed_at"] >= active_tool.started_at:
+                                active_tool.completed_at = event["completed_at"]
+                            else:
+                                observations.gaps.append(
+                                    ObservationGap(
+                                        code="tool_clock_moved_backwards",
+                                        invocation_id=invocation.invocation_id,
+                                    )
+                                )
+                            active_tool = None
+                            step_count += 1
+                            if trajectory.turns:
+                                trajectory.turns[-1].step_count = step_count
+                    else:
+                        raise RuntimeError(f"Unknown mini-SWE relay event: {kind}")
+                    await self._upload_json(f"response-{index}.json", reply)
+                    index += 1
         except asyncio.CancelledError:
             termination = HarnessOutcome(reason="cancelled")
         except TimeoutError:
@@ -443,9 +429,30 @@ class MiniSWEHarness:
         except Exception as exc:
             termination = HarnessOutcome(reason="infrastructure_error", detail=f"{type(exc).__name__}: {exc}")
         finally:
-            bridge.close()
-            # Cancel pending I/O and join the synchronous loop before verification.
-            await asyncio.gather(worker, return_exceptions=True)
+            try:
+                await self.close()
+            except Exception as error:
+                LOGGER.exception("Failed to stop mini-SWE processes; resources must quiesce the sandbox")
+                termination = HarnessOutcome(reason="infrastructure_error", detail=f"Process cleanup failed: {error}")
+            if active_tool is not None:
+                active_tool.status = (
+                    "cancelled"
+                    if termination.reason == "cancelled"
+                    else "timeout"
+                    if termination.reason == "timeout"
+                    else "failed"
+                )
+                active_tool.duration_ms = (monotonic() - active_started) * 1000
+                active_tool.error_type = termination.reason
+            if not result:
+                try:
+                    result = await self._read_result()
+                except Exception:
+                    # Preserve already captured responses when the sandbox transport fails.
+                    LOGGER.exception("Unable to retrieve the partial mini-SWE trajectory")
+        native_trajectory = result.get("mini_swe_trajectory")
+        if native_trajectory is not None:
+            (self.directory / "trajectory.json").write_text(json.dumps(native_trajectory, indent=2))
         response = NeMoGymResponse(
             id="resp_" + uuid4().hex,
             created_at=int(time()),
@@ -460,7 +467,7 @@ class MiniSWEHarness:
             if responses and all(r.usage is not None for r in responses)
             else None,
         )
-        extra = {"mini_swe_trajectory": agent.serialize(), "harness_version": mini_swe_version}
+        extra = {key: result[key] for key in ("mini_swe_trajectory", "harness_version", "runtime") if key in result}
         if self.observability_enabled:
             invocation.status = (
                 "completed"
@@ -472,7 +479,7 @@ class MiniSWEHarness:
             invocation.duration_ms = (monotonic() - execution_started) * 1000
             extra["ng_agent_observations"] = observations.model_dump(mode="json")
             extra["ng_trajectory"] = trajectory.model_dump(mode="json")
-        termination.artifacts = [str(self.directory / "trajectory.json")]
+        termination.artifacts = [str(self.directory / "trajectory.json")] if native_trajectory is not None else []
         self.result = (response, termination, extra)
 
         return self.result
