@@ -39,6 +39,8 @@ from nemo_gym.rollout_correlation import (
     take_checkpoint_parent,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.token_id_capture.lineage import InMemoryLineageStore
+from nemo_gym.token_id_capture.sink import CaptureContext, reset_token_sink, resolve_parent, set_token_sink
 from responses_api_agents.proof_refinement_agent.app import (
     ProofRefinementAgent,
     ProofRefinementAgentConfig,
@@ -213,6 +215,68 @@ class _Run:
         await self.participant.resume()
 
 
+class _CapturedRun(_Run):
+    """Resolve real capture ancestry for the simulated model's proof outputs."""
+
+    def __init__(self, *, ledger=None, **kwargs):
+        super().__init__(**kwargs)
+        self.ledger = ledger if ledger is not None else InMemoryLineageStore()
+        self.admissions = []
+
+    async def post(self, **kwargs):
+        response = await super().post(**kwargs)
+        if kwargs["server_name"] != "proof-agent":
+            return response
+        turn = self.generated[-1]
+        source_capture_key, parent_model_call_id = self.parents[-1]
+        capture_key = current_rollout_id()
+        context = CaptureContext(
+            rollout_id=capture_key,
+            model_call_id=f"call-{turn}",
+            token_sink=None,
+            lineage_store=self.ledger,
+            external_staging=True,
+            source_capture_key=source_capture_key,
+            explicit_parent_call_id=parent_model_call_id,
+        )
+        token = set_token_sink(context)
+        try:
+            await resolve_parent(kwargs["json"]["input"])
+        finally:
+            reset_token_sink(token)
+        if context.capture_admission is None:
+            response.headers[MODEL_CALL_CAPTURE_OUTCOME_HEADER] = context.capture_outcome
+            response.headers.pop(MODEL_CALL_ID_HEADER, None)
+        else:
+            self.admissions.append(context.capture_admission)
+            self.ledger.index.for_rollout(capture_key).record(
+                f"call-{turn}",
+                kwargs["json"]["input"] + _model_response(turn)["output"],
+                cum_tokens=[turn + 1],
+                digest=f"proof-{turn}",
+            )
+        return response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", [("model", 0), ("verify", 0), ("model", 1), ("finished", 2)])
+async def test_restored_proof_capture_keeps_independent_correction_roots(tmp_path, stop):
+    baseline = _CapturedRun()
+    expected = await baseline.run()
+    original = _CapturedRun(stop=stop)
+    await original.save(tmp_path)
+    replacement = _CapturedRun(ledger=original.ledger)
+    await replacement.restore(tmp_path)
+    result = await replacement.run(attempt=1)
+    assert result.model_dump() == expected.model_dump()
+    assert len(baseline.admissions) == 3
+    assert len(original.admissions) + len(replacement.admissions) == 3
+    for admission in baseline.admissions + original.admissions + replacement.admissions:
+        assert admission.mode == "text"
+        assert admission.parent_call_id is None
+    assert (await replacement.ledger.manifest(f"{ROLLOUT}-a1"))["failures"] == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("stop", "index", "turn", "kind", "generated", "verified"),
@@ -248,8 +312,7 @@ async def test_disk_restore_matches_uninterrupted_proof(tmp_path, stop, index, t
     assert [attempt["turn_index"] for attempt in result.all_attempts] == [0, 1, 2]
     assert replacement.participant.resolve(ROLLOUT, 1).boundary.boundary_index == 6
     if generated:
-        assert replacement.parents[0] == ((ROLLOUT, "call-0") if index else (None, None))
-        assert replacement.parents[1:] == [(None, None)] * (len(generated) - 1)
+        assert replacement.parents == [(None, None)] * len(generated)
     if kind == AgentBoundaryKind.PENDING_MODEL:
         resumed_verify = next(call for call in replacement.calls if call["path"] == "/verify")
         assert resumed_verify["headers"] == pending_verify["headers"]
@@ -281,8 +344,27 @@ async def test_recheckpoint_before_restored_verification_keeps_original_parent(t
     assert result.reward == 1
     assert result.total_turns == 3
     assert third.generated == [1, 2]
-    assert third.parents == [(ROLLOUT, "call-0"), (None, None)]
+    assert third.parents == [(None, None), (None, None)]
     assert third.participant.completion_receipt(ROLLOUT, 2).manifest_capture_key == f"{ROLLOUT}-a2"
+
+
+@pytest.mark.asyncio
+async def test_recheckpoint_before_correction_generation_keeps_saved_capture_coordinate(tmp_path):
+    first = _CapturedRun(stop=("model", 1))
+    original = await first.save(tmp_path / "first")
+    second = _CapturedRun(stop=("model", 1), ledger=first.ledger)
+    await second.restore(tmp_path / "first")
+    repeated = await second.save(tmp_path / "second", attempt=1)
+    assert repeated.last_committed_model_capture_key == original.last_committed_model_capture_key == ROLLOUT
+    assert repeated.last_committed_model_call_id == original.last_committed_model_call_id == "call-0"
+    assert repeated.agent_state == original.agent_state
+    assert second.generated == []
+    third = _CapturedRun(ledger=second.ledger)
+    await third.restore(tmp_path / "second")
+    result = await third.run(attempt=2)
+    assert result.reward == 1
+    assert third.generated == [1, 2]
+    assert all(admission.mode == "text" for admission in third.admissions)
 
 
 @pytest.mark.asyncio
