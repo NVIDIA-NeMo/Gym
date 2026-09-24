@@ -19,17 +19,14 @@ import json
 import logging
 import os
 import shutil
-import signal
 import subprocess
 import tempfile
 from asyncio import Semaphore
-from contextlib import suppress
 from pathlib import Path
 from time import monotonic, time
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
-import psutil
 from fastapi import Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
@@ -49,6 +46,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.process_utils import kill_process_tree
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
@@ -57,24 +55,6 @@ from responses_api_agents.claude_code_agent.setup_claude_code import ensure_clau
 
 
 LOG = logging.getLogger(__name__)
-
-
-def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
-    """Stop descendants even when a launcher gives them separate process groups."""
-    descendants = []
-    with suppress(psutil.NoSuchProcess):
-        descendants = psutil.Process(proc.pid).children(recursive=True)
-    for child in reversed(descendants):
-        with suppress(psutil.NoSuchProcess):
-            child.kill()
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except (AttributeError, OSError):
-        # Platforms without process groups still stop the direct child.
-        with suppress(ProcessLookupError):
-            proc.kill()
 
 
 def _extract_text(content: list[Any]) -> str:
@@ -511,7 +491,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 )
             except asyncio.TimeoutError:
                 if proc.returncode is None:
-                    _kill_process_tree(proc)
+                    kill_process_tree(proc)
                 stdout, _ = await communication
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
                 _, run_metadata = parse_stream_json(stdout.decode(errors="replace"))
@@ -523,7 +503,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 return [], model, run_metadata
             except asyncio.CancelledError:
                 if proc.returncode is None:
-                    _kill_process_tree(proc)
+                    kill_process_tree(proc)
                 await asyncio.gather(communication, return_exceptions=True)
                 raise
 

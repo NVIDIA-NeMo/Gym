@@ -19,18 +19,15 @@ import logging
 import os
 import re
 import shutil
-import signal
 import subprocess
 import tempfile
 from asyncio import Semaphore
-from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
 from time import time
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
-import psutil
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
@@ -50,6 +47,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.process_utils import kill_process_tree
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
@@ -240,24 +238,6 @@ def parse_exec_jsonl(stdout: str) -> tuple[list[Any], dict]:
     if errors:
         metadata["errors"] = errors
     return output_items, metadata
-
-
-def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
-    """Stop descendants even when a launcher gives them separate process groups."""
-    descendants = []
-    with suppress(psutil.NoSuchProcess):
-        descendants = psutil.Process(proc.pid).children(recursive=True)
-    for child in reversed(descendants):
-        with suppress(psutil.NoSuchProcess):
-            child.kill()
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except (AttributeError, OSError):
-        # Platforms without process groups still stop the direct child.
-        with suppress(ProcessLookupError):
-            proc.kill()
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -518,13 +498,13 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=self.config.timeout)
             except asyncio.TimeoutError:
                 if proc.returncode is None:
-                    _kill_process_tree(proc)
+                    kill_process_tree(proc)
                 await communication
                 LOG.warning("codex timed out after %ds", self.config.timeout)
                 return "", model
             except asyncio.CancelledError:
                 if proc.returncode is None:
-                    _kill_process_tree(proc)
+                    kill_process_tree(proc)
                 await asyncio.gather(communication, return_exceptions=True)
                 raise
 
