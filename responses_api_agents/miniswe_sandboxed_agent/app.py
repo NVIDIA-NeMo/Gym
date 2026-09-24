@@ -67,7 +67,7 @@ class MiniSWESession:
 
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
     num_workers: Literal[1] = 1
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     sandbox_model_base_url: str | None = None
     harness: MiniSWEConfig = Field(default_factory=MiniSWEConfig)
@@ -75,6 +75,7 @@ class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
     agent_max_timeout_sec: float | None = Field(default=None, gt=0)
     setup_timeout_sec: float = Field(default=360, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
+    closed_session_retention_sec: float = Field(default=300, gt=0)
 
     @field_validator("sandbox_model_base_url")
     @classmethod

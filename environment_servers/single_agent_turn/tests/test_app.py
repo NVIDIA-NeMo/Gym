@@ -355,3 +355,32 @@ def test_retry_requires_a_transient_dependency_error() -> None:
     assert _is_retryable_dependency_error(TimeoutError()) is True
     assert _is_retryable_dependency_error(ClientPayloadError("response body interrupted")) is True
     assert _is_retryable_dependency_error(ValueError("invalid response")) is False
+
+
+@pytest.mark.parametrize("input", [[], [{"role": "user", "content": "caller prompt"}]])
+async def test_resource_context_fills_empty_input_and_preserves_request_options(input):
+    server, client = _environment_server()
+    context = {
+        "instruction": "pinned task",
+        "timeout_sec": 30,
+        "user": 1000,
+        "skills_dir": "/task/skills",
+        "mcp_servers": [],
+    }
+    client.responses[0] = _Response({"resources_session_id": "resources-session", "agent_context": context})
+    request = _request()
+    request.task.task_input.responses_create_params = type(
+        request.task.task_input.responses_create_params
+    ).model_validate({"input": input})
+    request.task.task_input.responses_create_params.max_output_tokens = 73
+    request.task.task_input.responses_create_params.temperature = 0.2
+    result = await server.run_request(request)
+    assert result.failure is None
+    seed = next(call[2]["json"] for call in client.calls if call[1] == "/v1/agent_sessions")
+    activation = next(call[2]["json"] for call in client.calls if call[1].endswith("/v1/responses"))
+    verify = next(call[2]["json"] for call in client.calls if call[1] == "/verify")
+    assert seed["agent_context"] == context
+    assert activation["input"] == (input or "pinned task")
+    assert activation["max_output_tokens"] == 73
+    assert activation["temperature"] == 0.2
+    assert verify["responses_create_params"] == activation

@@ -1,88 +1,28 @@
 # OpenCode Agent
 
-Runs the OpenCode CLI (`opencode run`). OpenCode runs its own tools internally. 
-The run's sqlite session is read for the full trajectory (including tool
-calls) and converts it into Gym format and uses resources server to verify.
+This package supports native EnvironmentServer sessions (`execution_mode: sandbox`),
+a local runner, and an explicit legacy compatibility mode. The existing
+`opencode_sandboxed_agent` package and its benchmark configurations remain available.
 
-Minimal, meant to be extended, and currently eval-only. 
-Token IDs and logprobs are not wired up and
-it does not use a Gym model server yet.
+For native sessions, compose [opencode_native_agent.yaml](configs/opencode_native_agent.yaml)
+with [the TB4 episode profile](../../benchmarks/terminal_bench_4/episode.yaml).
+Resources provisions the task; OpenCode borrows its sandbox, installs pinned
+OpenCode 1.17.11, and executes there as the task user. The runtime needs Linux,
+Python >=3.9, bash, and glibc. Automatic curl/CA installation requires root and apt-get;
+otherwise the image must provide them or the deployment must stage the binary.
 
-## Quick start
+The adapter accepts one user text prompt and optional system/developer instructions.
+It uses the rollout-prefixed Gym model endpoint. `max_output_tokens` is a per-call
+cap, defaulting to the agent config; `max_steps` optionally bounds the build agent's
+iterations. Unsupported sampling/history options fail before activation. Task user,
+deadline, skills, and sandbox-local MCP connections come from `AgentTaskContext`.
 
-OpenCode must be on PATH (auto-installed on first start, or `npm install -g opencode-ai`). Set
-`policy_base_url`, `policy_api_key`, and `policy_model_name` in `env.yaml`.
+One session permits one activation. A Linux subreaper confirms process cleanup;
+close removes session files and disconnects before Resources verifies. Cleanup
+failures retain the session for retry and block verification. Persisted trajectories,
+model/tool observations, and available usage counters are returned through the
+existing Gym response and close contracts.
 
-```bash
-gym env start \
-  --config environments/opencode_math/config.yaml \
-  --model-type openai_model
-
-gym eval run --no-serve --agent opencode_math_agent \
-  --input environments/opencode_math/data/example.jsonl \
-  --output opencode_rollout.jsonl --limit 5
-```
-
-Each request gets a temporary directory under `workspace_root`, which the agent deletes after the
-run. Leave `repo_dir` unset when no files need to survive, such as a math task. Set `repo_dir` when
-OpenCode must edit an environment-owned task directory: the agent creates it if needed, runs
-OpenCode there, and preserves it for the environment to grade or collect before cleanup.
-
-```yaml
-# Math or another task without persistent files.
-repo_dir: null
-
-# AnySWE repository provided by the task sandbox.
-repo_dir: /testbed
-
-# Terminal workspace provided by the task sandbox.
-repo_dir: /workspace
-```
-
-`repo_dir` sets the working directory, not a filesystem boundary. Do not share it across concurrent
-requests unless each request runs in an isolated filesystem.
-
-## Model id
-
-`model` is `<provider>/<model-name>`. For a custom OpenAI-compatible endpoint, define the provider
-in `opencode_config` (written to `opencode.json`) and reference it here:
-
-```yaml
-model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
-opencode_config:
-  provider:
-    nvinf:
-      npm: "@ai-sdk/openai-compatible"
-      options:
-        baseURL: ${policy_base_url}
-        apiKey: ${policy_api_key}
-      models:
-        nvidia/qwen/qwen3-next-80b-a3b-instruct: {}
-```
-
-Alternatively, set `model_server` to a Gym model server and set `model` to its served model id. The
-agent creates the OpenCode provider entry automatically. Without `model_server`, the existing URL,
-key, and provider configuration are unchanged.
-
-## Config fields
-
-- `concurrency`: max simultaneous `run()` calls
-- `command`: the OpenCode command, split on spaces so a multi-word launcher works (e.g. `npx opencode`)
-- `model`: `<provider>/<model-name>` (see Model id)
-- `model_server`: optional Gym model server used to generate the provider entry
-- `context_window`: context limit for a generated model entry
-- `max_output_tokens`: output limit for a generated model entry
-- `openai_api_key`: passed to the subprocess as `OPENAI_API_KEY`
-- `openai_base_url`: passed to the subprocess as `OPENAI_BASE_URL`
-- `env`: extra env vars for the subprocess
-- `workspace_root`: where per-request run dirs are created and deleted
-- `repo_dir`: optional environment-owned task directory that OpenCode edits and the agent preserves
-- `thinking`: passes `--thinking` when true
-- `system_prompt`: prepended to the user message
-- `setup_timeout`: reserved, currently unused
-- `timeout`: seconds for the `opencode run` call
-- `extra_args`: extra flags appended to `opencode run`
-- `opencode_config`: written to `opencode.json` in `repo_dir` when set, otherwise in the run dir
-- `opencode_version`: npm version to pin on install (null means latest)
-
-See `configs/opencode_agent.yaml`.
+The native implementation is adapted from Gym PR #3639. Local and legacy modes
+retain their separate compatibility paths. Inference smokes do not establish
+training support or full benchmark coverage.

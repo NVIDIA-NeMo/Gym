@@ -301,6 +301,10 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
         await self.sandbox.download(f"{self.remote_directory}/{name}", local)
         return json.loads(local.read_text())
 
+    def runner_command(self, command: str) -> str:
+        """Launch the native CLI; session adapters may supervise its descendants."""
+        return f"setsid --fork --wait bash -c {quote(command)}"
+
     async def execute(self, budget: float) -> tuple[NeMoGymResponse, HarnessOutcome, dict]:
         """Run one sandbox command and collect its persisted native artifacts."""
         remote = self.remote_directory
@@ -358,7 +362,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             # --wait keeps this single exec open until mini-SWE exits. There is
             # no host-side request loop or sandbox polling between model calls.
             run_result = await self.sandbox.exec(
-                f"setsid --fork --wait bash -c {quote(command)}",
+                self.runner_command(command),
                 user=self.context.user,
                 cwd=self.context.workdir,
                 timeout_s=budget,

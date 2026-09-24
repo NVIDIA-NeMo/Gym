@@ -85,7 +85,13 @@ async def run_verifier(environment, directory, diagnostics):
     logs.mkdir(parents=True, exist_ok=True)
 
     async def execute():
-        await environment.exec("chmod +x /tests/test.sh", user="root")
+        executable = await environment.exec(
+            "test -x /tests/test.sh || chmod +x /tests/test.sh",
+            user=settings.user,
+            timeout_sec=min(settings.timeout_sec, 30),
+        )
+        if executable.return_code:
+            raise RuntimeError(f"Cannot execute the official verifier: {executable.stderr}")
         result = await environment.exec(
             "/tests/test.sh > /logs/verifier/test-stdout.txt 2>&1",
             env=resolve_env(settings.env),

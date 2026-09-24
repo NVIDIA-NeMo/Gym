@@ -206,6 +206,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     task_id=request.task.task_id,
                     tool_accesses=tool_accesses,
                     sandbox_access=seed.sandbox_access,
+                    agent_context=seed.agent_context,
                 ).model_dump(mode="json"),
             )
             await raise_for_status(agent_create_http_response)
@@ -222,12 +223,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
+        effective_params = task_input.responses_create_params.model_copy(deep=True)
+        if not effective_params.input and seed.agent_context and seed.agent_context.instruction is not None:
+            effective_params.input = seed.agent_context.instruction
         agent_response = None
         try:
             agent_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
                 url_path=self._agent_responses_path(request),
-                json=task_input.responses_create_params,
+                json=effective_params,
                 cookies=agent_cookies,
             )
             await raise_for_status(agent_http_response)
@@ -263,9 +267,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 # cookie identifies the episode.
                 json=task_input.task_data
                 | {
-                    "responses_create_params": task_input.responses_create_params.model_dump(
-                        mode="json", exclude_unset=True
-                    ),
+                    "responses_create_params": effective_params.model_dump(mode="json", exclude_unset=True),
                     "response": agent_response.model_dump(mode="json"),
                 },
                 cookies=resources_cookies,

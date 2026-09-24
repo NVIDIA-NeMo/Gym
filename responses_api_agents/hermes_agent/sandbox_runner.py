@@ -5,16 +5,19 @@
 
 from __future__ import annotations
 
+import ctypes
 import functools
 import json
 import os
+import signal
+import subprocess
 import sys
+import time
 import traceback
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-
-from run_agent import AIAgent
 
 
 try:
@@ -38,6 +41,8 @@ def _use_model_server(base_url: str) -> None:
     The root agent and its iteration-limit summary share one client, delegated children inherit the
     parent's base URL, and auxiliary clients such as context compression read ``OPENAI_BASE_URL``.
     """
+    from run_agent import AIAgent
+
     os.environ["OPENAI_BASE_URL"] = base_url
     os.environ["OPENAI_API_KEY"] = _MODEL_API_KEY
 
@@ -66,6 +71,13 @@ def _connect_mcp_servers(required: list[str]) -> None:
 
 
 def _run(payload: dict[str, Any], session_dir: Path) -> dict[str, Any]:
+    home = session_dir / "home"
+    home.mkdir(exist_ok=True)
+    os.environ["HOME"] = str(home)
+    os.environ["XDG_CACHE_HOME"] = str(home / ".cache")
+    os.environ["HERMES_HOME"] = str(session_dir / "hermes-home")
+    from run_agent import AIAgent
+
     hermes_home = session_dir / "hermes-home"
     hermes_home.mkdir(parents=True, exist_ok=True)
     (hermes_home / "config.yaml").write_text(payload["config_yaml"])
@@ -103,9 +115,50 @@ def _run(payload: dict[str, Any], session_dir: Path) -> dict[str, Any]:
         chat_template_kwargs = kwargs.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})
         chat_template_kwargs.setdefault("enable_thinking", True)
         chat_template_kwargs["truncate_history_thinking"] = False
+        # Gym accepts template overrides through metadata, not an extra top-level field.
+        kwargs["extra_body"].pop("chat_template_kwargs")
+        metadata = kwargs.setdefault("metadata", {})
+        previous = json.loads(metadata.get("chat_template_kwargs") or "{}")
+        metadata["chat_template_kwargs"] = json.dumps(previous | chat_template_kwargs)
         return kwargs
 
     agent._build_api_kwargs = build_api_kwargs
+
+    def summarize_at_iteration_limit(messages: list[dict[str, Any]], api_call_count: int) -> str:
+        # The pinned Hermes summary bypasses _build_api_kwargs, leaking internal
+        # Responses IDs into Chat Completions and dropping sampling/reasoning.
+        # Keep the stored transcript intact and use its normal wire formatter.
+        messages.append(
+            {
+                "role": "user",
+                "content": "You've reached the maximum number of tool-calling iterations allowed. "
+                "Please provide a final response summarizing what you've found and accomplished so far, "
+                "without calling any more tools.",
+            }
+        )
+        api_messages = deepcopy(messages)
+        for message in api_messages:
+            reasoning = message.pop("reasoning", None)
+            if reasoning and agent.insert_reasoning:
+                message["reasoning_content"] = reasoning
+            message.pop("finish_reason", None)
+        system = "\n\n".join(part for part in (agent._cached_system_prompt, agent.ephemeral_system_prompt) if part)
+        api_messages = (
+            ([{"role": "system", "content": system}] if system else [])
+            + deepcopy(agent.prefill_messages or [])
+            + api_messages
+        )
+        kwargs = agent._build_api_kwargs(api_messages)
+        for key in ("tools", "tool_choice", "parallel_tool_calls"):
+            kwargs.pop(key, None)
+        client = agent._ensure_primary_openai_client(reason="iteration_limit_summary")
+        response = client.chat.completions.create(**kwargs)
+        final = agent._strip_think_blocks(response.choices[0].message.content or "").strip()
+        if final:
+            messages.append({"role": "assistant", "content": final})
+        return final or "I reached the iteration limit without a final summary."
+
+    agent._handle_max_iterations = summarize_at_iteration_limit
     result = None
     error = None
     try:
@@ -130,16 +183,10 @@ def _run(payload: dict[str, Any], session_dir: Path) -> dict[str, Any]:
     }
 
 
-def main() -> int:
-    if len(sys.argv) != 3:
-        print("usage: sandbox_runner.py INPUT_JSON OUTPUT_JSON", file=sys.stderr)
-        return 2
-
-    input_path = Path(sys.argv[1])
-    output_path = Path(sys.argv[2])
-    session_dir = input_path.parent
+def _run_worker(input_path: Path, output_path: Path) -> int:
+    exchange_dir = input_path.parent
     try:
-        output = _run(json.loads(input_path.read_text()), session_dir)
+        output = _run(json.loads(input_path.read_text()), exchange_dir)
     except BaseException as error:
         output = {
             "error": str(error),
@@ -157,6 +204,83 @@ def main() -> int:
 
     _write_atomic(output_path, output)
     return 0
+
+
+def _drain_children(timeout: float) -> None:
+    """Kill and reap adopted descendants, including tools that start a new process group."""
+    children = Path(f"/proc/self/task/{os.getpid()}/children")
+    deadline = time.monotonic() + timeout
+    while True:
+        for child in children.read_text().split():
+            try:
+                os.kill(int(child), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        try:
+            while os.waitpid(-1, os.WNOHANG)[0]:
+                pass
+        except ChildProcessError:
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Hermes descendants remain alive; verification must not proceed")
+        time.sleep(0.01)
+
+
+def _supervise(command: list[str], *, cleanup_timeout: float) -> dict[str, Any]:
+    """Run Hermes as a child and acknowledge cleanup only after its descendants are gone."""
+    process = None
+    cleanup_confirmed = False
+    error = None
+    stopping = False
+
+    def interrupt(*_: object) -> None:
+        nonlocal stopping
+        # Do not interrupt Popen between process creation and handle assignment.
+        stopping = True
+
+    signal.signal(signal.SIGTERM, interrupt)
+    try:
+        if sys.platform != "linux":
+            raise RuntimeError("Native Hermes sessions require a Linux sandbox")
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+            raise OSError(ctypes.get_errno(), "Cannot establish Hermes child-subreaper boundary")
+        process = subprocess.Popen(command, start_new_session=True)
+        while process.poll() is None and not stopping:
+            time.sleep(0.05)
+    except Exception as exception:
+        error = str(exception)
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            if process is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=cleanup_timeout)
+                _drain_children(cleanup_timeout)
+            cleanup_confirmed = True
+        except Exception as exception:
+            error = f"cleanup: {exception}"
+    return {"cleanup_confirmed": cleanup_confirmed, "error": error}
+
+
+def main() -> int:
+    worker = len(sys.argv) == 4 and sys.argv[1] == "--worker"
+    if not worker and len(sys.argv) != 3:
+        print("usage: sandbox_runner.py [--worker] INPUT_JSON OUTPUT_JSON", file=sys.stderr)
+        return 2
+    input_path, output_path = map(Path, sys.argv[-2:])
+    if worker:
+        return _run_worker(input_path, output_path)
+    payload = json.loads(input_path.read_text())
+    receipt = _supervise(
+        [sys.executable, str(Path(__file__).resolve()), "--worker", str(input_path), str(output_path)],
+        cleanup_timeout=payload["cleanup_timeout"],
+    )
+    _write_atomic(input_path.parent / "cleanup.json", receipt)
+    return 0 if receipt["cleanup_confirmed"] and receipt["error"] is None else 1
 
 
 if __name__ == "__main__":

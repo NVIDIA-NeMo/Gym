@@ -315,3 +315,25 @@ async def test_restore_file_and_best_effort_collection_errors(tmp_path):
     await restore(verifier, tmp_path / "artifacts")
     assert box.path("/app/output.txt").read_text() == "file-data"
     assert box.path("/evidence/state.txt").read_text() == "sidecar-data"
+
+
+async def test_verifier_preparation_uses_configured_user_without_root_switch(tmp_path):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"user": 1000, "environment": {"docker_image": "v"}}}
+    )
+    env, main, _ = environment(tmp_path / "verifier", cfg)
+    script = main.path("/tests/test.sh")
+    script.write_text(f"#!/bin/sh\necho 0 > {main.path('/logs/verifier/reward.txt')}\n")
+    script.chmod(0o555)
+    users = []
+    execute = env.exec
+
+    async def no_root(command, **kwargs):
+        assert kwargs.get("user") == 1000
+        users.append(kwargs["user"])
+        return await execute(command, **kwargs)
+
+    env.exec = no_root
+    assert await run_verifier(env, tmp_path / "result", []) == {"rewards": {"reward": 0}}
+    assert len(users) == 2
+    assert script.stat().st_mode & 0o777 == 0o555

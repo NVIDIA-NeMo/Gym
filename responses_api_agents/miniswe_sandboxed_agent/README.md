@@ -88,3 +88,35 @@ from remote sandboxes. Three-step smokes validate execution and verification,
 not task-solving accuracy. The TB4 profile retains one repeat; the three-repeat
 protocol requires `++num_repeats=3`. Selecting this profile does not establish
 benchmark coverage or exact methodology parity.
+
+
+## Native EnvironmentServer sessions
+
+Use `episode.py` with [the standalone agent config](configs/miniswe_sandboxed_agent.yaml)
+and [the generic TB4 episode profile](../../benchmarks/terminal_bench_4/episode.yaml).
+The EnvironmentServer seeds Resources, passes `SandboxAccess` and optional
+`AgentTaskContext` to the agent, activates `/v1/responses`, closes the agent,
+then verifies and closes Resources. Caller-assigned session IDs support cleanup
+when a seed response is lost. Only Resources creates or destroys task sandboxes.
+
+The native adapter keeps the CLI and direct LiteLLM Responses path described above.
+It adds one Linux child subreaper around the CLI, confirms termination of all
+agent descendants (including detached children), and removes session files before
+successful close. Missing launch or cleanup evidence blocks grading and retains
+state for a close retry. Runtime, HOME, and caches live in a unique adapter directory
+outside the task workdir. Task-local MCP processes run under the same supervisor.
+Task user, workdir, skills, and time budget come from Resources.
+
+A session accepts one activation with a string or one user text message, optionally
+preceded by a system/developer message. System content becomes per-call instructions;
+continuation histories and unsupported options are rejected before launch.
+Sampling, reasoning, and output limits remain on the direct model request.
+The task instruction from Resources fills empty inputs. The response includes
+sandbox hostname/PID and native termination metadata; saved model usage stays
+unknown when the runtime did not report it.
+
+Successful close receipts remain available for `closed_session_retention_sec`
+(default 300 seconds). Failed cleanup retains state for recovery; provider/owner
+expiry handles server crashes. This process supervisor is not a security boundary
+against hostile task code. Inference smokes do not establish training support or
+measure orchestration overhead at scale.
