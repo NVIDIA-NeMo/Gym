@@ -54,7 +54,9 @@ async def fixture(tmp_path, monkeypatch):
             response = await kwargs["query"](kwargs["params"].model_dump(mode="json"))
             return response, HarnessOutcome(reason="completed"), {"harness_version": "test"}
 
-        instance = SimpleNamespace(**kwargs, setup=AsyncMock(), execute=AsyncMock(side_effect=execute))
+        instance = SimpleNamespace(
+            **kwargs, setup=AsyncMock(), close=AsyncMock(), execute=AsyncMock(side_effect=execute)
+        )
         harnesses.append(instance)
         return instance
 
@@ -119,12 +121,13 @@ async def test_run_with_unrelated_resource_schema(fixture):
     assert f.body.responses_create_params.input == []
 
 
-async def test_execute_borrowed_session_without_resource_calls(fixture):
+async def test_run_agent_borrowed_session_without_resource_calls(fixture):
     f = fixture
     f.seed.pop("task_id")  # Optional for other resources and old seed responses.
-    result = await f.agent.execute(
+    result = await f.agent._run_agent(
         SeedSessionResponse.model_validate(f.seed),
         f.body.responses_create_params.model_copy(deep=True),
+        client_session_id="owner",
         rollout_id="activation",
         capture_model_calls=False,
         cookies={"session": "seeded"},
@@ -169,3 +172,57 @@ async def test_shutdown_while_seed_request_never_returns(fixture):
         await asyncio.wait_for(worker, timeout=0.5)
     f.agent.server_client.post.assert_awaited_once()
     assert not f.harnesses
+
+
+async def test_run_invokes_responses_with_session_state_and_releases_it(fixture, monkeypatch):
+    f = fixture
+    calls = []
+    original = module.MiniSWESandboxedAgent.responses
+
+    async def responses(self, request, body):
+        key = (request.session[SESSION_ID_KEY], request.session[module._SESSION_KEY])
+        state = self._sessions[key]
+        assert state.sandbox is f.sandbox
+        assert state.harness is f.harnesses[0]
+        assert state.harness.context.instruction == f.seed["instruction"]
+        calls.append(key)
+        return await original(self, request, body)
+
+    monkeypatch.setattr(module.MiniSWESandboxedAgent, "responses", responses)
+    first, replay = await asyncio.gather(f.agent.run(f.request, f.body), f.agent.run(f.request, f.body))
+    assert first == replay
+    assert calls == [("owner", "resource-session")]
+    assert not f.agent._sessions
+    assert f.body.responses_create_params.input == []
+
+
+async def test_responses_requires_matching_session_and_replays_one_execution(fixture):
+    from fastapi import HTTPException, Request
+
+    f = fixture
+    params = f.body.responses_create_params
+    response = module.empty_response(params, "model")
+    execute = AsyncMock(return_value=(response, HarnessOutcome(reason="completed"), {}))
+    state = module.MiniSWESession(
+        sandbox=f.sandbox,
+        harness=SimpleNamespace(params=params, execute=execute),
+        budget=60,
+    )
+    f.agent._sessions["owner", "resource-session"] = state
+
+    def request(owner, session_id):
+        return Request({"type": "http", "session": {SESSION_ID_KEY: owner, module._SESSION_KEY: session_id}})
+
+    for owner, session_id in [("other", "resource-session"), ("owner", "missing")]:
+        with pytest.raises(HTTPException, match="No seeded") as error:
+            await f.agent.responses(request(owner, session_id), params)
+        assert error.value.status_code == 409
+    with pytest.raises(HTTPException, match="bound to another"):
+        await f.agent.responses(request("owner", "resource-session"), params.model_copy(update={"input": "different"}))
+    first, replay = await asyncio.gather(
+        *[f.agent.responses(request("owner", "resource-session"), params) for _ in range(2)]
+    )
+    assert first == replay == response
+    execute.assert_awaited_once_with(60)
+    assert state.result[1].reason == "completed"
+    f.agent._sessions.clear()

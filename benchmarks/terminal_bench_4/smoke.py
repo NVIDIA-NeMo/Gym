@@ -77,6 +77,7 @@ async def main(args):
             "resources_servers/terminal_bench_4/verifier.py",
             "responses_api_agents/miniswe_sandboxed_agent/app.py",
             "responses_api_agents/miniswe_sandboxed_agent/harness.py",
+            "responses_api_agents/miniswe_sandboxed_agent/sandbox_runner.py",
             "responses_api_agents/miniswe_sandboxed_agent/mcp_client.py",
         ]
     ]

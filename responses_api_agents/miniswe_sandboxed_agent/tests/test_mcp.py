@@ -11,7 +11,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from responses_api_agents.miniswe_sandboxed_agent import mcp_client as module
-from responses_api_agents.miniswe_sandboxed_agent.harness import GymModel, responses_input
+from responses_api_agents.miniswe_sandboxed_agent.harness import responses_input
+from responses_api_agents.miniswe_sandboxed_agent.sandbox_runner import GymModel
 
 
 @pytest.mark.parametrize("transport", ["stdio", "sse", "streamable-http"])
@@ -98,7 +99,7 @@ async def test_mcp_session_preserves_tool_state_across_cli_calls(monkeypatch):
 
 
 def test_mcp_images_are_multimodal_model_inputs():
-    model = GymModel(None, None)
+    model = GymModel(None)
     messages = model.format_observation_messages(
         {"extra": {"actions": [{"command": "screenshot", "tool_call_id": "call_image"}]}},
         [{"output": "Screenshot", "returncode": 0, "images": ["data:image/png;base64,AA=="]}],

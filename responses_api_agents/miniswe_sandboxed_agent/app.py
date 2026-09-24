@@ -7,6 +7,7 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, time
@@ -45,6 +46,18 @@ from responses_api_agents.miniswe_sandboxed_agent.models import (
 
 
 LOGGER = logging.getLogger(__name__)
+_SESSION_KEY = "miniswe_session_id"
+
+
+@dataclass
+class MiniSWESession:
+    """Execution state shared by /run and responses for one borrowed sandbox."""
+
+    sandbox: AsyncSandbox
+    harness: MiniSWEHarness
+    budget: float
+    result: tuple[NeMoGymResponse, HarnessOutcome, dict] | None = None
+    worker: asyncio.Task | None = None
 
 
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
@@ -81,6 +94,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
         self._runs = {}
+        self._sessions: dict[tuple[str, str], MiniSWESession] = {}
         self._finalizers = set()
         self._closing = False
         self._shutdown_deadline: float | None = None
@@ -124,8 +138,22 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         if not task.cancelled() and (error := task.exception()) is not None:
             LOGGER.error("mini-SWE background operation failed", exc_info=(type(error), error, error.__traceback__))
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
-        raise NotImplementedError("This agent requires /run")
+    async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        key = (request.session[SESSION_ID_KEY], request.session.get(_SESSION_KEY))
+        state = self._sessions.get(key)
+        if state is None:
+            raise HTTPException(409, "No seeded mini-SWE sandbox for this session")
+        if body != state.harness.params:
+            raise HTTPException(409, "Agent session is already bound to another request")
+        if state.worker is None:
+            state.worker = asyncio.create_task(state.harness.execute(state.budget))
+        try:
+            state.result = await asyncio.shield(state.worker)
+        except asyncio.CancelledError:
+            state.worker.cancel()
+            # The sandbox runner must finish cleanup before /run can verify.
+            state.result = await state.worker
+        return state.result[0]
 
     async def run(self, request: Request, body: MiniSWERunRequest) -> MiniSWEVerifyResponse:
         if self._closing:
@@ -184,9 +212,10 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 termination=HarnessOutcome(reason="cancelled"),
             )
         else:
-            result = await self.execute(
+            result = await self._run_agent(
                 seed,
                 params,
+                client_session_id=payload["client_session_id"],
                 rollout_id=payload.get("_ng_rollout_id") or payload["rollout_id"],
                 capture_model_calls=capture_model_calls,
                 cookies=cookies,
@@ -199,17 +228,18 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         finalizer.add_done_callback(self._observe_background_task)
         return await asyncio.shield(finalizer)
 
-    async def execute(
+    async def _run_agent(
         self,
         seed: SeedSessionResponse,
         params: NeMoGymResponseCreateParamsNonStreaming,
         *,
+        client_session_id: str,
         rollout_id: str,
         capture_model_calls: bool,
         cookies: dict,
         artifact_directory: Path | None = None,
     ) -> AgentExecutionResult:
-        """Execute on a borrowed sandbox; the caller owns seeding and verification."""
+        """Set up session state, invoke responses, and release the borrowed transport."""
         response = empty_response(params, self.config.model_server.name)
         termination = seed.termination or HarnessOutcome(
             reason="infrastructure_error", detail="Setup did not complete"
@@ -217,6 +247,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         extra, timings = {}, {}
         agent_started = False
         provider = None
+        harness = None
+        key = (client_session_id, seed.session_id)
         with rollout_context(rollout_id if capture_model_calls else None):
             try:
                 if seed.termination is None:
@@ -272,9 +304,20 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                     timings["agent_execution"] = {"started_at": now()}
                     budget = min(seed.agent_timeout_sec, self.config.agent_max_timeout_sec or float("inf"))
                     deadline = monotonic() + budget
+                    state = MiniSWESession(sandbox=sandbox, harness=harness, budget=max(0, deadline - monotonic()))
+                    self._sessions[key] = state
+                    request = Request(
+                        {
+                            "type": "http",
+                            "headers": [],
+                            "session": {SESSION_ID_KEY: client_session_id, _SESSION_KEY: seed.session_id},
+                        }
+                    )
                     agent_started = True
-                    response, outcome, extra = await harness.execute(max(0, deadline - monotonic()))
-                    termination = HarnessOutcome.model_validate(outcome.model_dump())
+                    # In full swap, the environment server will replace this call
+                    # with an HTTP request to the agent's /v1/responses endpoint.
+                    response = await self.responses(request, params)
+                    _, termination, extra = state.result
                     if monotonic() >= deadline:
                         termination.reason = "timeout"
             except asyncio.CancelledError:
@@ -287,6 +330,12 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                     detail=f"{type(exc).__name__}: {exc}",
                 )
             finally:
+                self._sessions.pop(key, None)
+                if harness is not None and not agent_started:
+                    try:
+                        await harness.close()
+                    except Exception:
+                        LOGGER.exception("Failed to clean up mini-SWE setup")
                 for timing in timings.values():
                     timing.setdefault("finished_at", now())
                 if provider is not None:
