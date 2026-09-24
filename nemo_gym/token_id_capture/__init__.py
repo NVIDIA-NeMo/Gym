@@ -53,11 +53,16 @@ from nemo_gym.token_id_capture.consumer import (
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, canonicalize_tool_arguments
 from nemo_gym.token_id_capture.lineage import (
     FileLineageStore,
+    FileManifestReader,
     IncrementalLineageStore,
     InMemoryLineageStore,
+    LedgerRootMismatch,
     LineageIndex,
+    ManifestReadCancelled,
+    ManifestReadTimeout,
     RolloutLineage,
     stamp_continuation,
+    verify_ledger_root_visibility,
 )
 from nemo_gym.token_id_capture.protocols import (
     CaptureLedger,
@@ -121,6 +126,11 @@ __all__ = [
     "cumulative_tokens",
     "stamp_lineage",
     "TokenCaptureStore",
+    "FileManifestReader",
+    "LedgerRootMismatch",
+    "ManifestReadCancelled",
+    "ManifestReadTimeout",
+    "verify_ledger_root_visibility",
     "validate_rollout_id",
     "make_token_store",
     "TokenSink",
