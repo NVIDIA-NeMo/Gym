@@ -1,0 +1,28 @@
+name: indic_arena_hard
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: Indic Arena Hard prompts evaluated with the English Arena Hard pairwise LLM judge and language-specific baselines.
+modality: text
+licensing: Apache-2.0
+authors:
+- anushakamathofficial
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+resources_server: arena_judge
+agent_server: simple_agent
+datasets:
+- name: indic_arena_hard
+  type: benchmark
+  jsonl_fpath: benchmarks/indic_arena_hard/data/indic_arena_hard_benchmark.jsonl
+  prepare_script: benchmarks/indic_arena_hard/prepare.py
+  prompt_config: benchmarks/prompts/generic/default.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/generic/default.yaml
+lifecycle: active

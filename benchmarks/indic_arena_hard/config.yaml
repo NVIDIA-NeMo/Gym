@@ -1,0 +1,20 @@
+# Reuse the English Arena Hard judge, policy model, and prompt settings.
+config_paths:
+  - resources_servers/arena_judge/configs/arena_judge.yaml
+
+indic_arena_hard_arena_judge_resources_server:
+  _inherit_from: arena_judge
+
+indic_arena_hard_arena_judge_simple_agent:
+  _inherit_from: arena_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: indic_arena_hard_arena_judge_resources_server
+      datasets:
+      - name: indic_arena_hard
+        type: benchmark
+        jsonl_fpath: benchmarks/indic_arena_hard/data/indic_arena_hard_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic/default.yaml
+        prepare_script: benchmarks/indic_arena_hard/prepare.py
+        license: Apache 2.0
