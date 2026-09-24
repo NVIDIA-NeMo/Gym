@@ -645,8 +645,40 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
 
 
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
+    target = getattr(args, "target", None)
+    if target and "=" in target:
+        # A bare Hydra override (`+key=value`) landed in the positional slot; hand it back.
+        overrides = [target, *overrides]
+        target = None
+    if target:
+        # A task folder or `harbor:<dataset>` reference: prepare it, then run end to end.
+        from nemo_gym.tasks.harbor.cli import run_target
+
+        run_target(args, overrides)
+        return
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
+
+
+# `gym eval run <target>`: a Harbor task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`.
+# Register-only: the target is consumed by `_eval_run`, not translated to a Hydra override.
+TASK_TARGET = Flag(
+    register=lambda p: p.add_argument(
+        "target",
+        nargs="?",
+        metavar="TARGET",
+        help="Harbor task folder, folder of task folders, or `harbor:<dataset>[@<version>]` hub reference.",
+    ),
+)
+
+# `--sandbox <provider>`: load the named sandbox provider config (nemo_gym/sandbox/providers/<provider>/configs).
+SANDBOX = Flag(
+    register=lambda p: p.add_argument(
+        "--sandbox",
+        metavar="PROVIDER",
+        help="Sandbox provider for task containers (e.g. opensandbox, docker). Used with a task TARGET.",
+    ),
+)
 
 
 def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -1003,6 +1035,8 @@ COMMANDS = {
         target=_eval_run,
         summary="Collate data, start servers, and collect rollouts.",
         flags=(
+            TASK_TARGET,
+            SANDBOX,
             CONFIG,
             BENCHMARK,
             ENVIRONMENT,
