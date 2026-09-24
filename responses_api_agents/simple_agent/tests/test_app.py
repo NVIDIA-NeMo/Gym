@@ -101,6 +101,7 @@ class TestApp:
             seeded = client.post(
                 "/v1/agent_sessions",
                 json={
+                    "agent_session_id": "agent-session-0",
                     "episode_id": {"rollout_id": "rollout", "attempt": 0},
                     "task_id": {"taskset": "usersim:example", "task_id": "task"},
                     "tool_accesses": [
@@ -115,6 +116,7 @@ class TestApp:
                 },
             )
             assert seeded.status_code == 200
+            assert seeded.json()["agent_session_id"] == "agent-session-0"
             closed = client.post(
                 "/v1/agent_sessions/close",
                 json={

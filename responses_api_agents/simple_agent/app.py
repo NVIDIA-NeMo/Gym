@@ -114,12 +114,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             raise ValueError("SimpleAgent supports at most one direct HTTP Resources access")
         resources_cookies = dict(direct_accesses[0].cookies) if direct_accesses else {}
         self.session_id_to_state[session_id] = _SimpleAgentSession(
-            agent_session_id=session_id,
+            agent_session_id=body.agent_session_id,
             episode_id=body.episode_id,
             task_id=body.task_id,
             resources_cookies=resources_cookies,
         )
-        return AgentSeedSessionResponse(agent_session_id=session_id)
+        return AgentSeedSessionResponse(agent_session_id=body.agent_session_id)
 
     async def close_agent_session(
         self,
