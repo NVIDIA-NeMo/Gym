@@ -29,6 +29,7 @@ from nemo_gym.environment.manifest import (
     ManifestDataset,
     dump_manifest,
     load_manifest,
+    resolve_manifest_config_path,
 )
 from nemo_gym.global_config import (
     GlobalConfigDictParser,
@@ -163,7 +164,7 @@ def _resolve_dataset_owner_agent(resolved: DictConfig, owner_instance_name: str)
         raise EnvironmentValidationError(f"Datasets on {owner_instance_name!r}: {e}") from e
 
 
-def _resolve_manifest_composition(config_path: Path) -> ResolvedComposition:
+def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | None = None) -> ResolvedComposition:
     """Resolve manifest wiring without probing or materializing runtime services."""
     initial = OmegaConf.merge(
         GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
@@ -188,12 +189,28 @@ def _resolve_manifest_composition(config_path: Path) -> ResolvedComposition:
     # resolver rollout dispatch uses — so a config that validates is a config that routes.
     rs_with_data = [s for s in servers if s.SERVER_TYPE == "resources_servers" and s.datasets]
     dataset_rs = None
-    if len(rs_with_data) > 1:
+    if dataset_owner is not None:
+        owner = by_instance.get(dataset_owner)
+        if (
+            owner is None
+            or owner.SERVER_TYPE not in {"resources_servers", "responses_api_agents"}
+            or not owner.datasets
+        ):
+            raise EnvironmentValidationError(
+                f"dataset_owner {dataset_owner!r} must name a dataset-bearing resources server or agent instance."
+            )
+        agent_name = _resolve_dataset_owner_agent(resolved, owner.name)
+        selected_agent = by_instance.get(agent_name)
+        if selected_agent is None or selected_agent.SERVER_TYPE != "responses_api_agents":
+            raise EnvironmentValidationError(f"dataset_owner {dataset_owner!r} does not resolve to an agent instance.")
+        if owner.SERVER_TYPE == "resources_servers":
+            dataset_rs = owner
+    elif len(rs_with_data) > 1:
         names = ", ".join(s.name for s in rs_with_data)
         raise EnvironmentValidationError(
             f"Workload config must define exactly one dataset-bearing instance; found resources servers: {names}."
         )
-    if rs_with_data:
+    elif rs_with_data:
         dataset_rs = rs_with_data[0]
         agent_name = _resolve_dataset_owner_agent(resolved, dataset_rs.name)
         selected_agent = by_instance.get(agent_name)
@@ -220,8 +237,8 @@ def _resolve_manifest_composition(config_path: Path) -> ResolvedComposition:
 
     resources_server = _implementation_name(resources_instance) if resources_instance is not None else None
     model_server = model_ref.get("name") if isinstance(model_ref, DictConfig) else None
-    dataset_owner = dataset_rs if dataset_rs is not None else selected_agent
-    datasets = tuple(_manifest_dataset(dataset) for dataset in (dataset_owner.datasets or []))
+    owner = dataset_rs if dataset_rs is not None else selected_agent
+    datasets = tuple(_manifest_dataset(dataset) for dataset in (owner.datasets or []))
     grading_mode = None
     if resources_instance is not None:
         grading_mode = resources_instance.get_inner_run_server_config_dict().get("grading_mode")
@@ -479,6 +496,7 @@ def _validate_dataset(
     dataset: ManifestDataset,
     *,
     standard_prompt_config: str | None,
+    prompt_source: str = "template",
 ) -> DatasetValidation:
     data_path = _resolve_under_cwd_or_install(dataset.jsonl_fpath)
     prompt_path: Path | None = None
@@ -489,23 +507,31 @@ def _validate_dataset(
             raise EnvironmentValidationError(f"Benchmark dataset '{dataset.name}' has no prepare script.")
         prepare_path = _resolve_under_cwd_or_install(dataset.prepare_script)
         _validate_prepare_script(prepare_path)
-        prompt_config = dataset.prompt_config or standard_prompt_config
-        if prompt_config is None:
-            raise EnvironmentValidationError(
-                f"Benchmark dataset '{dataset.name}' has no prompt_config and the manifest has no "
-                "standard_prompt_config."
-            )
-        prompt_path = _resolve_under_cwd_or_install(prompt_config)
-        try:
-            prompt = load_prompt_config(str(prompt_path))
-        except (OSError, UnicodeError, YAMLError, ValueError, KeyError, AttributeError, TypeError) as error:
-            raise EnvironmentValidationError(
-                f"Could not materialize benchmark dataset '{dataset.name}': {error}"
-            ) from error
+        if prompt_source == "template":
+            prompt_config = dataset.prompt_config or standard_prompt_config
+            if prompt_config is None:
+                raise EnvironmentValidationError(
+                    f"Benchmark dataset '{dataset.name}' has no prompt_config and the manifest has no "
+                    "standard_prompt_config."
+                )
+            prompt_path = _resolve_under_cwd_or_install(prompt_config)
+            try:
+                prompt = load_prompt_config(str(prompt_path))
+            except (OSError, UnicodeError, YAMLError, ValueError, KeyError, AttributeError, TypeError) as error:
+                raise EnvironmentValidationError(
+                    f"Could not materialize benchmark dataset '{dataset.name}': {error}"
+                ) from error
 
     row_count = 0
     for line_number, row in _iter_dataset_rows(data_path):
         row_count += 1
+        if prompt_source == "prepared" and dataset.type == DatasetKind.BENCHMARK:
+            params = row.get("responses_create_params")
+            if not isinstance(params, dict) or not params.get("input"):
+                raise EnvironmentValidationError(
+                    f"Benchmark dataset '{dataset.name}' row {line_number} declares prepared prompts "
+                    "but has no responses_create_params.input."
+                )
         if prompt is not None:
             try:
                 validate_prompt_compatibility([row], prompt)
@@ -541,6 +567,17 @@ def _validate_dataset(
 
 def _validate_benchmark_prompt_contract(manifest: EnvironmentManifest) -> None:
     if manifest.kind != EnvironmentKind.BENCHMARK:
+        return
+    if manifest.prompt_source != "template":
+        # Agent templates consume fields constructed during the agent loop, not dataset rows.
+        if manifest.prompt_source == "agent" and manifest.standard_prompt_config is not None:
+            path = _resolve_under_cwd_or_install(manifest.standard_prompt_config)
+            if not path.is_file():
+                raise EnvironmentValidationError(f"Agent prompt config was not found: {path}")
+            try:
+                load_prompt_config(str(path))
+            except (OSError, UnicodeError, YAMLError, ValueError, TypeError, AttributeError) as error:
+                raise EnvironmentValidationError(f"Could not load agent prompt config '{path}': {error}") from error
         return
     benchmark_datasets = [dataset for dataset in manifest.datasets if dataset.type == DatasetKind.BENCHMARK]
     mismatched = [
@@ -599,17 +636,17 @@ def validate_environment(
 ) -> EnvironmentValidationReport:
     """Validate a manifest without probing services or runtime output paths."""
     resolved_manifest_path = Path(manifest_path).expanduser().resolve()
+    manifest = load_manifest(resolved_manifest_path)
     resolved_config_path = (
-        resolved_manifest_path.with_name("config.yaml")
+        resolve_manifest_config_path(resolved_manifest_path, manifest)
         if config_path is None
         else Path(config_path).expanduser().resolve()
     )
-    manifest = load_manifest(resolved_manifest_path)
     _validate_manifest_location(resolved_manifest_path, manifest)
     if not resolved_config_path.is_file():
         raise EnvironmentValidationError(f"Gym config was not found: {resolved_config_path}")
 
-    composition = _resolve_manifest_composition(resolved_config_path)
+    composition = _resolve_manifest_composition(resolved_config_path, dataset_owner=manifest.dataset_owner)
     differences = _mirror_differences(manifest, composition)
     synchronized: tuple[str, ...] = ()
     if differences:
@@ -640,7 +677,9 @@ def validate_environment(
         if manifest.rollout_driver:
             _validate_rollout_driver(manifest.rollout_driver)
         dataset_reports = tuple(
-            _validate_dataset(dataset, standard_prompt_config=manifest.standard_prompt_config)
+            _validate_dataset(
+                dataset, standard_prompt_config=manifest.standard_prompt_config, prompt_source=manifest.prompt_source
+            )
             for dataset in manifest.datasets
         )
     if synchronized:

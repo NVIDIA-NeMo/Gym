@@ -1,0 +1,30 @@
+name: legal_agent_bench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: agent
+description: Harbor-native Legal Agent Benchmark document tasks scored by the official
+  all-criteria full-task metric.
+modality: multimodal
+licensing: MIT
+authors:
+- rystewart-nvidia
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+agent_server: harbor_agent
+datasets:
+- name: legal_agent_bench
+  type: benchmark
+  jsonl_fpath: benchmarks/legal_agent_bench/data/legal_agent_bench_benchmark.jsonl
+  prepare_script: benchmarks/legal_agent_bench/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active
+resources_server: null

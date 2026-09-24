@@ -1,0 +1,32 @@
+name: brokenarxiv_0626/config_with_system
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: Sycophancy grader for prove-the-false-statement benchmarks, using MathArena's
+  0-2 judge rubric; system-prompt variant.
+modality: text
+licensing: unknown
+authors:
+- Kipok
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../config_with_system.yaml
+resources_server: false_statement_judge
+agent_server: simple_agent
+datasets:
+- name: brokenarxiv_0626
+  type: benchmark
+  jsonl_fpath: benchmarks/brokenarxiv_0626/data/brokenarxiv_0626_benchmark.jsonl
+  prepare_script: benchmarks/brokenarxiv_0626/prepare.py
+  prompt_config: benchmarks/brokenarxiv_0626/prompts/with_system.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/brokenarxiv_0626/prompts/with_system.yaml
+lifecycle: active

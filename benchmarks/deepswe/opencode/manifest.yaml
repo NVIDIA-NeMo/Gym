@@ -1,0 +1,31 @@
+name: deepswe/opencode
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: DeepSWE v1.1 software engineering tasks with prepared instructions, an
+  OpenCode sandboxed agent, and execution-based patch verification.
+modality: text
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../opencode.yaml
+resources_server: deepswe
+agent_server: opencode_sandboxed_agent
+datasets:
+- name: deepswe_v1_1
+  type: benchmark
+  jsonl_fpath: benchmarks/deepswe/data/deepswe_benchmark.jsonl
+  prepare_script: benchmarks/deepswe/prepare.py
+  num_repeats: 10
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+lifecycle: active
