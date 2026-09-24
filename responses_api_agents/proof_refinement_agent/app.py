@@ -63,6 +63,7 @@ from nemo_gym.rollout_correlation import (
     MODEL_CALL_ID_HEADER,
     ModelCallCaptureOutcome,
     current_rollout_id,
+    take_checkpoint_parent,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
@@ -266,6 +267,11 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
                 model_response_json = pending_model.response
                 verify_request_id = pending_model.resource_request_id
             else:
+                if turn_index > 0:
+                    # Correction prompts replace the conversation with a new
+                    # user message. Their capture starts a fresh root, even
+                    # after restore; it does not extend the saved proof's tokens.
+                    take_checkpoint_parent()
                 execution_headers = self.checkpoint_execution_headers()
                 gen_response = await self.retry_checkpoint_refusal(
                     lambda: self.server_client.post(
