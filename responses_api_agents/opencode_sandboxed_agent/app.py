@@ -397,6 +397,9 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
+    opencode_chunk_timeout_ms: int = Field(
+        default=600000, gt=0, description="HTTP stream chunk timeout in milliseconds."
+    )
 
     # Sandbox config
     sandbox_provider: str
@@ -557,7 +560,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         "baseURL": base_url,
                         "apiKey": "dummy_key",  # pragma: allowlist secret
                         "timeout": False,
-                        "chunkTimeout": 600000,  # in milliseconds, 10 min
+                        "chunkTimeout": self.config.opencode_chunk_timeout_ms,
                     },
                     "models": {
                         "dummy_model": {
