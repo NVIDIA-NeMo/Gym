@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import logging
 import math
 import os
 import re
@@ -27,8 +28,11 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
     rewrite_image,
 )
-from resources_servers.terminal_bench_4.compose_config import resolve_compose
+from resources_servers.terminal_bench_4.compose_config import MAIN_COMMAND, resolve_compose, resolve_image_startup
 from resources_servers.terminal_bench_4.task import Settings, resolve_env
+
+
+logger = logging.getLogger(__name__)
 
 
 class EnvironmentConfig(Settings):
@@ -41,7 +45,8 @@ class EnvironmentConfig(Settings):
     sandbox_env_by_task: dict[str, dict[str, str]]
     sandbox_request_gpu_type: bool
     sandbox_split_endpoints: bool
-    compose_image_configs: Path | None
+    compose_image_configs: Path | None  # Shared OCI metadata for Compose and standalone images.
+    # Compatibility override for existing single-container run configurations.
     single_container_image_configs: Path | None = None
     root_bootstrap_image_users: dict[str, StrictStr | StrictInt] | None = None
     sandbox_ttl_s: float = Field(gt=0)
@@ -157,33 +162,53 @@ class Environment:
         return self.default_user if self.configured_user is None else execution_user(self.configured_user)
 
     def _single_container_entrypoint(self, image: str) -> list[str] | None:
-        path = self.config.single_container_image_configs
+        override = self.config.single_container_image_configs
+        path = override if override is not None else self.config.compose_image_configs
         if self.uses_compose or path is None:
             return None
         if not path.is_absolute():
             path = Path(__file__).resolve().parents[2] / path
         records = json.loads(path.read_text())
-        record = records.get(image) if isinstance(records, dict) else None
+        if not isinstance(records, dict):
+            raise ValueError("OCI startup metadata must be an image mapping")
+        if image not in records and override is None:
+            # The official catalog originally covered only Compose images. Do
+            # not break those legacy standalone tasks or guess an entrypoint.
+            logger.warning("No recorded OCI startup metadata for %r; retaining provider keepalive", image)
+            return None
+        record = records.get(image)
         if not isinstance(record, dict):
             raise ValueError(f"No recorded OCI startup metadata for {image!r}")
         if record.get("image") != image:
-            raise ValueError(f"OCI startup metadata image does not match {image!r}")
+            # Compose catalogs can spell tag@digest keys as repo@digest in the
+            # record. Accept that only when both refs pin identical content.
+            digest = image.rsplit("@", 1)[-1]
+            recorded_image = record.get("image")
+            if not (
+                "@" in image
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+                and isinstance(recorded_image, str)
+                and recorded_image.endswith("@" + digest)
+            ):
+                raise ValueError(f"OCI startup metadata image does not match {image!r}")
         if (record.get("os"), record.get("architecture")) != ("linux", "amd64"):
             raise ValueError(f"OCI startup metadata for {image!r} requires a supported Linux/amd64 image")
         config = record.get("config")
         if not isinstance(config, dict):
             raise ValueError(f"OCI startup metadata for {image!r} requires an image config")
-        startup = []
         for field in ("Entrypoint", "Cmd"):
             value = config.get(field)
             if value is None:
                 continue
             if not isinstance(value, list) or any(not isinstance(arg, str) for arg in value):
                 raise ValueError(f"OCI {field} for {image!r} must be a list of strings or null")
-            startup.extend(value)
-        # The provider's entrypoint is the complete argv, not Docker's separate
-        # ENTRYPOINT field. Empty image startup retains the provider keepalive.
-        return startup or None
+        # A standalone sandbox is the main service, not a sidecar. Match the
+        # Compose main convention: preserve ENTRYPOINT, replace CMD with the
+        # keepalive (an inherited python/bash CMD can exit immediately).
+        service = {"command": list(MAIN_COMMAND)}
+        resolve_image_startup(service, config)
+        # OpenSandbox takes the complete argv rather than separate EP/CMD fields.
+        return [*service["entrypoint"], *service["command"]]
 
     def build_spec(self) -> SandboxSpec:
         settings, config = self.settings, self.config

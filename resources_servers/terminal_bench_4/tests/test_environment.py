@@ -172,13 +172,15 @@ async def test_single_start_workdir_env_user_quiescence_cleanup(tmp_path, monkey
             {"Entrypoint": ["/start", "--mode"], "Cmd": ["sh", "-c", "sleep infinity"]},
             ["/start", "--mode", "sh", "-c", "sleep infinity"],
         ),
-        ({"Entrypoint": ["/start"], "Cmd": None}, ["/start"]),
-        ({"Entrypoint": None, "Cmd": ["sh", "-c", "echo '$HOME'"]}, ["sh", "-c", "echo '$HOME'"]),
-        ({"Entrypoint": [], "Cmd": []}, None),
-        ({}, None),
+        ({"Entrypoint": ["/start"], "Cmd": None}, ["/start", "sh", "-c", "sleep infinity"]),
+        ({"Entrypoint": None, "Cmd": ["python3"]}, ["sh", "-c", "sleep infinity"]),
+        ({"Entrypoint": None, "Cmd": ["/bin/bash"]}, ["sh", "-c", "sleep infinity"]),
+        ({"Entrypoint": [], "Cmd": []}, ["sh", "-c", "sleep infinity"]),
+        ({}, ["sh", "-c", "sleep infinity"]),
     ],
 )
-async def test_single_container_uses_role_image_startup(tmp_path, monkeypatch, verifier, startup, expected):
+@pytest.mark.parametrize("catalog", ["compose_image_configs", "single_container_image_configs"])
+async def test_single_container_uses_role_image_startup(tmp_path, monkeypatch, verifier, startup, expected, catalog):
     images = tmp_path / "single-images.json"
     images.write_text(
         json.dumps(
@@ -187,27 +189,29 @@ async def test_single_container_uses_role_image_startup(tmp_path, monkeypatch, v
                     "image": "mirror/agent",
                     "os": "linux",
                     "architecture": "amd64",
-                    "config": startup if not verifier else {"Cmd": ["wrong-role"]},
+                    "config": startup if not verifier else {"Entrypoint": ["wrong-role"]},
                 },
                 "mirror/verifier": {
                     "image": "mirror/verifier",
                     "os": "linux",
                     "architecture": "amd64",
-                    "config": startup if verifier else {"Cmd": ["wrong-role"]},
+                    "config": startup if verifier else {"Entrypoint": ["wrong-role"]},
                 },
             }
         )
     )
-    env, _, create, _ = make_environment(
+    env, _, create, compose_create = make_environment(
         tmp_path,
         monkeypatch,
         verifier=verifier,
-        config={"single_container_image_configs": images, "image_rewrites": [{"from": "public/", "to": "mirror/"}]},
+        config={catalog: images, "image_rewrites": [{"from": "public/", "to": "mirror/"}]},
     )
     await env.start()
     spec = create.call_args.args[1]
     assert spec.image == "mirror/" + ("verifier" if verifier else "agent")
     assert spec.entrypoint == expected
+    assert not env.uses_compose
+    compose_create.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -221,11 +225,12 @@ async def test_single_container_uses_role_image_startup(tmp_path, monkeypatch, v
         ({"config": {"Cmd": ["sleep", 1]}}, "Cmd.*list of strings"),
     ],
 )
-def test_single_container_rejects_incompatible_startup_metadata(tmp_path, monkeypatch, change, error):
+@pytest.mark.parametrize("catalog", ["compose_image_configs", "single_container_image_configs"])
+def test_single_container_rejects_incompatible_startup_metadata(tmp_path, monkeypatch, change, error, catalog):
     images = tmp_path / "single-images.json"
     record = {"image": "public/agent", "os": "linux", "architecture": "amd64", "config": {}}
     images.write_text(json.dumps({"public/agent": record | change}))
-    env, *_ = make_environment(tmp_path, monkeypatch, config={"single_container_image_configs": images})
+    env, *_ = make_environment(tmp_path, monkeypatch, config={catalog: images})
     with pytest.raises(ValueError, match=error):
         env.build_spec()
 
@@ -234,6 +239,73 @@ def test_single_container_configured_metadata_must_include_image(tmp_path, monke
     images = tmp_path / "single-images.json"
     images.write_text("{}")
     env, *_ = make_environment(tmp_path, monkeypatch, config={"single_container_image_configs": images})
+    with pytest.raises(ValueError, match="No recorded OCI startup metadata"):
+        env.build_spec()
+
+
+def test_compose_only_catalog_retains_legacy_standalone_keepalive(tmp_path, monkeypatch, caplog):
+    images = tmp_path / "compose-images.json"
+    images.write_text("{}")
+    env, *_ = make_environment(tmp_path, monkeypatch, config={"compose_image_configs": images})
+    assert env.build_spec().entrypoint is None
+    assert "No recorded OCI startup metadata" in caplog.text
+
+
+@pytest.mark.parametrize("catalog", ["compose_image_configs", "single_container_image_configs"])
+@pytest.mark.parametrize("record", [None, [], "not a record"])
+def test_invalid_catalog_or_present_record_does_not_fall_back(tmp_path, monkeypatch, catalog, record):
+    images = tmp_path / "images.json"
+    env, *_ = make_environment(tmp_path, monkeypatch, config={catalog: images})
+    images.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="image mapping"):
+        env.build_spec()
+    images.write_text(json.dumps({"public/agent": record}))
+    with pytest.raises(ValueError, match="No recorded OCI startup metadata"):
+        env.build_spec()
+
+
+@pytest.mark.parametrize("same_digest", [False, True])
+def test_standalone_accepts_compose_catalog_digest_spelling_only_for_same_content(tmp_path, monkeypatch, same_digest):
+    digest = "sha256:" + "a" * 64
+    image = "registry/repo:tag@" + digest
+    recorded_image = "registry/repo@" + (digest if same_digest else "sha256:" + "b" * 64)
+    images = tmp_path / "images.json"
+    images.write_text(
+        json.dumps(
+            {
+                image: {
+                    "image": recorded_image,
+                    "os": "linux",
+                    "architecture": "amd64",
+                    "config": {"Entrypoint": ["/start"]},
+                }
+            }
+        )
+    )
+    env, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        config={"compose_image_configs": images},
+        task_config={"environment": {"docker_image": image}},
+    )
+    if same_digest:
+        assert env.build_spec().entrypoint == ["/start", "sh", "-c", "sleep infinity"]
+    else:
+        with pytest.raises(ValueError, match="does not match"):
+            env.build_spec()
+
+
+def test_existing_standalone_catalog_override_is_still_strict(tmp_path, monkeypatch):
+    images = tmp_path / "override.json"
+    images.write_text("{}")
+    env, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        config={
+            "single_container_image_configs": images,
+            "compose_image_configs": tmp_path / "unused-catalog.json",
+        },
+    )
     with pytest.raises(ValueError, match="No recorded OCI startup metadata"):
         env.build_spec()
 

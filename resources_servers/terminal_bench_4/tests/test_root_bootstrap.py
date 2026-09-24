@@ -97,7 +97,7 @@ def test_root_bootstrap_preserves_entrypoint_fix_and_role_image(tmp_path, monkey
     image = "public/verifier" if verifier else "public/agent"
     spec = env.build_spec()
     assert spec.image == image
-    assert spec.entrypoint == ["/start-service", image]
+    assert spec.entrypoint == ["/start-service", "sh", "-c", "sleep infinity"]
     assert env.role_user == (1200 if verifier else "image-agent")
 
 

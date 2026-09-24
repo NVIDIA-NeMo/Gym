@@ -93,8 +93,8 @@ image User, configured/effective execution user, and observed UID/GID.
 
 Keep the original USER record independently of the new image, preserve task
 users, and perform a live golden/model smoke before qualifying a new image.
-The separate image-startup option below can be combined with this mode; it
-preserves the new image's startup argv and does not impose a service account.
+The image-startup metadata below can be combined with this mode; it preserves
+the new image's entrypoint and does not impose a service account.
 
 ### Reference solution checks
 
@@ -108,27 +108,37 @@ lifecycle. `oracle/identity.json`, stdout/stderr and `oracle_exit_code` distingu
 solution failures from verifier errors; reward 1 is still required for a golden
 pass. `execution_mode: miniswe` is the default for ordinary rollouts.
 
-## Optional single-container image startup
+## Image startup: Compose and standalone
 
-Set `environment.single_container_image_configs` to a trusted JSON file to
-preserve a single-container image's startup command. Paths are absolute or
-relative to the Gym root. Like `compose_image_configs`, this file maps image
-references to records with `image`, `os`, `architecture`, and the OCI `config`.
-Acquire and digest-check the metadata upstream; the runner does not query a
-registry. Every non-Compose agent and verifier image must have a record matching
-its effective image reference after `image_rewrites`.
+`environment.compose_image_configs` is the shared OCI metadata catalog for both
+Compose and standalone images. Despite its historical name, no Compose file or
+conversion is needed for a standalone image. The runner automatically uses its
+recorded `Entrypoint` followed by `sh -c "sleep infinity"`, matching Compose's
+default `main` service. It does **not** run the image's raw `Cmd`: an inherited
+`python3` or `bash` command can exit immediately. With no entrypoint, the startup
+is just the keepalive. Compose's explicit overrides and sidecar commands retain
+their existing behavior. Standalone agent and verifier roles each remain one
+ordinary sandbox, with unchanged users, workdirs, health checks and networking.
 
-For each role, the runner passes the recorded `Entrypoint` followed by `Cmd` as
-the sandbox's complete startup argv. Values must be string lists or null;
-shell-form commands must already have their image-recorded shell argv. This
-starts services supplied by the image instead of OpenSandbox's default
-`tail -f /dev/null`. An empty image startup keeps the provider default. Metadata
-must describe a Linux/amd64 image; missing or mismatched records fail explicitly.
+The catalog maps image references to records with `image`, `os`, `architecture`,
+and the OCI `config`. Paths are absolute or relative to the Gym root. Acquire
+and digest-check the metadata upstream; the runner does not query a registry.
+Standalone records must match the effective image after `image_rewrites` (or
+pin the same SHA-256 image digest), describe Linux/amd64, and have string-list
+or null `Entrypoint`/`Cmd` fields. Shell-form entrypoints must already contain
+their image-recorded shell argv; they are not parsed again.
 
-The option defaults to null, retaining existing single-container behavior.
-Enable it for images whose recorded command is suitable for a long-lived task
-sandbox. Compose continues to use its existing startup resolution. This option
-does not change users, workdirs, health checks, environment, or network policy.
+The original official catalog contains only Compose images. A standalone image
+absent from that shared catalog retains the provider's old keepalive behavior,
+with a warning; the runner cannot infer an unrecorded entrypoint. No catalog
+also retains the old behavior. To preserve startup for new datasets, include
+**both** their agent and verifier images in the catalog.
+
+The previous `environment.single_container_image_configs` path remains accepted
+as a standalone-only compatibility override; when provided, it still requires
+every effective standalone image to be present and fails on missing records.
+Its startup semantics now also match Compose `main` (ENTRYPOINT + keepalive,
+not ENTRYPOINT + raw CMD). Neither metadata path is a boolean startup toggle.
 
 ## Non-root Compose services
 
