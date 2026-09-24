@@ -159,6 +159,32 @@ class TestServerUtils:
         assert exc_info.value.response_content == content
         response.content.read.assert_not_awaited()
 
+    async def test_raise_for_status_debug_print_omits_request_headers(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
+    ) -> None:
+        api_key = "sk-FAKE-CANARY"  # pragma: allowlist secret
+        url = URL(f"http://model.test/v1/chat/completions?api-key={api_key}")
+        request_info = RequestInfo(
+            url=url,
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict({"Authorization": f"Bearer {api_key}"})),
+            real_url=url,
+        )
+        response = MagicMock()
+        response.ok = False
+        response.request_info = request_info
+        response.raise_for_status.side_effect = ClientResponseError(
+            request_info=request_info, history=(), status=401, message="Unauthorized"
+        )
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", True)
+
+        with raises(ClientResponseError):
+            await raise_for_status(response, b'{"error":"invalid api key"}')
+
+        printed = capsys.readouterr().out
+        assert api_key not in printed
+        assert "Request info: POST http://model.test/v1/chat/completions\n" in printed
+
     def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
         assert not nemo_gym.server_utils.is_global_aiohttp_client_request_debug_enabled()
