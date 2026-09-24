@@ -110,6 +110,38 @@ class TestAssignTaskReferences:
     def test_empty_reference_set_yields_no_assignment(self) -> None:
         assert assign_task_references(["t0", "t1"], [], rng=random.Random(0)) == {}
 
+    def test_default_preserves_independent_uniform_draws(self) -> None:
+        task_ids = [f"t{i}" for i in range(20)]
+        refs = ["a", "b", "c"]
+        expected_rng = random.Random(11)
+        expected = {task_id: expected_rng.choice(refs) for task_id in task_ids}
+
+        assert assign_task_references(task_ids, refs, rng=random.Random(11)) == expected
+
+    def test_balanced_counts_differ_by_at_most_one(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        refs = ["a", "b", "c"]
+        assignment = assign_task_references(task_ids, refs, rng=random.Random(7), balanced=True)
+        counts = {ref: list(assignment.values()).count(ref) for ref in refs}
+
+        assert set(assignment) == set(task_ids)
+        assert max(counts.values()) - min(counts.values()) <= 1
+
+    def test_balanced_assignment_is_seeded_and_randomized(self) -> None:
+        task_ids = [f"t{i}" for i in range(20)]
+        refs = ["a", "b", "c"]
+        first = assign_task_references(task_ids, refs, rng=random.Random(3), balanced=True)
+        replay = assign_task_references(task_ids, refs, rng=random.Random(3), balanced=True)
+        other = assign_task_references(task_ids, refs, rng=random.Random(4), balanced=True)
+
+        assert first == replay
+        assert first != other
+
+    def test_balanced_with_fewer_tasks_than_references(self) -> None:
+        assignment = assign_task_references(["t0", "t1"], ["a", "b", "c", "d"], rng=random.Random(5), balanced=True)
+
+        assert len(set(assignment.values())) == 2
+
 
 class TestStageAssignmentRng:
     def test_distinct_streams_per_stage_and_seed(self) -> None:
