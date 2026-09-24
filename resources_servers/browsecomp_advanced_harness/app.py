@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import functools
+import hashlib
 import json
 import os
 import re
@@ -25,7 +26,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from time import time
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
@@ -70,12 +71,29 @@ _EXA_SEARCH_TYPES = ("instant", "fast", "auto") + _EXA_DEEP_TYPES
 _EXA_DEEP_ANSWER_MAX_FRACTION = 0.5
 
 
+class BraveSearchConfig(BaseModel):
+    api_key: str
+    url: str = "https://api.search.brave.com/res/v1/llm/context"
+    timeout_s: float = 120.0
+    country: str = "US"
+    language: str = "en"
+    search_count: int = Field(default=20, ge=1, le=50)
+    maximum_number_of_urls: int = Field(default=20, ge=1, le=50)
+    maximum_number_of_tokens: int = Field(default=8192, ge=1024, le=32768)
+    maximum_number_of_tokens_per_url: int = Field(default=4096, ge=512, le=8192)
+    maximum_number_of_snippets: int = Field(default=100, ge=1, le=100)
+    maximum_number_of_snippets_per_url: int = Field(default=100, ge=1, le=100)
+    context_threshold_mode: Literal["strict", "balanced", "lenient", "disabled"] = "lenient"
+    cache_root: Optional[str] = None
+
+
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
-    # Search/browse backend. "tavily" (default) or "exa". The chosen provider's
-    # key must be present (validated below). exclude_domains are honored by both.
+    # Search/browse backend. "tavily" (default), "exa", or "brave". Provider
+    # requirements are validated below; exclude_domains are honored by all providers.
     search_provider: str = "tavily"
     tavily_api_key: str | List[str] | None = None
     exa_api_key: str | List[str] | None = None
+    brave: Optional[BraveSearchConfig] = None
     exclude_domains_file_path: str
     use_judge: bool = True  # If False, use regex matching instead of LLM judge
     judge_model_server: Optional[ModelServerRef] = None
@@ -128,8 +146,11 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
             raise ValueError("tavily_api_key is required when search_provider='tavily'")
         if self.search_provider == "exa" and not self.exa_api_key:
             raise ValueError("exa_api_key is required when search_provider='exa'")
-        if self.search_provider not in ("tavily", "exa"):
-            raise ValueError(f"search_provider must be 'tavily' or 'exa', got {self.search_provider!r}")
+        if self.search_provider == "brave":
+            if self.brave is None:
+                raise ValueError("brave configuration is required when search_provider='brave'")
+        if self.search_provider not in ("tavily", "exa", "brave"):
+            raise ValueError(f"search_provider must be 'tavily', 'exa', or 'brave', got {self.search_provider!r}")
         if self.exa_search_type not in _EXA_SEARCH_TYPES:
             raise ValueError(
                 f"exa_search_type must be one of {sorted(_EXA_SEARCH_TYPES)}, got {self.exa_search_type!r}"
@@ -234,7 +255,7 @@ class JudgeEvaluation(BaseModel):
 
 class TavilySearchSingleAsyncTavilyMetrics(BaseModel):
     function: str  # "search" | "browse"
-    provider: str = "tavily"  # "tavily" | "exa"
+    provider: str = "tavily"  # "tavily" | "exa" | "brave"
     status: str
     start_time: float
     end_time: float
@@ -569,6 +590,136 @@ class ExaAIOHTTPClient(BaseModel):
         return await self._post("/contents", body)
 
 
+class BraveAIOHTTPClient(BaseModel):
+    """Client for Brave's public LLM Context API."""
+
+    api_key: str = Field(repr=False)
+    search_url: str
+    search_timeout_s: float = 120.0
+    country: str = "US"
+    language: str = "en"
+    search_count: int = 20
+    maximum_number_of_urls: int = 20
+    maximum_number_of_tokens: int = 8192
+    maximum_number_of_tokens_per_url: int = 4096
+    maximum_number_of_snippets: int = 100
+    maximum_number_of_snippets_per_url: int = 100
+    context_threshold_mode: Literal["strict", "balanced", "lenient", "disabled"] = "lenient"
+    debug: bool = False
+
+    async def _post(
+        self,
+        url: str,
+        body: Dict[str, Any],
+        timeout_s: float,
+        function: str,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        max_attempts = 6
+        response = None
+        for attempt in range(1, max_attempts + 1):
+            response = await request(
+                method="POST",
+                url=url,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    **(headers or {}),
+                },
+                json=body,
+                timeout=timeout_s,
+            )
+            content = (await response.content.read()).decode(errors="replace")
+            if response.status in RETRY_ERROR_CODES:
+                _count_provider_retry(response.status)
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    delay = min(float(retry_after), 60.0) if retry_after else 0.5
+                except ValueError:
+                    delay = 0.5
+                print(
+                    f"[browsecomp][tool_fail][brave_retry] function={function} "
+                    f"status={response.status} try={attempt}/{max_attempts} "
+                    f"retry_after_s={delay:g} body={content[:300]}",
+                    flush=True,
+                )
+                await sleep(delay)
+                continue
+
+            await raise_for_status(response)
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Brave {function} returned invalid JSON: {content[:300]}") from exc
+            if not isinstance(data, dict):
+                raise ValueError(f"Brave {function} returned a non-object response")
+            if self.debug:
+                print(f"Received Brave {function} response: status={response.status}", flush=True)
+            return data
+
+        assert response is not None
+        await raise_for_status(response)
+        raise RuntimeError(f"Brave {function} exhausted its retry budget")
+
+    async def context(self, query: str, urls: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        body = {
+            "q": query,
+            "country": (self.country or "US").upper(),
+            "search_lang": self.language or "en",
+            "count": self.search_count,
+            "maximum_number_of_urls": self.maximum_number_of_urls,
+            "maximum_number_of_tokens": self.maximum_number_of_tokens,
+            "maximum_number_of_tokens_per_url": self.maximum_number_of_tokens_per_url,
+            "maximum_number_of_snippets": self.maximum_number_of_snippets,
+            "maximum_number_of_snippets_per_url": self.maximum_number_of_snippets_per_url,
+            "context_threshold_mode": self.context_threshold_mode,
+        }
+        if urls:
+            body["urls"] = list(urls)
+        data = await self._post(
+            self.search_url,
+            body,
+            self.search_timeout_s,
+            "browse" if urls else "search",
+            headers={"X-Subscription-Token": self.api_key},
+        )
+        grounding = data.get("grounding")
+        if not isinstance(grounding, dict) or not isinstance(grounding.get("generic"), list):
+            raise ValueError("Brave search response must contain grounding.generic as a list")
+        sources = data.get("sources") if isinstance(data.get("sources"), dict) else {}
+        results: List[Dict[str, Any]] = []
+        for item in grounding["generic"]:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            source = sources.get(url) if isinstance(sources.get(url), dict) else {}
+            snippets = item.get("snippets") or []
+            if isinstance(snippets, str):
+                snippets = [snippets]
+            content_parts = []
+            if isinstance(snippets, list):
+                for snippet in snippets:
+                    if isinstance(snippet, dict):
+                        text = str(snippet.get("text") or snippet.get("content") or "").strip()
+                    else:
+                        text = str(snippet or "").strip()
+                    if text:
+                        content_parts.append(text)
+            results.append(
+                {
+                    "title": str(item.get("title") or source.get("title") or ""),
+                    "url": url,
+                    "content": "\n".join(content_parts),
+                }
+            )
+        return results
+
+    async def search(self, query: str) -> List[Dict[str, Any]]:
+        return await self.context(query)
+
+
 # ---------------------------------------------------------------------------
 # Terminal/disk mode: per-session page workspace (pages/ + manifest.tsv) and a
 # read-only bash tool. Ported from the reference harness.
@@ -885,6 +1036,41 @@ class _PageWriter:
         return f"pages/{fname}"
 
 
+class _SearchContextCache:
+    """Persist Brave Search URL/context pairs for the cache-backed Browse path."""
+
+    def __init__(self, cache_dir):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _canonical_url(url: str) -> str:
+        return (url or "").strip().rstrip("/")
+
+    def put(self, query: str, title: str, url: str, content: str) -> None:
+        canonical_url = self._canonical_url(url)
+        if not canonical_url or not content:
+            return
+        record = {"query": query, "title": title or "", "url": url, "content": content}
+        filename = hashlib.sha256(canonical_url.encode("utf-8")).hexdigest() + ".json"
+        with self._lock:
+            (self.cache_dir / filename).write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+    def get(self, url: str) -> Optional[Dict[str, Any]]:
+        canonical_url = self._canonical_url(url)
+        if not canonical_url:
+            return None
+        filename = hashlib.sha256(canonical_url.encode("utf-8")).hexdigest() + ".json"
+        try:
+            record = json.loads((self.cache_dir / filename).read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+        if self._canonical_url(record.get("url", "")) != canonical_url:
+            return None
+        return record
+
+
 # Judge retry backoff cap. The 2026-07-15 inference-api 529 outage outlasted the old
 # 10-attempt/30s-cap schedule (~2.9 min total) and falsely zeroed 25 samples in one
 # full-400 run; 15 attempts capped at 120s gives ~18 min of cumulative window.
@@ -919,9 +1105,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
     _exa_clients: Optional[List[ExaAIOHTTPClient]] = PrivateAttr(default=None)
+    _brave_client: Optional[BraveAIOHTTPClient] = PrivateAttr(default=None)
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
     _session_workspaces: Dict[str, "_PageWriter"] = PrivateAttr(default_factory=dict)
+    _session_context_caches: Dict[str, "_SearchContextCache"] = PrivateAttr(default_factory=dict)
     _bash_semaphore: Optional[asyncio.Semaphore] = PrivateAttr(default=None)
     _workspace_root: Optional[str] = PrivateAttr(default=None)
 
@@ -961,6 +1149,25 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 for k in exa_api_keys
             ]
             print(f"Search provider: exa ({len(self._exa_clients)} key(s))")
+
+        if self.config.search_provider == "brave":
+            assert self.config.brave is not None
+            self._brave_client = BraveAIOHTTPClient(
+                api_key=self.config.brave.api_key,
+                search_url=self.config.brave.url,
+                search_timeout_s=self.config.brave.timeout_s,
+                country=self.config.brave.country,
+                language=self.config.brave.language,
+                search_count=self.config.brave.search_count,
+                maximum_number_of_urls=self.config.brave.maximum_number_of_urls,
+                maximum_number_of_tokens=self.config.brave.maximum_number_of_tokens,
+                maximum_number_of_tokens_per_url=self.config.brave.maximum_number_of_tokens_per_url,
+                maximum_number_of_snippets=self.config.brave.maximum_number_of_snippets,
+                maximum_number_of_snippets_per_url=self.config.brave.maximum_number_of_snippets_per_url,
+                context_threshold_mode=self.config.brave.context_threshold_mode,
+                debug=self.config.debug,
+            )
+            print("Search provider: brave (public LLM Context API with Browse cache)")
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
 
@@ -1019,10 +1226,37 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._session_workspaces[sid] = pw
         return pw
 
+    def _get_context_cache(self, sid: str) -> "_SearchContextCache":
+        cache = self._session_context_caches.get(sid)
+        if cache is None:
+            assert self.config.brave is not None
+            cache_root = self.config.brave.cache_root or os.environ.get(
+                "BROWSECOMP_CONTEXT_CACHE_ROOT", "/tmp/browsecomp_context_cache"
+            )
+            cache = _SearchContextCache(Path(cache_root) / sid)
+            self._session_context_caches[sid] = cache
+        return cache
+
+    def _cache_brave_search_results(self, sid: str, query: str, items: List[Dict[str, Any]]) -> None:
+        cache = self._get_context_cache(sid)
+        for item in items:
+            cache.put(
+                query=query,
+                title=str(item.get("title") or ""),
+                url=str(item.get("url") or ""),
+                content=self._brave_item_content(item),
+            )
+
     def _cleanup_workspace(self, sid: str) -> None:
         pw = self._session_workspaces.pop(sid, None)
         if pw is not None:
             shutil.rmtree(pw.workspace, ignore_errors=True)
+        self._session_context_caches.pop(sid, None)
+        if self.config.brave is not None:
+            cache_root = self.config.brave.cache_root or os.environ.get(
+                "BROWSECOMP_CONTEXT_CACHE_ROOT", "/tmp/browsecomp_context_cache"
+            )
+            shutil.rmtree(Path(cache_root) / sid, ignore_errors=True)
 
     async def bash_command(self, request: Request, body: BashCommandRequest) -> BashCommandResponse:
         sid = request.session[SESSION_ID_KEY]
@@ -1097,6 +1331,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         client = self._exa_clients[self._num_requests % len(self._exa_clients)]
         self._num_requests += 1
         return client
+
+    def _select_brave_client(self) -> BraveAIOHTTPClient:
+        assert self._brave_client is not None
+        return self._brave_client
 
     def _record_call(
         self,
@@ -1240,6 +1478,77 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             print(f"[browsecomp][search_empty][exa] query={query[:120]!r} provider returned 0 results", flush=True)
         return results_string
 
+    @staticmethod
+    def _brave_item_content(item: Dict[str, Any]) -> str:
+        return str(item.get("content") or "")
+
+    async def _brave_search(self, query: str, metrics: "TavilySearchMetrics", sid: str) -> List[Dict[str, Any]]:
+        client = self._select_brave_client()
+        call_start = time()
+        print(f"[brave_call_begin function=search query={query[:80]!r}]", flush=True)
+        try:
+            items = await client.search(query)
+        except Exception as e:
+            self._record_call(metrics, "search", "brave", "error", call_start)
+            print(f"[browsecomp][tool_fail][brave_search] query={query[:200]!r} error={e}", flush=True)
+            raise
+        self._record_call(metrics, "search", "brave", "success", call_start)
+        filtered = [item for item in items if not self._is_url_excluded(item.get("url", ""))]
+        filtered = filtered[: self.config.max_results]
+        self._cache_brave_search_results(sid, query, filtered)
+        print(
+            f"[brave_call function=search status=success duration_s={time() - call_start:.2f} "
+            f"query={query[:80]!r} n_results={len(filtered)}]",
+            flush=True,
+        )
+        return filtered
+
+    async def _brave_search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics", sid: str) -> str:
+        if len(query) > 400:
+            return "Query is too long"
+        try:
+            items = await self._brave_search(query, metrics, sid)
+        except Exception as e:
+            return f"Search failed: {e}"
+
+        results = {
+            "results": [
+                {
+                    "title": item.get("title", "") or "",
+                    "url": item.get("url", "") or "",
+                    "content": self._brave_item_content(item),
+                }
+                for item in items
+            ]
+        }
+        return self._postprocess_search_results(query, results, max_length)
+
+    async def _brave_search_one_to_disk(
+        self,
+        query: str,
+        page_writer: "_PageWriter",
+        max_per_query: int,
+        metrics: "TavilySearchMetrics",
+        sid: str,
+    ) -> str:
+        if len(query) > 400:
+            return "Query is too long"
+        try:
+            items = await self._brave_search(query, metrics, sid)
+        except Exception as e:
+            return f"Search failed: {e}"
+        results = {
+            "results": [
+                {
+                    "title": item.get("title", "") or "",
+                    "url": item.get("url", "") or "",
+                    "content": self._brave_item_content(item),
+                }
+                for item in items
+            ]
+        }
+        return self._format_search_results_to_disk(query, results, page_writer, max_per_query)
+
     async def _search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
         if len(query) > 400:
             return "Query is too long"
@@ -1297,13 +1606,23 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             return f"Search failed: {e}"
         self._record_call(metrics, "search", "tavily", "success", call_start)
 
+        return self._format_search_results_to_disk(query, results, page_writer, max_per_query)
+
+    def _format_search_results_to_disk(
+        self,
+        query: str,
+        results: Dict[str, Any],
+        page_writer: "_PageWriter",
+        max_per_query: int,
+    ) -> str:
+        """Render normalized search results using the Tavily workspace contract."""
+
         # THE important one. In terminal mode the raw page is written to pages/*.txt
         # and the model reads it later with grep/cat through the bash tool, so
         # filtering only the returned string would leave the contamination on disk
         # and fully readable. Filtering here, ABOVE the write loop, means the page is
         # never written at all.
         result_list, _ = _filter_results(results.get("results", []), "search", "tavily")
-
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
         for ri, result in enumerate(result_list, start=1):
@@ -1349,6 +1668,19 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             results = await asyncio.gather(
                 *[self._exa_search_one(q, max_per_query_length, metrics, exa_page_writer) for q in body.queries]
             )
+        elif self.config.search_provider == "brave":
+            page_writer = self._get_page_writer(sid)
+            if page_writer is not None:
+                results = await asyncio.gather(
+                    *[
+                        self._brave_search_one_to_disk(q, page_writer, max_per_query_length, metrics, sid)
+                        for q in body.queries
+                    ]
+                )
+            else:
+                results = await asyncio.gather(
+                    *[self._brave_search_one(q, max_per_query_length, metrics, sid) for q in body.queries]
+                )
         else:
             page_writer = self._get_page_writer(sid)
             if page_writer is not None:
@@ -1379,10 +1711,35 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # set max length per url
         max_per_url_length = body.max_total_length // len(urls)
 
-        # fetch full page content (provider-specific); normalize to a list of
+        # Fetch full page content (provider-specific); normalize to a list of
         # {url, raw_content} so the shared disk/inline formatting below is provider-agnostic.
-        start_time = time()
-        if self.config.search_provider == "exa":
+        if self.config.search_provider == "brave":
+            # Brave Search already fetched context for these URLs. Keep Browse's
+            # tool signature, but serve it from the per-session cache so Browse
+            # does not issue a second LLM Context request.
+            cache = self._get_context_cache(request.session[SESSION_ID_KEY])
+            result_list = []
+            missing_urls = []
+            for url in urls:
+                cached = cache.get(url)
+                if cached is None:
+                    missing_urls.append(url)
+                    continue
+                result_list.append(
+                    {
+                        "url": cached.get("url", url),
+                        "title": cached.get("title", ""),
+                        "raw_content": cached.get("content", "") or "",
+                    }
+                )
+            print(
+                f"[brave_cache function=browse hits={len(result_list)} misses={len(missing_urls)} n_urls={len(urls)}]",
+                flush=True,
+            )
+            for url in missing_urls:
+                print(f"[browsecomp][cache_miss][brave_browse] url={url!r}", flush=True)
+        elif self.config.search_provider == "exa":
+            start_time = time()
             exa_client = self._select_exa_client()
             print(f"[exa_call_begin function=browse n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]", flush=True)
             try:
@@ -1396,6 +1753,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 {"url": r.get("url", "") or "", "raw_content": r.get("text", "") or ""} for r in raw.get("results", [])
             ]
         else:
+            start_time = time()
             async_tavily_client = self._select_tavily_client()
             print(
                 f"[tavily_call_begin function=extract n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]",
