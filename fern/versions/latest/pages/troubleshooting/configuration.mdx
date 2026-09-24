@@ -178,6 +178,26 @@ Bypassing validation means invalid servers won't start. Use this only for debugg
 
 Errors where the config is valid but an endpoint it names cannot be reached.
 
+### Head Server Unreachable
+
+```
+Error: Could not connect to the head server at http://127.0.0.1:11000. Is the head server running?
+Start it with: `gym env start`. If it is already running on a different host or port, pass
+`++head_server.host=<host>` / `++head_server.port=<port>` so this command can find it.
+```
+
+**When**: `gym eval run --no-serve` collects against servers that are already running, and found nothing
+listening at the head server address in its config. Either no `gym env start` is running, or it was started
+with a different `head_server.host` / `head_server.port` than this command is using.
+
+**Fix**: Run `gym env status`. If it reports no servers, start them with `gym env start` (in another terminal
+or the background) and retry. If they are running but on another host or port, pass the same overrides to
+the collecting command:
+
+```bash
+gym eval run --no-serve "++head_server.port=<port>" ...
+```
+
 ### Model Endpoint Unreachable
 
 ```
