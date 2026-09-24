@@ -41,12 +41,20 @@ import logging
 from copy import deepcopy
 from typing import Any, Iterator
 
-from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+)
 
 
 LOG = logging.getLogger(__name__)
 
-_PARAM_FIELDS = frozenset(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
+# Provider extension fields are accepted on the non-streaming path only. Streaming harnesses
+# (e.g. OpenClaw's ``chat_template_kwargs``) have always had them dropped here, so they stay
+# dropped rather than reaching the backend.
+_PARAM_FIELDS = (
+    frozenset(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields) - CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+)
 
 
 def _wants_usage(stream_options: Any) -> bool:

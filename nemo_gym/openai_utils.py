@@ -32,7 +32,6 @@ from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
-    ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartTextParam,
     ChatCompletionDeveloperMessageParam,
     ChatCompletionMessage,
@@ -1052,8 +1051,25 @@ class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageP
     pass
 
 
-class NeMoGymChatCompletionContentPartInputAudioParam(ChatCompletionContentPartInputAudioParam):
-    pass
+class NeMoGymInputAudio(TypedDict, total=False):
+    """``input_audio`` payload of a chat content part, with an open ``format`` token.
+
+    Declared on its own rather than subclassing the SDK's ``InputAudio`` (and the content
+    part likewise rather than ``ChatCompletionContentPartInputAudioParam``): the SDK types
+    ``format`` as ``Literal["wav", "mp3"]``, and a TypedDict subclass may not change the
+    type of an inherited field (PEP 589). A widened subclass would fail type checking and
+    would claim to be an SDK ``InputAudio`` while carrying formats that contract forbids.
+    vLLM and OpenAI-compatible gateways build a ``data:audio/<format>`` URL and decode by
+    content, so callers may send m4a/flac/ogg/aac/aiff to self-hosted audio models.
+    """
+
+    data: Required[str]
+    format: Required[str]
+
+
+class NeMoGymChatCompletionContentPartInputAudioParam(TypedDict, total=False):
+    type: Required[Literal["input_audio"]]
+    input_audio: Required[NeMoGymInputAudio]
 
 
 class NeMoGymChatCompletionContentPartFileParam(ChatCompletionContentPartFileParam):
@@ -1174,6 +1190,12 @@ NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
 ]
 
 
+# Provider extensions accepted by the strict chat request model beyond the
+# OpenAI SDK's own field set. Tests pin the model's fields to SDK ∪ this set so
+# unknown keys keep failing validation while these documented contracts pass.
+CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS = frozenset({"chat_template_kwargs", "thinking", "output_config"})
+
+
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1211,6 +1233,21 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     verbosity: Optional[Literal["low", "medium", "high"]] = None
     web_search_options: Optional[WebSearchOptions] = None
     stream: Optional[Literal[False]] = None
+
+    # Provider extensions that OpenAI-SDK clients send as top-level fields (the SDK
+    # flattens ``extra_body`` into the request body). They are typed (rather than
+    # allowed as arbitrary extras) so the strict schema still rejects typos:
+    # - ``chat_template_kwargs``: vLLM per-request template variables (e.g.
+    #   ``enable_thinking``). vllm_model merges them over its configured baseline
+    #   and below per-request metadata overrides only when
+    #   ``forward_request_chat_template_kwargs`` is set, and drops them otherwise.
+    # - ``thinking`` / ``output_config``: Anthropic's reasoning request fields
+    #   (e.g. ``{"type": "adaptive"}`` / ``{"effort": "high"}``), accepted by
+    #   OpenAI-compatible gateways that front Claude. Kept as open mappings so they
+    #   are not forced through an SDK type that requires ``budget_tokens``.
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
+    thinking: Optional[Dict[str, Any]] = None
+    output_config: Optional[Dict[str, Any]] = None
 
     # Disallow deprecated args
     # function_call: FunctionCall
