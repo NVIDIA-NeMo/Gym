@@ -100,6 +100,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseMcpListTools,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
@@ -474,6 +475,80 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
         assert replay_dump["role"] == "developer"
         assert (
             InputAdditionalTools.model_validate(replay_dump).model_dump(mode="json", exclude_unset=True) == replay_dump
+        )
+
+    @pytest.mark.parametrize(
+        "item, expected_dump",
+        [
+            (
+                NeMoGymResponseOutputMessage(
+                    id="message-1",
+                    content=[NeMoGymResponseOutputText(text="The status field was set.", annotations=[])],
+                ),
+                {
+                    "id": "message-1",
+                    "content": [{"text": "The status field was set.", "annotations": [], "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                },
+            ),
+            (
+                NeMoGymResponseFunctionToolCall(call_id="call-1", name="set_value", arguments='{"status":"done"}'),
+                {
+                    "call_id": "call-1",
+                    "name": "set_value",
+                    "arguments": '{"status":"done"}',
+                    "type": "function_call",
+                },
+            ),
+        ],
+    )
+    def test_replay_preserves_model_items_with_default_type_tags(self, item, expected_dump: dict) -> None:
+        replay = NeMoGymResponseCreateParamsNonStreaming(input=[item])
+        replayed_item = replay.input[0]
+        assert type(replayed_item) is type(item)
+
+        replay_dump = replay.model_dump(mode="json", exclude_unset=True)
+        assert replay_dump["input"][0] == expected_dump
+        assert type(NeMoGymResponseCreateParamsNonStreaming.model_validate(replay_dump).input[0]) is type(item)
+
+    @pytest.mark.parametrize(
+        "item, expected_type",
+        [
+            (
+                ResponseOutputMessage.model_validate(
+                    {
+                        "id": "message-1",
+                        "content": [{"text": "The status field was set.", "annotations": [], "type": "output_text"}],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                    }
+                ),
+                NeMoGymResponseOutputMessage,
+            ),
+            (
+                ResponseFunctionToolCall.model_validate(
+                    {
+                        "id": "function-call-1",
+                        "call_id": "call-1",
+                        "name": "set_value",
+                        "arguments": '{"status":"done"}',
+                        "status": "completed",
+                        "type": "function_call",
+                    }
+                ),
+                NeMoGymResponseFunctionToolCall,
+            ),
+        ],
+    )
+    def test_replay_accepts_sdk_model_items(self, item, expected_type: type) -> None:
+        replay = NeMoGymResponseCreateParamsNonStreaming(input=[item])
+
+        assert type(replay.input[0]) is expected_type
+        assert replay.model_dump(mode="json", exclude_unset=True)["input"][0] == item.model_dump(
+            mode="json", exclude_unset=True
         )
 
     def test_failed_computer_output_preserved_then_status_removed_for_replay(self) -> None:
