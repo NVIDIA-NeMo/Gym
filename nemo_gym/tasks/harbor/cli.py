@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_ROOT = Path("results/harbor")
 ENVIRONMENT_SERVER_CONFIG = "environment_servers/single_agent_turn/configs/single_agent_turn.yaml"
+RESOURCES_SERVER_CONFIG = "resources_servers/harbor/configs/harbor.yaml"
 SANDBOX_PROVIDER_CONFIG = "nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml"
 # Harness-specific settings a Harbor run needs; keyed by the agent implementation folder.
 AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -145,7 +146,12 @@ def build_run(
     config_path = prepared.output_dir / "run_config.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
 
-    config_paths = [config_path.resolve(), agent.config_path, _config_path(ENVIRONMENT_SERVER_CONFIG)]
+    config_paths = [
+        config_path.resolve(),
+        _config_path(RESOURCES_SERVER_CONFIG),
+        agent.config_path,
+        _config_path(ENVIRONMENT_SERVER_CONFIG),
+    ]
     if sandbox is not None:
         config_paths.append(resolve_sandbox_config(sandbox))
     tokens = [token for token in overrides if not token.startswith("+agent_name=")]
