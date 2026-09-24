@@ -35,10 +35,10 @@ from nemo_gym.exporters.base import BaseExporter
 
 logger = logging.getLogger(__name__)
 
-# Backend name -> (config model, "module:class").
-EXPORTER_REGISTRY: dict[str, tuple[type[ExporterConfig], str]] = {
-    "wandb": (WANDBConfig, "nemo_gym.exporters.wandb:WandbExporter"),
-    "mlflow": (MLFlowConfig, "nemo_gym.exporters.mlflow:MLflowExporter"),
+# Backend name -> (config model, "module:class", extra to install its SDK).
+EXPORTER_REGISTRY: dict[str, tuple[type[ExporterConfig], str, str]] = {
+    "wandb": (WANDBConfig, "nemo_gym.exporters.wandb:WandbExporter", "wandb"),
+    "mlflow": (MLFlowConfig, "nemo_gym.exporters.mlflow:MLflowExporter", "mlflow"),
 }
 
 _EXPORTERS: list[BaseExporter] = []
@@ -62,12 +62,18 @@ def setup_exporters(global_config_dict: DictConfig) -> list[BaseExporter]:
     """
     teardown_exporters()
 
-    for name, (config_model, class_path) in EXPORTER_REGISTRY.items():
+    for name, (config_model, class_path, extra) in EXPORTER_REGISTRY.items():
         if not config_model.model_validate(global_config_dict).is_available:
             continue
         try:
             exporter = _load_exporter_class(class_path)(global_config_dict)
             exporter.setup()
+        except ImportError as e:
+            logger.warning(
+                f"Exporter {name} is configured but its SDK is not installed; continuing without it. "
+                f"Install with: pip install nemo-gym[{extra}] ({e})"
+            )
+            continue
         except Exception as e:
             logger.warning(f"Exporter {name} failed to start; continuing without it: {e}", exc_info=True)
             continue

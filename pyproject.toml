@@ -170,13 +170,6 @@ dependencies = [
     # License: MIT https://github.com/Textualize/rich/blob/27701029082052c6541031b6f139097230253900/LICENSE
     "rich",
 
-    # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
-    # mlflow dependency is necessary for importing. However, all of mlflow's dependencies that don't overlap with mlflow-skinny are excluded below.
-    # Updated Fri Sep 04, 2026 with mlflow>=3.16.0 (security bump)
-    # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
-    "mlflow-skinny>=3.16.0",
-    "mlflow>=3.16.0",
-
     # scipy: t-distribution confidence intervals for repeat-level reward metrics in
     # nemo_gym/reward_profile.py. Lower bound is the first release with cp313 wheels;
     # deliberately NOT >=1.18, which requires numpy>=2.0 and breaks servers pinned to
@@ -220,12 +213,6 @@ dependencies = [
     # License: MIT https://github.com/urllib3/urllib3/blob/main/LICENSE.txt
     "urllib3>=2.7.0",
 
-    # sqlparse: SQL parsing library (transitive dependency of mlflow-skinny, pinned for security)
-    # mlflow-skinny only requires sqlparse<1,>=0.4.0, so it won't pull the fixed version on its own.
-    # Updated: Wed Sep 02, 2026 with sqlparse>=0.6.0 (security bump)
-    # License: BSD 3-Clause https://github.com/andialbrecht/sqlparse/blob/master/LICENSE
-    "sqlparse>=0.6.0",
-
     # fonttools: Library to manipulate font files (transitive dependency, pinned for security)
     # Updated: Mon Feb 10, 2026 with fonttools>=4.60.2
     # License: MIT https://github.com/fonttools/fonttools/blob/main/LICENSE
@@ -235,22 +222,6 @@ dependencies = [
     # Updated: Mon Feb 10, 2026 with python-multipart>=0.0.22
     # License: Apache 2.0 https://github.com/andrew-d/python-multipart/blob/master/LICENSE.txt
     "python-multipart>=0.0.22",
-
-    # pyarrow: columnar data library (transitive dependency via mlflow, pinned for security)
-    # mlflow caps pyarrow<25; versions >=23.0.1 have cp313 wheels and address use-after-free.
-    # Updated: Tue Jul 29, 2026 with pyarrow>=23.0.1
-    # License: Apache 2.0 https://github.com/apache/arrow/blob/main/LICENSE
-    "pyarrow>=23.0.1",
-
-    # wandb: E2E rollout collection data and metrics upload
-    # Updated: Mon May 19, 2026 with wandb==0.27.0
-    # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
-    "wandb",
-
-    # GitPython: Git interaction library (transitive dependency of wandb, pinned for security)
-    # Updated: Fri Sep 04, 2026 with GitPython>=3.1.61
-    # License: BSD 3-Clause https://github.com/gitpython-developers/GitPython/blob/main/LICENSE
-    "GitPython>=3.1.61",
 
     # pyasn1: ASN.1 library (transitive dependency via google-auth, pinned for security)
     # Updated: Tue Jul 29, 2026 with pyasn1>=0.6.4
@@ -263,7 +234,43 @@ dependencies = [
 
 [project.optional-dependencies]
 all = [
-    "nemo-gym[dev,sandbox]",
+    "nemo-gym[dev,mlflow,sandbox,wandb]",
+]
+
+# MLflow is used both by the rollout exporter (nemo_gym/exporters/mlflow.py) and by the
+# GitLab dataset/model-registry integration (nemo_gym/gitlab_utils.py). Without this extra,
+# both call paths raise an actionable ConfigError instead of failing on unrelated imports.
+mlflow = [
+    # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
+    # mlflow dependency is necessary for importing. However, all of mlflow's dependencies that don't overlap with mlflow-skinny are excluded below.
+    # Updated Fri Sep 04, 2026 with mlflow>=3.16.0 (security bump)
+    # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
+    "mlflow-skinny>=3.16.0",
+    "mlflow>=3.16.0",
+
+    # sqlparse: SQL parsing library (transitive dependency of mlflow-skinny, pinned for security)
+    # mlflow-skinny only requires sqlparse<1,>=0.4.0, so it won't pull the fixed version on its own.
+    # Updated: Wed Sep 02, 2026 with sqlparse>=0.6.0 (security bump)
+    # License: BSD 3-Clause https://github.com/andialbrecht/sqlparse/blob/master/LICENSE
+    "sqlparse>=0.6.0",
+
+    # pyarrow: columnar data library (transitive dependency via mlflow, pinned for security)
+    # mlflow caps pyarrow<25; versions >=23.0.1 have cp313 wheels and address use-after-free.
+    # Updated: Tue Jul 29, 2026 with pyarrow>=23.0.1
+    # License: Apache 2.0 https://github.com/apache/arrow/blob/main/LICENSE
+    "pyarrow>=23.0.1",
+]
+
+wandb = [
+    # wandb: E2E rollout collection data and metrics upload
+    # Updated: Mon May 19, 2026 with wandb==0.27.0
+    # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
+    "wandb",
+
+    # GitPython: Git interaction library (transitive dependency of wandb, pinned for security)
+    # Updated: Fri Sep 04, 2026 with GitPython>=3.1.61
+    # License: BSD 3-Clause https://github.com/gitpython-developers/GitPython/blob/main/LICENSE
+    "GitPython>=3.1.61",
 ]
 
 vllm = [

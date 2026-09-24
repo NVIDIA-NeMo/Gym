@@ -253,6 +253,16 @@ Gym exports the resolved config, aggregate metrics, and rollouts to any tracking
 configure. Weights & Biases and MLflow are both supported, and both can be on at once. A backend
 is used only when every key it needs is set; otherwise it is silently skipped.
 
+Both SDKs are optional extras, not part of the core install. 
+
+```bash
+uv sync --extra wandb   # Weights & Biases
+uv sync --extra mlflow  # MLflow
+```
+
+If a backend is configured but its extra isn't installed, Gym logs a warning naming the missing
+extra and continues the run without that backend.
+
 ### Weights & Biases
 
 | Key | Required | Description |
