@@ -29,7 +29,6 @@ routing.
 import asyncio
 import fcntl
 import inspect
-import json
 import logging
 import os
 import re
@@ -143,7 +142,9 @@ def _request_envelope(getter: Any) -> list[dict]:
     if not instructions and not tools:
         return []
     envelope = {"instructions": _plain(instructions), "tools": _plain(tools)}
-    return [{"role": _ENVELOPE_ROLE, "content": json.dumps(envelope, sort_keys=True, default=str)}]
+    return [
+        {"role": _ENVELOPE_ROLE, "content": orjson.dumps(envelope, option=orjson.OPT_SORT_KEYS, default=str).decode()}
+    ]
 
 
 def _plain(value: Any) -> Any:
@@ -642,7 +643,7 @@ def _as_arguments(arguments: Any) -> dict[str, Any]:
         return arguments
     if isinstance(arguments, str):
         try:
-            return json.loads(arguments)
+            return orjson.loads(arguments)
         except Exception:
             return {"_raw": arguments}
     return {}
@@ -957,7 +958,7 @@ def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str
                 if not line.startswith(b"data:"):
                     continue
                 try:
-                    payload = json.loads(line[5:].lstrip())
+                    payload = orjson.loads(line[5:].lstrip())
                 except Exception:
                     continue
                 if isinstance(payload, dict) and payload.get("error") is not None:
@@ -1054,7 +1055,7 @@ def _parse_sse_events(raw: bytes) -> list[dict[str, Any]]:
         if payload == "[DONE]":
             continue
         try:
-            parsed = json.loads(payload)
+            parsed = orjson.loads(payload)
         except Exception:
             continue
         if isinstance(parsed, dict):
@@ -1101,7 +1102,7 @@ def _reconstruct_anthropic_sse(events: list[dict[str, Any]]) -> Optional[dict[st
         block = blocks[idx]
         if block.get("type") == "tool_use" and idx in tool_json and not block.get("input"):
             try:
-                block["input"] = json.loads(tool_json[idx]) if tool_json[idx] else {}
+                block["input"] = orjson.loads(tool_json[idx]) if tool_json[idx] else {}
             except Exception:
                 block["input"] = {"_raw": tool_json[idx]}
         content.append(block)
@@ -1224,7 +1225,7 @@ def _record(
     request_raw = None
     if request_bytes:
         try:
-            parsed_request = json.loads(request_bytes)
+            parsed_request = orjson.loads(request_bytes)
             if isinstance(parsed_request, dict):
                 request_body = parsed_request
             else:
@@ -1583,7 +1584,7 @@ class _CaptureMiddleware:
             if body_bytes:
                 try:
                     response_body = (
-                        _reconstruct_streamed_response(body_bytes, dialect) if streaming else json.loads(body_bytes)
+                        _reconstruct_streamed_response(body_bytes, dialect) if streaming else orjson.loads(body_bytes)
                     )
                     if not isinstance(response_body, dict):
                         response_body = None
