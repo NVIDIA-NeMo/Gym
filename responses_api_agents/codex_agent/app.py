@@ -19,7 +19,6 @@ import logging
 import os
 import re
 import shutil
-import signal
 import subprocess
 import tempfile
 from asyncio import Semaphore
@@ -48,6 +47,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.process_utils import kill_process_tree
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
@@ -238,18 +238,6 @@ def parse_exec_jsonl(stdout: str) -> tuple[list[Any], dict]:
     if errors:
         metadata["errors"] = errors
     return output_items, metadata
-
-
-def _kill_process_group(proc: Any) -> None:
-    """Kill the codex subprocess and every child in its process group.
-
-    Killing only the direct child leaves the npm shim's vendored-binary child alive, holding the
-    stdout pipe open — the post-kill ``communicate()`` would then block until the orphan exits.
-    """
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:
-        proc.kill()
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -505,13 +493,20 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 # binary) must die with it, or it keeps the stdout pipe open past the kill below.
                 start_new_session=True,
             )
+            communication = asyncio.create_task(proc.communicate())
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=self.config.timeout)
             except asyncio.TimeoutError:
-                _kill_process_group(proc)
-                await proc.communicate()
+                if proc.returncode is None:
+                    kill_process_tree(proc)
+                await communication
                 LOG.warning("codex timed out after %ds", self.config.timeout)
                 return "", model
+            except asyncio.CancelledError:
+                if proc.returncode is None:
+                    kill_process_tree(proc)
+                await asyncio.gather(communication, return_exceptions=True)
+                raise
 
             if proc.returncode not in (0, None):
                 LOG.warning("codex exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])

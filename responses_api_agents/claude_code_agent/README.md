@@ -122,7 +122,10 @@ claude_code_agent:
 - `anthropic_api_key`: Anthropic API key, or any non-empty string for local endpoints
 - `anthropic_base_url`: if set, used as `ANTHROPIC_BASE_URL`. Leave null for the real Anthropic API
 - `max_turns`: passed to `--max-turns`. Set to `null` to omit the flag entirely (unlimited turns)
-- `timeout`: per-request wall-clock seconds
+- `timeout`: per-request wall-clock seconds. On timeout or cancellation, the harness
+  stops the launcher and its observed descendants, including children that start
+  separate process groups, before collecting observations and removing the
+  per-request configuration directory.
 - `system_prompt`: appended to Claude Code's built-in system prompt via `--append-system-prompt`. The data's system message (if any) is also appended after this.
 - `allowed_tools`: passed to `--allowedTools` (e.g. `"Bash,Read"`)
 - `disallowed_tools`: passed to `--disallowedTools`

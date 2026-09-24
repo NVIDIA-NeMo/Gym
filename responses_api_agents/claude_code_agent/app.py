@@ -22,7 +22,6 @@ import shutil
 import subprocess
 import tempfile
 from asyncio import Semaphore
-from contextlib import suppress
 from pathlib import Path
 from time import monotonic, time
 from typing import Any, Callable, Optional
@@ -47,6 +46,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.process_utils import kill_process_tree
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
@@ -481,6 +481,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
             )
             communication = asyncio.create_task(proc.communicate())
             try:
@@ -490,8 +491,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 )
             except asyncio.TimeoutError:
                 if proc.returncode is None:
-                    with suppress(ProcessLookupError):
-                        proc.kill()
+                    kill_process_tree(proc)
                 stdout, _ = await communication
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
                 _, run_metadata = parse_stream_json(stdout.decode(errors="replace"))
@@ -503,8 +503,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 return [], model, run_metadata
             except asyncio.CancelledError:
                 if proc.returncode is None:
-                    with suppress(ProcessLookupError):
-                        proc.kill()
+                    kill_process_tree(proc)
                 await asyncio.gather(communication, return_exceptions=True)
                 raise
 
