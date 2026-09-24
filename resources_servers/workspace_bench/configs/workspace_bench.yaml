@@ -19,6 +19,9 @@ workspace_bench_resources_server:
           cpu: 2
           memory_mib: 8192
           disk_gib: 20
-        provider_options: {}
+        provider_options:
+          resource_requests:
+            cpu: 0.25
+            memory_mib: 1024
         metadata:
           benchmark: workspace-bench
