@@ -15,7 +15,7 @@
 import asyncio
 import contextlib
 import logging
-import multiprocessing as mp
+import os
 from io import StringIO
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
@@ -40,7 +40,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.process_pool import ProcessPoolError, WarmProcessPool, WarmProcessPoolConfig
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+
+
+logger = logging.getLogger(__name__)
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
@@ -49,6 +53,10 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     should_use_judge: bool = True
     library_verifier_timeout_seconds: PositiveFloat = 10.0
     library_verifier_max_concurrency: PositiveInt = 32
+    """Verifications executing at once. The warm pool is capped at the machine's core count, since SymPy is CPU-bound
+    pure Python and extra workers past that only add memory (about 80 MB each, measured)."""
+    library_verifier_max_tasks_per_worker: Optional[PositiveInt] = 1000
+    """Retire a verifier worker after this many verifications so SymPy caches cannot grow without bound."""
 
 
 class LibraryJudgeMathRunRequest(BaseRunRequest):
@@ -130,20 +138,29 @@ def _run_math_verify(
         return 0.0, None
 
 
-def _run_math_verify_in_subprocess(expected_answer: str, generated_answer: str, result_connection: Any) -> None:
-    # Keep math_verify construction inside the child process. A wedged SymPy call
-    # can then be killed by terminating this process without poisoning the server.
-    library_verifier = math_metric(
+_LIBRARY_VERIFIER: Any = None
+
+
+def _initialize_library_verifier() -> None:
+    """Pool initializer: build math_verify's metric once per worker instead of once per verification.
+
+    Runs in the worker process. A wedged SymPy call is bounded by the pool's deadline, which kills
+    and replaces the worker, so the server process is never exposed to it.
+    """
+    global _LIBRARY_VERIFIER
+    logging.getLogger("math_verify").setLevel(logging.CRITICAL)
+    _LIBRARY_VERIFIER = math_metric(
         gold_extraction_target=(LatexExtractionConfig(),),
         pred_extraction_target=(
             ExprExtractionConfig(),
             LatexExtractionConfig(),
         ),
     )
-    try:
-        result_connection.send(_run_math_verify(library_verifier, expected_answer, generated_answer))
-    finally:
-        result_connection.close()
+
+
+def _library_verify_task(expected_answer: str, generated_answer: str) -> tuple[float, Optional[str]]:
+    """Pool task: score one answer with the worker's warm verifier."""
+    return _run_math_verify(_LIBRARY_VERIFIER, expected_answer, generated_answer)
 
 
 class LibraryJudgeMathResourcesServer(SimpleResourcesServer):
@@ -178,17 +195,62 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
         logging.getLogger("math_verify").setLevel(logging.CRITICAL)
 
-        # The async path no longer blocks the event loop while SymPy runs, so
-        # cap child-process fanout explicitly.
-        self._library_verifier_semaphore = asyncio.Semaphore(value=self.config.library_verifier_max_concurrency)
+        # SymPy verification is CPU-bound pure Python, so it runs in warm worker processes.
+        # ``library_verifier_max_concurrency`` keeps its meaning: the number of verifications
+        # that execute at once. Submissions beyond the pending bound wait, as they did behind
+        # the previous semaphore. Workers beyond the core count cannot add throughput for
+        # CPU-bound work and cost about 80 MB each, so the pool is capped there. The pool starts
+        # lazily on first use or at server startup.
+        num_workers = min(self.config.library_verifier_max_concurrency, os.cpu_count() or 1)
+        if num_workers < self.config.library_verifier_max_concurrency:
+            logger.info(
+                "library verifier pool capped at %d workers (cpu_count) from library_verifier_max_concurrency=%d",
+                num_workers,
+                self.config.library_verifier_max_concurrency,
+            )
+        self._library_pool = WarmProcessPool(
+            WarmProcessPoolConfig(
+                num_workers=num_workers,
+                max_pending=4 * self.config.library_verifier_max_concurrency,
+                default_timeout_seconds=self.config.library_verifier_timeout_seconds,
+                max_tasks_per_worker=self.config.library_verifier_max_tasks_per_worker,
+            ),
+            initializer=_initialize_library_verifier,
+            name="math_with_judge.library_verifier",
+        )
+        self._library_pool_started = False
+        self._library_pool_start_lock = asyncio.Lock()
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
-        # Additional server routes go here! e.g.:
-        # app.post("/get_weather")(self.get_weather)
+        # Warm the verifier workers before the first request and reap them on a normal stop.
+        main_app_lifespan = app.router.lifespan_context
+
+        @contextlib.asynccontextmanager
+        async def lifespan_wrapper(app):
+            await self._ensure_library_pool()
+            try:
+                async with main_app_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                await self.shutdown()
+
+        app.router.lifespan_context = lifespan_wrapper
 
         return app
+
+    async def shutdown(self) -> None:
+        """Stop the verifier workers. Safe to call more than once."""
+        await self._library_pool.aclose()
+
+    async def _ensure_library_pool(self) -> WarmProcessPool:
+        if not self._library_pool_started:
+            async with self._library_pool_start_lock:
+                if not self._library_pool_started:
+                    await self._library_pool.start()
+                    self._library_pool_started = True
+        return self._library_pool
 
     async def verify(self, body: LibraryJudgeMathVerifyRequest) -> LibraryJudgeMathVerifyResponse:
         assistant_responses = []
@@ -264,62 +326,15 @@ Example output: "My final verdict is different [[A!=B]]"."""
     async def _verify_answer_with_library_async(
         self, expected_answer: str, generated_answer: str
     ) -> tuple[float, Optional[str]]:
-        async with self._library_verifier_semaphore:
-            # The production rollout workers run on Linux. Pin fork so the
-            # verifier child is cheap to start and can be killed independently
-            # if SymPy wedges.
-            ctx = mp.get_context("fork")
-            result_connection, child_connection = ctx.Pipe(duplex=False)
-            process = ctx.Process(
-                target=_run_math_verify_in_subprocess,
-                args=(expected_answer, generated_answer, child_connection),
-            )
-            process.start()
-            child_connection.close()
-            return await self._wait_for_library_verifier_process(
-                process,
-                result_connection,
-                self.config.library_verifier_timeout_seconds,
-            )
-
-    @staticmethod
-    async def _wait_for_library_verifier_process(
-        process: Any, result_connection: Any, timeout_seconds: float
-    ) -> tuple[float, Optional[str]]:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_seconds
+        pool = await self._ensure_library_pool()
         try:
-            while process.is_alive():
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    process.terminate()
-                    terminate_deadline = loop.time() + 1.0
-                    while process.is_alive() and loop.time() < terminate_deadline:
-                        await asyncio.sleep(0.05)
-                    if process.is_alive():
-                        process.kill()
-                    while process.is_alive():
-                        await asyncio.sleep(0.05)
-                    process.join(timeout=0)
-                    return 0.0, None
-                await asyncio.sleep(min(0.05, remaining))
-
-            process.join(timeout=0)
-            if process.exitcode != 0 or not result_connection.poll():
-                return 0.0, None
-            try:
-                return result_connection.recv()
-            except EOFError:
-                return 0.0, None
-        finally:
-            with contextlib.suppress(OSError, AssertionError):
-                if process.is_alive():
-                    process.terminate()
-                    process.join(timeout=1.0)
-                    if process.is_alive():
-                        process.kill()
-                        process.join(timeout=1.0)
-            result_connection.close()
+            return await pool.run(_library_verify_task, expected_answer, generated_answer)
+        except ProcessPoolError as exc:
+            # Same contract as the per-request fork this replaced: a verifier that times out,
+            # crashes, or raises scores 0.0 with no extracted answer. The pool has already
+            # replaced the worker where that was needed.
+            logger.warning("library verifier did not produce a result: %s", exc)
+            return 0.0, None
 
     async def _verify_answer_with_judge(
         self, question: str, expected_answer: str, generated_answer: str
