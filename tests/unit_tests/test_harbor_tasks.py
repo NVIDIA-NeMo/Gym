@@ -396,3 +396,73 @@ class TestCli:
         assert "resources_servers/harbor/configs/harbor.yaml" in config_paths
         assert "opensandbox/configs/opensandbox.yaml" in config_paths
         assert f"+output_jsonl_fpath={tmp_path / 'out' / 'rollouts.jsonl'}" in tokens
+
+
+class TestValidationSummary:
+    def test_summarizes_rollouts(self, tmp_path):
+        from nemo_gym.tasks.harbor.cli import summarize_validation
+
+        rows = [
+            {
+                "task_id": {"taskset": "ds", "task_id": "solved"},
+                "reward": 1.0,
+                "mask_sample": False,
+                "result": {"verification": {"reward": 1.0, "response": {"metadata": {"oracle": "solved"}}}},
+            },
+            {
+                "task_id": {"taskset": "ds", "task_id": "wrong"},
+                "reward": 0.0,
+                "mask_sample": False,
+                "result": {
+                    "verification": {
+                        "reward": 0.0,
+                        "failure_kind": "harbor:missing_reward",
+                        "response": {"metadata": {"oracle": "solved"}},
+                    }
+                },
+            },
+            {
+                "task_id": {"taskset": "ds", "task_id": "skipped"},
+                "reward": 0.0,
+                "mask_sample": False,
+                "result": {"verification": {"reward": 0.0, "response": {"metadata": {"oracle": "unvalidated"}}}},
+            },
+            {
+                "task_id": {"taskset": "ds", "task_id": "broken"},
+                "failure": {"message": "seed exploded", "terminal": True},
+            },
+            {
+                "task_id": {"taskset": "ds", "task_id": "masked"},
+                "reward": 0.0,
+                "mask_sample": True,
+                "failure_kind": "provider_unavailable",
+            },
+        ]
+        rollouts = tmp_path / "rollouts.jsonl"
+        rollouts.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+        report = summarize_validation(rollouts, ["never_ran"])
+
+        lines = report.text.splitlines()
+        assert lines[0] == "task_id\tstatus\treward"
+        assert "solved\toracle solved\t1.0" in lines
+        assert "wrong\toracle solved (harbor:missing_reward)\t0.0" in lines
+        assert "skipped\tunvalidated (no solution/)\t-" in lines
+        assert any(line.startswith("broken\tfailed: seed exploded") for line in lines)
+        assert "masked\tmasked (provider_unavailable)\t-" in lines
+        assert "never_ran\tunvalidated (no solution/)\t-" in lines
+        assert report.ok is False
+
+    def test_all_good_is_ok(self, tmp_path):
+        from nemo_gym.tasks.harbor.cli import summarize_validation
+
+        rollouts = tmp_path / "rollouts.jsonl"
+        rollouts.write_text(json.dumps({"task_id": {"taskset": "ds", "task_id": "a"}, "reward": 1.0}) + "\n")
+        report = summarize_validation(rollouts, [])
+        assert report.ok is True and "a\toracle ran\t1.0" in report.text
+
+    def test_missing_rollouts_file(self, tmp_path):
+        from nemo_gym.tasks.harbor.cli import summarize_validation
+
+        report = summarize_validation(tmp_path / "none.jsonl", [])
+        assert report.ok is False and "no rollouts written" in report.text
