@@ -259,15 +259,26 @@ async def test_usersim_environment_server_runs_native_episode(monkeypatch) -> No
     environment_server, client = _environment_server()
     _queue_success_responses(client)
 
-    def fake_run(bridge, _scenario):
-        bridge.complete_from_worker("user_model", [{"role": "user", "content": "write user"}], max_tokens=None)
-        bridge.complete_from_worker(
+    async def fake_run(bridge, _scenario):
+        await bridge.invoke("user_model", [{"role": "user", "content": "write user"}], max_tokens=None, tools=None)
+        await bridge.invoke(
             "assistant_model",
             [{"role": "user", "content": "I need dinner advice."}],
             max_tokens=128,
+            tools=None,
         )
-        bridge.complete_from_worker("judge_model", [{"role": "user", "content": "judge"}], max_tokens=None)
-        bridge.complete_from_worker("summary_model", [{"role": "user", "content": "summarize"}], max_tokens=None)
+        await bridge.invoke(
+            "judge_model",
+            [{"role": "user", "content": "judge"}],
+            max_tokens=None,
+            tools=None,
+        )
+        await bridge.invoke(
+            "summary_model",
+            [{"role": "user", "content": "summarize"}],
+            max_tokens=None,
+            tools=None,
+        )
         return {
             "conversation_messages": [
                 {"role": "user", "content": "I need dinner advice."},
@@ -327,11 +338,26 @@ async def test_token_capture_uses_environment_episode_identity(monkeypatch) -> N
     environment_server, client = _environment_server(token_capture=True)
     _queue_success_responses(client)
 
-    def fake_run(bridge, _scenario):
-        bridge.complete_from_worker("user_model", [{"role": "user", "content": "write user"}], max_tokens=None)
-        bridge.complete_from_worker("assistant_model", [{"role": "user", "content": "hello"}], max_tokens=None)
-        bridge.complete_from_worker("judge_model", [{"role": "user", "content": "judge"}], max_tokens=None)
-        bridge.complete_from_worker("summary_model", [{"role": "user", "content": "summarize"}], max_tokens=None)
+    async def fake_run(bridge, _scenario):
+        await bridge.invoke("user_model", [{"role": "user", "content": "write user"}], max_tokens=None, tools=None)
+        await bridge.invoke(
+            "assistant_model",
+            [{"role": "user", "content": "hello"}],
+            max_tokens=None,
+            tools=None,
+        )
+        await bridge.invoke(
+            "judge_model",
+            [{"role": "user", "content": "judge"}],
+            max_tokens=None,
+            tools=None,
+        )
+        await bridge.invoke(
+            "summary_model",
+            [{"role": "user", "content": "summarize"}],
+            max_tokens=None,
+            tools=None,
+        )
         return {
             "conversation_messages": [
                 {"role": "user", "content": "hello"},
