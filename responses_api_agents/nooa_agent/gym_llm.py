@@ -40,6 +40,10 @@ class PolicyCallBudgetExceeded(RuntimeError):
     """Raised when one rollout exceeds its configured policy-call budget."""
 
 
+class InvalidPolicyOutputError(ValueError):
+    """A successful model request whose output does not satisfy the method contract."""
+
+
 @dataclass(slots=True)
 class GymModelCall:
     """Exact Gym request/response evidence for one NOOA policy call."""
@@ -52,7 +56,7 @@ class GymModelCall:
 
 @dataclass(slots=True)
 class RolloutLLMState:
-    """Gym-owned policy budget and model evidence for one rollout."""
+    """Gym-owned budget and exact model evidence shared by this rollout's clients."""
 
     max_policy_calls: int
     used: int = 0
@@ -60,6 +64,7 @@ class RolloutLLMState:
     gaps: list[ObservationGap] = field(default_factory=list)
 
     def charge(self) -> None:
+        # No await between check and increment: atomic for the async rollout task tree.
         if self.used >= self.max_policy_calls:
             raise PolicyCallBudgetExceeded(f"NOOA policy call budget exhausted after {self.max_policy_calls} calls")
         self.used += 1
@@ -78,6 +83,7 @@ def _dump(value: Any) -> Any:
 
 
 def _portable_assistant_message(response: LLMResponse) -> dict[str, Any]:
+    """Project a foreign LLMResponse onto the portable chat-shaped dict."""
     message: dict[str, Any] = {"role": "assistant", "content": response.content}
     if response.tool_calls:
         message["tool_calls"] = [
@@ -89,16 +95,35 @@ def _portable_assistant_message(response: LLMResponse) -> dict[str, Any]:
 
 def _responses_input(
     messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+    gaps: list[ObservationGap] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     instructions: list[str] = []
     result: list[dict[str, Any]] = []
     for message in messages:
         if isinstance(message, CacheBoundary):
+            # Stable-prefix marker, never a model input.
             continue
         if isinstance(message, LLMResponse):
+            # The rewritten unifiedllm passes prior turns back as the stored
+            # LLMResponse object. This adapter's responses carry the full Gym
+            # output (including training token metadata) on raw_response.
             if isinstance(message.raw_response, NeMoGymResponse):
                 result.extend(_dump(item) for item in message.raw_response.output)
                 continue
+            # Foreign or detached turns (per-method model aliases, edited turns,
+            # snapshot-restored sessions) carry no Gym raw output; replay only
+            # their portable public fields and record the gap instead of guessing
+            # at training metadata.
+            if gaps is not None:
+                gaps.append(
+                    ObservationGap(
+                        code="foreign_turn_projected_portable",
+                        detail=(
+                            "A stored LLMResponse without a Gym raw_response was projected from its portable "
+                            "public fields; training metadata was not guessed."
+                        ),
+                    )
+                )
             message = _portable_assistant_message(message)
         if message.get("role") == "system":
             if content := message.get("content"):
@@ -192,6 +217,7 @@ class GymResponsesLLM(UnifiedLLM):
         cookies: dict[str, str],
         model: str = "gym-policy",
         on_call: Callable[[GymModelCall], None] | None = None,
+        sampling_overrides: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(model=model)
         self._server_client = server_client
@@ -199,6 +225,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._model_url_path = model_url_path
         self._state = state
         self._on_call = on_call
+        self._sampling_overrides = dict(sampling_overrides or {})
         self._cookies = cookies
         self._calls = 0
         self._lock = asyncio.Lock()
@@ -236,7 +263,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._state.charge()
         self._calls += 1
 
-        input_items, instructions = _responses_input(messages)
+        input_items, instructions = _responses_input(messages, gaps=self._state.gaps)
         request: dict[str, Any] = {
             "input": input_items,
             "instructions": instructions,
@@ -262,6 +289,8 @@ class GymResponsesLLM(UnifiedLLM):
             if destination in supported and value is not None:
                 request[destination] = value
 
+        # Explicit Gym rollout controls take precedence over NOOA's per-call settings.
+        request.update(self._sampling_overrides)
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
         call = GymModelCall(
             model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),
@@ -309,7 +338,7 @@ class GymResponsesLLM(UnifiedLLM):
             try:
                 content = output_model.model_validate(json.loads(content))
             except (json.JSONDecodeError, ValueError, TypeError) as error:
-                raise ValueError(f"Gym model returned invalid {output_model.__name__} JSON") from error
+                raise InvalidPolicyOutputError(f"Gym model returned invalid {output_model.__name__} JSON") from error
 
         reasoning = [
             item.model_dump(mode="json", exclude_none=True) for item in response.output if item.type == "reasoning"

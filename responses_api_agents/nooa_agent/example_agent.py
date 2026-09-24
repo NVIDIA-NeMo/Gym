@@ -13,10 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-policy_api_key: ${oc.env:MODEL_API_KEY}
-policy_model_name: ${oc.env:E2E_MODEL}
+from nooa import Agent, CodeActStrategy, strategy
 
-example_single_tool_call_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      max_policy_calls: 2
+
+class GymResourceAgent(Agent):
+    """Solve tasks using resource methods supplied by Gym at runtime."""
+
+    @strategy(CodeActStrategy())
+    async def answer(self, task: str) -> str:
+        """Solve `task`.
+
+        Inspect and call the available resource methods when needed, then
+        return a concise answer grounded in their results.
+        """
+
+        ...
