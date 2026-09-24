@@ -159,18 +159,12 @@ async def test_one_runner_reuses_live_sandbox_and_replays_exact_result(fixture):
 
 
 @pytest.mark.parametrize("mode", ["miniswe", "oracle"])
-async def test_live_and_golden_harnesses_receive_resolved_image_default(fixture, monkeypatch, mode):
+@pytest.mark.parametrize("user", [None, "preprocessed-agent", "root", 0, 1000])
+async def test_live_and_golden_harnesses_receive_task_identity(fixture, monkeypatch, mode, user):
     f = fixture
     f.server.config.execution_mode = mode
-    f.server._loader.load.return_value.config.agent.user = None
+    f.server._loader.load.return_value.config.agent.user = user
     f.server._loader.load.return_value.path = f.server.config.artifacts_dir
-    create = lifecycle.Environment
-
-    def environment(*args, **kwargs):
-        env = create(*args, **kwargs)
-        env.role_user = "original-image-user"
-        return env
-
     oracle_contexts = []
 
     def oracle_harness(**kwargs):
@@ -181,13 +175,12 @@ async def test_live_and_golden_harnesses_receive_resolved_image_default(fixture,
 
         return SimpleNamespace(setup=AsyncMock(), execute=AsyncMock(side_effect=execute))
 
-    monkeypatch.setattr(lifecycle, "Environment", environment)
     monkeypatch.setattr(module, "OracleHarness", oracle_harness)
     result = await f.server.run(f.request, f.body)
     assert result.evaluation_completed
-    assert f.harnesses[0].context.user == "original-image-user"
+    assert f.harnesses[0].context.user == user
     if mode == "oracle":
-        assert oracle_contexts[0].user == "original-image-user"
+        assert oracle_contexts[0].user == user
 
 
 @pytest.mark.parametrize("field", ["task_name", "task_ref", "dataset_ref"])

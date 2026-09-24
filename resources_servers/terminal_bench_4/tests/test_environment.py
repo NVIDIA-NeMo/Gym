@@ -78,7 +78,18 @@ def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, co
     box._handle = SimpleNamespace(sandbox_id="owned-box")
     box.start = AsyncMock()
     box.stop = AsyncMock()
-    box.exec = AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/app\n", stderr=""))
+
+    async def execute(command, **kwargs):
+        stdout = "/app\n"
+        if command == "id -u":
+            stdout = "0\n"
+        elif "id -u && id -g" in command:
+            user = kwargs.get("user")
+            uid = user if isinstance(user, int) else 0 if user in (None, "root") else 1000
+            stdout = f"{uid}\n{uid}\n" + (f"{uid}\n" if "id -u --" in command else "")
+        return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
+
+    box.exec = AsyncMock(wraps=execute)
     box.serialize = AsyncMock(return_value={"sandbox_id": "owned-box", "credentials": "must not be copied"})
     create = MagicMock(return_value=box)
     monkeypatch.setattr(module, "AsyncSandbox", create)
@@ -409,18 +420,21 @@ async def test_failures_are_visible_and_preserve_cleanup_identities(tmp_path, mo
             env.sandbox("missing")
         return
     if failure == "logs":
-        box.exec.return_value.return_code = 1
+        box.exec.side_effect = [
+            SimpleNamespace(return_code=0, stdout="0\n", stderr=""),
+            SimpleNamespace(return_code=1, stdout="", stderr="log setup failed"),
+        ]
     if failure == "logs":
         with pytest.raises(RuntimeError, match="log directories"):
             await env.start()
     else:
         await env.start()
     if failure == "workdir":
-        box.exec.return_value.return_code = 1
+        box.exec.return_value = SimpleNamespace(return_code=1, stdout="", stderr="workdir failed")
         with pytest.raises(RuntimeError):
             await env.agent_workdir()
     if failure == "quiesce":
-        box.exec.return_value.return_code = 1
+        box.exec.return_value = SimpleNamespace(return_code=1, stdout="", stderr="quiesce failed")
         with pytest.raises(RuntimeError):
             await env.quiesce_agent("session")
     if failure == "delete":
@@ -440,7 +454,7 @@ async def test_readiness_success_and_failure(tmp_path, monkeypatch):
     )
     await env.start()
     await env.healthcheck()
-    box.exec.return_value.return_code = 1
+    box.exec.return_value = SimpleNamespace(return_code=1, stdout="", stderr="healthcheck failed")
     with pytest.raises(HealthcheckError):
         await env.healthcheck()
     env.settings.healthcheck.start_period_sec = 0.01

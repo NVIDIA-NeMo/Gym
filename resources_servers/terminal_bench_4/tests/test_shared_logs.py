@@ -226,12 +226,13 @@ async def test_log_owner_uses_image_identity_and_protects_parent(tmp_path, monke
     await logs.start()
     env = SimpleNamespace(
         log_role="agent",
+        role_user=None,
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout=f"{os.getuid()}\n{os.getgid()}\n")),
     )
     await logs.initialize_role(env)
     root = Path(logs.root) / "agent"
     assert root.stat().st_uid == os.getuid() and root.stat().st_mode & 0o777 == 0o755
-    assert "user" not in env.exec.await_args.kwargs
+    assert env.exec.await_args.kwargs["user"] is None
     for result in (SimpleNamespace(return_code=0, stdout="invalid"), SimpleNamespace(return_code=1, stdout="0 0")):
         env.exec.return_value = result
         with pytest.raises(RuntimeError, match="task log owner"):
@@ -240,12 +241,11 @@ async def test_log_owner_uses_image_identity_and_protects_parent(tmp_path, monke
     await logs.stop()
 
 
-async def test_root_bootstrap_log_mount_uses_role_identity_not_daemon_identity(tmp_path, monkeypatch):
+async def test_log_mount_uses_task_identity_without_original_user_metadata(tmp_path, monkeypatch):
     logs, _, _ = shared(tmp_path, monkeypatch)
     await logs.start()
     env = SimpleNamespace(
         log_role="agent",
-        root_bootstrap=True,
         role_user="agent",
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout=f"{os.getuid()}\n{os.getgid()}\n")),
     )

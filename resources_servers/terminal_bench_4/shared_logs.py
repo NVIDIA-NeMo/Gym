@@ -98,8 +98,7 @@ class SharedLogs:
         )
 
     async def initialize_role(self, environment):
-        user_options = {"user": environment.role_user} if getattr(environment, "root_bootstrap", False) else {}
-        result = await environment.exec("id -u; id -g", timeout_sec=60, **user_options)
+        result = await environment.exec("id -u; id -g", timeout_sec=60, user=environment.role_user)
         try:
             uid, gid = (int(value) for value in result.stdout.split())
             if result.return_code or min(uid, gid) < 0:
