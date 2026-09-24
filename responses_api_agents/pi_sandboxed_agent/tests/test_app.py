@@ -26,25 +26,33 @@ import pytest
 from nemo_gym.rollout_observability import ToolCallObservation
 from nemo_gym.sandbox.agent_tools import restricted_network_policy
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.pi_agent.app import PiAgentRunRequest
+from responses_api_agents.pi_agent.app import PiAgentRunRequest, PiMCPServerConfig
 from responses_api_agents.pi_sandboxed_agent import app
 from responses_api_agents.pi_sandboxed_agent.app import _RUN, PiSandboxedAgent, PiSandboxedAgentConfig
 
 
 def response(value):
     return SimpleNamespace(
-        cookies={}, read=AsyncMock(return_value=json.dumps(value).encode()), raise_for_status=lambda: None
+        cookies={}, ok=True, read=AsyncMock(return_value=json.dumps(value).encode()), raise_for_status=lambda: None
     )
 
 
 @pytest.fixture
 def agent(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "raise_for_status", AsyncMock())
-    monkeypatch.setattr(app, "sandbox_server_url", lambda _: "http://model.example:8000")
+    monkeypatch.setattr(app, "sandbox_server_url", lambda _, **kwargs: "http://model.example:8000")
     client = MagicMock(spec=ServerClient)
 
     async def post(**kwargs):
-        return response(kwargs["json"] | {"reward": 1} if kwargs["url_path"] == "/verify" else {})
+        return response(
+            kwargs["json"]
+            | {
+                "reward": float(bool(kwargs["json"]["response"]["output"])),
+                "library_reward": float(bool(kwargs["json"]["response"]["output"])),
+            }
+            if kwargs["url_path"] == "/verify"
+            else {}
+        )
 
     client.post = AsyncMock(side_effect=post)
     config = PiSandboxedAgentConfig(
@@ -187,7 +195,10 @@ async def test_partial_event_tail_only_recovers_failed_execution(agent, failure,
     else:
         with pytest.raises(json.JSONDecodeError):
             await server.run(SimpleNamespace(cookies={}), request_body())
-    assert server.server_client.post.await_count == 1  # Never send failed/corrupt captures to the judge.
+    assert server.server_client.post.await_count == (2 if recover else 1)
+    if recover:
+        assert server.server_client.post.await_args.kwargs["json"]["response"]["output"] == []
+        assert result.response.output  # Retain the original generation for inspection.
     sandbox.stop.assert_awaited_once()
     assert _RUN.get() is None
 
@@ -211,7 +222,8 @@ async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure
     if failure in {"exit", "timeout"}:
         result = await server.run(SimpleNamespace(cookies={}), request_body())
         assert result.reward == 0 and result.pi_failed
-        assert server.server_client.post.await_count == 1
+        assert server.server_client.post.await_count == 2
+        assert server.server_client.post.await_args.kwargs["json"]["response"]["output"] == []
     else:
         with pytest.raises((OSError, RuntimeError, asyncio.CancelledError)):
             await server.run(SimpleNamespace(cookies={}), request_body())
@@ -276,3 +288,17 @@ def test_capture_preserves_multiline_unicode_and_process_exit(tmp_path):
     assert json.loads(result.stdout) == payload
     observed, event = json.loads(output.read_text())
     assert observed > 0 and event == payload
+
+
+async def test_mcp_initialization_failure_is_a_request_failure(agent):
+    server, sandbox = agent
+    server.config.mcp_servers = {"search": PiMCPServerConfig(url="http://tools/mcp")}
+    sandbox.exec.side_effect = [
+        SimpleNamespace(return_code=0, error_type=None),
+        SimpleNamespace(return_code=78, error_type=None),
+    ]
+    with pytest.raises(RuntimeError, match="MCP tools could not be initialized"):
+        await server.run(SimpleNamespace(cookies={}), request_body())
+    assert server.server_client.post.await_count == 1
+    sandbox.stop.assert_awaited_once()
+    assert _RUN.get() is None

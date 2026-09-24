@@ -37,11 +37,17 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentInvocation, SandboxObservation, ToolCallObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
-from nemo_gym.sandbox.agent_tools import restricted_network_policy, sandbox_server_url, seed_mcp_servers
+from nemo_gym.sandbox.agent_tools import (
+    restricted_network_policy,
+    sandbox_server_url,
+    seed_mcp_servers,
+    verify_agent_response,
+)
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from responses_api_agents.pi_agent.app import (
+    MCP_SETUP_ERROR_EXIT_CODE,
     PiAgent,
     PiAgentConfig,
     PiAgentRunRequest,
@@ -86,7 +92,12 @@ class PiSandboxedAgent(PiAgent):
         if context is None:
             raise RuntimeError("Pi sandbox model routing requires a seeded /run request")
         return (
-            self.base_url_for_run(sandbox_server_url(self.config.model_server.name), context["body"]).rstrip("/")
+            self.base_url_for_run(
+                sandbox_server_url(
+                    self.config.model_server.name, require_reachable=self.config.network_access != "inherit"
+                ),
+                context["body"],
+            ).rstrip("/")
             + "/v1"
         )
 
@@ -107,11 +118,11 @@ class PiSandboxedAgent(PiAgent):
         metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config)
         metadata = metadata | options.pop("metadata", {}) | {"nemo_gym_agent": self.config.name}
         if self.config.network_access != "inherit":
-            urls = [sandbox_server_url(self.config.model_server.name)]
+            urls = [sandbox_server_url(self.config.model_server.name, require_reachable=True)]
             if self.config.network_access == "model_and_tools":
                 if not self.config.tool_servers:
                     raise ValueError("model_and_tools requires tool_servers")
-                urls.extend(sandbox_server_url(s.name) for s in self.config.tool_servers)
+                urls.extend(sandbox_server_url(s.name, require_reachable=True) for s in self.config.tool_servers)
             options.setdefault("provider_options", {})["network_policy"] = restricted_network_policy(
                 provider.name, urls
             )
@@ -198,6 +209,8 @@ class PiSandboxedAgent(PiAgent):
         stdout = (root / "stdout.jsonl").read_text(errors="replace")
         error_type = error_type or getattr(result, "error_type", None)
         return_code = getattr(result, "return_code", None)
+        if return_code == MCP_SETUP_ERROR_EXIT_CODE and mcp:
+            raise RuntimeError("Required Gym MCP tools could not be initialized")
         events = []
         lines = (root / "events.jsonl").read_text().split("\n")
         for index, line in enumerate(lines):
@@ -250,7 +263,12 @@ class PiSandboxedAgent(PiAgent):
             cookies = request.cookies | seeded.cookies
             seed = await get_response_json(seeded)
             mcp = await seed_mcp_servers(
-                self.server_client, self.config.tool_servers, body, cookies, timeout_s=self.config.timeout
+                self.server_client,
+                self.config.tool_servers,
+                body,
+                cookies,
+                timeout_s=self.config.timeout,
+                require_reachable=self.config.network_access != "inherit",
             )
             sandbox = await self._start_sandbox(seed)
             rollout_id = self.rollout_id_from_run(body) or uuid4().hex
@@ -284,17 +302,14 @@ class PiSandboxedAgent(PiAgent):
                 payload = body.model_dump(mode="json") | {"response": episode.response.model_dump(mode="json")}
                 root = Path(execution["pi_results_dir"])
                 (root / "generation.json").write_text(json.dumps(payload | metadata))
-                if failed and self.config.execution_failure_reward_zero:
-                    result = payload | {"reward": 0.0}
-                else:
-                    verified = await self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path="/verify",
-                        json=payload,
-                        cookies=cookies,
-                    )
-                    await raise_for_status(verified)
-                    result = await get_response_json(verified)
+                result = await verify_agent_response(
+                    self.server_client,
+                    self.config.resources_server,
+                    body,
+                    episode.response,
+                    cookies,
+                    force_zero_reward=failed and self.config.execution_failure_reward_zero,
+                )
                 return PiSandboxedAgentVerifyResponse.model_validate(
                     result
                     | metadata

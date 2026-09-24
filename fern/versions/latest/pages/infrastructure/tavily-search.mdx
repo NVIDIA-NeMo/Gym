@@ -133,8 +133,9 @@ These changes apply to existing Tavily configurations as well as HLE:
   Invalid exclusion domains reject the policy at startup with the file and domain
   identified; entries are never silently dropped.
 - Rate-limit retries are bounded rather than indefinite. `max_http_attempts` defaults
-  to 3 total attempts; retryable HTTP failures use exponential delays starting at one
-  second and rotate keys. `http_timeout_s` defaults to 60 seconds per attempt; a shorter
+  to 3 total attempts; retryable HTTP failures, connection errors, incomplete response
+  bodies, and timeouts share this budget. Retries use exponential delays starting at
+  one second and rotate keys. `http_timeout_s` defaults to 60 seconds per attempt; a shorter
   SDK timeout takes precedence. Exhaustion raises a tool-service error instead of
   returning an empty search. Under sustained rate limits, reduce concurrency or
   explicitly increase the attempt budget.

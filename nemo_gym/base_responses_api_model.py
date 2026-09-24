@@ -371,7 +371,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                     logger.exception("chat_completions() failed after streaming headers were sent")
                     status = getattr(exc, "status_code", None) or getattr(exc, "status", None) or 500
                     error = {
-                        "message": exc.detail if isinstance(exc, HTTPException) else "Model request failed",
+                        "message": f"HTTP {status}: {exc.detail if isinstance(exc, HTTPException) else 'Model request failed'}",
                         "type": "server_error" if status >= 500 else "invalid_request_error",
                         "code": status,
                     }

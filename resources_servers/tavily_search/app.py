@@ -22,7 +22,7 @@ from time import time
 from typing import Any, ClassVar, Dict, List, Literal, Optional
 from urllib.parse import unquote, urlparse, urlsplit, urlunsplit
 
-from aiohttp import ClientTimeout
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
@@ -155,22 +155,27 @@ class TavilySearchAIOHTTPClient(BaseModel):
             if attempt and self.retry_api_keys:
                 key = self.retry_api_keys[(attempt - 1) % len(self.retry_api_keys)]
                 headers["authorization"] = "Bearer " + key
-            response = await request(
-                "POST",
-                headers=headers.copy(),
-                url=f"{self.base_url}{endpoint}",
-                data=content,
-                timeout=ClientTimeout(total=min(timeout, self.timeout_s)),
-                _max_connection_retries=0,
-            )
+            response = None
             try:
+                response = await request(
+                    "POST",
+                    headers=headers.copy(),
+                    url=f"{self.base_url}{endpoint}",
+                    data=content,
+                    timeout=ClientTimeout(total=min(timeout, self.timeout_s)),
+                    _max_connection_retries=0,
+                )
                 if response.status == 200:
                     return TavilySearchAIOHTTPClientResponse(status_code=200, data=await response.json())
                 if response.status not in RETRY_ERROR_CODES or attempt + 1 == self.max_attempts:
                     # Provider error bodies may contain credentials; never forward them to the agent.
                     raise RuntimeError(f"Tavily HTTP {response.status} after {attempt + 1} attempts")
+            except (ClientConnectionError, ClientPayloadError, TimeoutError):
+                if attempt + 1 == self.max_attempts:
+                    raise RuntimeError(f"Tavily transport failure after {attempt + 1} attempts") from None
             finally:
-                response.release()
+                if response is not None:
+                    response.release()
             await sleep(min(2**attempt, 8))
         raise RuntimeError("Tavily retry budget exhausted")
 

@@ -208,3 +208,36 @@ def test_empty_key_pool_is_rejected(server):
     cfg = server.config.model_copy(update={"tavily_api_key": " , "})
     with pytest.raises(ValueError, match="At least one"):
         TavilySearchResourcesServer(config=cfg, server_client=MagicMock(spec=ServerClient))
+
+
+@pytest.mark.parametrize("failure", [module.ClientConnectionError, module.ClientPayloadError, TimeoutError])
+async def test_transport_failures_share_bounded_retry_budget(server, monkeypatch, failure):
+    success = http_response(200, {"results": []})
+    post = AsyncMock(side_effect=[failure("private-provider-details"), success])
+    monkeypatch.setattr(module, "request", post)
+    monkeypatch.setattr(module, "sleep", AsyncMock())
+    await server.web_search(tool_request(), TavilySearchRequest(query="query"))
+    assert post.await_count == 2
+    assert (
+        post.await_args_list[0].kwargs["headers"]["authorization"]
+        != post.await_args_list[1].kwargs["headers"]["authorization"]
+    )
+    success.release.assert_called_once()
+    post.reset_mock(side_effect=True)
+    post.side_effect = failure("private-provider-details")
+    with pytest.raises(RuntimeError, match="transport failure after 3 attempts") as error:
+        await server.web_search(tool_request(), TavilySearchRequest(query="query"))
+    assert post.await_count == 3
+    assert "private-provider-details" not in str(error.value)
+    assert error.value.__suppress_context__
+
+
+async def test_interrupted_response_body_releases_connection_before_retry(server, monkeypatch):
+    broken = http_response(200, {})
+    broken.json.side_effect = module.ClientPayloadError("truncated body")
+    good = http_response(200, {"results": []})
+    monkeypatch.setattr(module, "request", AsyncMock(side_effect=[broken, good]))
+    monkeypatch.setattr(module, "sleep", AsyncMock())
+    await server.web_search(tool_request(), TavilySearchRequest(query="query"))
+    broken.release.assert_called_once()
+    good.release.assert_called_once()

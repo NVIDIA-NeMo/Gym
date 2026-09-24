@@ -600,3 +600,21 @@ def test_process_failure_overrides_partial_answer_status(process_event, expected
     bundle = _build_pi_observations(events, "run-1", None, [])
     invocations = _records(bundle, AgentInvocation)
     assert invocations[0].status == expected
+
+
+@pytest.mark.parametrize("collect_observations", [False, True])
+async def test_mcp_setup_exit_is_request_failure_and_cleans_workspace(tmp_path, collect_observations):
+    agent = _make_agent(workspace_root=str(tmp_path), mcp_servers={"search": {"url": "http://tools.test/mcp"}})
+    stdout = asyncio.StreamReader()
+    stdout.feed_eof()
+    process = SimpleNamespace(
+        stdout=stdout,
+        stderr=SimpleNamespace(read=AsyncMock(return_value=b"setup failed")),
+        wait=AsyncMock(return_value=78),
+        communicate=AsyncMock(return_value=(b"", b"setup failed")),
+        returncode=78,
+    )
+    with patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
+        with pytest.raises(RuntimeError, match="Required Gym MCP"):
+            await agent._run_pi("task", None, collect_observations=collect_observations)
+    assert not list(tmp_path.iterdir())

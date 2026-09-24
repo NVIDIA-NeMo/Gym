@@ -11,7 +11,7 @@ test("supplies missing Bash deadlines, caps longer ones, and preserves shorter o
     assert.equal(event, "tool_call");
     handler = callback;
   } });
-  for (const [requested, expected] of [[undefined, 120], [300, 120], [30, 30]]) {
+  for (const [requested, expected] of [[undefined, 120], [300, 120], [30, 30], [0, 120], [-1, 120], [null, 120], [NaN, 120], [Infinity, 120], ["30", 120]]) {
     const event = { toolName: "bash", input: { command: "sleep 1000", timeout: requested } };
     handler(event);
     assert.deepEqual(event.input, { command: "sleep 1000", timeout: expected });

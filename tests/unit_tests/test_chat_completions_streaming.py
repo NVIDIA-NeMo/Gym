@@ -357,14 +357,22 @@ class TestChatDispatchRoute:
         assert response.json()["detail"] == "backend rejected request"
         assert response.headers["Retry-After"] == "2"
 
-    async def test_delayed_failure_is_terminal_error_with_status(self, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        "error,status,message",
+        [
+            (HTTPException(429, "rate limited"), 429, "rate limited"),
+            (HTTPException(503, "unavailable"), 503, "unavailable"),
+            (RuntimeError("private backend details"), 500, "Model request failed"),
+        ],
+    )
+    async def test_delayed_failure_is_terminal_error_with_status(self, monkeypatch, error, status, message) -> None:
         monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
         _, server = _client(_EchoChatModel)
         release = asyncio.Event()
 
         async def delayed(*args):
             await release.wait()
-            raise HTTPException(429, "rate limited")
+            raise error
 
         monkeypatch.setattr(_EchoChatModel, "_invoke_chat_completions", delayed)
         response = await server.chat_completions_dispatch(MagicMock(), {"stream": True, "messages": []})
@@ -373,9 +381,9 @@ class TestChatDispatchRoute:
         events = [event async for event in response.body_iterator]
         assert len(events) == 1
         assert _events(events[0])[-1]["error"] == {
-            "message": "rate limited",
-            "type": "invalid_request_error",
-            "code": 429,
+            "message": f"HTTP {status}: {message}",
+            "type": "server_error" if status >= 500 else "invalid_request_error",
+            "code": status,
         }
         assert "[DONE]" not in events[0]
 

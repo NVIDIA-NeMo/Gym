@@ -7,7 +7,8 @@ export default function bashTimeout(pi) {
     if (event.toolName !== "bash") return;
     // Pi executes the mutated arguments using its native process-tree timeout.
     // Preserve shorter model deadlines; cap longer ones and supply omitted ones.
-    event.input.timeout = event.input.timeout === undefined
-      ? limit : Math.min(event.input.timeout, limit);
+    const requested = event.input.timeout;
+    event.input.timeout = Number.isFinite(requested) && requested > 0
+      ? Math.min(requested, limit) : limit;
   });
 }

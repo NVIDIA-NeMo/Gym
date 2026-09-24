@@ -106,7 +106,7 @@ export default function (pi) {
       // Pi normally tolerates extension errors. Required Gym tools must instead
       // fail the rollout, rather than silently run without search.
       process.stderr.write("Required Gym MCP tools could not be initialized\n");
-      process.exit(1);
+      process.exit(78); // EX_CONFIG: setup failure, not a scored agent execution failure.
     }
   });
 }

@@ -67,12 +67,16 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
-from nemo_gym.sandbox.agent_tools import restricted_network_policy, sandbox_server_url, seed_mcp_servers
+from nemo_gym.sandbox.agent_tools import (
+    restricted_network_policy,
+    sandbox_server_url,
+    seed_mcp_servers,
+    verify_agent_response,
+)
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
-    get_response_json,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
@@ -522,22 +526,28 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         )
 
         if self.config.network_access != "inherit":
-            urls = [sandbox_server_url(self.config.model_server.name)]
+            urls = [sandbox_server_url(self.config.model_server.name, require_reachable=True)]
             if self.config.network_access == "model_and_tools":
                 if not self.config.tool_servers:
                     raise ValueError("model_and_tools requires tool_servers")
-                urls.extend(sandbox_server_url(server.name) for server in self.config.tool_servers)
+                urls.extend(
+                    sandbox_server_url(server.name, require_reachable=True) for server in self.config.tool_servers
+                )
             sandbox_spec.provider_options["network_policy"] = restricted_network_policy(
                 resolved_sandbox_provider.name, urls
-            )
-        if self.config.output_token_policy == "remaining_context":
-            sandbox_spec.files["/tmp/nemo-gym-remaining-context.js"] = (
-                Path(__file__).with_name("remaining-context.js").read_text()
             )
         sandbox = AsyncSandbox(resolved_sandbox_provider)
         await sandbox.start(sandbox_spec)
 
         return sandbox
+
+    def _runtime_plugins(self) -> list[str]:
+        plugins = []
+        if self.config.output_token_policy == "remaining_context":
+            plugins.append("remaining-context.js")
+        if self.config.tool_servers:
+            plugins.append("required-mcp.js")
+        return plugins
 
     def _agent_sandbox_observation(
         self,
@@ -573,7 +583,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
         base_url = (
             self.base_url_for_run(
-                base_url=sandbox_server_url(self.config.model_server.name),
+                base_url=sandbox_server_url(
+                    self.config.model_server.name, require_reachable=self.config.network_access != "inherit"
+                ),
                 body=await request.json(),
             )
             + "/v1"
@@ -614,8 +626,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     base[key] = deepcopy(value)
 
         merge(config, self.config.opencode_config)
-        if self.config.output_token_policy == "remaining_context":
-            config.setdefault("plugin", []).append("file:///tmp/nemo-gym-remaining-context.js")
+        config.setdefault("plugin", []).extend(f"file:///tmp/nemo-gym-{name}" for name in self._runtime_plugins())
         rollout_mcp = getattr(request.state, "_ng_opencode_mcp", None)
         if isinstance(rollout_mcp, dict):
             config.setdefault("mcp", {}).update(rollout_mcp)
@@ -623,7 +634,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
     async def _seed_tool_servers(self, request: Request, body: OpenCodeSandboxedAgentRunRequest) -> Dict[str, Any]:
         entries = await seed_mcp_servers(
-            self.server_client, self.config.tool_servers, body, request.cookies, timeout_s=self.config.sandbox_timeout
+            self.server_client,
+            self.config.tool_servers,
+            body,
+            request.cookies,
+            timeout_s=self.config.sandbox_timeout,
+            require_reachable=self.config.network_access != "inherit",
         )
         return {name: {"type": "remote", **entry} for name, entry in entries.items()}
 
@@ -757,6 +773,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && VERSION={self.config.opencode_version} bash "$installer\""""
 
         effective_config = await self._create_opencode_config(request)
+        for name in self._runtime_plugins():
+            await sandbox.upload(Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}")
         build_agent = effective_config.setdefault("agent", {}).setdefault("build", {})
         for name in ("temperature", "top_p"):
             value = getattr(body, name, None)
@@ -782,7 +800,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
-        && OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
+        && rm -f /tmp/nemo-gym-mcp-setup-error \
+        && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
@@ -804,6 +823,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
             print("OpenCode install and run stderr:\n", result.stderr, file=sys.stderr)
+
+        if self.config.tool_servers:
+            mcp_check = await sandbox.exec(command="test ! -f /tmp/nemo-gym-mcp-setup-error", timeout_s=30)
+            if mcp_check.return_code != 0 or mcp_check.error_type:
+                raise RuntimeError("Required Gym MCP tools could not be initialized")
 
         export_fname = "export.json"
         # Kept outside the sandbox workdir on purpose: SWE-bench-style environments set the workdir
@@ -1028,23 +1052,15 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
             observations = run_result.pop("_ng_agent_observations", None)
             trajectory = run_result.pop("_ng_trajectory", None)
-            if self.config.execution_failure_reward_zero and run_result.get("opencode_failed", False):
-                response_dict = body.model_dump(mode="json") | {
-                    "response": response.model_dump(mode="json"),
-                    "reward": 0.0,
-                }
-            else:
-                verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(
-                    body.model_dump() | {"response": response}
-                )
-                verify_response = await self.server_client.post(
-                    server_name=self.config.resources_server.name,
-                    url_path="/verify",
-                    json=verify_request.model_dump(),
-                    cookies=cookies,
-                )
-                await raise_for_status(verify_response)
-                response_dict = await get_response_json(verify_response)
+            response_dict = await verify_agent_response(
+                self.server_client,
+                self.config.resources_server,
+                body,
+                response,
+                cookies,
+                force_zero_reward=self.config.execution_failure_reward_zero
+                and run_result.get("opencode_failed", False),
+            )
         finally:
             del request.state._ng_observation_invocation_id
             del request.state._ng_opencode_mcp

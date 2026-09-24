@@ -63,6 +63,7 @@ from responses_api_agents.pi_agent.setup_pi import ensure_pi
 
 
 LOG = logging.getLogger(__name__)
+MCP_SETUP_ERROR_EXIT_CODE = 78  # Must match gym_mcp.mjs (EX_CONFIG).
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
@@ -598,6 +599,8 @@ class PiAgent(SimpleResponsesAPIAgent):
                     LOG.warning("pi timed out after %ds", self.config.timeout)
                     return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
 
+            if proc.returncode == MCP_SETUP_ERROR_EXIT_CODE and self.config.mcp_servers:
+                raise RuntimeError("Required Gym MCP tools could not be initialized")
             if proc.returncode not in (0, None):
                 LOG.warning("pi exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
                 events.append((time(), {"type": "_ng_process_exit", "return_code": proc.returncode}))
