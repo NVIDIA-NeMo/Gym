@@ -465,3 +465,47 @@ class TestMultiWorkerEntrypoint:
                 assert "is_nemo_gym_fastapi_entrypoint(__file__)" in self._source(), (
                     f"{name} sets num_workers={workers} but the entrypoint has no module-level app"
                 )
+
+
+class TestSkipVerification:
+    """skip_verification must create no verification sandbox and still stop the agent's: a
+    skipped row that leaked its sandbox would hold a cell slot until the provider TTL."""
+
+    @pytest.mark.asyncio
+    async def test_scores_zero_stops_the_agent_sandbox_and_creates_nothing(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from nemo_gym.server_utils import SESSION_ID_KEY
+        from resources_servers.scale_swe.app import (
+            ScaleSWEResourcesServer,
+            ScaleSWEResourcesServerConfig,
+            ScaleSWEVerifyRequest,
+        )
+
+        config = ScaleSWEResourcesServerConfig.model_construct(
+            skip_verification=True, sandbox_provider="sandbox", sandbox_config={}
+        )
+        server = ScaleSWEResourcesServer.model_construct(config=config, server_client=MagicMock())
+        agent_sandbox = MagicMock(stop=AsyncMock())
+        server._session_id_to_sandbox = {"s": agent_sandbox}
+        server._session_id_to_pristine_untracked = {"s": frozenset()}
+        server._session_id_to_base_commit = {"s": "abc123"}
+        server._create_sandbox = AsyncMock(side_effect=AssertionError("no verification sandbox"))
+
+        response = await server.verify(
+            SimpleNamespace(session={SESSION_ID_KEY: "s"}),
+            ScaleSWEVerifyRequest.model_validate(TestVerifyResponseShape._body()),
+        )
+
+        assert response.reward == 0.0
+        assert not response.evaluation_completed and not response.resolved
+        assert "skip_verification" in response.error
+        agent_sandbox.stop.assert_awaited_once()
+        server._create_sandbox.assert_not_awaited()
+        assert server._session_id_to_sandbox == {}
+        assert server._session_id_to_pristine_untracked == {} and server._session_id_to_base_commit == {}
+
+    def test_off_by_default(self) -> None:
+        from resources_servers.scale_swe.app import ScaleSWEResourcesServerConfig
+
+        assert ScaleSWEResourcesServerConfig.model_fields["skip_verification"].default is False

@@ -93,6 +93,10 @@ class SWERebenchResourcesServerConfig(BaseResourcesServerConfig):
     # Where the upstream log-parser repo is cloned. Empty uses the shared nemo_gym cache.
     log_parser_cache_dir: str = ""
     apply_anti_cheating: bool = True
+    # Score every rollout 0.0 without extracting the patch or running the tests (no second
+    # sandbox), for training whose advantage ignores the reward, e.g. on-policy distillation.
+    # evaluation_completed is False so the zeros cannot be read as graded failures.
+    skip_verification: bool = False
     sandbox_provider: str
     sandbox_config: dict[str, Any]
     # Deny all egress from the agent's sandbox except sandbox_model_server's host (the
@@ -289,6 +293,26 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: SWERebenchVerifyRequest) -> SWERebenchVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
+        if self.config.skip_verification:
+            # The agent's sandbox is still ours to stop; nothing else is created.
+            await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
+            self._session_id_to_pristine_untracked.pop(session_id, None)
+            return SWERebenchVerifyResponse.model_validate(
+                body.model_dump()
+                | {
+                    "reward": 0.0,
+                    "evaluation_completed": False,
+                    "resolved": False,
+                    "patch_applied": False,
+                    "instance_id": body.instance_id,
+                    "language": body.language,
+                    "test_results": None,
+                    "test_output": "",
+                    "error": "verification skipped (skip_verification=true)",
+                    "eval_sandbox_start_time_taken": 0.0,
+                    "patch_verification_time_taken": 0.0,
+                }
+            )
         extraction_error = None
         mode = self.config.patch_capture_mode
         if self.config.is_verifying_golden_patch:

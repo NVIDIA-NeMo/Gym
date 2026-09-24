@@ -645,3 +645,45 @@ class TestAgentNetworkPolicy:
     async def test_fails_closed(self, monkeypatch, provider: str, model_url: str) -> None:
         with pytest.raises(ValueError):
             await self._create(monkeypatch, enforce=True, for_agent=True, provider=provider, model_url=model_url)
+
+
+class TestSkipVerification:
+    """skip_verification must create no verification sandbox and still stop the agent's: a
+    skipped row that leaked its sandbox would hold a cell slot until the provider TTL."""
+
+    @pytest.mark.asyncio
+    async def test_scores_zero_stops_the_agent_sandbox_and_creates_nothing(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from nemo_gym.server_utils import SESSION_ID_KEY
+        from resources_servers.swe_rebench.app import (
+            SWERebenchResourcesServer,
+            SWERebenchResourcesServerConfig,
+            SWERebenchVerifyRequest,
+        )
+
+        config = SWERebenchResourcesServerConfig.model_construct(
+            skip_verification=True, sandbox_provider="sandbox", sandbox_config={}
+        )
+        server = SWERebenchResourcesServer.model_construct(config=config, server_client=MagicMock())
+        agent_sandbox = MagicMock(stop=AsyncMock())
+        server._session_id_to_sandbox = {"s": agent_sandbox}
+        server._session_id_to_pristine_untracked = {"s": frozenset()}
+        server._create_sandbox = AsyncMock(side_effect=AssertionError("no verification sandbox"))
+
+        response = await server.verify(
+            SimpleNamespace(session={SESSION_ID_KEY: "s"}),
+            SWERebenchVerifyRequest.model_validate(TestVerifyResponseShape._body()),
+        )
+
+        assert response.reward == 0.0
+        assert not response.evaluation_completed and not response.resolved
+        assert "skip_verification" in response.error
+        agent_sandbox.stop.assert_awaited_once()
+        server._create_sandbox.assert_not_awaited()
+        assert server._session_id_to_sandbox == {} and server._session_id_to_pristine_untracked == {}
+
+    def test_off_by_default(self) -> None:
+        from resources_servers.swe_rebench.app import SWERebenchResourcesServerConfig
+
+        assert SWERebenchResourcesServerConfig.model_fields["skip_verification"].default is False
