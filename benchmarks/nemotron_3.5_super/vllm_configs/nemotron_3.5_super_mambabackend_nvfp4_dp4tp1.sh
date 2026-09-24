@@ -1,6 +1,7 @@
 #!/bin/bash
 
 GYM_MODEL_PARAMS=(
+    "++model_endpoint_readiness_timeout_seconds=1200"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
 )
@@ -15,9 +16,9 @@ export VLLM_USE_V2_MODEL_RUNNER=0
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 # @bxyu-nvidia: --kernel-config '{"linear_backend_per_quant":{"fp8_w8a8":"torch"}}' is not supported in vLLM 2a02f6efe319c885e3ccbcecde402e0028f9ec1e
 # So we add the `--linear-backend torch` flag instead
-# TODO @bxyu-nvidia: Add back --disable-uvicorn-access-log
 VLLM_COMMON_ARGS=(
     --trust-remote-code
+    --disable-uvicorn-access-log
     --gpu-memory-utilization 0.85
     --distributed-executor-backend mp
     --data-parallel-backend mp
