@@ -92,6 +92,7 @@ UVICORN_TIMEOUT_WORKER_HEALTHCHECK = "uvicorn_timeout_worker_healthcheck"
 MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
 ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
+UV_LOCK_TIMEOUT_KEY_NAME = "uv_lock_timeout_seconds"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 RESULTS_DIR_KEY_NAME = "results_dir"
 CACHE_DIR_KEY_NAME = "cache_dir"
@@ -141,6 +142,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     ALLOW_OPENAI_VERSION_SKEW_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
+    UV_LOCK_TIMEOUT_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
     CACHE_DIR_KEY_NAME,
@@ -1396,6 +1398,20 @@ Found global config dict yaml:
             # Runtime subprocesses inherit the configured cache directory.
             if not parse_config.offline:
                 environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+            # Every server installs into that one shared cache, and they all start at once, so
+            # exactly one holds uv's distribution-cache lock while the rest wait out its cold
+            # resolve and download. uv's own default is 300s, which is shorter than a cold install
+            # of a large dependency set - the waiters then abort and the run dies during spinup.
+            # An explicit key wins, then a UV_LOCK_TIMEOUT the user already exported, then 1800.
+            # A null key exports nothing, so the inherited environment (or uv's default) applies.
+            exported_uv_lock_timeout = environ.get("UV_LOCK_TIMEOUT", "").strip()
+            global_config_dict.setdefault(
+                UV_LOCK_TIMEOUT_KEY_NAME,
+                int(exported_uv_lock_timeout) if exported_uv_lock_timeout.isdecimal() else 1800,
+            )
+            uv_lock_timeout = global_config_dict[UV_LOCK_TIMEOUT_KEY_NAME]
+            if not parse_config.offline and uv_lock_timeout is not None:
+                environ["UV_LOCK_TIMEOUT"] = str(uv_lock_timeout)
             # By default, build the directories in their individual folders using the root repository
             # e.g. WORKING_DIR/responses_api_models/my_server
             # Deliberately anchored at WORKING_DIR rather than the cache root: venv
