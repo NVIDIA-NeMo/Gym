@@ -17,6 +17,7 @@ AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
 
 # Instance names in the generated run config, per taskset.
 RESOURCES_SERVER_IMPL = "harbor"
+RESOURCES_SERVER_INSTANCE = "harbor_resources_server"
 ENVIRONMENT_SERVER_IMPL = "single_agent_turn"
 
 
@@ -82,7 +83,8 @@ def run_config(
 ) -> dict[str, Any]:
     """The run-config blocks that bind one taskset to the ``harbor`` resources server.
 
-    The agent block inherits the selected harness config and points it at the taskset's
+    The resources server block inherits the shipped ``harbor_resources_server`` config. The
+    agent block inherits the selected harness config and points it at the taskset's
     resources server. The environment server is a ``single_agent_turn`` instance. Rows
     route to it by taskset.
     """
@@ -93,9 +95,9 @@ def run_config(
         "environment_routing_mode": "taskset",
         "environment_server_routes": {taskset: environment_name},
         resources_name: {
+            "_inherit_from": RESOURCES_SERVER_INSTANCE,
             "resources_servers": {
                 RESOURCES_SERVER_IMPL: {
-                    "entrypoint": "app.py",
                     "sandbox_provider": sandbox_provider,
                     "tasksets": {taskset: taskset_mapping(tasks, folder)},
                     "datasets": [
@@ -109,7 +111,7 @@ def run_config(
                         }
                     ],
                 }
-            }
+            },
         },
         agent_name: {
             "_inherit_from": agent_instance_name,
