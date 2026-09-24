@@ -428,6 +428,31 @@ class TestRewardProfile:
         assert row["mean/input_tokens"] == 4.0
         assert row["mean/verifier_score"] == 2.5
 
+    def test_private_retry_metadata_is_excluded_from_all_metric_levels(self) -> None:
+        rows = [{"_ng_task_index": 0, "_ng_rollout_index": i, "agent_ref": {"name": "agent"}} for i in range(2)]
+        results = [
+            row
+            | {
+                "response": {},
+                "reward": 1.0,
+                "verifier_score": 3.0,
+                "_ng_group_attempt": 2,
+                "_ng_attempt_index": 3,
+                "_private_value": 4,
+            }
+            for row in rows
+        ]
+        group, agent, dataset = RewardProfiler().profile_from_data(rows, results)
+        assert group[0]["_ng_task_index"] == 0
+        assert [r["_ng_rollout_index"] for r in group[0]["rollout_infos"]] == [0, 1]
+        assert group[0]["mean/verifier_score"] == 3.0
+        for record in [*group, *agent, *dataset, *group[0]["rollout_infos"]]:
+            assert not any(
+                field in key
+                for key in record
+                for field in ("_ng_group_attempt", "_ng_attempt_index", "_private_value")
+            )
+
     def test_profile_from_data_missing_rollouts_requires_partial_flag(self) -> None:
         rows = [_row(0, 0), _row(0, 1)]
         results = [_result(0, 0)]

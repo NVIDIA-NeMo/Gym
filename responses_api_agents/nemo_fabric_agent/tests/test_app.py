@@ -423,6 +423,27 @@ def test_fabric_output_items_single_turn_is_one_message() -> None:
     assert items[0]["content"][0]["text"] == "42"
 
 
+def test_fabric_output_items_preserve_mini_swe_reasoning_and_submission() -> None:
+    output = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "Verify the result before submitting.",
+                "tool_calls": [{"id": "c1", "function": {"name": "bash", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n42"},
+            {"role": "exit", "content": "42"},
+        ],
+    }
+    items = [item.model_dump() for item in _fabric_output_items(output, "42")]
+    assert [item["type"] for item in items] == ["reasoning", "function_call", "function_call_output", "message"]
+    assert items[0]["summary"][0]["text"] == "Verify the result before submitting."
+    assert items[1]["call_id"] == items[2]["call_id"] == "c1"
+    assert items[2]["output"] == "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n42"
+    assert items[3]["content"][0]["text"] == "42"
+
+
 def test_fabric_output_items_reads_openai_tool_call_shape() -> None:
     """hermes reports {call_id, function: {name, arguments}} rather than LangChain's {id, name, args}."""
     output = {
