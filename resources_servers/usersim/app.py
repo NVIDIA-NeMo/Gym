@@ -456,7 +456,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         except ValidationError as error:
             raise HTTPException(status_code=422, detail=error.errors()) from error
         session_id = request.session[SESSION_ID_KEY]
-        result = self._resolve_seed(task.sampling, session_id)
+        result = self._resolve_seed(task.sampling, body.resources_session_id)
         result = result.model_copy(
             update={"scenario": result.scenario.model_copy(update={"probe_data": task.probe_data})}
         )

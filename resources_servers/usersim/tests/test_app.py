@@ -104,6 +104,7 @@ def _seed_body(*, seed: int, probe_type: str | None = None) -> dict:
     if probe_type is not None:
         sampling["probe_type"] = probe_type
     return {
+        "resources_session_id": "resources-session-0",
         "episode_id": {"rollout_id": "0-0", "attempt": 0},
         "task_id": {"taskset": "usersim:example", "task_id": "0"},
         "task_data": {"sampling": sampling},
