@@ -1809,6 +1809,29 @@ class TestRolloutCollection:
         # Seeds should track rollout index within each task (0, 1, 2 per task).
         assert seeds_seen == [0, 1, 2, 0, 1, 2]
 
+    def test_preprocess_examples_seeds_preserve_existing_metadata(self) -> None:
+        examples = [
+            {
+                "agent_ref": {"name": "my_agent"},
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "Say hello."}],
+                    "metadata": {"source": "example", "extra_body": '{"top_k": 10, "seed": 99}'},
+                },
+            }
+        ]
+        original = deepcopy(examples)
+
+        rows = RolloutCollectionHelper().preprocess_examples(examples, num_repeats=3, num_repeats_add_seed=True)
+
+        params = [
+            NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"]) for row in rows
+        ]
+        assert [json.loads(param.metadata["extra_body"]) for param in params] == [
+            {"top_k": 10, "seed": seed} for seed in range(3)
+        ]
+        assert [param.metadata["source"] for param in params] == ["example"] * 3
+        assert examples == original
+
     def test_preprocess_rows_num_repeats_dict_form(self, tmp_path: Path) -> None:
         """Dict-form num_repeats applies the per-agent value to each row."""
         fpath = tmp_path / "input.jsonl"

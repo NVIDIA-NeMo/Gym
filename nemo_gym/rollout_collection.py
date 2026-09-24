@@ -1178,7 +1178,8 @@ class RolloutCollectionHelper(BaseModel):
 
                     if config.num_repeats_add_seed:
                         row[RESPONSES_CREATE_PARAMS_KEY_NAME] = row[RESPONSES_CREATE_PARAMS_KEY_NAME].copy()
-                        metadata = row[RESPONSES_CREATE_PARAMS_KEY_NAME].setdefault("metadata", {})
+                        metadata = (row[RESPONSES_CREATE_PARAMS_KEY_NAME].get("metadata") or {}).copy()
+                        row[RESPONSES_CREATE_PARAMS_KEY_NAME]["metadata"] = metadata
                         extra_body = json.loads(metadata.get("extra_body", "{}"))
                         extra_body["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
                         metadata["extra_body"] = json.dumps(extra_body)
