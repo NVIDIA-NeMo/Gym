@@ -19,13 +19,14 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from nooa import Agent
+from nooa.runtime.hooks import hooks_scope
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import ModelCallRef
+from nemo_gym.rollout_observability import AgentEpisode
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
-from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM
+from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM, RolloutLLMState
+from responses_api_agents.nooa_agent.observability import GymTraceHooks
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
     create_agent_class_with_resource_methods,
@@ -45,9 +46,8 @@ class NOOARunRequest:
 
 @dataclass(slots=True)
 class NOOARunResult:
+    episode: AgentEpisode
     return_value: Any
-    agent: Agent
-    model_calls: list[ModelCallRef]
     model_cookies: dict[str, str]
     resource_cookies: dict[str, str]
 
@@ -78,19 +78,21 @@ class EmbeddedNOOARunner:
         self._agent_class, self._invocation_adapter = validate_invocation(invocation)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
-        model_calls: list[ModelCallRef] = []
+        state = RolloutLLMState(max_policy_calls=self._max_policy_calls)
+        trace = GymTraceHooks()
         llm = GymResponsesLLM(
             server_client=self._server_client,
             model_server_name=self._model_server_name,
             model_url_path=request.model_url_path,
-            max_policy_calls=self._max_policy_calls,
-            model_call_collector=model_calls,
+            state=state,
             cookies=request.model_cookies,
+            on_call=trace.on_model_call,
         )
         dispatcher = ResourceToolDispatcher(
             server_client=self._server_client,
             resources_server_name=self._resources_server_name,
             cookies=request.resource_cookies,
+            trace_hooks=trace,
         )
         agent_class = create_agent_class_with_resource_methods(
             self._agent_class,
@@ -100,11 +102,17 @@ class EmbeddedNOOARunner:
         agent = agent_class(llm=llm, **copy.deepcopy(self._invocation.init_kwargs))
         validate_agent_resource_method_bindings(agent)
 
-        return_value = await self._invocation_adapter(agent, request.responses_create_params)
+        with hooks_scope(trace):
+            return_value = await self._invocation_adapter(agent, request.responses_create_params)
+
+        episode = trace.project(
+            create_params=request.responses_create_params,
+            state=state,
+            default_model=self._model_server_name,
+        )
         return NOOARunResult(
+            episode=episode,
             return_value=return_value,
-            agent=agent,
-            model_calls=model_calls,
             model_cookies=request.model_cookies,
             resource_cookies=request.resource_cookies,
         )

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import aiohttp
@@ -30,12 +32,45 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import ModelCallRef
+from nemo_gym.rollout_observability import ModelCallRef, ObservationGap
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 
 
 class PolicyCallBudgetExceeded(RuntimeError):
     """Raised when one rollout exceeds its configured policy-call budget."""
+
+
+@dataclass(slots=True)
+class GymModelCall:
+    """Exact Gym request/response evidence for one NOOA policy call."""
+
+    model_ref: ModelServerRef
+    request: NeMoGymResponseCreateParamsNonStreaming
+    response: NeMoGymResponse | None = None
+    invocation_id: str | None = None
+
+
+@dataclass(slots=True)
+class RolloutLLMState:
+    """Gym-owned policy budget and model evidence for one rollout."""
+
+    max_policy_calls: int
+    used: int = 0
+    calls: list[GymModelCall] = field(default_factory=list)
+    gaps: list[ObservationGap] = field(default_factory=list)
+
+    def charge(self) -> None:
+        if self.used >= self.max_policy_calls:
+            raise PolicyCallBudgetExceeded(f"NOOA policy call budget exhausted after {self.max_policy_calls} calls")
+        self.used += 1
+
+    @property
+    def model_calls(self) -> list[ModelCallRef]:
+        return [
+            ModelCallRef(model_ref=call.model_ref, response_id=call.response.id)
+            for call in self.calls
+            if call.response is not None
+        ]
 
 
 def _dump(value: Any) -> Any:
@@ -153,17 +188,17 @@ class GymResponsesLLM(UnifiedLLM):
         server_client: ServerClient,
         model_server_name: str,
         model_url_path: str,
-        max_policy_calls: int,
-        model_call_collector: list[ModelCallRef],
+        state: RolloutLLMState,
         cookies: dict[str, str],
         model: str = "gym-policy",
+        on_call: Callable[[GymModelCall], None] | None = None,
     ) -> None:
         super().__init__(model=model)
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._model_url_path = model_url_path
-        self._max_policy_calls = max_policy_calls
-        self._model_call_collector = model_call_collector
+        self._state = state
+        self._on_call = on_call
         self._cookies = cookies
         self._calls = 0
         self._lock = asyncio.Lock()
@@ -198,8 +233,7 @@ class GymResponsesLLM(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        if self._calls >= self._max_policy_calls:
-            raise PolicyCallBudgetExceeded(f"NOOA policy call budget exhausted after {self._max_policy_calls} calls")
+        self._state.charge()
         self._calls += 1
 
         input_items, instructions = _responses_input(messages)
@@ -222,13 +256,20 @@ class GymResponsesLLM(UnifiedLLM):
             }
 
         aliases = {"max_tokens": "max_output_tokens"}
-        supported = set(NeMoGymResponseCreateParamsNonStreaming.model_fields)
+        supported = set(NeMoGymResponseCreateParamsNonStreaming.model_fields) - {"model"}
         for name, value in kwargs.items():
             destination = aliases.get(name, name)
             if destination in supported and value is not None:
                 request[destination] = value
 
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
+        call = GymModelCall(
+            model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),
+            request=body.model_copy(deep=True),
+        )
+        self._state.calls.append(call)
+        if self._on_call is not None:
+            self._on_call(call)
         http_response = await self._server_client.post(
             server_name=self._model_server_name,
             url_path=self._model_url_path,
@@ -247,13 +288,8 @@ class GymResponsesLLM(UnifiedLLM):
             raise
         raw = await get_response_json(http_response)
         response = NeMoGymResponse.model_validate(raw)
+        call.response = response
         self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
-        self._model_call_collector.append(
-            ModelCallRef(
-                model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),
-                response_id=response.id,
-            )
-        )
 
         function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]
         usage = response.usage.model_dump(mode="json") if response.usage is not None else None
