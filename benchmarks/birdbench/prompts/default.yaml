@@ -1,15 +1,51 @@
 # Prompt used for text-to-SQL.
 
-system: Please reason step by step, and put your final answer within the tags "```sql" and "```".
+### Part of the prompts are adapted from OmniSQL code: https://github.com/RUCKBReasoning/OmniSQL/blob/main/train_and_evaluate/process_dataset.py#L164
+### which is released under Apache 2.0 license as shown here: https://github.com/RUCKBReasoning/OmniSQL/issues/25
+
+system: You are a data science expert. Below, you are provided with a database schema and a natural 
+        language question. Your task is to understand the schema and generate a valid SQL query to answer the question.
 
 user: |-
-  ### Question
-  {question}
 
-  The following is a SQL dump that describes the database and the tables in it.
+  ### Database Engine:
+  SQLite
+
+  ### Database Schema:
+  The database schema below is organized into two sections, "#### Tables" and "#### Foreign key".
+
+  The "#### Tables" section lists every table in the database as a list, where each table is followed by a list of its columns. Each column entry
+  has the structure:
+
+  column_name:
+    data_type: data_type
+    description: column description
+    values:
+    - value1
+    - value2
+
+  where we have column name followed by data type (e.g., TEXT), a free-form description about the column and its value, and a list of some values
+  from the given column. If the column is (part of) the table's primary key, "(primary key)" is appended to its data type, e.g. "TEXT (primary key)".
+
+  The "#### Foreign key" section lists foreign key relationships between one table's column and another table's column. E.g., table1.column1 =
+  table2.column2 means the column 1 of table 1 has a foreign key relationship to column 2 of table 2.
+
   {sql_context}
 
-  Convert the question above to a SQL query for the database given. Use the answer tags given.
-  If there is more than one set of tags, the last one will be taken as your final answer.
+  ### Question:
+  {question}
 
-  ### Answer:
+  ### Instructions:
+  - Make sure you only output the information that is asked in the question. If the question asks for a specific column, make sure to only include that column in the SELECT clause, nothing more.
+  - The generated query should return all of the information asked in the question without any missing or extra information.
+  - Before generating the final SQL query, please think through the steps of how to write the query.
+
+  ### Output Format:
+  In your answer, please enclose the generated SQL query in a code block:
+  ```sql
+  -- Your SQL query
+  ```
+
+  Only put a single SQL query inside a code block. You can, however, generate many SQL code during your reasoning. We will only use the final one.
+
+  Take a deep breath and think step by step to find the correct SQL query.

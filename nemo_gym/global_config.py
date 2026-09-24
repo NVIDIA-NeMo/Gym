@@ -117,6 +117,10 @@ SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
 ALLOW_UNSUPPORTED_PAIRING_KEY_NAME = "allow_unsupported_pairing"
 ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME = "NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING"
+ENVIRONMENT_SERVER_NAME_KEY_NAME = "environment_server_name"
+ENVIRONMENT_SERVER_ROUTES_KEY_NAME = "environment_server_routes"
+ENVIRONMENT_ROUTING_MODE_KEY_NAME = "environment_routing_mode"
+TASKSETS_KEY_NAME = "tasksets"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -154,9 +158,14 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     SKIP_VERIFICATION_REWARD_KEY_NAME,
     TELEMETRY_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
+    ENVIRONMENT_SERVER_NAME_KEY_NAME,
+    ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
+    ENVIRONMENT_ROUTING_MODE_KEY_NAME,
+    TASKSETS_KEY_NAME,
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
+ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
 # Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
@@ -980,6 +989,8 @@ the check."""
         if held_agent_overrides is None:
             return
         override = OmegaConf.select(held_agent_overrides, f"{name}.{AGENT_SERVER_TYPE_KEY_NAME}.{agent_type}")
+        with open_dict(held_agent_overrides):
+            held_agent_overrides.pop(name, None)
         if not isinstance(override, DictConfig):
             return
         # Struct mode is what makes a field the agent does not declare an error rather than a silent add.
@@ -1210,6 +1221,7 @@ Pass each config with --config (it builds the list for you), e.g.:
         # Must run after the swap above (inherited bindings must exist to carry over) and before the
         # missing-value check below (it removes the unbound agent instance that still carries '???').
         self.compose_unbound_agent(global_config_dict, held_agent_overrides)
+        global_config_dict = OmegaConf.merge(global_config_dict, held_agent_overrides)
         self.apply_legacy_agent_aliases(global_config_dict)
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*
@@ -1294,12 +1306,11 @@ Found global config dict yaml:
         )
 
         with open_dict(global_config_dict):
-            # Populate head server defaults
-            if not global_config_dict.get(HEAD_SERVER_KEY_NAME):
-                global_config_dict[HEAD_SERVER_KEY_NAME] = {
-                    "host": default_host,
-                    "port": DEFAULT_HEAD_SERVER_PORT,
-                }
+            # Head server defaults, filled per key so a config may pin just one.
+            head_server = global_config_dict.get(HEAD_SERVER_KEY_NAME) or {}
+            head_server.setdefault("host", default_host)
+            head_server.setdefault("port", DEFAULT_HEAD_SERVER_PORT)
+            global_config_dict[HEAD_SERVER_KEY_NAME] = head_server
 
             # Store final list of disallowed ports.
             global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
@@ -1750,7 +1761,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     errors = error.errors()
 
     # Identify the actual server type from the error (excluding Union discriminator noise)
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents", "environment_servers"]
     actual_server_type = None
 
     # Example error structure: ('ResponsesAPIAgentServerInstanceConfig', 'responses_api_agents', 'simple_agent', 'datasets', 0, 'license')

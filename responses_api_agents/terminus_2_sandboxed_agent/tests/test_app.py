@@ -54,6 +54,9 @@ def _make_config(**overrides):
         tmux_pane_height=40,
         dump_trajectory=False,
         debug=False,
+        model_context_limit=32_000,
+        model_output_limit=4_000,
+        llm_request_timeout=60,
         sandbox_provider="opensandbox",
         sandbox_timeout=10,
         remote_tmux_binary_path=None,
@@ -153,7 +156,8 @@ def test_agent_implements_required_responses_endpoint():
 
 
 @pytest.mark.asyncio
-async def test_nemo_gym_llm_records_every_responses_request_and_output():
+@pytest.mark.parametrize("reasoning_content", [None, "reasoning before answer 1"])
+async def test_nemo_gym_llm_records_every_responses_request_and_output(reasoning_content):
     class Client:
         def __init__(self):
             self.requests = []
@@ -190,12 +194,21 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
             )
 
     client = Client()
-    llm = NeMoGymLLM(client=client, model_name="policy_model", model_context_limit=32_000, model_output_limit=4_000)
+    llm = NeMoGymLLM(
+        client=client,
+        model_name="policy_model",
+        model_context_limit=32_000,
+        model_output_limit=4_000,
+        llm_request_timeout=60,
+    )
 
     first = await llm.call("first")
     second = await llm.call(
         "second",
-        message_history=[{"role": "user", "content": "first"}, {"role": "assistant", "content": "answer 1"}],
+        message_history=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "answer 1", "reasoning_content": reasoning_content},
+        ],
         previous_response_id="resp_1",
     )
     third = await llm.call(
@@ -208,13 +221,25 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
     assert first.usage.prompt_tokens == 10
     assert second.content == "answer 2"
     assert third.content == "answer 3"
+    expected_reasoning = (
+        [{"id": "", "summary": [{"text": reasoning_content, "type": "summary_text"}], "type": "reasoning"}]
+        if reasoning_content
+        else []
+    )
     assert client.requests == [
         {"model": "policy_model", "input": [{"content": "first", "role": "user", "type": "message"}]},
         {
             "model": "policy_model",
             "input": [
                 {"content": "first", "role": "user", "type": "message"},
-                {"content": "answer 1", "role": "assistant", "type": "message"},
+                *expected_reasoning,
+                {
+                    "id": "",
+                    "content": [{"annotations": [], "text": "answer 1", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                },
                 {"content": "second", "role": "user", "type": "message"},
             ],
         },
@@ -229,7 +254,6 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
     assert [item.content for item in llm.trajectory if isinstance(item, NeMoGymEasyInputMessage)] == [
         "first",
         "second",
-        "compacted summary",
         "third",
     ]
 
@@ -238,8 +262,11 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
 @pytest.mark.parametrize("agent_user", [None, "agent", 1000, "root"])
 @pytest.mark.parametrize("dump_trajectory", [False, True])
 @pytest.mark.parametrize("debug", [False, True])
-async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_trajectory, debug, agent_user):
-    config = _make_config(dump_trajectory=dump_trajectory, debug=debug)
+@pytest.mark.parametrize("interleaved_thinking", [False, True])
+async def test_execute_runs_terminus_in_seeded_sandbox(
+    monkeypatch, dump_trajectory, debug, agent_user, interleaved_thinking
+):
+    config = _make_config(dump_trajectory=dump_trajectory, debug=debug, interleaved_thinking=interleaved_thinking)
     set_level = MagicMock()
     monkeypatch.setattr(app_module.harbor_logger, "setLevel", set_level)
     server = Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
@@ -253,6 +280,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
             self.kwargs = kwargs
             self._session = SimpleNamespace(stop=self.stop)
             self._times_spent = [1.0, 3.0]
+            self._num_proactive_compactions = 0
             self._num_compactions = 2
 
         async def stop(self):
@@ -266,9 +294,11 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         async def run(self, instruction, environment, context):
             assert instruction == "solve this"
             assert self.kwargs["dump_trajectory"] is dump_trajectory
+            assert self.kwargs["interleaved_thinking"] is interleaved_thinking
             # No user: exercises the default_user resolution inside NeMoGymSandboxEnvironment.exec.
             await environment.exec("tmux run")
             self.kwargs["llm"]._times_spent.extend([2.0, 4.0])
+            self.kwargs["llm"]._num_compactions = 2
             context.n_input_tokens = 4
             context.n_output_tokens = 3
             self.kwargs["llm"].trajectory.append(
@@ -317,7 +347,10 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         "model_call_time_pct": 60.0,
         "terminus2_time_taken": 10.0,
         "model_calls_gt_10min": 0,
+        "num_proactive_compactions": 0,
         "num_compactions": 2,
+        "error": None,
+        "usages": [],
     }
     assert response.output[-1].content[0].text == "done"
     assert response.usage.input_tokens == 4

@@ -44,6 +44,7 @@ from nemo_gym.rollout_observability import (
     AgentInvocation,
     SandboxObservation,
     ToolCallObservation,
+    TrajectoryRecord,
 )
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
@@ -65,11 +66,12 @@ EXPORT_COMMAND = "export PATH=$HOME/.opencode/bin:$PATH && opencode export sessi
 
 
 class TestOpenCodeSandboxedAgent:
-    def test_import_does_not_load_standalone_opencode_agent(self) -> None:
+    def test_import_only_loads_shared_opencode_observability(self) -> None:
         code = (
             "import sys; import responses_api_agents.opencode_sandboxed_agent.app; "
-            "assert not any(name == 'responses_api_agents.opencode_agent' "
-            "or name.startswith('responses_api_agents.opencode_agent.') for name in sys.modules)"
+            "assert {name for name in sys.modules if name == 'responses_api_agents.opencode_agent' "
+            "or name.startswith('responses_api_agents.opencode_agent.')} == "
+            "{'responses_api_agents.opencode_agent', 'responses_api_agents.opencode_agent.observability'}"
         )
         subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
 
@@ -391,11 +393,13 @@ class TestOpenCodeSandboxedAgent:
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
 
+    @mark.parametrize("agent_user", [None, "agent", 1000])
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,
         opencode_export_test_data: Dict[str, Any],
         monkeypatch: MonkeyPatch,
+        agent_user,
     ) -> None:
         class Response:
             ok = True
@@ -457,6 +461,10 @@ class TestOpenCodeSandboxedAgent:
                 1,
             ),
         )
+        for part_id, kind in [("start", "step-start"), ("finish", "step-finish")]:
+            connection.execute(
+                "insert into part values (?, 'm1', 'root', ?, 2)", (part_id, json.dumps({"type": kind}))
+            )
         connection.commit()
         assert db_path.with_name(f"{db_path.name}-wal").stat().st_size > 0
         main_only_path = tmp_path / "main-only.db"
@@ -475,7 +483,12 @@ class TestOpenCodeSandboxedAgent:
         sandbox = MagicMock()
         sandbox._handle = SandboxHandle(sandbox_id="connected-sandbox", provider_name="opensandbox", raw=None)
         sandbox.exec = AsyncMock(
-            side_effect=[
+            side_effect=(
+                [SimpleNamespace(stdout="0", return_code=0), SimpleNamespace(stdout="1000\n1000", return_code=0)]
+                if agent_user is not None
+                else []
+            )
+            + [
                 SimpleNamespace(
                     stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
                 ),
@@ -521,8 +534,9 @@ class TestOpenCodeSandboxedAgent:
 
         async def post(server_name, url_path, json=None, cookies=None):
             if url_path == "/seed_session":
-                return Response({"sandbox_handle": "seed-sandbox"})
+                return Response({"sandbox_handle": "seed-sandbox", "agent_user": agent_user})
             assert url_path == "/verify"
+            assert json["agent_user"] == agent_user
             return Response(
                 json
                 | {
@@ -547,6 +561,10 @@ class TestOpenCodeSandboxedAgent:
             connection.close()
 
         assert result.ng_agent_observations is not None
+        [turn] = TrajectoryRecord.model_validate(result.ng_trajectory).turns
+        assert (turn.task_id, turn.rollout_id, turn.invocation_id) == ("7", "7-2", "root")
+        assert turn.answer[0]["call_id"] == "call-1"
+        assert not turn.model_calls
         [invocation] = [
             record for record in result.ng_agent_observations.records if isinstance(record, AgentInvocation)
         ]
@@ -566,18 +584,21 @@ class TestOpenCodeSandboxedAgent:
         assert sandbox_records[0].provider == "opensandbox"
         assert sandbox_records[0].outcome == "completed"
         assert sandbox_records[0].wall_time_s is None
-        assert "sandbox_lifecycle_timing_unavailable" in {gap.code for gap in result.ng_agent_observations.gaps}
-        assert "sandbox_cleanup_failed" not in {gap.code for gap in result.ng_agent_observations.gaps}
-        session_list_env = sandbox.exec.await_args_list[1].kwargs["env"]
-        export_env = sandbox.exec.await_args_list[2].kwargs["env"]
+        gap_codes = {gap.code for gap in result.ng_agent_observations.gaps}
+        assert "model_call_ownership_unavailable" not in gap_codes
+        assert "sandbox_lifecycle_timing_unavailable" in gap_codes
+        assert "sandbox_cleanup_failed" not in gap_codes
+        agent_execs = sandbox.exec.await_args_list[2 if agent_user is not None else 0 :]
+        assert all(call.kwargs.get("user") == agent_user for call in agent_execs)
+        assert result.agent_user == agent_user
+        assert server._sandbox_id_to_agent_user == {}
+        session_list_env = agent_execs[1].kwargs["env"]
+        export_env = agent_execs[2].kwargs["env"]
         remote_data_home = session_list_env["XDG_DATA_HOME"]
         assert remote_data_home.startswith("/tmp/nemo-gym-opencode-")
-        assert f"XDG_DATA_HOME={remote_data_home}" in sandbox.exec.await_args_list[0].kwargs["command"]
+        assert f"XDG_DATA_HOME={remote_data_home}" in agent_execs[0].kwargs["command"]
         assert export_env["XDG_DATA_HOME"] == remote_data_home
-        assert (
-            "opencode export session-id > /tmp/opencode_export.json"
-            in sandbox.exec.await_args_list[2].kwargs["command"]
-        )
+        assert "opencode export session-id > /tmp/opencode_export.json" in agent_execs[2].kwargs["command"]
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()

@@ -89,7 +89,7 @@ def _make_request(
 
 
 def _make_server(
-    overlap_metric_rule: OverlapMetricRule = OverlapMetricRule.LCS,
+    overlap_metric_rule: OverlapMetricRule = OverlapMetricRule.NGRAM16,
     overlap_grading_rule: OverlapGradingRule = OverlapGradingRule.MULTIPLY,
 ) -> LCNIAHResourcesServer:
     config = LCNIAHResourcesServerConfig(
@@ -305,30 +305,40 @@ class TestVerify:
             input_text="graph prompt",
         )
         result = await server.verify(request)
-        assert result.overlap_seq_match == approx(0.0)
-        assert result.overlap_ngram16 == approx(0.0)
-        assert result.overlap_lcs == approx(0.0)
         assert result.reasoning_overlap == approx(0.0)
         assert result.reward == approx(1.0)
 
     @pytest.mark.parametrize(
-        "metric_rule, signal_field",
+        "metric_rule, expected_signal",
         [
-            (OverlapMetricRule.SEQ_MATCH, "overlap_seq_match"),
-            (OverlapMetricRule.NGRAM16, "overlap_ngram16"),
-            (OverlapMetricRule.LCS, "overlap_lcs"),
+            (OverlapMetricRule.SEQ_MATCH, lambda r, i: LCNIAHResourcesServer._overlap_seq_match(r, i)),
+            (OverlapMetricRule.NGRAM16, lambda r, i: LCNIAHResourcesServer._overlap_ngram(r, i, n=16)),
+            (OverlapMetricRule.LCS, lambda r, i: LCNIAHResourcesServer._overlap_lcs(r, i)),
         ],
     )
-    async def test_metric_rule_selects_signal(self, metric_rule: OverlapMetricRule, signal_field: str) -> None:
+    async def test_metric_rule_selects_signal(self, metric_rule: OverlapMetricRule, expected_signal) -> None:
         server = _make_server(metric_rule)
+        reasoning = "a partially overlapping reasoning trace with several words"
+        input_text = "a partially overlapping prompt with several extra words"
         request = _make_request(
             expected_answer='["a"]',
             answer="Final Answer: [a]",
-            reasoning="a partially overlapping reasoning trace with several words",
-            input_text="a partially overlapping prompt with several extra words",
+            reasoning=reasoning,
+            input_text=input_text,
         )
         result = await server.verify(request)
-        assert result.reasoning_overlap == approx(getattr(result, signal_field))
+        assert result.reasoning_overlap == approx(expected_signal(reasoning, input_text))
+
+    async def test_metric_rules_are_distinguishable(self) -> None:
+        """The three rules must not be interchangeable, or the parametrized test above is vacuous."""
+        reasoning = "a partially overlapping reasoning trace with several words"
+        input_text = "a partially overlapping prompt with several extra words"
+        signals = {
+            LCNIAHResourcesServer._overlap_seq_match(reasoning, input_text),
+            LCNIAHResourcesServer._overlap_ngram(reasoning, input_text, n=16),
+            LCNIAHResourcesServer._overlap_lcs(reasoning, input_text),
+        }
+        assert len(signals) == 3
 
     async def test_invalid_metric_rule_raises(self) -> None:
         server = _make_server()
@@ -349,18 +359,19 @@ class TestVerify:
         request = _make_request(expected_answer='["x"]', answer="Final Answer: [x]", reasoning="r", input_text="i")
         result = await server.verify(request)
         dump = result.model_dump()
-        for field in (
-            "reward",
-            "answer_score",
-            "overlap_seq_match",
-            "overlap_ngram16",
-            "overlap_lcs",
-            "reasoning_overlap",
-        ):
+        for field in ("reward", "answer_score", "reasoning_overlap"):
             assert field in dump
+        # Only the selected signal is computed, so the per-signal fields are no longer emitted.
+        for field in ("overlap_seq_match", "overlap_ngram16", "overlap_lcs"):
+            assert field not in dump
 
 
 class TestServerInstantiation:
     def test_default_name(self) -> None:
         config = LCNIAHResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="")
         assert config.name == "lc_niah"
+
+    def test_default_rules(self) -> None:
+        config = LCNIAHResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="")
+        assert config.overlap_metric_rule == OverlapMetricRule.NGRAM16
+        assert config.overlap_grading_rule == OverlapGradingRule.MULTIPLY

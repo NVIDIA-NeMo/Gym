@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from copy import deepcopy
-from types import UnionType
+from types import SimpleNamespace, UnionType
 from typing import (
     Annotated,
     Any,
@@ -27,12 +27,15 @@ from typing import (
     get_origin,
     get_type_hints,
 )
+from unittest.mock import AsyncMock, call
 
 import openai
 import pytest
+from aiohttp import ClientResponseError
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
 from openai.types.responses import (
     EasyInputMessage,
+    FunctionTool,
     ResponseCodeInterpreterToolCall,
     ResponseComputerToolCall,
     ResponseCustomToolCall,
@@ -67,6 +70,7 @@ from openai.types.responses.response_output_item import (
 from pydantic import ValidationError
 
 from nemo_gym.openai_utils import (
+    MAX_NUM_TRIES,
     RESPONSES_TO_TRAIN,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
@@ -86,6 +90,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseCustomToolCall,
     NeMoGymResponseFileSearchToolCall,
+    NeMoGymResponseFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseFunctionWebSearch,
     NeMoGymResponseInputItem,
@@ -98,7 +103,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    PermanentEndpointError,
     TokenIDLogProbMixin,
+    _error_body_is_permanent_auth,
+    _error_body_is_permanent_quota,
     accumulate_response_usage,
     training_variant_of,
 )
@@ -122,8 +130,300 @@ def _response_with_output(output: list) -> dict:
 
 
 class TestOpenAIUtils:
+    def test_invalid_retry_configuration_rejected(self):
+        with pytest.raises(ValidationError):
+            NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", max_http_attempts=0)
+
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+    async def test_external_endpoint_retries_are_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        response = SimpleNamespace(status=504, content=SimpleNamespace(read=AsyncMock(return_value=b"")))
+        request = AsyncMock(side_effect=[response] * MAX_NUM_TRIES + [SimpleNamespace(status=200)])
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+
+        async def raise_status(response, content=None):
+            raise RuntimeError("bounded")
+
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        with pytest.raises(RuntimeError):
+            await client._request_with_retry()
+
+        assert request.await_count == MAX_NUM_TRIES
+
+    @pytest.mark.parametrize("status", [404, 408])
+    async def test_retry_reuses_request_with_fixed_delay(self, monkeypatch, status):
+        failure = SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=b"temporary")))
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[failure, failure, success])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        payload = {"model": "judge", "input": [{"role": "user", "content": "preserved answer"}]}
+        original = deepcopy(payload)
+
+        result = await client._request_with_retry(method="POST", url="https://example.com/v1/responses", json=payload)
+
+        assert result is success
+        assert request.await_count == 3
+        assert all(c.kwargs["json"] == original for c in request.await_args_list)
+        assert payload == original
+        assert sleep.await_args_list == [call(0.5), call(0.5)]
+
+    async def test_non_retryable_http_errors_are_returned_once(self, monkeypatch):
+        response = SimpleNamespace(status=400)
+        request = AsyncMock(return_value=response)
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        assert await client._request_with_retry() is response
+        request.assert_awaited_once()
+        sleep.assert_not_awaited()
+
+    @pytest.mark.parametrize("status", [404, 408])
+    @pytest.mark.parametrize("attempts", [1, 3, 5])
+    @pytest.mark.parametrize("internal", [False, True])
+    async def test_configured_attempt_limit_preserves_terminal_error(self, monkeypatch, status, attempts, internal):
+        replies = [
+            SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=b"error body")))
+            for _ in range(attempts)
+        ]
+        request = AsyncMock(side_effect=replies)
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+
+        async def raise_status(response, content=None):
+            assert response is replies[-1]
+            assert content == b"error body"
+            raise RuntimeError("terminal error")
+
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.com/v1",
+            max_http_attempts=attempts,
+            internal=internal,
+        )
+        with pytest.raises(RuntimeError, match="terminal error"):
+            await client._request_with_retry()
+        assert request.await_count == attempts
+        assert sleep.await_args_list == [call(0.5)] * (attempts - 1)
+
+    @pytest.mark.parametrize(
+        "body,expected",
+        [
+            (b'{"error":{"code":"budget_exceeded"}}', True),
+            (b'{"error":{"type":"insufficient_quota"}}', True),
+            (b'{"error":{"code":"rate_limit_exceeded"}}', False),
+            (b"Quota exceeded for quota metric requests per minute. Retry in 30 seconds.", False),
+            (b'{"error":{"message":"quota exceeded"}}', False),
+            (b"budget_exceeded", False),
+        ],
+    )
+    def test_permanent_quota_classifier(self, body, expected):
+        assert _error_body_is_permanent_quota(body) is expected
+
+    @pytest.mark.parametrize(
+        "body,expected",
+        [
+            (b'{"error":{"code":"invalid_api_key"}}', True),
+            (b'{"error":{"type":"authentication_error"}}', True),
+            (b"Incorrect API key provided", True),
+            (b'{"error":"unauthorized"}', False),
+            (b'{"error":{"message":"model not available"}}', False),
+        ],
+    )
+    def test_permanent_auth_classifier(self, body, expected):
+        assert _error_body_is_permanent_auth(body) is expected
+
+    @pytest.mark.parametrize(
+        "status,body",
+        [
+            (429, b'{"error":{"code":"budget_exceeded"}}'),
+            (429, b'{"error":{"type":"insufficient_quota"}}'),
+            (401, b'{"error":{"code":"invalid_api_key"}}'),
+            (403, b'{"error":{"type":"authentication_error"}}'),
+        ],
+    )
+    async def test_permanent_quota_and_auth_errors_fail_fast(self, monkeypatch, status, body):
+        response = SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=body)))
+        request = AsyncMock(return_value=response)
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        with pytest.raises(PermanentEndpointError) as first:
+            await client._request_with_retry(url="https://example.com/v1/responses")
+        with pytest.raises(PermanentEndpointError) as second:
+            await client._request_with_retry(url="https://example.com/v1/responses")
+
+        assert first.value is not second.value
+        assert first.value.status == status
+        assert first.value.response_content == body
+        request.assert_awaited_once()
+        sleep.assert_not_awaited()
+
+    async def test_generic_quota_exceeded_429_still_retries(self, monkeypatch):
+        failure = SimpleNamespace(
+            status=429,
+            content=SimpleNamespace(
+                read=AsyncMock(return_value=b"Quota exceeded for quota metric requests per minute.")
+            ),
+        )
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[failure, success])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        result = await client._request_with_retry(url="https://example.com/v1/responses")
+
+        assert result is success
+        assert request.await_count == 2
+        sleep.assert_awaited_once_with(0.5)
+
+    async def test_transient_429_still_retries(self, monkeypatch):
+        failure = SimpleNamespace(
+            status=429,
+            content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":"rate_limit_exceeded"}')),
+        )
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[failure, success])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        result = await client._request_with_retry(url="https://example.com/v1/responses")
+
+        assert result is success
+        assert request.await_count == 2
+        sleep.assert_awaited_once_with(0.5)
+
+    async def test_exhausted_transient_429_raises_without_tripping(self, monkeypatch):
+        replies = [
+            SimpleNamespace(
+                status=429,
+                content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":"rate_limit_exceeded"}')),
+            )
+            for _ in range(MAX_NUM_TRIES)
+        ]
+        request = AsyncMock(side_effect=replies)
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        seen = {}
+
+        async def raise_status(response, content=None):
+            seen["response"] = response
+            seen["content"] = content
+            raise RuntimeError("terminal 429")
+
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        with pytest.raises(RuntimeError, match="terminal 429"):
+            await client._request_with_retry(url="https://example.com/v1/responses")
+        assert request.await_count == MAX_NUM_TRIES
+        assert seen["content"] == b'{"error":"rate_limit_exceeded"}'
+        assert sleep.await_count == MAX_NUM_TRIES - 1
+
+        later = SimpleNamespace(status=200)
+        request.side_effect = [later]
+        assert await client._request_with_retry(url="https://example.com/v1/responses") is later
+
+    async def test_auth_without_key_marker_is_returned_once(self, monkeypatch):
+        response = SimpleNamespace(
+            status=401,
+            content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":"unauthorized"}')),
+        )
+        request = AsyncMock(return_value=response)
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        assert await client._request_with_retry() is response
+        assert await client._request_with_retry() is response
+        assert request.await_count == 2
+        sleep.assert_not_awaited()
+
+    async def test_request_skips_the_wire_after_permanent_trip(self, monkeypatch):
+        response = SimpleNamespace(
+            status=429,
+            content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":{"code":"budget_exceeded"}}')),
+        )
+        request = AsyncMock(return_value=response)
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        with pytest.raises(PermanentEndpointError):
+            await client._request(method="POST", url="https://example.com/v1/responses")
+        with pytest.raises(PermanentEndpointError):
+            await client._request(method="POST", url="https://example.com/v1/responses")
+
+        request.assert_awaited_once()
+
+    async def test_in_flight_retry_stops_after_sibling_trips(self, monkeypatch):
+        import asyncio
+
+        rate_limited = SimpleNamespace(
+            status=429,
+            content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":"rate_limit_exceeded"}')),
+        )
+        spent = SimpleNamespace(
+            status=429,
+            content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":{"code":"budget_exceeded"}}')),
+        )
+        gate = asyncio.Event()
+        calls = 0
+
+        async def fake_request(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return rate_limited
+            return spent
+
+        async def fake_sleep(_delay):
+            await gate.wait()
+
+        monkeypatch.setattr("nemo_gym.openai_utils.request", fake_request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", fake_sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        first = asyncio.create_task(client._request_with_retry(url="https://example.com/v1/responses"))
+        await asyncio.sleep(0)
+        with pytest.raises(PermanentEndpointError):
+            await client._request_with_retry(url="https://example.com/v1/responses")
+        gate.set()
+        with pytest.raises(PermanentEndpointError):
+            await first
+        assert calls == 2
+
+    async def test_create_chat_completion_surfaces_permanent_error_status(self, monkeypatch):
+        body = b'{"error":{"code":"budget_exceeded"}}'
+        response = SimpleNamespace(status=429, content=SimpleNamespace(read=AsyncMock(return_value=body)))
+        monkeypatch.setattr("nemo_gym.openai_utils.request", AsyncMock(return_value=response))
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        with pytest.raises(PermanentEndpointError) as exc_info:
+            await client.create_chat_completion(model="judge", messages=[])
+
+        assert isinstance(exc_info.value, ClientResponseError)
+        assert exc_info.value.status == 429
+        assert exc_info.value.response_content == body
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:
@@ -140,6 +440,21 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
     def test_unknown_field_still_forbidden(self) -> None:
         with pytest.raises(ValidationError):
             NeMoGymResponseCreateParamsNonStreaming(input="hello", not_a_real_field=1)
+
+    def test_response_tool_null_defer_loading_normalized_for_replay(self) -> None:
+        response_tool = FunctionTool(
+            name="get_weather",
+            parameters={"type": "object", "properties": {}},
+            strict=None,
+            type="function",
+        )
+        response_tool_dump = response_tool.model_dump()
+        assert response_tool_dump["defer_loading"] is None
+
+        replay = NeMoGymResponseCreateParamsNonStreaming(input="hello", tools=[response_tool_dump])
+
+        assert replay.tools[0]["defer_loading"] is False
+        assert replay.tools[0]["strict"] is None
 
     @pytest.mark.parametrize(
         "role",
@@ -221,6 +536,214 @@ class TestTokenMetadataValidation:
                     "prompt_token_ids": [1],
                 },
             )
+
+    @pytest.mark.parametrize("container", ["input", "output"])
+    def test_response_items_reject_partial_metadata(self, container: str) -> None:
+        item = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "answer", "annotations": []}],
+            "prompt_token_ids": [1],
+        }
+
+        with pytest.raises(ValidationError, match="Token metadata must include all required fields"):
+            if container == "input":
+                NeMoGymResponseCreateParamsNonStreaming(input=[item])
+            else:
+                NeMoGymResponse.model_validate(_response_with_output([item]))
+
+
+class TestDiscriminatedResponseItems:
+    _TOKEN_METADATA = {
+        "prompt_token_ids": [1, 2],
+        "generation_token_ids": [3],
+        "generation_log_probs": [-0.1],
+        "routed_experts": [[[0, 1]]],
+    }
+
+    @pytest.mark.parametrize(
+        "payload, expected_type",
+        [
+            (
+                {"type": "message", "role": "user", "content": "question", "phase": "commentary"},
+                NeMoGymEasyInputMessage,
+            ),
+            (
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "question"}],
+                },
+                NeMoGymEasyInputMessage,
+            ),
+            (
+                {
+                    "type": "message",
+                    "role": "system",
+                    "status": "completed",
+                    "content": [{"type": "input_text", "text": "instructions"}],
+                },
+                NeMoGymMessage,
+            ),
+            (
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "answer", "annotations": []}],
+                    "phase": "final_answer",
+                },
+                NeMoGymResponseOutputMessage,
+            ),
+            (
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "input_text", "text": "local observation"}],
+                },
+                NeMoGymEasyInputMessage,
+            ),
+            (
+                {
+                    "type": "message",
+                    "id": "msg_2",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [],
+                },
+                NeMoGymResponseOutputMessage,
+            ),
+            (
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                },
+                NeMoGymEasyInputMessage,
+            ),
+        ],
+        ids=[
+            "easy-string",
+            "easy-input-content",
+            "input-status",
+            "output-content",
+            "assistant-input-content",
+            "output-empty-content",
+            "easy-empty-content",
+        ],
+    )
+    def test_message_shape_selects_concrete_class(self, payload: dict, expected_type: type) -> None:
+        request_item = NeMoGymResponseCreateParamsNonStreaming(input=[payload]).input[0]
+        response_item = NeMoGymResponse.model_validate(_response_with_output([payload])).output[0]
+
+        assert type(request_item) is expected_type
+        assert type(response_item) is expected_type
+
+    @pytest.mark.parametrize(
+        "base_type, payload",
+        [
+            (
+                NeMoGymEasyInputMessage,
+                {"type": "message", "role": "user", "content": "question", "phase": "commentary"},
+            ),
+            (
+                NeMoGymMessage,
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "status": "in_progress",
+                    "content": [{"type": "input_text", "text": "instructions"}],
+                },
+            ),
+            (
+                NeMoGymResponseOutputMessage,
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "incomplete",
+                    "content": [{"type": "refusal", "refusal": "no"}],
+                    "phase": "final_answer",
+                },
+            ),
+            (
+                NeMoGymResponseFunctionToolCall,
+                {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                    "status": "completed",
+                    "namespace": "tools",
+                },
+            ),
+            (
+                NeMoGymResponseReasoningItem,
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [],
+                    "encrypted_content": "opaque",
+                },
+            ),
+        ],
+        ids=["easy-message", "input-message", "output-message", "function-call", "reasoning"],
+    )
+    def test_all_training_variants_preserve_fields_and_revalidate(self, base_type: type, payload: dict) -> None:
+        payload = {**payload, **self._TOKEN_METADATA}
+        expected_type = RESPONSES_TO_TRAIN[base_type]
+
+        request = NeMoGymResponseCreateParamsNonStreaming(input=[payload])
+        response = NeMoGymResponse.model_validate(_response_with_output([payload]))
+        assert type(request.input[0]) is expected_type
+        assert type(response.output[0]) is expected_type
+
+        request_dump = request.model_dump(mode="json", exclude_unset=True)
+        response_dump = response.model_dump(mode="json", exclude_unset=True)
+        for key, value in payload.items():
+            assert request_dump["input"][0][key] == value
+            assert response_dump["output"][0][key] == value
+
+        revalidated_request = NeMoGymResponseCreateParamsNonStreaming.model_validate(request_dump)
+        revalidated_response = NeMoGymResponse.model_validate(response_dump)
+        assert type(revalidated_request.input[0]) is expected_type
+        assert type(revalidated_response.output[0]) is expected_type
+        assert revalidated_request.model_dump(mode="json", exclude_unset=True) == request_dump
+        assert revalidated_response.model_dump(mode="json", exclude_unset=True) == response_dump
+
+        instance = expected_type.model_validate(payload)
+        assert type(NeMoGymResponseCreateParamsNonStreaming(input=[instance]).input[0]) is expected_type
+        assert type(NeMoGymResponse.model_validate(_response_with_output([instance])).output[0]) is expected_type
+
+    def test_typeless_input_uses_field_preserving_fallback(self) -> None:
+        payload = {"role": "tool", "tool_call_id": "call_1", "content": "result", "provider_field": {"x": 1}}
+
+        request = NeMoGymResponseCreateParamsNonStreaming(input=[payload])
+
+        assert type(request.input[0]) is NeMoGymResponseMcpListTools
+        assert request.model_dump(mode="json", exclude_unset=True)["input"][0] == payload
+
+    def test_function_call_output_models_route_by_output_fields(self) -> None:
+        input_payload = {"type": "function_call_output", "call_id": "call_1", "output": "result"}
+        output_payload = {
+            **input_payload,
+            "id": "fco_1",
+            "status": "completed",
+        }
+
+        request_item = NeMoGymResponseCreateParamsNonStreaming(input=[input_payload]).input[0]
+        local_output_item = NeMoGymResponse.model_validate(_response_with_output([input_payload])).output[0]
+        provider_output_item = NeMoGymResponse.model_validate(_response_with_output([output_payload])).output[0]
+
+        assert type(request_item) is NeMoGymFunctionCallOutput
+        assert type(local_output_item) is NeMoGymFunctionCallOutput
+        assert type(provider_output_item) is NeMoGymResponseFunctionCallOutput
+        assert provider_output_item.model_dump(mode="json", exclude_unset=True) == output_payload
 
 
 class TestNeMoGymChatCompletionSchemas:

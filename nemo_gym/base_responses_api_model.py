@@ -37,11 +37,12 @@ import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, ClassVar, Iterable, Mapping, Optional
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
-from fastapi import Body, FastAPI, HTTPException, Request, Response
+from fastapi import Body, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -56,6 +57,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.responses_streaming import (
+    NamespaceMap,
+    restore_namespace_tool_calls,
     sanitize_streaming_responses_body,
     synthesize_responses_failure_sse,
     synthesize_responses_sse,
@@ -84,7 +87,7 @@ from nemo_gym.token_id_capture import (
 
 # The store factory needs Gym's server stack.
 # The leaf package does not re-export it.
-from nemo_gym.token_id_capture.config import token_id_capture_config
+from nemo_gym.token_id_capture.config import NonGeneratingRequest, token_id_capture_config
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
@@ -93,16 +96,6 @@ from nemo_gym.token_id_capture.store import make_token_store
 
 
 logger = logging.getLogger(__name__)
-
-
-def _reject_external_capture_streaming(body: dict[str, Any]) -> None:
-    """Reject streaming before sanitization can hide it from worker capture."""
-    context = current_capture_context()
-    if context is not None and context.external_staging and body.get("stream") is True:
-        raise HTTPException(
-            status_code=422,
-            detail="worker-owned token capture does not support streaming requests",
-        )
 
 
 # Stateless; shared by every model server's default /v1/messages handler.
@@ -186,7 +179,8 @@ def _orjson_dispatch_response(content: Any) -> Any:
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
-    pass
+    # Exact successful routes whose responses cannot contain policy-generated content.
+    token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -194,6 +188,22 @@ class BaseResponsesAPIModel(BaseServer):
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    # Subclasses can declare successful metadata or health routes here.
+    # Unknown successful routes fail closed during training-token capture.
+    non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
+
+    async def _finalize_served_response(self, response: Any) -> None:
+        """Finalize capture after conversion to the response returned to the client."""
+
+    async def _stream_served_response(self, response: Any, events: Iterable[str | bytes]) -> StreamingResponse:
+        """Serialize buffered SSE before committing externally staged capture."""
+        context = current_capture_context()
+        if context is not None and context.external_staging:
+            # SSE generators serialize lazily. Finish that work before recording success.
+            events = [event.encode("utf-8") if isinstance(event, str) else event for event in events]
+            await self._finalize_served_response(response)
+        return StreamingResponse(iter(events), media_type="text/event-stream")
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
@@ -205,6 +215,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             model_server_name=self.config.name,
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
+            non_generating_requests=self.non_generating_model_routes
+            | frozenset(
+                (request.method, request.path) for request in self.config.token_id_capture_non_generating_requests
+            ),
         )
 
         model_attributes = {"nemo.gym.server.name": self.config.name}
@@ -252,10 +266,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
         still fails eagerly, before the stream is committed).
         """
-        _reject_external_capture_streaming(body)
         if not body.get("stream"):
             params = _validate_responses_params(body)
-            return _orjson_dispatch_response(await self._invoke_responses(request, params))
+            response = await self._invoke_responses(request, params)
+            dispatched = _orjson_dispatch_response(response)
+            await self._finalize_served_response(response)
+            return dispatched
 
         cleaned, ns_map = sanitize_streaming_responses_body(body)
         try:
@@ -263,9 +279,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         except ValidationError as exc:
             raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
 
+        return await self._stream_responses(request, params, ns_map)
+
+    async def _stream_responses(
+        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, ns_map: NamespaceMap
+    ) -> StreamingResponse:
+        """Serve the same converted response to capture and Responses SSE clients."""
         try:
             response = await self._invoke_responses(request, params)
             response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
+            response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
+            return await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
         except Exception as exc:
             # The streaming contract is already the response's shape, so a backend failure must be a
             # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
@@ -274,10 +298,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 synthesize_responses_failure_sse(str(exc)),
                 media_type="text/event-stream",
             )
-        return StreamingResponse(
-            synthesize_responses_sse(response_json, ns_map),
-            media_type="text/event-stream",
-        )
 
     async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/chat/completions`` entrypoint shared by every Gym model server.
@@ -297,18 +317,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
         malformed ``stream`` with the same 422 as before.
         """
-        _reject_external_capture_streaming(body)
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
-            return _orjson_dispatch_response(await self._invoke_chat_completions(request, params))
+            response = await self._invoke_chat_completions(request, params)
+            dispatched = _orjson_dispatch_response(response)
+            await self._finalize_served_response(response)
+            return dispatched
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
         completion = await self._invoke_chat_completions(request, params)
         completion_json = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
-        return StreamingResponse(
+        return await self._stream_served_response(
+            completion_json,
             synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
-            media_type="text/event-stream",
         )
 
     async def _invoke_chat_completions(
@@ -344,17 +366,18 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (the Claude Code CLI always does), the complete response is re-emitted as a synthesized
         Anthropic SSE event stream. Servers may override this for native Messages handling.
         """
-        _reject_external_capture_streaming(body)
         params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
         response = await self._invoke_responses(request, params)
         model_name = body.get("model") or response.model
         anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
         if body.get("stream"):
-            return StreamingResponse(
+            return await self._stream_served_response(
+                anthropic_response,
                 _ANTHROPIC_CONVERTER.anthropic_response_to_sse(anthropic_response),
-                media_type="text/event-stream",
             )
-        return _orjson_dispatch_response(anthropic_response)
+        dispatched = _orjson_dispatch_response(anthropic_response)
+        await self._finalize_served_response(anthropic_response)
+        return dispatched
 
     async def _invoke_responses(
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
@@ -694,6 +717,10 @@ class ModelCallRecord(BaseModel):
     # Unique server-generated identity for each persisted call.
     model_call_id: Optional[str] = None
     response_id: Optional[str] = None
+    client_session_id: Optional[str] = Field(
+        default=None,
+        description="Client-declared correlation identifier; evidence only, not a security boundary.",
+    )
 
     # Durable append order, not a causal or semantic order for concurrent calls.
     call_index: int
@@ -771,6 +798,9 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
     return ModelCallRecord(
         model_call_id=exchange.get("model_call_id"),
         response_id=response.get("id") if isinstance(response.get("id"), str) else None,
+        client_session_id=(
+            exchange.get("client_session_id") if isinstance(exchange.get("client_session_id"), str) else None
+        ),
         call_index=call_index,
         model_ref=exchange.get("model_ref"),
         model=model if isinstance(model, str) else None,
@@ -846,6 +876,10 @@ _OBSERVED_PATHS = {
     "/v1/messages": "messages",
 }
 
+# A client may declare its persisted session ID for exact correlation with an AgentInvocation.
+# It is correlation evidence, not authentication; absence is fail-safe.
+_CLIENT_SESSION_HEADER = b"x-session-id"
+
 _TERMINAL_SSE_LINES: dict[str, dict[bytes, str]] = {
     "responses": {
         b"event: response.completed": "complete",
@@ -863,6 +897,48 @@ def _headers_content_type(headers: list) -> bytes:
         if key.lower() == b"content-type":
             return value
     return b""
+
+
+def _unique_request_header(headers: list, name: bytes) -> Optional[str]:
+    values = {value.decode("latin-1") for key, value in headers if key.lower() == name and value}
+    return values.pop() if len(values) == 1 else None
+
+
+def _preserve_capture_prefix_on_redirect(
+    message: dict[str, Any],
+    *,
+    capture_prefix: str,
+    request_headers: list[tuple[bytes, bytes]],
+) -> dict[str, Any]:
+    """Keep rollout correlation on root-relative and same-origin redirects."""
+    status = int(message.get("status") or 0)
+    if not 300 <= status < 400:
+        return message
+
+    request_host = next(
+        (value.decode("latin-1") for key, value in request_headers if key.lower() == b"host"),
+        "",
+    )
+    headers = list(message.get("headers") or [])
+    changed = False
+    for index, (key, value) in enumerate(headers):
+        if key.lower() != b"location":
+            continue
+        location = value.decode("latin-1")
+        parts = urlsplit(location)
+        if parts.netloc and parts.netloc != request_host:
+            continue
+        if not parts.path.startswith("/") or parts.path.startswith(f"{capture_prefix}/"):
+            continue
+        headers[index] = (
+            key,
+            urlunsplit(parts._replace(path=f"{capture_prefix}{parts.path}")).encode("latin-1"),
+        )
+        changed = True
+
+    if not changed:
+        return message
+    return {**message, "headers": headers}
 
 
 def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str]:
@@ -1039,6 +1115,7 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     """Rebuild a Chat Completions response from streamed chunks."""
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
+    refusal_parts: list[str] = []
     tool_calls: dict[int, dict[str, Any]] = {}
     usage: Optional[dict[str, Any]] = None
     model: Optional[str] = None
@@ -1060,6 +1137,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
             role = delta.get("role") or role
             if delta.get("content"):
                 content_parts.append(delta["content"])
+            if delta.get("refusal"):
+                refusal_parts.append(delta["refusal"])
             reasoning = delta.get("reasoning_content") or delta.get("reasoning")
             if reasoning:
                 reasoning_parts.append(reasoning)
@@ -1081,6 +1160,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     message: dict[str, Any] = {"role": role, "content": "".join(content_parts) or None}
     if reasoning_parts:
         message["reasoning_content"] = "".join(reasoning_parts)
+    if refusal_parts:
+        message["refusal"] = "".join(refusal_parts)
     if tool_calls:
         message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
     result: dict[str, Any] = {
@@ -1126,6 +1207,7 @@ def _record(
     model_server_name: Optional[str],
     request_bytes: bytes,
     *,
+    client_session_id: Optional[str] = None,
     rollout_id: str,
     model_call_id: str,
     started_at: float,
@@ -1164,6 +1246,8 @@ def _record(
             "request": request_body,
             "response": response_body,
         }
+        if client_session_id is not None:
+            exchange["client_session_id"] = client_session_id
         if request_raw is not None:
             exchange["request_raw"] = request_raw
         if response_raw is not None:
@@ -1218,8 +1302,8 @@ class _CaptureMiddleware:
     downstream unchanged, so it composes with streaming (SSE) responses -- it never consumes or rewraps
     the stream. SSE chunks are forwarded immediately except for the terminal event, which is released
     after the capture is durable. Every chunk is also buffered for post-hoc reassembly, so a very long
-    stream is held in memory until it completes. When ``store`` is None (capture disabled) it strips the
-    prefix and forwards only.
+    stream is held in memory until it completes. When ``store`` is None it avoids buffering evaluation
+    records, while still persisting external capture failures before terminal events are forwarded.
     """
 
     def __init__(
@@ -1234,6 +1318,7 @@ class _CaptureMiddleware:
         delta_records: bool = False,
         external_staging: bool = False,
         token_capture_enabled: bool = False,
+        non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
     ) -> None:
         self._app = app
         self._store = store
@@ -1254,6 +1339,7 @@ class _CaptureMiddleware:
         # A framework may stage records from its inference worker.
         # This process still resolves the capture identity.
         self._token_capture_enabled = token_capture_enabled
+        self._non_generating_requests = non_generating_requests
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -1263,14 +1349,18 @@ class _CaptureMiddleware:
         path = scope.get("path", "")
         rollout_from_path: Optional[str] = None
         token_capture_requested = False
+        capture_prefix = ""
         prefix_match = _ROLLOUT_PATH_RE.match(path)
         if prefix_match:
             rollout_from_path = prefix_match.group("rollout_id")
             token_capture_requested = prefix_match.group("token_capture") is not None
+            capture_prefix = path[: prefix_match.start("rest")]
             path = prefix_match.group("rest")
             scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
 
+        method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)
+        known_non_generating = (method, path) in self._non_generating_requests
 
         # Forward when no active store needs this correlated endpoint.
         # The prefix is already stripped.
@@ -1283,26 +1373,63 @@ class _CaptureMiddleware:
         # Installed sinks are resolved for each request.
         token_sink = self._configured_sink or installed_token_sink() or self._token_store
         capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
-        if token_capture_requested and dialect is None:
-            # An uncapturable call must not look complete.
-            # Its output can still feed later prompts.
-            # Mark the rollout before forwarding so consumers retain that evidence.
-            if token_sink is not None:
+        if token_capture_requested and dialect is None and token_sink is not None:
+            marked_incomplete = False
+            response_started = False
+
+            async def _mark_unobserved_incomplete(reason: str) -> None:
+                nonlocal marked_incomplete
+                if marked_incomplete:
+                    return
+                marked_incomplete = True
                 try:
                     await token_sink.mark_incomplete(rollout_from_path, "")
+                    logger.warning(
+                        f"Marked rollout {rollout_from_path} incomplete because unclassified model request "
+                        f"{method} {path} {reason}. Declare the exact request on the model server only if its "
+                        "response cannot contain policy-generated content."
+                    )
                 except Exception:
                     logger.warning(
-                        "Could not mark rollout %s incomplete for unobserved path %s.",
-                        rollout_from_path,
-                        path,
+                        f"Could not mark rollout {rollout_from_path} incomplete for unobserved path {path}.",
                         exc_info=True,
                     )
+
+            async def _send_unobserved(message: dict[str, Any]) -> None:
+                nonlocal response_started
+                if message.get("type") == "http.response.start":
+                    response_started = True
+                    status = int(message.get("status") or 0)
+                    safe_without_capture = status in {404, 405}
+                    if not known_non_generating and not safe_without_capture:
+                        await _mark_unobserved_incomplete(f"returned HTTP {status}")
+                    message = _preserve_capture_prefix_on_redirect(
+                        message,
+                        capture_prefix=capture_prefix,
+                        request_headers=list(scope.get("headers") or []),
+                    )
+                await send(message)
+
+            try:
+                await self._app(scope, receive, _send_unobserved)
+            except asyncio.CancelledError:
+                if not known_non_generating and not response_started:
+                    await _mark_unobserved_incomplete("was cancelled before starting a response")
+                raise
+            except Exception:
+                if not known_non_generating and not response_started:
+                    await _mark_unobserved_incomplete("failed before starting a response")
+                raise
+            if not known_non_generating and not response_started:
+                await _mark_unobserved_incomplete("completed without starting a response")
+            return
         if (self._store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
             await self._app(scope, receive, send)
             return
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
+        client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
 
         # Give the model server a token sink keyed to this call.
         # The sink records token ids from the complete response.
@@ -1324,10 +1451,26 @@ class _CaptureMiddleware:
             sink_token = set_token_sink(capture_context)
 
         # Training-only capture has no evaluation record.
-        # Forward without buffering while the sink is active.
+        # Persist capture failure before forwarding a terminal event or finishing a JSON response.
         if self._store is None:
+            streaming = False
+            sse_event_buffer = bytearray()
+
+            async def _send_training_only(message: dict[str, Any]) -> None:
+                nonlocal streaming
+                if message.get("type") == "http.response.start":
+                    streaming = _headers_content_type(message.get("headers") or []).startswith(b"text/event-stream")
+                elif message.get("type") == "http.response.body":
+                    terminal = None
+                    if streaming:
+                        sse_event_buffer.extend(message.get("body", b"") or b"")
+                        terminal = _consume_terminal_sse_event(sse_event_buffer, dialect)
+                    if terminal is not None or not message.get("more_body", False):
+                        await _fail_uncommitted_external_call(capture_context)
+                await send(message)
+
             try:
-                await self._app(scope, receive, send)
+                await self._app(scope, receive, _send_training_only)
             finally:
                 await _fail_uncommitted_external_call(capture_context)
                 if sink_token is not None:
@@ -1399,6 +1542,7 @@ class _CaptureMiddleware:
                     dialect,
                     self._model_server_name,
                     bytes(request_body),
+                    client_session_id=client_session_id,
                     rollout_id=rollout_id,
                     model_call_id=model_call_id,
                     started_at=started_at,
@@ -1413,6 +1557,7 @@ class _CaptureMiddleware:
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
             finally:
+                await _fail_uncommitted_external_call(capture_context)
                 await _flush_deferred_response()
             raise
         finally:
@@ -1466,6 +1611,7 @@ class _CaptureMiddleware:
                 dialect,
                 model_server_name,
                 request_bytes,
+                client_session_id=client_session_id,
                 rollout_id=rollout_id,
                 model_call_id=model_call_id,
                 started_at=started_at,
@@ -1493,6 +1639,7 @@ def install_model_call_capture(
     model_server_name: str | None = None,
     global_config_dict: Any = None,
     num_workers: int | None = None,
+    non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
 ) -> None:
     """Install model-call capture middleware.
 
@@ -1581,6 +1728,7 @@ def install_model_call_capture(
         delta_records=(capture_settings.token_id_capture.delta_records if capture_settings is not None else False),
         external_staging=external_staging,
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
+        non_generating_requests=non_generating_requests,
     )
 
 

@@ -17,7 +17,7 @@ import json
 import pickle
 import warnings
 from asyncio import Future
-from collections import Counter
+from collections import Counter, defaultdict
 from copy import deepcopy
 from pathlib import Path
 from threading import get_ident
@@ -66,6 +66,7 @@ from nemo_gym.rollout_collection import (
     _failure_rows_counted_as_zero,
     _failures_path_for,
     _get_max_rollout_attempts,
+    _masking_step_metrics,
     _rollout_for_export,
     _rollout_request_debug_summary,
     loads_jsonl_line,
@@ -1125,6 +1126,163 @@ class TestRolloutCollection:
             ".json"
         )
         assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": expected_mean}
+
+    @pytest.mark.parametrize("count_judge_failure", [False, True])
+    async def test_masked_judge_failure_counts_as_zero_only_when_opted_in(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        count_judge_failure: bool,
+    ) -> None:
+        """Online and offline aggregation honor the opt-in without rewriting failure evidence."""
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_text(
+            "".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                + "\n"
+                for i in range(4)
+            )
+        )
+        output_path = tmp_path / "output.jsonl"
+        failure = {
+            "reward": 0.0,
+            "mask_sample": True,
+            "failure_kind": "judge_failed",
+            "failure_reason": "judge unavailable",
+            "instance_config": {"mask_sample": True},
+            NG_FAILURE_CLASS_KEY: "judge_failed",
+            "_ng_failure_judge_error": "judge unavailable",
+        }
+        metrics = []
+        metric_inputs = []
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/run":
+                return FakeResponse(200, failure if json["x"] == 0 else {"reward": 1.0})
+            metric_inputs.append(json.verify_responses)
+            result = compute_aggregate_metrics(json.verify_responses)
+            metrics.append(result)
+            return FakeResponse(200, result.model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        counted = ["judge_failed"] if count_judge_failure else []
+        await RolloutCollectionHelper().run_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_path),
+                output_jsonl_fpath=str(output_path),
+                route_failures_to_sidecar=True,
+                count_failure_classes_as_zero=counted,
+                disable_health_check=True,
+            )
+        )
+        sidecar_path = _failures_path_for(output_path)
+        original_sidecar = sidecar_path.read_bytes()
+        await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(
+                input_glob=str(output_path),
+                output_jsonl_fpath=str(tmp_path / "merged.jsonl"),
+                count_failure_classes_as_zero=counted,
+                disable_health_check=True,
+            )
+        )
+        assert len(metrics) == 2
+        for result, inputs in zip(metrics, metric_inputs):
+            assert result.key_metrics == {"mean/reward": 0.75 if count_judge_failure else 1.0}
+            assert result.agent_metrics.get("coverage/masked_rollouts", 0) == 0
+            assert len(inputs) == (4 if count_judge_failure else 3)
+            assert all("failure_kind" not in row and "failure_reason" not in row for row in inputs)
+        assert sidecar_path.read_bytes() == original_sidecar
+        saved_failure = orjson.loads(original_sidecar)
+        assert all(saved_failure[key] == value for key, value in failure.items())
+        assert len(output_path.read_text().splitlines()) == 3
+
+    @pytest.mark.parametrize("num_failures", [1, 4])
+    @pytest.mark.parametrize("counted_classes", [[], [AGENT_RUN_ERROR_FAILURE_CLASS], ["judge_failed"]])
+    @pytest.mark.parametrize("disable_aggregation", [False, True])
+    async def test_all_judge_failures_only_produce_metrics_when_explicitly_counted(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        num_failures: int,
+        counted_classes: list[str],
+        disable_aggregation: bool,
+    ) -> None:
+        """An opted-in all-failure run has a score, but never synthetic successful rollouts."""
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_text(
+            "".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
+                for _ in range(num_failures)
+            )
+        )
+        output_path = tmp_path / "output.jsonl"
+        failure = {
+            "reward": 0.0,
+            "mask_sample": True,
+            "failure_kind": "judge_failed",
+            "failure_reason": "judge unavailable",
+            "instance_config": {"mask_sample": True},
+            NG_FAILURE_CLASS_KEY: "judge_failed",
+            "_ng_failure_judge_error": "judge unavailable",
+        }
+        metric_inputs = []
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/run":
+                return FakeResponse(200, deepcopy(failure))
+            metric_inputs.append(json.verify_responses)
+            return FakeResponse(200, compute_aggregate_metrics(json.verify_responses).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_path),
+            output_jsonl_fpath=str(output_path),
+            route_failures_to_sidecar=True,
+            count_failure_classes_as_zero=counted_classes,
+            disable_aggregation=disable_aggregation,
+            disable_health_check=True,
+        )
+        counted = "judge_failed" in counted_classes
+        if counted:
+            results = await RolloutCollectionHelper().run_from_config(config)
+            assert len(results) == num_failures and all(row["mask_sample"] for row in results)
+        else:
+            # A nonempty opt-in for another class must not bypass the no-results guard.
+            with pytest.raises(RuntimeError, match="produced a result"):
+                await RolloutCollectionHelper().run_from_config(config)
+
+        sidecar_path = _failures_path_for(output_path)
+        original_sidecar = sidecar_path.read_bytes()
+        saved = [orjson.loads(line) for line in original_sidecar.splitlines()]
+        assert len(saved) == num_failures
+        assert all(all(row[key] == value for key, value in failure.items()) for row in saved)
+        assert output_path.read_bytes() == b""
+        online_path = output_path.with_stem("output_aggregate_metrics").with_suffix(".json")
+        if counted and not disable_aggregation:
+            assert orjson.loads(online_path.read_bytes())[0]["key_metrics"] == {"mean/reward": 0.0}
+        else:
+            assert not online_path.exists() and not metric_inputs
+
+        offline_path = await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(
+                input_glob=str(output_path),
+                output_jsonl_fpath=str(tmp_path / "merged.jsonl"),
+                count_failure_classes_as_zero=counted_classes,
+                disable_health_check=True,
+            )
+        )
+        if counted:
+            assert orjson.loads(offline_path.read_bytes())[0]["key_metrics"] == {"mean/reward": 0.0}
+            assert len(metric_inputs) == (1 if disable_aggregation else 2)
+            for inputs in metric_inputs:
+                assert len(inputs) == num_failures
+                assert all(row["reward"] == 0.0 and row["mask_sample"] is False for row in inputs)
+        else:
+            assert offline_path is None and not metric_inputs
+        assert sidecar_path.read_bytes() == original_sidecar
+        assert output_path.read_bytes() == (tmp_path / "merged.jsonl").read_bytes() == b""
 
     async def test_run_from_config_fails_when_no_rollout_produced_a_result(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -4045,3 +4203,99 @@ class TestPreprocessExamples:
     def test_validates_knobs_like_the_cli(self) -> None:
         with pytest.raises(ValueError, match="empty list"):
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
+
+
+class TestMaskingStepMetrics:
+    """Progress accounting covers persisted rollouts; dropped attempts are counted apart."""
+
+    def test_a_healthy_run_adds_no_keys(self) -> None:
+        assert _masking_step_metrics("my_agent", Counter({"reward": 2.0, "count": 4}), Counter()) == {}
+
+    def test_masked_rollouts_report_their_share_and_the_score_without_them(self) -> None:
+        # 10 persisted, 2 masked; the 8 unmasked ones scored 4.0 in total.
+        metrics = _masking_step_metrics("my_agent", Counter({"reward": 4.0, "count": 8, "masked": 2}), Counter())
+
+        assert metrics == {
+            "progress/my_agent/masked_pct": 20.0,
+            "progress/my_agent/reward_unmasked": 50.0,
+        }
+
+    def test_every_persisted_rollout_masked_publishes_no_score(self) -> None:
+        """No unmasked rollout means no honest average to publish."""
+        assert _masking_step_metrics("my_agent", Counter({"masked": 6}), Counter()) == {
+            "progress/my_agent/masked_pct": 100.0
+        }
+
+    def test_failed_and_omitted_attempts_do_not_enter_the_quality_average(self) -> None:
+        """A sidecar row and a kill-shaped one are counted, never averaged as a zero."""
+        metrics = _masking_step_metrics(
+            "my_agent",
+            Counter({"reward": 4.0, "count": 4}),
+            Counter({"failed": 3, "omitted": 2}),
+        )
+
+        assert metrics == {
+            "progress/my_agent/reward_unmasked": 100.0,
+            "progress/my_agent/failed": 3,
+            "progress/my_agent/omitted": 2,
+        }
+
+
+class TestAnAgentThatOnlyEverFails:
+    """The wiring case: a total failure must not fall out of the export.
+
+    `_masking_step_metrics` is correct on its own Counters; what this covers is the loop
+    that feeds it. An agent whose every request returns no result never lands in
+    `agent_name_to_counts`, so iterating that dict would drop exactly the agent whose
+    failure the series exists to surface.
+    """
+
+    def _exported_agents(self, scored: dict, dropped: dict) -> set:
+        """Reproduce the export loop's selection over the two counter dicts."""
+        agent_name_to_scored = defaultdict(Counter, {k: Counter(v) for k, v in scored.items()})
+        agent_name_to_dropped = defaultdict(Counter, {k: Counter(v) for k, v in dropped.items()})
+
+        step_metrics: dict = {}
+        for agent_name in sorted(agent_name_to_scored.keys() | agent_name_to_dropped.keys()):
+            step_metrics.update(
+                _masking_step_metrics(
+                    agent_name,
+                    agent_name_to_scored.get(agent_name, Counter()),
+                    agent_name_to_dropped.get(agent_name, Counter()),
+                )
+            )
+        return {key.split("/")[1] for key in step_metrics}
+
+    def test_an_agent_with_no_successful_result_still_reports_its_failures(self) -> None:
+        exported = self._exported_agents(
+            scored={"healthy_agent": {"reward": 3.0, "count": 4}},
+            dropped={"broken_agent": {"failed": 4}},
+        )
+
+        assert "broken_agent" in exported
+
+    def test_the_healthy_agent_is_not_lost_in_the_process(self) -> None:
+        exported = self._exported_agents(
+            scored={"healthy_agent": {"reward": 3.0, "count": 4, "masked": 1}},
+            dropped={"broken_agent": {"failed": 4}},
+        )
+
+        assert exported == {"healthy_agent", "broken_agent"}
+
+    def test_a_run_with_nothing_wrong_still_exports_nothing(self) -> None:
+        """The series stays empty on a healthy run, as before."""
+        assert self._exported_agents(scored={"healthy_agent": {"reward": 3.0, "count": 4}}, dropped={}) == set()
+
+    def test_the_counters_are_not_grown_by_being_read(self) -> None:
+        agent_name_to_scored: dict = defaultdict(Counter, {"healthy_agent": Counter({"count": 1})})
+        agent_name_to_dropped: dict = defaultdict(Counter, {"broken_agent": Counter({"failed": 1})})
+
+        for agent_name in sorted(agent_name_to_scored.keys() | agent_name_to_dropped.keys()):
+            _masking_step_metrics(
+                agent_name,
+                agent_name_to_scored.get(agent_name, Counter()),
+                agent_name_to_dropped.get(agent_name, Counter()),
+            )
+
+        assert set(agent_name_to_scored) == {"healthy_agent"}
+        assert set(agent_name_to_dropped) == {"broken_agent"}

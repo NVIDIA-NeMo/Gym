@@ -17,11 +17,13 @@ aalcr_benchmark_resources_server:
       judge_model_server:
         type: responses_api_models
         name: Qwen3-235B-A22B-Instruct-2507-FP8
+      judge_protocol: legacy_v1_0
       judge_responses_create_params_overrides: {}
 
 aalcr_benchmark_simple_agent:
   responses_api_agents:
     simple_agent:
+      max_steps: 1
       entrypoint: app.py
       resources_server:
         type: resources_servers
@@ -32,7 +34,7 @@ aalcr_benchmark_simple_agent:
       datasets:
       - name: aalcr
         type: benchmark
-        jsonl_fpath: benchmarks/aalcr/data/aalcr_benchmark.jsonl
+        jsonl_fpath: benchmarks/aalcr/data/aalcr_v1_0_benchmark.jsonl
         prompt_config: null
         prepare_script: benchmarks/aalcr/prepare.py
         num_repeats: 16

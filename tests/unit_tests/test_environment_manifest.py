@@ -63,10 +63,14 @@ def test_environment_manifest_parses_and_uses_declared_defaults() -> None:
     manifest = EnvironmentManifest.model_validate(raw)
 
     assert manifest.name == "my_eval"
+    assert manifest.experimental is True
     assert manifest.licensing == "unknown"
     assert manifest.determinism.value == "unknown"
     assert manifest.lifecycle.value == "active"
     assert manifest.session_model is None
+
+    raw["experimental"] = False
+    assert EnvironmentManifest.model_validate(raw).experimental is False
 
 
 def test_integration_profiles_are_closed_string_values() -> None:
@@ -265,6 +269,7 @@ def test_generated_schema_is_machine_readable() -> None:
     schema = manifest_json_schema()
 
     assert schema["$defs"]["Domain"]["enum"] == [domain.value for domain in Domain]
+    assert schema["properties"]["experimental"]["default"] is True
     Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema)
     assert not list(validator.iter_errors(_manifest()))

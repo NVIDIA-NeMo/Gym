@@ -42,6 +42,7 @@ Point `policy_base_url` at any OpenAI-compatible Responses endpoint to reuse thi
 | `openai_default_headers` | `dict` | `{}` | Extra headers sent on every request. |
 | `extra_body` | `dict` | `{}` | Default parameters merged into every request body. Values set on the incoming request take precedence. |
 | `max_concurrent_requests` | `int` | `null` | Cap on in-flight upstream requests (per-process). `null` = unlimited; set it on rate-limited endpoints. |
+| `max_http_attempts` | `int` | `3` | Bounded retries for transient HTTP failures (404, 408, 429, 500, 502, 503, 504, 520). A 429 whose `error.code`/`error.type` is `budget_exceeded` or `insufficient_quota`, or a 401/403 whose body is an invalid key, trips the client immediately; later requests skip the wire. Generic "quota exceeded" 429s and other 401/403s still retry or return as before. |
 
 <Note>
 **The model is fixed by configuration.** This server always sends the configured `openai_model` (from `policy_model_name`) to the upstream endpoint. If an incoming request carries its own `model` field — as standard OpenAI-compatible clients and SDKs do — that value is **overwritten**, so you cannot switch models on a per-request basis. To run a different model, change the config and start a new server.

@@ -28,6 +28,8 @@ from nemo_gym.telemetry.config import TelemetryConfig
 from nemo_gym.telemetry.setup import (
     configure_telemetry_env,
     is_telemetry_env_enabled,
+    is_telemetry_metrics_enabled,
+    memory_profiling_config_from_env,
     telemetry_config_from_global_config,
 )
 from tests.unit_tests.telemetry.conftest import no_lens
@@ -38,6 +40,35 @@ def test_defaults_are_off_and_gym_shaped():
     assert config.enabled is False
     assert config.service_name == "nemo-gym"
     assert config.span_groups == "default"
+    assert config.memory_profiling.enabled is False
+    assert config.memory_profiling.interval_seconds == 1.0
+
+
+def test_memory_profiling_config_is_nested_under_telemetry():
+    config = TelemetryConfig.model_validate(
+        {
+            "enabled": True,
+            "memory_profiling": {
+                "enabled": True,
+                "interval_seconds": 2.5,
+            },
+        }
+    )
+
+    assert config.memory_profiling.enabled is True
+    assert config.memory_profiling.interval_seconds == 2.5
+
+
+def test_memory_profiling_interval_must_be_positive():
+    with pytest.raises(ValueError, match="interval_seconds"):
+        TelemetryConfig.model_validate(
+            {
+                "memory_profiling": {
+                    "enabled": True,
+                    "interval_seconds": 0,
+                }
+            }
+        )
 
 
 def test_export_strategy_defaults_to_all_ranks():
@@ -134,10 +165,66 @@ def test_unset_otlp_fields_write_nothing(clean_otel_env):
 
 
 def test_booleans_are_translated_as_1_and_0(clean_otel_env):
-    configure_telemetry_env(TelemetryConfig(enabled=True, logs_enabled=False, metrics_enabled=True))
+    configure_telemetry_env(
+        TelemetryConfig(
+            enabled=True,
+            logs_enabled=False,
+            metrics_enabled=True,
+            memory_profiling={"enabled": True, "interval_seconds": 2.5},
+        )
+    )
     assert os.environ["NEMO_GYM_OTEL_ENABLED"] == "1"
     assert os.environ["NEMO_GYM_OTEL_LOGS_ENABLED"] == "0"
     assert os.environ["NEMO_GYM_OTEL_METRICS_ENABLED"] == "1"
+    assert os.environ["NEMO_GYM_OTEL_MEMORY_PROFILING_ENABLED"] == "1"
+    assert os.environ["NEMO_GYM_OTEL_MEMORY_PROFILING_INTERVAL_SECONDS"] == "2.5"
+
+
+def test_memory_profiling_can_be_enabled_entirely_from_env(clean_otel_env):
+    clean_otel_env.setenv("NEMO_GYM_OTEL_ENABLED", "1")
+    clean_otel_env.setenv("NEMO_GYM_OTEL_MEMORY_PROFILING_ENABLED", "1")
+    clean_otel_env.setenv("NEMO_GYM_OTEL_MEMORY_PROFILING_INTERVAL_SECONDS", "0.25")
+
+    config = TelemetryConfig()
+    configure_telemetry_env(config)
+    resolved = memory_profiling_config_from_env(config.memory_profiling)
+
+    assert resolved.enabled is True
+    assert resolved.interval_seconds == 0.25
+
+
+def test_memory_profiling_env_overrides_yaml(clean_otel_env):
+    clean_otel_env.setenv("NEMO_GYM_OTEL_MEMORY_PROFILING_ENABLED", "0")
+    clean_otel_env.setenv("NEMO_GYM_OTEL_MEMORY_PROFILING_INTERVAL_SECONDS", "3")
+    config = TelemetryConfig.model_validate(
+        {
+            "memory_profiling": {
+                "enabled": True,
+                "interval_seconds": 1,
+            }
+        }
+    )
+
+    resolved = memory_profiling_config_from_env(config.memory_profiling)
+
+    assert resolved.enabled is False
+    assert resolved.interval_seconds == 3.0
+
+
+def test_memory_profiling_env_rejects_invalid_interval(clean_otel_env):
+    clean_otel_env.setenv("NEMO_GYM_OTEL_MEMORY_PROFILING_INTERVAL_SECONDS", "0")
+
+    with pytest.raises(ValueError, match="interval_seconds"):
+        memory_profiling_config_from_env(TelemetryConfig().memory_profiling)
+
+
+def test_effective_metrics_switch_follows_env_precedence(clean_otel_env):
+    assert is_telemetry_metrics_enabled() is True
+
+    clean_otel_env.setenv("NEMO_LENS_METRICS_ENABLED", "1")
+    clean_otel_env.setenv("NEMO_GYM_OTEL_METRICS_ENABLED", "0")
+
+    assert is_telemetry_metrics_enabled() is False
 
 
 def test_env_wins_over_yaml(clean_otel_env):

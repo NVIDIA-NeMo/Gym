@@ -86,10 +86,15 @@ from nemo_gym.server_utils import (
     ServerStatus,
     initialize_ray,
 )
+from nemo_gym.telemetry.config import MemoryProfilingConfig
+from nemo_gym.telemetry.memory import MemoryProfiler, ServerMemoryTarget, process_tree_memory_supported
 from nemo_gym.telemetry.metrics import record_active_servers
 from nemo_gym.telemetry.setup import (
     configure_telemetry_env,
+    get_telemetry,
     init_telemetry,
+    is_telemetry_metrics_enabled,
+    memory_profiling_config_from_env,
     shutdown_telemetry,
     telemetry_config_from_global_config,
 )
@@ -372,6 +377,9 @@ class RunHelper:  # pragma: no cover
     _processes: Dict[str, Popen]
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
     _server_client: ServerClient
+    _memory_profiler: MemoryProfiler | None
+    _memory_profiling_config: MemoryProfilingConfig
+    _telemetry_metrics_enabled: bool
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
@@ -384,8 +392,12 @@ class RunHelper:  # pragma: no cover
         # spawned. run_command copies os.environ into every server process, and that copy is
         # the only channel these settings have — the servers share no memory with this one.
         # Also mints the run id they all report, so a backend can group one run's processes.
-        configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
+        telemetry_config = telemetry_config_from_global_config(global_config_dict)
+        configure_telemetry_env(telemetry_config)
         init_telemetry(server_name="orchestrator", server_type="orchestrator")
+        self._memory_profiler = None
+        self._memory_profiling_config = memory_profiling_config_from_env(telemetry_config.memory_profiling)
+        self._telemetry_metrics_enabled = is_telemetry_metrics_enabled()
 
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
@@ -494,8 +506,14 @@ class RunHelper:  # pragma: no cover
         if global_config_dict[DRY_RUN_KEY_NAME]:
             self.wait_for_dry_run_spinup()
         else:
-            self.wait_for_spinup()
-            self.wait_for_model_endpoints(global_config_dict)
+            self.wait_for_server_readiness(global_config_dict)
+
+    def wait_for_server_readiness(self, global_config_dict: DictConfig) -> None:
+        """Mark the head ready only after every managed server and model endpoint is reachable."""
+        self.wait_for_spinup()
+        self._start_memory_profiler()
+        self.wait_for_model_endpoints(global_config_dict)
+        self._head_server_instance.mark_ready()
 
     def display_server_instance_info(self) -> None:
         if not self._server_instance_display_configs:
@@ -604,8 +622,13 @@ Process `{process_name}` stderr:
             sleep(sleep_interval)
 
     def shutdown(self) -> None:
-        # Before the servers go: the gauge should read zero once the fleet is torn down,
-        # and a BatchSpanProcessor needs an explicit flush or the last interval is lost.
+        memory_profiler = getattr(self, "_memory_profiler", None)
+        if memory_profiler is not None:
+            memory_profiler.stop()
+            self._memory_profiler = None
+
+        # Before the servers go, the gauge should read zero once the fleet is torn down.
+        # The metric provider also needs an explicit flush or the last interval is lost.
         record_active_servers(0)
         shutdown_telemetry()
 
@@ -715,6 +738,37 @@ in your config does not match where it is listening.
             statuses.append((name, status))
 
         return statuses
+
+    def _start_memory_profiler(self) -> None:
+        memory_config = getattr(self, "_memory_profiling_config", None)
+        if memory_config is None or not memory_config.enabled:
+            return
+        if not process_tree_memory_supported():
+            print("Memory profiling requires Linux procfs and is disabled on this host.")
+            return
+        if not getattr(self, "_telemetry_metrics_enabled", False):
+            print("Memory profiling is enabled but telemetry metrics are disabled.")
+            return
+        telemetry = get_telemetry()
+        if telemetry is None or not telemetry.is_exporting:
+            print(
+                "Memory profiling is enabled but telemetry is not exporting. "
+                "Install nemo-gym[telemetry] and enable telemetry metrics."
+            )
+            return
+        targets = [
+            ServerMemoryTarget(
+                name=instance.process_name,
+                server_type=instance.server_type,
+                pid=instance.pid,
+            )
+            for instance in self._server_instance_display_configs
+        ]
+        self._memory_profiler = MemoryProfiler(
+            targets,
+            interval_seconds=memory_config.interval_seconds,
+        )
+        self._memory_profiler.start()
 
 
 @exit_cleanly_on_config_error
@@ -1007,7 +1061,7 @@ def test_all():  # pragma: no cover
     # (a user's project), and the Gym install root (built-ins, under PARENT_DIR in editable and wheel
     # installs). Entrypoints are kept relative; earlier roots shadow later ones for same-named modules. This
     # lets `gym env test` discover and run built-in and plugin servers from any cwd, not only a repo checkout.
-    server_type_dirs = ("resources_servers", "responses_api_agents", "responses_api_models")
+    server_type_dirs = ("resources_servers", "responses_api_agents", "responses_api_models", "environment_servers")
     seen_rel_paths: set[str] = set()
     candidate_dir_paths: List[str] = []
     for root in component_search_roots():
@@ -1339,9 +1393,10 @@ def publish_environment_manifest() -> None:
     if command_dict.get(JSON_OUTPUT_KEY_NAME, False):
         print(json.dumps(report.to_dict()))
         return
+    annotation = f"catalog status={report.status} " if report.status else ""
     rich.print(
         f"[green]✓[/green] Publication checks passed for {report.kind} {report.name} {report.version}; "
-        f"catalog status={report.status} ({report.verifier_cases} verifier cases)."
+        f"{annotation}({report.verifier_cases} verifier cases)."
     )
 
 
@@ -1429,7 +1484,9 @@ def _inspect_environment(
         return
     entry = resolve_catalog_entry(name, kind, entries=entries)
     parsed = read_environment_details(entry.config_path)
-    details = {"config": str(entry.config_path.resolve()), "status": entry.status}
+    details = {"config": str(entry.config_path.resolve())}
+    if entry.status is not None:
+        details["status"] = entry.status
     if entry.manifest_path is not None:
         details["manifest"] = str(entry.manifest_path.resolve())
     for label, value in (
@@ -1468,7 +1525,7 @@ def _inspect_environment(
 
 
 def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
-    return {
+    payload = {
         "name": entry.name,
         "kind": entry.kind,
         "status": entry.status,
@@ -1480,6 +1537,9 @@ def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
         "licensing": entry.licensing,
         "lifecycle": entry.lifecycle,
     }
+    if entry.status is None:
+        payload.pop("status")
+    return payload
 
 
 @exit_cleanly_on_config_error
@@ -1507,7 +1567,7 @@ def list_environments() -> None:
             continue
         attribute = "kind" if field == "catalog_kind" else field
         missing = sum(getattr(entry, attribute) is None for entry in entries)
-        if missing:
+        if missing and field != "status":
             noun = "entry" if missing == 1 else "entries"
             print(
                 f"Warning: {missing} catalog {noun} {'has' if missing == 1 else 'have'} no "
@@ -1541,7 +1601,7 @@ def list_environments() -> None:
         table.add_row(
             entry.name,
             entry.kind,
-            entry.status,
+            entry.status or "",
             entry.lifecycle or "",
             entry.domain or "",
             entry.description or "",

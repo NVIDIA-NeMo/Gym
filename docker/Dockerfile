@@ -69,6 +69,12 @@ curl -fSsL -o /tmp/enroot.deb \
 apt-get install -y /tmp/enroot.deb
 rm /tmp/enroot.deb
 
+# Drop the --ldconfig arg from enroot's NVIDIA hook so nvidia-container-cli
+# reuses the sandbox's existing ld.so.cache instead of regenerating it.
+sed -i 's/cli_args=("--no-cgroups" "--ldconfig=@$(command -v ldconfig.real || command -v ldconfig)")/cli_args=("--no-cgroups")/' \
+    /etc/enroot/hooks.d/98-nvidia.sh
+grep -q '^cli_args=("--no-cgroups")$' /etc/enroot/hooks.d/98-nvidia.sh
+
 # Install nvidia-container-toolkit so enroot's NVIDIA hook
 # (/etc/enroot/hooks.d/98-nvidia.sh) can find nvidia-container-cli to inject
 # GPUs into enroot sandboxes. Without this, enroot sandboxes that request a
@@ -159,7 +165,7 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # an environment variable — they would have to rebuild. Off remains the default: the code
 # is inert until NEMO_LENS_ENABLED=1.
 RUN uv venv --seed && \
-    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --no-install-project
+    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --extra dev --no-install-project
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
@@ -178,20 +184,50 @@ ENV NVIDIA_BUILD_REF=${NVIDIA_BUILD_REF:-<unknown>}
 LABEL com.nvidia.build.id="${NVIDIA_BUILD_ID}"
 LABEL com.nvidia.build.ref="${NVIDIA_BUILD_REF}"
 
-# Copy full source as root while the package build introspects the preserved
-# Git checkout. Exclude pyproject.toml and uv.lock since they are already
-# present from the hermetic stage. Runtime ownership is applied after install.
-COPY --from=nemo-gym --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
+# Copy full source while the package build introspects the preserved Git
+# checkout. Exclude pyproject.toml and uv.lock since they are already present
+# from the hermetic stage.
+#
+# --chown matches the hermetic-stage copies above and makes the source readable
+# by the runtime UID regardless of the build context's file modes. Without it
+# the image only works when the context happens to be world-readable: a builder
+# with a restrictive umask (NeMo CI uses 0007) yields mode 0660 root-owned
+# files, and the later chown pass only covers directories, so `gym --help`
+# fails with PermissionError on nemo_gym/__init__.py once USER is switched.
+COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
+    --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
 
 # Install the nemo-gym project itself along with the vllm and telemetry extras. The
 # worktree was created for the runtime UID in the base stage, so restore build ownership
 # before setuptools invokes Git.
 RUN chown root:root /opt/nemo-gym && \
-    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry
+    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry --extra dev
 
-# Keep runtime uv and XDG caches separate from the root-owned build cache that
-# backs the symlinked project environment.
+# Seed the runtime uv cache with the full dependency set (including the dev
+# extra and the project itself) so that CI scripts can run offline: setup_dev.sh
+# resolves `uv sync --extra dev --offline` from this cache in a fresh venv.
+# The runtime cache is separate from the root-owned build cache (/opt/uv/cache)
+# that backs the symlinked project environment.
 ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv
+RUN uv venv /opt/nemo-gym/cache/seed-venv && \
+    UV_PROJECT_ENVIRONMENT=/opt/nemo-gym/cache/seed-venv \
+        uv sync --locked --extra vllm --extra telemetry --extra dev && \
+    rm -rf /opt/nemo-gym/cache/seed-venv && \
+    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
+
+# Seed the pre-commit hook cache (PRE_COMMIT_HOME) so the image's offline lint
+# path needs no network: lint.sh reuses the baked pre-commit executable, but a
+# bare `pre-commit run` still clones the hook repositories declared in
+# .pre-commit-config.yaml and pip-installs the local hooks' dependencies on
+# first run. Resolving every hook environment here, while the build has
+# network, keeps the runtime lint hermetic.
+ENV PRE_COMMIT_HOME=/opt/nemo-gym/cache/pre-commit
+# Local build contexts exclude .git, but pre-commit requires a repository to
+# resolve the configuration. Use disposable metadata while seeding the cache.
+RUN git init --quiet && \
+    pre-commit install-hooks && \
+    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}" && \
+    rm -rf .git
 RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" \
         "${UV_CACHE_DIR}" \
         /opt/nemo-gym/cache/xdg
@@ -235,6 +271,7 @@ RUN export HOME=/home/nemo-runtime \
     test -w "${HOME}" && \
     test -w "${XDG_CACHE_HOME}" && \
     test -w "${UV_CACHE_DIR}" && \
+    test -w "${PRE_COMMIT_HOME}" && \
     test -w /opt/nemo-gym/cache && \
     test -w /opt/nemo-gym/results && \
     test -x /usr/local/bin/uv && \

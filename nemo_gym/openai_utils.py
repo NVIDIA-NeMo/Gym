@@ -25,6 +25,7 @@ from typing import (
     Required,
     TypeAlias,
     Union,
+    get_args,
 )
 
 from openai.types.chat import (
@@ -138,13 +139,14 @@ from openai.types.responses.response_usage import OutputTokensDetails as Respons
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Discriminator, Field, PrivateAttr, Tag, model_validator
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG,
     MAX_NUM_TRIES,
     ClientResponse,
+    ClientResponseError,
     get_response_json,
     raise_for_status,
     request,
@@ -529,9 +531,8 @@ RESPONSES_TO_TRAIN = {
 # It holds only NeMoGymResponseReasoningItem, NeMoGymResponseOutputMessage
 # or NeMoGymResponseFunctionToolCall, all registered above.
 #
-# Each variant is also another member of NeMoGymResponseInputItem.
-# That union is validated in smart mode, so an unrecognised item reports the errors of every member.
-# Variants that nothing can emit only make those errors harder to read.
+# Each variant is also a member of the response item unions.
+# Complete token metadata selects that variant.
 #
 # The upstream models permit extra fields.
 # An item carrying token IDs without a declared variant still round-trips through its base class.
@@ -554,54 +555,195 @@ def training_variant_of(item_cls: type) -> type:
         ) from None
 
 
+########################################
+# Item union discrimination
+########################################
+
+# Route each item to one concrete model.
+# Shared type literals use stable shape-based tags.
+# Typeless input preserves the existing permissive fallback.
+_SIMPLE_MESSAGE_ROLES = frozenset({"user", "system", "developer"})
+_MESSAGE_ROLES = _SIMPLE_MESSAGE_ROLES | {"assistant"}
+_ITEM_STATUSES = frozenset({"in_progress", "completed", "incomplete"})
+_OUTPUT_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
+_TRAINING_TAG_SUFFIX = "__training"
+# Tags whose models have a ForTraining variant registered in RESPONSES_TO_TRAIN.
+_TRAINABLE_ITEM_TAGS = frozenset({"easy_message", "input_message", "output_message", "function_call", "reasoning"})
+
+# Exact member class -> union tag, populated from the annotated unions defined below.
+_RESPONSE_INPUT_ITEM_TAG_BY_CLASS: Dict[type, str] = {}
+_RESPONSE_OUTPUT_ITEM_TAG_BY_CLASS: Dict[type, str] = {}
+
+
+def _register_item_tags(item_union: Any, tag_by_class: Dict[type, str]) -> None:
+    """Index each union member class by its Tag, so instances discriminate by class."""
+    union_type = get_args(item_union)[0]
+    for member in get_args(union_type):
+        member_cls, *metadata = get_args(member)
+        tag = next(meta for meta in metadata if isinstance(meta, Tag))
+        tag_by_class[member_cls] = tag.tag
+
+
+def _tag_for_item_instance(value: Any, tag_by_class: Dict[type, str]) -> Optional[str]:
+    """Map an item instance to its nearest registered class tag."""
+    for cls in type(value).__mro__:
+        tag = tag_by_class.get(cls)
+        if tag is not None:
+            return tag
+    return getattr(value, "type", None)
+
+
+def _first_content_part_type(content: Any) -> Optional[str]:
+    """Return the type of the first content part, or None for empty or non-list content."""
+    if not isinstance(content, list) or not content:
+        return None
+    first_part = content[0]
+    if isinstance(first_part, dict):
+        return first_part.get("type") or ("refusal" if "refusal" in first_part else None)
+    return getattr(first_part, "type", None)
+
+
+def _discriminate_message_item(value: Dict[str, Any]) -> str:
+    """Choose a message model from its role, content, and status."""
+    content = value.get("content")
+    if value.get("role") in _SIMPLE_MESSAGE_ROLES:
+        if isinstance(content, list) and value.get("status") in _ITEM_STATUSES:
+            return "input_message"
+        return "easy_message"
+    if isinstance(content, list):
+        if content:
+            if _first_content_part_type(content) in _OUTPUT_CONTENT_PART_TYPES:
+                return "output_message"
+        elif isinstance(value.get("id"), str):
+            return "output_message"
+    return "easy_message"
+
+
+def _discriminate_untyped_input_item(value: Dict[str, Any]) -> str:
+    """Infer a typeless input model or use the permissive fallback."""
+    role = value.get("role")
+    content = value.get("content")
+    if role in _MESSAGE_ROLES and isinstance(content, (str, list)):
+        tag = _discriminate_message_item(value)
+        if tag == "output_message":
+            if isinstance(value.get("id"), str):
+                return tag
+        elif _first_content_part_type(content) not in _OUTPUT_CONTENT_PART_TYPES:
+            return tag
+        return "mcp_list_tools"
+    if (
+        "role" not in value
+        and isinstance(value.get("id"), str)
+        and isinstance(content, list)
+        and (not content or _first_content_part_type(content) in _OUTPUT_CONTENT_PART_TYPES)
+    ):
+        return "output_message"
+    if "arguments" in value and "name" in value:
+        return "function_call" if "call_id" in value else "mcp_call"
+    if isinstance(value.get("call_id"), str) and "output" in value:
+        return "function_call_output"
+    if isinstance(value.get("id"), str) and isinstance(value.get("summary"), list):
+        return "reasoning"
+    return "mcp_list_tools"
+
+
+def _training_variant_tag(tag: str, value: Dict[str, Any]) -> str:
+    """Route to the ForTraining member when the item carries complete token metadata."""
+    if tag in _TRAINABLE_ITEM_TAGS and REQUIRED_TOKEN_METADATA_FIELDS.issubset(value):
+        return tag + _TRAINING_TAG_SUFFIX
+    return tag
+
+
+def _discriminate_response_input_item(value: Any) -> Optional[str]:
+    """Pick the input union tag for a request item."""
+    if not isinstance(value, dict):
+        return _tag_for_item_instance(value, _RESPONSE_INPUT_ITEM_TAG_BY_CLASS)
+
+    item_type = value.get("type")
+    if item_type == "message":
+        tag = _discriminate_message_item(value)
+    elif isinstance(item_type, str):
+        tag = item_type
+    elif item_type is None:
+        tag = _discriminate_untyped_input_item(value)
+    else:
+        return None
+    return _training_variant_tag(tag, value)
+
+
+def _discriminate_response_output_item(value: Any) -> Optional[str]:
+    """Pick the output union tag for a response item."""
+    if not isinstance(value, dict):
+        return _tag_for_item_instance(value, _RESPONSE_OUTPUT_ITEM_TAG_BY_CLASS)
+
+    item_type = value.get("type")
+    if item_type == "message":
+        tag = _discriminate_message_item(value)
+    elif item_type == "function_call_output":
+        # The SDK output item additionally requires an id and a status; results without
+        # them only fit the request-input model.
+        if isinstance(value.get("id"), str) and value.get("status") in _ITEM_STATUSES:
+            tag = "function_call_output"
+        else:
+            tag = "function_call_output_input"
+    elif isinstance(item_type, str):
+        tag = item_type
+    else:
+        # _require_response_output_item_type already rejected untyped dicts.
+        return None
+    return _training_variant_tag(tag, value)
+
+
 NeMoGymResponseInputItem = Annotated[
     Union[
-        NeMoGymEasyInputMessage,
-        NeMoGymMessage,
-        NeMoGymResponseOutputMessage,
-        NeMoGymResponseFunctionToolCall,
-        NeMoGymFunctionCallOutput,
-        NeMoGymResponseReasoningItem,
-        NeMoGymResponseMcpCall,
-        NeMoGymResponseMcpListTools,
-        NeMoGymResponseMcpApprovalRequest,
+        Annotated[NeMoGymEasyInputMessage, Tag("easy_message")],
+        Annotated[NeMoGymMessage, Tag("input_message")],
+        Annotated[NeMoGymResponseOutputMessage, Tag("output_message")],
+        Annotated[NeMoGymResponseFunctionToolCall, Tag("function_call")],
+        Annotated[NeMoGymFunctionCallOutput, Tag("function_call_output")],
+        Annotated[NeMoGymResponseReasoningItem, Tag("reasoning")],
+        Annotated[NeMoGymResponseMcpCall, Tag("mcp_call")],
+        Annotated[NeMoGymResponseMcpListTools, Tag("mcp_list_tools")],
+        Annotated[NeMoGymResponseMcpApprovalRequest, Tag("mcp_approval_request")],
         # The SDK includes these items in both response output and request input.
         # Outputs are replayed as input on subsequent turns.
-        NeMoGymResponseFileSearchToolCall,
-        NeMoGymResponseFunctionWebSearch,
-        NeMoGymResponseComputerToolCall,
-        NeMoGymImageGenerationCall,
-        NeMoGymResponseCodeInterpreterToolCall,
-        NeMoGymLocalShellCall,
-        NeMoGymResponseCustomToolCall,
-        NeMoGymComputerCallOutput,
-        NeMoGymResponseCustomToolCallOutput,
-        NeMoGymLocalShellCallOutput,
-        NeMoGymMcpApprovalResponse,
+        Annotated[NeMoGymResponseFileSearchToolCall, Tag("file_search_call")],
+        Annotated[NeMoGymResponseFunctionWebSearch, Tag("web_search_call")],
+        Annotated[NeMoGymResponseComputerToolCall, Tag("computer_call")],
+        Annotated[NeMoGymImageGenerationCall, Tag("image_generation_call")],
+        Annotated[NeMoGymResponseCodeInterpreterToolCall, Tag("code_interpreter_call")],
+        Annotated[NeMoGymLocalShellCall, Tag("local_shell_call")],
+        Annotated[NeMoGymResponseCustomToolCall, Tag("custom_tool_call")],
+        Annotated[NeMoGymComputerCallOutput, Tag("computer_call_output")],
+        Annotated[NeMoGymResponseCustomToolCallOutput, Tag("custom_tool_call_output")],
+        Annotated[NeMoGymLocalShellCallOutput, Tag("local_shell_call_output")],
+        Annotated[NeMoGymMcpApprovalResponse, Tag("mcp_approval_response")],
         # Codex tool family and context management.
-        NeMoGymResponseApplyPatchToolCall,
-        NeMoGymResponseApplyPatchToolCallOutput,
-        NeMoGymResponseCompactionItem,
-        NeMoGymResponseFunctionShellToolCall,
-        NeMoGymResponseFunctionShellToolCallOutput,
-        NeMoGymResponseToolSearchCall,
-        NeMoGymResponseToolSearchOutputItem,
-        NeMoGymCompactionTrigger,
-        NeMoGymAdditionalTools,
+        Annotated[NeMoGymResponseApplyPatchToolCall, Tag("apply_patch_call")],
+        Annotated[NeMoGymResponseApplyPatchToolCallOutput, Tag("apply_patch_call_output")],
+        Annotated[NeMoGymResponseCompactionItem, Tag("compaction")],
+        Annotated[NeMoGymResponseFunctionShellToolCall, Tag("shell_call")],
+        Annotated[NeMoGymResponseFunctionShellToolCallOutput, Tag("shell_call_output")],
+        Annotated[NeMoGymResponseToolSearchCall, Tag("tool_search_call")],
+        Annotated[NeMoGymResponseToolSearchOutputItem, Tag("tool_search_output")],
+        Annotated[NeMoGymCompactionTrigger, Tag("compaction_trigger")],
+        Annotated[NeMoGymAdditionalTools, Tag("additional_tools")],
         # Training variants.
-        NeMoGymEasyInputMessageForTraining,
-        NeMoGymMessageForTraining,
-        NeMoGymResponseOutputMessageForTraining,
-        NeMoGymResponseFunctionToolCallForTraining,
-        NeMoGymResponseReasoningItemForTraining,
+        Annotated[NeMoGymEasyInputMessageForTraining, Tag("easy_message__training")],
+        Annotated[NeMoGymMessageForTraining, Tag("input_message__training")],
+        Annotated[NeMoGymResponseOutputMessageForTraining, Tag("output_message__training")],
+        Annotated[NeMoGymResponseFunctionToolCallForTraining, Tag("function_call__training")],
+        Annotated[NeMoGymResponseReasoningItemForTraining, Tag("reasoning__training")],
     ],
+    Discriminator(_discriminate_response_input_item),
     BeforeValidator(_validate_atomic_token_metadata),
 ]
+_register_item_tags(NeMoGymResponseInputItem, _RESPONSE_INPUT_ITEM_TAG_BY_CLASS)
 NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 
 
-def _normalize_response_item_for_input(item: Any) -> Any:
-    """Convert a provider output item to the request input schema."""
+def _normalize_output_item_for_replay(item: Any) -> Any:
+    """Convert a provider output item for request replay."""
     if isinstance(item, BaseModel):
         item = item.model_dump(exclude_unset=True)
     if not isinstance(item, dict):
@@ -617,6 +759,18 @@ def _normalize_response_item_for_input(item: Any) -> Any:
     return item
 
 
+def _normalize_tool_for_replay(tool: Any) -> Any:
+    """Convert a provider response tool for request replay."""
+    if isinstance(tool, BaseModel):
+        tool = tool.model_dump()
+    if not isinstance(tool, dict) or "defer_loading" not in tool or tool["defer_loading"] is not None:
+        return tool
+
+    tool = tool.copy()
+    tool["defer_loading"] = False
+    return tool
+
+
 class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     """
     This class is a copy of openai.types.responses.response_create_params.ResponseCreateParamsNonStreaming
@@ -629,11 +783,17 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_output_items_for_replay(cls, value: Any) -> Any:
-        """Normalize fields whose OpenAI output and input schemas differ."""
-        if not isinstance(value, dict) or not isinstance(value.get("input"), list):
+        """Normalize response-derived fields before request validation.
+
+        The method name is retained for compatibility; replayed tools are normalized too.
+        """
+        if not isinstance(value, dict):
             return value
         value = value.copy()
-        value["input"] = [_normalize_response_item_for_input(item) for item in value["input"]]
+        if isinstance(value.get("input"), list):
+            value["input"] = [_normalize_output_item_for_replay(item) for item in value["input"]]
+        if isinstance(value.get("tools"), list):
+            value["tools"] = [_normalize_tool_for_replay(tool) for tool in value["tools"]]
         return value
 
     background: Optional[bool] = None
@@ -690,45 +850,48 @@ class NeMoGymResponseFunctionCallOutput(ResponseFunctionToolCallOutputItem):
 
 NeMoGymResponseOutputItem = Annotated[
     Union[
-        NeMoGymResponseOutputMessage,
-        NeMoGymResponseFunctionToolCall,
-        NeMoGymResponseFunctionCallOutput,
-        NeMoGymResponseReasoningItem,
-        NeMoGymResponseMcpCall,
-        NeMoGymResponseMcpListTools,
-        NeMoGymResponseMcpApprovalRequest,
-        NeMoGymResponseFileSearchToolCall,
-        NeMoGymResponseFunctionWebSearch,
-        NeMoGymResponseComputerToolCall,
-        NeMoGymImageGenerationCall,
-        NeMoGymResponseCodeInterpreterToolCall,
-        NeMoGymLocalShellCall,
-        NeMoGymResponseCustomToolCall,
-        NeMoGymResponseComputerCallOutput,
-        NeMoGymResponseCustomToolCallOutputItem,
-        NeMoGymResponseLocalShellCallOutput,
-        NeMoGymResponseMcpApprovalResponse,
-        NeMoGymResponseApplyPatchToolCall,
-        NeMoGymResponseApplyPatchToolCallOutput,
-        NeMoGymResponseCompactionItem,
-        NeMoGymResponseFunctionShellToolCall,
-        NeMoGymResponseFunctionShellToolCallOutput,
-        NeMoGymResponseToolSearchCall,
-        NeMoGymResponseToolSearchOutputItem,
-        NeMoGymResponseAdditionalTools,
+        Annotated[NeMoGymResponseOutputMessage, Tag("output_message")],
+        Annotated[NeMoGymResponseFunctionToolCall, Tag("function_call")],
+        Annotated[NeMoGymResponseFunctionCallOutput, Tag("function_call_output")],
+        Annotated[NeMoGymResponseReasoningItem, Tag("reasoning")],
+        Annotated[NeMoGymResponseMcpCall, Tag("mcp_call")],
+        Annotated[NeMoGymResponseMcpListTools, Tag("mcp_list_tools")],
+        Annotated[NeMoGymResponseMcpApprovalRequest, Tag("mcp_approval_request")],
+        Annotated[NeMoGymResponseFileSearchToolCall, Tag("file_search_call")],
+        Annotated[NeMoGymResponseFunctionWebSearch, Tag("web_search_call")],
+        Annotated[NeMoGymResponseComputerToolCall, Tag("computer_call")],
+        Annotated[NeMoGymImageGenerationCall, Tag("image_generation_call")],
+        Annotated[NeMoGymResponseCodeInterpreterToolCall, Tag("code_interpreter_call")],
+        Annotated[NeMoGymLocalShellCall, Tag("local_shell_call")],
+        Annotated[NeMoGymResponseCustomToolCall, Tag("custom_tool_call")],
+        Annotated[NeMoGymResponseComputerCallOutput, Tag("computer_call_output")],
+        Annotated[NeMoGymResponseCustomToolCallOutputItem, Tag("custom_tool_call_output")],
+        Annotated[NeMoGymResponseLocalShellCallOutput, Tag("local_shell_call_output")],
+        Annotated[NeMoGymResponseMcpApprovalResponse, Tag("mcp_approval_response")],
+        Annotated[NeMoGymResponseApplyPatchToolCall, Tag("apply_patch_call")],
+        Annotated[NeMoGymResponseApplyPatchToolCallOutput, Tag("apply_patch_call_output")],
+        Annotated[NeMoGymResponseCompactionItem, Tag("compaction")],
+        Annotated[NeMoGymResponseFunctionShellToolCall, Tag("shell_call")],
+        Annotated[NeMoGymResponseFunctionShellToolCallOutput, Tag("shell_call_output")],
+        Annotated[NeMoGymResponseToolSearchCall, Tag("tool_search_call")],
+        Annotated[NeMoGymResponseToolSearchOutputItem, Tag("tool_search_output")],
+        Annotated[NeMoGymResponseAdditionalTools, Tag("additional_tools")],
         # Local agents include prompt messages and function results in returned trajectories.
         # Accept their request models alongside the SDK output models.
-        NeMoGymEasyInputMessage,
-        NeMoGymMessage,
-        NeMoGymFunctionCallOutput,
-        NeMoGymEasyInputMessageForTraining,
-        NeMoGymMessageForTraining,
-        NeMoGymResponseOutputMessageForTraining,
-        NeMoGymResponseFunctionToolCallForTraining,
-        NeMoGymResponseReasoningItemForTraining,
+        Annotated[NeMoGymEasyInputMessage, Tag("easy_message")],
+        Annotated[NeMoGymMessage, Tag("input_message")],
+        Annotated[NeMoGymFunctionCallOutput, Tag("function_call_output_input")],
+        Annotated[NeMoGymEasyInputMessageForTraining, Tag("easy_message__training")],
+        Annotated[NeMoGymMessageForTraining, Tag("input_message__training")],
+        Annotated[NeMoGymResponseOutputMessageForTraining, Tag("output_message__training")],
+        Annotated[NeMoGymResponseFunctionToolCallForTraining, Tag("function_call__training")],
+        Annotated[NeMoGymResponseReasoningItemForTraining, Tag("reasoning__training")],
     ],
+    Discriminator(_discriminate_response_output_item),
+    BeforeValidator(_validate_atomic_token_metadata),
     BeforeValidator(_require_response_output_item_type),
 ]
+_register_item_tags(NeMoGymResponseOutputItem, _RESPONSE_OUTPUT_ITEM_TAG_BY_CLASS)
 
 
 class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
@@ -976,6 +1139,8 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
+    # Allow incoming responses with reasoning_content=None. This field should not be used.
+    reasoning_content: Annotated[None, Field(exclude=True)]
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -1057,11 +1222,57 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 ########################################
 
 # See https://platform.openai.com/docs/guides/error-codes/api-errors
+# 404 can be a transient model-routing failure; retries remain bounded.
+# 408 is a request timeout.
 # 500 is internal server error, which may sporadically occur
 # 502 is Bad gateway (when the endpoint is overloaded)
 # 504 is Gateway timeout (when the endpoint config has too low of a gateway timeout setting for the model to finish generating)
 RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
-RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [500]
+RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [404, 408, 500]
+# 429 is usually a transient rate limit. Match only these spent-key codes/types;
+# generic "quota exceeded" wording is used by per-minute limits that recover.
+PERMANENT_QUOTA_CODES = ("budget_exceeded", "insufficient_quota")
+PERMANENT_AUTH_CODES = ("invalid_api_key", "invalid_api_token", "authentication_error")
+
+
+def _decode_error_text(content: bytes | str) -> str:
+    return content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
+
+
+def _parsed_error_codes(content: bytes | str) -> list[str]:
+    """error.code / error.type tokens from an OpenAI-style error body."""
+    text = _decode_error_text(content)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    error = payload.get("error")
+    if isinstance(error, str):
+        return [error]
+    if not isinstance(error, dict):
+        return []
+    return [str(error[key]) for key in ("code", "type") if error.get(key) is not None]
+
+
+def _error_body_is_permanent_quota(content: bytes | str) -> bool:
+    """True when a 429 body is a spent key, not a transient rate limit."""
+    codes = {token.lower() for token in _parsed_error_codes(content)}
+    return any(code in codes for code in PERMANENT_QUOTA_CODES)
+
+
+def _error_body_is_permanent_auth(content: bytes | str) -> bool:
+    """True when a 401/403 body is a revoked or invalid key, not a one-off denial."""
+    codes = {token.lower() for token in _parsed_error_codes(content)}
+    if any(code in codes for code in PERMANENT_AUTH_CODES):
+        return True
+    lowered = _decode_error_text(content).lower()
+    return "invalid api key" in lowered or "incorrect api key" in lowered
+
+
+class PermanentEndpointError(ClientResponseError):
+    """The upstream key is spent or unauthorized; further calls on this client skip the wire."""
 
 
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
@@ -1072,7 +1283,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     internal: bool = Field(
         default=False,
-        description="Set this to true if this particular client is only used to call internal NeMo Gym servers.",
+        description="Set this to true for internal NeMo Gym servers, which may retry indefinitely.",
     )
 
     max_connection_retries: Optional[int] = Field(
@@ -1083,12 +1294,45 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         ),
     )
 
+    max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
+
     default_headers: Dict[str, str] = Field(
         default_factory=dict,
         description="Extra headers to include in every request.",
     )
 
+    # Spent-key/auth trip: (status, body, url). Later calls raise a fresh exception.
+    _permanent_trip: Optional[tuple[int, bytes, str]] = PrivateAttr(default=None)
+
+    def _raise_permanent_error(self) -> None:
+        assert self._permanent_trip is not None
+        status, body, url = self._permanent_trip
+        snippet = body.decode("utf-8", errors="replace")[:200]
+        error = PermanentEndpointError(
+            request_info=None,
+            history=(),
+            status=status,
+            message=(
+                f"Skipping further requests to {self.base_url}: HTTP {status} is permanent "
+                f"(url={url} error_msg={snippet})"
+            ),
+            headers=None,
+        )
+        error.response_content = body
+        raise error
+
+    def _trip_permanent_error(self, status: int, content: bytes | str, url: Any) -> None:
+        body = content if isinstance(content, bytes) else content.encode("utf-8", errors="replace")
+        self._permanent_trip = (status, body, str(url))
+        print(
+            f"[model_retry_stop url={url} status={status} error_msg={body.decode('utf-8', errors='replace')[:200]}]",
+            flush=True,
+        )
+        self._raise_permanent_error()
+
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        if self._permanent_trip is not None:
+            self._raise_permanent_error()
         request_headers = request_kwargs.pop("headers", {})
         request_kwargs = request_kwargs | {
             "headers": self.default_headers
@@ -1102,29 +1346,45 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         return await self._request_with_retry(**request_kwargs)
 
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
-        max_num_tries = MAX_NUM_TRIES
+        if self._permanent_trip is not None:
+            self._raise_permanent_error()
+        max_num_tries = self.max_http_attempts
         tries = 0
         while tries < max_num_tries:
+            if self._permanent_trip is not None:
+                self._raise_permanent_error()
             tries += 1
             response = await request(**request_kwargs)
 
-            if response.status in RETRY_ERROR_CODES:
-                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
-                if response.status in RATE_LIMIT_ERROR_CODES:
-                    max_num_tries += 1
-
-                content = (await response.content.read()).decode()
-                kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "server_error"
-                print(
-                    f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
-                    flush=True,
-                )
-                await sleep(0.5)
-                continue
-            else:
+            if response.status in (401, 403):
+                content = await response.content.read()
+                if _error_body_is_permanent_auth(content):
+                    self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
                 return response
 
-        # We've exited the loop
+            if response.status not in RETRY_ERROR_CODES:
+                return response
+
+            content = await response.content.read()
+            if response.status == 429 and _error_body_is_permanent_quota(content):
+                self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
+
+            # Internal NeMo Gym servers extend max tries for retryable errors.
+            if response.status in RATE_LIMIT_ERROR_CODES and self.internal:
+                max_num_tries += 1
+
+            # Preserve the final error body for raise_for_status and avoid sleeping
+            # after the last attempt. Reading intermediate bodies releases sockets.
+            if tries >= max_num_tries:
+                await raise_for_status(response, content)
+
+            kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
+            print(
+                f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content.decode('utf-8', errors='replace')[:200]}]",
+                flush=True,
+            )
+            await sleep(0.5)
+
         await raise_for_status(response)
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:

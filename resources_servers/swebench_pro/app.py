@@ -15,6 +15,7 @@
 
 """SWE-bench Pro resources server."""
 
+import asyncio
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -38,7 +39,6 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import SandboxPtySession
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench_pro.verification import (
     DEFAULT_ENVIRONMENT_REPAIRS,
@@ -74,6 +74,29 @@ HARNESS_ENV_TO_SCRUB = (
 )
 
 
+def _verification_deadline(total_timeout: float | None) -> float | None:
+    """Wall-clock instant by which all attempts for one rollout must be done."""
+    return None if total_timeout is None else time() + total_timeout
+
+
+def _budget_spent(deadline: float | None) -> bool:
+    return deadline is not None and time() >= deadline
+
+
+def _attempt_budget(attempt_timeout: float | None, deadline: float | None) -> float | None:
+    """The smaller of this attempt's ceiling and what is left of the rollout's budget.
+
+    ``asyncio.timeout(None)`` is a no-op, so both being unset preserves the old
+    unbounded behaviour for anyone who wants it back.
+    """
+    remaining = None if deadline is None else max(deadline - time(), 0.0)
+    if attempt_timeout is None:
+        return remaining
+    if remaining is None:
+        return attempt_timeout
+    return min(attempt_timeout, remaining)
+
+
 class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     apply_anti_cheating: bool = True
@@ -81,6 +104,22 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     evaluation_timeout: int | None = None
     # A verdict-less run is retried on a new sandbox; see `inconclusive_reason`.
     inconclusive_verification_retries: int = 2
+    # Ceiling on ONE verification attempt, covering sandbox creation as well as
+    # the verification run. `evaluation_timeout` bounds only the test command
+    # inside the sandbox, so creation is otherwise unbounded here. 1200s is
+    # ~2.6x the p99 of observed per-rollout verification (461s) and above the
+    # healthy maximum (735s), while still cutting the multi-attempt pile-ups
+    # that leave dozens of verifications in flight at a job's wall clock.
+    verification_attempt_timeout: float | None = 1200.0
+    # Ceiling on ALL attempts for one rollout. Without it the worst case is
+    # `1 + inconclusive_verification_retries` times the per-attempt ceiling,
+    # which can exceed what remains of the job's wall clock -- and a rollout
+    # that never returns holds the whole run open, because collection ends only
+    # when the last rollout does.
+    verification_total_timeout: float | None = 2700.0
+    # Cleanup gets its own, smaller ceiling: a stop() that hangs in `finally`
+    # would defeat the attempt timeout it runs after.
+    verification_stop_timeout: float | None = 120.0
     # Which container repairs to apply; see `ENVIRONMENT_REPAIRS`.
     environment_repairs: tuple[str, ...] = DEFAULT_ENVIRONMENT_REPAIRS
     image_repository: str = "docker.io/jefzda/sweap-images"
@@ -124,8 +163,6 @@ class SWEBenchProSeedSessionRequest(SWEBenchProInstanceRequest, BaseSeedSessionR
 
 class SWEBenchProSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str
-    # The agent attaches to this session; without it, it builds its own sandbox instead.
-    pty_session_id: str
 
 
 class SWEBenchProVerifyRequest(SWEBenchProInstanceRequest, BaseVerifyRequest):
@@ -152,8 +189,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
-        # The agent's terminal for the session. Leading underscore: pydantic needs it.
-        self._session_id_to_pty: dict[str, SandboxPtySession] = {}
         # Untracked files the image ships, per session. Leading underscore: pydantic needs it.
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
 
@@ -172,23 +207,10 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         app.router.lifespan_context = lifespan
         return app
 
-    async def close_pty_session(self, session: SandboxPtySession | None) -> None:
-        """Close the agent's terminal; a session outliving its sandbox leaks its connection."""
-        if session is None:
-            return
-        try:
-            await session.close()
-        except Exception:
-            print("Failed to close SWE-bench Pro PTY session", format_exc(), file=sys.stderr)
-
     async def shutdown(self) -> None:
         sandboxes = list(self._session_id_to_sandbox.values())
-        sessions = list(self._session_id_to_pty.values())
         self._session_id_to_sandbox.clear()
-        self._session_id_to_pty.clear()
         self._session_id_to_pristine_untracked.clear()
-        for session in sessions:
-            await self.close_pty_session(session)
         for sandbox in sandboxes:
             try:
                 await sandbox.stop()
@@ -252,7 +274,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
     ) -> SWEBenchProSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
         self._session_id_to_pristine_untracked.pop(session_id, None)
-        await self.close_pty_session(self._session_id_to_pty.pop(session_id, None))
         previous = self._session_id_to_sandbox.pop(session_id, None)
         if previous is not None:
             try:
@@ -261,7 +282,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 print("Failed to stop previous SWE-bench Pro sandbox", format_exc(), file=sys.stderr)
 
         sandbox = await self._create_sandbox(body)
-        pty_session = await sandbox.pty.create()
         if self.config.apply_anti_cheating:
             anti_cheat_setup_fpath = Path(__file__).parent.parent / "swebench" / "anti_cheat_setup.sh"
             await sandbox.upload(anti_cheat_setup_fpath, "/app/anti_cheat_setup.sh")
@@ -277,10 +297,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         await self.normalize_sandbox_environment(sandbox, body.instance_id)
         self._session_id_to_pristine_untracked[session_id] = await self.pristine_untracked_files(sandbox)
         self._session_id_to_sandbox[session_id] = sandbox
-        self._session_id_to_pty[session_id] = pty_session
-        return SWEBenchProSeedSessionResponse(
-            sandbox_handle=sandbox._handle.sandbox_id, pty_session_id=pty_session.session_id
-        )
+        return SWEBenchProSeedSessionResponse(sandbox_handle=sandbox._handle.sandbox_id)
 
     async def normalize_sandbox_environment(self, sandbox: AsyncSandbox, instance_id: str) -> None:
         """Give the agent container the same repairs the verifier gets; best effort."""
@@ -310,7 +327,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
 
     async def _extract_model_patch(self, session_id: str, base_commit: str) -> str:
         original_sandbox = self._session_id_to_sandbox.pop(session_id)
-        original_pty_session = self._session_id_to_pty.pop(session_id, None)
         pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
         try:
             result = await original_sandbox.exec(
@@ -320,7 +336,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 raise RuntimeError(result.stderr or "git diff failed")
             return drop_patch_sections(result.stdout or "", pristine_untracked)
         finally:
-            await self.close_pty_session(original_pty_session)
             try:
                 await original_sandbox.stop()
             except Exception:
@@ -348,20 +363,22 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         eval_sandbox_start_time_taken = 0.0
         patch_verification_time_taken = 0.0
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
+        deadline = _verification_deadline(self.config.verification_total_timeout)
         for attempt in range(1, attempts + 1):
             eval_sandbox: AsyncSandbox | None = None
             start_time = time()
             try:
-                eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
-                eval_sandbox_start_time_taken = time() - start_time
-                verification_start = time()
-                result = await run_verification(
-                    sandbox=eval_sandbox,
-                    inputs=inputs,
-                    log_dir=run_log_dir,
-                    timeout_s=self.config.evaluation_timeout,
-                )
-                patch_verification_time_taken = time() - verification_start
+                async with asyncio.timeout(_attempt_budget(self.config.verification_attempt_timeout, deadline)):
+                    eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
+                    eval_sandbox_start_time_taken = time() - start_time
+                    verification_start = time()
+                    result = await run_verification(
+                        sandbox=eval_sandbox,
+                        inputs=inputs,
+                        log_dir=run_log_dir,
+                        timeout_s=self.config.evaluation_timeout,
+                    )
+                    patch_verification_time_taken = time() - verification_start
             except Exception as exc:
                 eval_sandbox_start_time_taken = time() - start_time
                 patch_verification_time_taken = 0.0
@@ -375,11 +392,20 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             finally:
                 if eval_sandbox is not None:
                     try:
-                        await eval_sandbox.stop()
+                        async with asyncio.timeout(self.config.verification_stop_timeout):
+                            await eval_sandbox.stop()
                     except Exception:
                         print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
 
             reason = inconclusive_reason(result, asdict(inputs))
+            if reason is not None and _budget_spent(deadline):
+                print(
+                    f"Verification for {body.instance_id} gave up after {attempt} attempt(s): "
+                    f"the {self.config.verification_total_timeout}s budget for this rollout is spent "
+                    f"({reason})",
+                    file=sys.stderr,
+                )
+                break
             if reason is None or attempt == attempts:
                 if reason is not None:
                     print(

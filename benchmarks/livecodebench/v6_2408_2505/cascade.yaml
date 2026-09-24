@@ -10,6 +10,7 @@ livecodebench_v6_cascade_code_gen_simple_agent:
   _inherit_from: code_gen_simple_agent
   responses_api_agents:
     simple_agent:
+      max_steps: 1
       resources_server:
         name: livecodebench_v6_cascade_code_gen_resources_server
       datasets:
