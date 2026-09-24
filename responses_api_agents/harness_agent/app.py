@@ -64,6 +64,11 @@ _AGENTS = {
     "opencode": ("responses_api_agents.opencode_agent.app", "OpenCodeAgent", "OpenCodeAgentConfig"),
     "pi": ("responses_api_agents.pi_agent.app", "PiAgent", "PiAgentConfig"),
     "prime": ("responses_api_agents.prime_agent.app", "PrimeAgent", "PrimeAgentConfig"),
+    "simple_strands": (
+        "responses_api_agents.simple_strands_agent.app",
+        "SimpleStrandsAgent",
+        "SimpleStrandsAgentConfig",
+    ),
     "terminus_2": ("responses_api_agents.terminus_2_agent.app", "Terminus2Agent", "Terminus2AgentConfig"),
 }
 
@@ -251,7 +256,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 local.write_text(content)
                 await self._provider.upload_file(handle, local, self._box_path(handle, target))
 
-    async def run(self, request: Request, body: HarnessAgentRunRequest) -> BaseVerifyResponse:
+    async def run(self, request: Request, body: HarnessAgentRunRequest) -> HarnessAgentVerifyResponse:
         async with self.sem:
             cookies = request.cookies
 

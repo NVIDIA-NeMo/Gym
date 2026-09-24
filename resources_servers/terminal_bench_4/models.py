@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 
 
 class SessionRequest(BaseModel):
@@ -23,6 +23,9 @@ class AgentTermination(BaseModel):
 
 class SandboxedVerifyRequest(BaseVerifyRequest, SessionRequest):
     termination: AgentTermination
+    agent_started: bool = False
+    agent_timings: dict[str, dict[str, str]] = Field(default_factory=dict)
+    harness_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class SandboxedVerifyResponse(BaseVerifyResponse):
@@ -34,3 +37,28 @@ class SandboxedVerifyResponse(BaseVerifyResponse):
     infrastructure_error: str | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
     timings: dict[str, Any] = Field(default_factory=dict)
+
+
+class TerminalBench4RunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+
+    task_name: str
+    task_ref: str
+    dataset_ref: str
+    rollout_id: str = Field(min_length=1, max_length=256)
+    client_session_id: str | None = Field(default=None, min_length=1, max_length=256)
+    artifact_directory: str | None = Field(default=None, min_length=1)
+
+
+class SeedSessionResponse(SessionRequest):
+    task_id: str | None = None
+    sandbox_descriptor: dict[str, Any] | None = None
+    sandbox_provider: dict[str, Any] = Field(default_factory=dict)
+    instruction: str = ""
+    user: str | int | None = None
+    execution_mode: Literal["miniswe", "oracle"] = "miniswe"
+    agent_timeout_sec: float = Field(default=28800, gt=0)
+    mcp_servers: list[dict[str, Any]] = Field(default_factory=list)
+    skills_dir: str | None = None
+    termination: AgentTermination | None = None
+    verified_response: SandboxedVerifyResponse | None = None

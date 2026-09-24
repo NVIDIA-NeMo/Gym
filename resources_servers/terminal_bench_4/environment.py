@@ -89,7 +89,9 @@ class Environment:
         self.session_id = session_id
         self.directory = Path(directory)
         self.settings = task.config.verifier_environment if verifier else task.config.environment
-        self.oracle_docker_image = task.config.oracle_docker_image if oracle else None
+        self.oracle_docker_image = (
+            (task.config.oracle_docker_image or task.config.verifier_environment.docker_image) if oracle else None
+        )
         if self.oracle_docker_image is not None:
             # Change only the image. Keep the agent's identity, workspace,
             # startup layout, healthcheck, network policy and resource budgets.

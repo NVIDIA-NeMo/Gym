@@ -2,41 +2,50 @@
 
 ## Contract
 
-The Gym agent endpoint forwards `/run` to this server. One runner owns provisioning,
-harness setup and execution, collection, separate verification, and cleanup.
-It imports the generic mini-SWE harness and passes the existing `Environment.main`
-sandbox directly. The harness never attaches, releases, grades, or destroys it.
+`/seed_session` provisions the pinned task and returns its sandbox descriptor,
+connection configuration, instruction, `task_id`, execution user, MCP/skills metadata,
+and official agent timeout. An agent server connects to that sandbox and owns
+harness setup, model calls, and the rollout loop. `/verify` collects artifacts,
+runs the separate official verifier, and cleans up the task's resources.
 
-`/run` accepts the Gym response parameters, `task_name`, `task_ref`, `dataset_ref`,
-and `rollout_id`. The task must match the configured manifest; dataset rows cannot
-select packages or override grading instructions. The adapter supplies a stable
-`client_session_id` so HTTP retries share the same episode even before a cookie
-response. Identical requests await one execution or replay its recorded result;
+Seed requests include `task_name`, `task_ref`, `dataset_ref`, and `rollout_id`.
+The task must match the configured manifest. The agent supplies a stable
+`client_session_id`, so identical seed retries share provisioning before the first
+cookie response. Verification retries share one finalizer and replay its result;
 conflicting requests fail. Run one resources worker per artifact directory.
 
-Harness setup, including working-directory discovery, has a separate 360-second
-budget. Queueing and provisioning do not consume it. The runner supplies the
-minimum of the official agent budget and any configured cap. The harness closes
-pending I/O and joins its synchronous worker before the runner quiesces sandbox
-process groups, collects artifacts, and starts the separate verifier. Official
+A seeded session has a resource-owned 10-hour deadline covering agent setup and
+execution. Configure it with `seeded_session_timeout_sec` or the benchmark override
+`tb4_seeded_session_timeout_sec`. The clock starts when the sandbox is ready;
+retries do not extend it. If `/verify` has not claimed the session by the deadline,
+resources quiesces the agent, destroys the owned resources, and releases its
+concurrency slot. Late seed/verify requests receive HTTP 410, including after
+restart. Expiry does not grade an abandoned rollout. Once `/verify` starts, its
+normal verifier timeout and cleanup lifecycle take over.
+
+The resources server retains the Compose creator, TTL renewal, and shared-volume
+ownership throughout the episode. The agent closes its attached transport after
+joining its harness worker, then submits its response, termination, execution
+status, timings, and harness metadata to `/verify`. Failed setup skips grading;
+a started agent is graded even after failure, cancellation, or timeout. Official
 zero and nonzero grades survive agent failure or timeout.
 
-`/cancel_session` cancels setup or agent execution and waits for cleanup. An episode
-that reached execution is still graded. Once finalization starts, cancellation
-waits for that finalizer. `/verify` only replays an already recorded result; it
-cannot initiate grading or supply an alternative agent result. Completed results
-can also be replayed after restart. Version-2 records contain the complete run
-request and response; records from the former split runner cannot resume here.
+The wire models in `models.py` are resources-owned. Agent implementations use
+their own HTTP models and need not import this server. `termination.reason` accepts
+`completed`, `timeout`, `nonzero_exit`, `cancelled`, and `infrastructure_error`;
+`agent_started` indicates whether execution began. `harness_metadata` is opaque
+result metadata, independent of the selected harness.
 
-Shutdown cancels active harnesses and drains finalization for the configured grace
-period, then interrupts grading and awaits cleanup. HTTP disconnection does not
-cancel the runner. Abrupt process death stops renewal; provider TTL is the cleanup
-fallback. Active records cannot resume after restart. The runner retains the
-Compose creator and its relay/volume ownership throughout the episode.
+Completed version-3 records can replay after a restart. Active records cannot
+resume after resources-process restart. Shutdown drains active verification for
+the configured grace period, then interrupts grading and awaits cleanup, including
+provisioned sessions that never reached verification. Abrupt resources-process
+death stops renewal; provider TTL is the sandbox cleanup fallback.
 
-Model calls use Gym's model server with the incoming cookies and rollout/token
-capture routing. Harness trajectories live in the trial's `harness/` directory;
-remote `/logs/agent` files are collected separately into `agent/`.
+Model-call capture and harness trajectories belong to the agent server. Resource
+artifacts, including collected remote `/logs/agent` files, remain under the trial
+directory. The seed's connection configuration is used only for the internal
+agent/resource exchange and is not persisted in session records.
 
 ## Optional local training packages and reference solutions
 
@@ -84,7 +93,7 @@ does not rebuild an image or make a non-root sandbox capable of root execution.
 | Operation | Execution identity |
 | --- | --- |
 | Stage trusted solution/tests | Root |
-| Golden solution | `agent.user`, otherwise selected oracle/agent-image default |
+| Golden solution | `agent.user`, otherwise selected golden-image default |
 | Live Mini-SWE commands | `agent.user`, otherwise current agent-image default |
 | Run verifier tests | `verifier.user`, otherwise current verifier-image default |
 | Healthcheck / collection hook without its own user | Current image default for that environment |
@@ -113,8 +122,9 @@ oracle_docker_image = "registry.example/task-oracle@sha256:<digest>"
 docker_image = "registry.example/task-agent@sha256:<digest>"
 ```
 
-Without this field, golden execution uses the agent image as before; it does
-not automatically fall back to the verifier image. Live rollouts always use
+Without this field, golden execution uses the verifier image. If there is no
+separate verifier image, the existing verifier-image fallback uses the task image.
+This supersedes the extension's earlier agent-image default. Live rollouts always use
 `environment.docker_image`, and grading still starts a fresh verifier using
 `verifier.environment.docker_image` (or its existing agent-image fallback).
 The override changes only the agent-side image, including the Compose `main`
@@ -130,15 +140,23 @@ just as for the agent and verifier images. No automatic permission repairs or
 fallback to root are performed. Changing this field requires regenerating the
 package and dataset content pins; a `/run` row cannot override the pinned image.
 
-Set `execution_mode: oracle` for a reference-solution check instead of Mini-SWE.
-The runner stages the trusted `solution/` directory into `/solution` as root,
-makes these reference assets readable, then executes `bash /solution/solve.sh`
-as `agent.user` (image default when absent), with the same discovered working
-directory and task timeout. It does not change workspace permissions or invoke
-a model. Artifact collection, separate grading and cleanup use the normal
-lifecycle. `oracle/identity.json`, stdout/stderr and `oracle_exit_code` distinguish
+Set the resources server's `execution_mode: oracle` for a reference-solution check.
+During `/seed_session`, resources stages the pinned `solution/` directory into
+`/solution` as root and makes these reference assets readable (bounded to 360 seconds).
+It returns `execution_mode: oracle` in the trusted seed response, alongside the
+agent identity and sandbox descriptor. Request-row extras cannot select this mode,
+image, or a host solution path. Live seeds never stage the solution.
+
+The agent server reconnects and executes `bash /solution/solve.sh` as `agent.user`
+(selected image default when absent), using its normal setup and task execution
+budgets. It neither reads host task packages nor uploads trusted files. It then
+submits the result to resources `/verify`; artifact collection, separate grading
+and cleanup use upstream's normal lifecycle. No workspace permissions change and
+no model is invoked. Under the agent's artifact directory, `oracle/identity.json`,
+stdout/stderr and the returned `oracle_exit_code` distinguish
 solution failures from verifier errors; reward 1 is still required for a golden
-pass. `execution_mode: miniswe` is the default for ordinary rollouts.
+pass. `execution_mode: miniswe` is the default for ordinary rollouts. The resources
+server no longer owns a `/run` loop; model/harness settings belong to the agent.
 
 ## Image startup: Compose and standalone
 

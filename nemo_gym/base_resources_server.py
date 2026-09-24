@@ -14,10 +14,10 @@
 # limitations under the License.
 from abc import abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 
 if TYPE_CHECKING:
@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     from nemo_gym.mcp_auto_exposure import MCPTool
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.failure_kinds import validate_failure_kind
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -33,6 +35,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
+from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
@@ -66,7 +69,7 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
 
 
 # Tool names that would collide with the resources server's own endpoints if advertised over MCP.
-RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "aggregate_metrics", "mcp"})
+RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "close_session", "aggregate_metrics", "mcp"})
 
 
 class ReverifyMode(str, Enum):
@@ -104,9 +107,45 @@ class BaseVerifyRequest(BaseRunRequest):
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
 
-    # Human-readable diagnosis of why `reward` may not reflect policy quality.
-    # Machine-readable handling belongs to `mask_sample`/`failure_kind`.
+    mask_sample: bool = Field(
+        default=False,
+        description=(
+            "Whether this completed sample should be excluded from evaluation scores and "
+            "other downstream quality calculations because its reward is not a valid "
+            "measurement of the evaluated system. Set it when the environment or its "
+            "infrastructure failed rather than the evaluated system: a lost session, an "
+            "unavailable judge, an OOM-killed container, a reset that timed out. The "
+            "default means the reward is a valid measurement. It is independent of the "
+            "diagnostic fields: a sample that degraded but was still measured validly "
+            "keeps mask_sample=False while naming a failure_kind/failure_reason."
+        ),
+    )
+
+    failure_kind: Optional[str] = Field(
+        default=None,
+        description=(
+            "Which kind of failure this was, from the shared vocabulary in "
+            "nemo_gym.failure_kinds. Stable and low cardinality, so it is safe to group by "
+            "in logs, metrics and traces — unlike failure_reason. An environment that needs "
+            "something the shared set should not grow can use '<server>:<kind>'. Orthogonal "
+            "to mask_sample: naming the kind does not decide whether the sample is usable."
+        ),
+    )
+
+    # Human-readable diagnosis of why `reward` may not reflect policy quality. Occurrence
+    # detail, so never a metric label; `failure_kind` is the groupable half.
     failure_reason: Optional[str] = None
+
+    @field_validator("failure_kind")
+    @classmethod
+    def _warn_on_unregistered_failure_kind(cls, value: Optional[str]) -> Optional[str]:
+        """Producers learn about a name outside the vocabulary without losing the failure.
+
+        Validation warns rather than rejects: an unregistered kind is a migration signal,
+        and dropping the response over it would replace a visible wrong label with an
+        invisible lost failure.
+        """
+        return validate_failure_kind(value)
 
 
 class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
@@ -140,6 +179,62 @@ class MCPServerMetadata(BaseModel):
     url_path: str = "/mcp"
     transport: str = "http"
     headers: dict[str, str]
+
+
+class ResourcesSeedSessionRequest(BaseModel):
+    """Initialize resources-server state for one episode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    episode_id: EpisodeId
+    task_id: TaskId
+    task_data: dict[str, JsonValue]
+
+
+class ResourcesSeedSessionResponse(BaseModel):
+    """Return resources state and optional agent access."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resources_session_id: str
+    resources_tools: MCPServerMetadata | None = None
+    sandbox_access: SandboxAccess | None = None
+
+
+VerificationInputT = TypeVar("VerificationInputT")
+
+
+class ResourcesVerifyRequest(BaseModel, Generic[VerificationInputT]):
+    """Carry typed environment output to a resources server."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    episode_id: EpisodeId
+    task_id: TaskId
+    verification_input: VerificationInputT
+
+
+class ResourcesVerifyResponse(BaseVerifyResponse):
+    """Preserve environment-specific verification fields across the server boundary."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class ResourcesCloseSessionRequest(BaseModel):
+    """Close resources-server state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resources_session_id: str
+    episode_id: EpisodeId
+
+
+class ResourcesCloseSessionResponse(BaseModel):
+    """Confirm resources-server state was closed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resources_session_id: str
 
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):

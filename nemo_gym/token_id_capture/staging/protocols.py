@@ -25,6 +25,7 @@ Implementations must synchronize their own shared state.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
 from nemo_gym.token_id_capture.staging.records import StagedCallBaseSnapshot, StagedCallRecord, StageResult
@@ -36,9 +37,19 @@ class StagingSink(Protocol):
 
     ``stage`` must be thread-safe: the capture host invokes it concurrently
     from multiple completion threads without serializing calls.
+
+    ``attachments`` are framework-owned payloads (for example processed media
+    tensors) that must land in the same durable write as the record. Gym never
+    inspects them and they never enter ``StagedCallRecord``, ``extras``, or any
+    digest. A sink that accepts the keyword must either store every supplied
+    attachment before returning success or reject the call; silently dropping
+    attachments violates the protocol. The capture core only passes the
+    keyword when the caller supplied a mapping, so a legacy ``stage(record)``
+    sink keeps working for text-only calls and raises ``TypeError`` (reported
+    as ``capture_failed``) when attachments are supplied.
     """
 
-    def stage(self, record: StagedCallRecord) -> StageResult: ...
+    def stage(self, record: StagedCallRecord, *, attachments: Mapping[str, Any] | None = None) -> StageResult: ...
 
 
 @runtime_checkable
@@ -79,15 +90,19 @@ class CaptureAdapter(Protocol):
         """
         ...
 
-    def extract_prompt_ids(self, response_payload: dict[str, Any]) -> list[int]:
-        """Return the exact prompt token IDs used for generation."""
+    def extract_prompt_ids(self, response_payload: Any) -> list[int]:
+        """Return the exact prompt token IDs used for generation.
+
+        ``response_payload`` is engine-native: a chat completion dict for
+        vLLM, an offloaded payload object for Megatron Inference.
+        """
         ...
 
-    def extract_generation(self, response_payload: dict[str, Any]) -> tuple[list[int], list[float]]:
+    def extract_generation(self, response_payload: Any) -> tuple[list[int], list[float]]:
         """Return exact generated token IDs and selected-token log probabilities."""
         ...
 
-    def extract_extras(self, response_payload: dict[str, Any]) -> dict[str, Any] | None:
+    def extract_extras(self, response_payload: Any) -> dict[str, Any] | None:
         """Return optional versioned engine-native per-token material."""
         ...
 

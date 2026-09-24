@@ -33,8 +33,8 @@ def test_oracle_image_changes_only_golden_image(tmp_path, monkeypatch, oracle_im
     expected = (
         "public/verifier"
         if role == "verifier"
-        else oracle_image
-        if role == "oracle" and oracle_image
+        else oracle_image or "public/verifier"
+        if role == "oracle"
         else "public/agent"
     )
     assert env.build_spec().image == expected
@@ -59,6 +59,17 @@ def test_oracle_image_rejects_invalid_references(invalid):
         )
 
 
+def test_oracle_without_separate_verifier_image_uses_task_image(tmp_path, monkeypatch):
+    env, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        oracle=True,
+        task_config={"verifier": {"environment": None, "environment_mode": "separate"}},
+    )
+    assert env.build_spec().image == "public/agent"
+    assert env.role_user == "task-user"
+
+
 def test_oracle_image_cannot_select_verifier_role(tmp_path, monkeypatch):
     env, *_ = make_environment(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="agent role"):
@@ -66,13 +77,15 @@ def test_oracle_image_cannot_select_verifier_role(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("compose", [False, True])
-async def test_oracle_uses_its_startup_metadata_and_keeps_sidecars(tmp_path, monkeypatch, compose):
+@pytest.mark.parametrize("oracle_image", [None, "public/oracle"])
+async def test_oracle_uses_its_startup_metadata_and_keeps_sidecars(tmp_path, monkeypatch, compose, oracle_image):
+    selected_image = oracle_image or "public/verifier"
     env, _, sandbox_factory, compose_factory = make_environment(
         tmp_path,
         monkeypatch,
         compose=compose,
         oracle=True,
-        task_config={"oracle_docker_image": "public/oracle"},
+        task_config={"oracle_docker_image": oracle_image},
     )
     records = {
         image: {
@@ -81,7 +94,7 @@ async def test_oracle_uses_its_startup_metadata_and_keeps_sidecars(tmp_path, mon
             "architecture": "amd64",
             "config": {"Entrypoint": [entrypoint], "Cmd": ["python3"], "User": "root"},
         }
-        for image, entrypoint in (("public/oracle", "/oracle-start"), ("db", "/database-start"))
+        for image, entrypoint in ((selected_image, "/oracle-start"), ("db", "/database-start"))
     }
     catalog = tmp_path / "startup.json"
     catalog.write_text(json.dumps(records))
@@ -93,7 +106,7 @@ async def test_oracle_uses_its_startup_metadata_and_keeps_sidecars(tmp_path, mon
         # The fixture explicitly names the normal image in the main overlay.
         # Oracle must replace it, not silently let the overlay win.
         document = yaml.safe_load(compose_factory.call_args.args[1].read_text())
-        assert document["services"]["main"]["image"] == "public/oracle"
+        assert document["services"]["main"]["image"] == selected_image
         assert document["services"]["main"]["entrypoint"] == ["/oracle-start"]
         assert document["services"]["main"]["command"] == ["sh", "-c", "sleep infinity"]
         assert document["services"]["db"]["image"] == "db"
@@ -102,7 +115,7 @@ async def test_oracle_uses_its_startup_metadata_and_keeps_sidecars(tmp_path, mon
         assert "image: public" in (env.environment_dir / "docker-compose.yaml").read_text()
     else:
         spec = sandbox_factory.call_args.args[1]
-        assert spec.image == "public/oracle"
+        assert spec.image == selected_image
         assert spec.entrypoint == ["/oracle-start", "sh", "-c", "sleep infinity"]
     assert env.role_user == "task-user"
     assert env.task.config.model_dump() == before

@@ -19,7 +19,13 @@ from pathlib import Path
 import orjson
 import pytest
 
-from nemo_gym.reward_profile import RewardProfiler
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.reward_profile import (
+    RewardProfiler,
+    compute_aggregate_metrics,
+    coverage_by_agent,
+    select_measured,
+)
 
 
 def _row(task_idx: int, rollout_idx: int) -> dict:
@@ -422,6 +428,31 @@ class TestRewardProfile:
         assert row["mean/input_tokens"] == 4.0
         assert row["mean/verifier_score"] == 2.5
 
+    def test_private_retry_metadata_is_excluded_from_all_metric_levels(self) -> None:
+        rows = [{"_ng_task_index": 0, "_ng_rollout_index": i, "agent_ref": {"name": "agent"}} for i in range(2)]
+        results = [
+            row
+            | {
+                "response": {},
+                "reward": 1.0,
+                "verifier_score": 3.0,
+                "_ng_group_attempt": 2,
+                "_ng_attempt_index": 3,
+                "_private_value": 4,
+            }
+            for row in rows
+        ]
+        group, agent, dataset = RewardProfiler().profile_from_data(rows, results)
+        assert group[0]["_ng_task_index"] == 0
+        assert [r["_ng_rollout_index"] for r in group[0]["rollout_infos"]] == [0, 1]
+        assert group[0]["mean/verifier_score"] == 3.0
+        for record in [*group, *agent, *dataset, *group[0]["rollout_infos"]]:
+            assert not any(
+                field in key
+                for key in record
+                for field in ("_ng_group_attempt", "_ng_attempt_index", "_private_value")
+            )
+
     def test_profile_from_data_missing_rollouts_requires_partial_flag(self) -> None:
         rows = [_row(0, 0), _row(0, 1)]
         results = [_result(0, 0)]
@@ -724,3 +755,165 @@ class TestWriteToDisk:
 
         written = orjson.loads(repeat_level_metrics_fpath.read_bytes())
         assert "histogram/reward" not in written[0]
+
+
+class TestTheTwoViewsAgree:
+    """`gym eval profile` and `/aggregate_metrics` read the same saved rollouts."""
+
+    def _verify_response(self, task: int, rollout: int, reward: float, masked: bool) -> dict:
+        return {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: rollout,
+            "reward": reward,
+            "mask_sample": masked,
+            "response": {},
+        }
+
+    def test_the_same_rollouts_give_the_same_mean_either_way(self) -> None:
+        """One valid reward of 1 and one masked reward of 0 is a mean of 1, not 0.5."""
+        verify_responses = [
+            self._verify_response(0, 0, reward=1.0, masked=False),
+            self._verify_response(0, 1, reward=0.0, masked=True),
+        ]
+
+        aggregated = compute_aggregate_metrics(verify_responses)
+
+        rows = [
+            {
+                TASK_INDEX_KEY_NAME: vr[TASK_INDEX_KEY_NAME],
+                ROLLOUT_INDEX_KEY_NAME: vr[ROLLOUT_INDEX_KEY_NAME],
+                "agent_ref": {"name": "agent"},
+            }
+            for vr in verify_responses
+        ]
+        measured_rows, measured_results, masked, coverage = select_measured(rows, verify_responses)
+        _, agent_level_metrics, _ = RewardProfiler().profile_from_data(measured_rows, measured_results)
+
+        # The point is that the two views agree, not the scale either one uses.
+        assert aggregated.key_metrics["mean/reward"] == 1.0
+        assert agent_level_metrics[0]["mean/reward"] == aggregated.key_metrics["mean/reward"]
+        assert len(masked) == 1
+        assert coverage["coverage/masked_rollouts"] == 1
+
+    def test_the_profiling_view_does_not_publish_the_flag_as_a_metric(self) -> None:
+        measured_rows, measured_results, _, _ = select_measured(
+            [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "agent_ref": {"name": "agent"}}],
+            [self._verify_response(0, 0, reward=1.0, masked=False)],
+        )
+        _, agent_level_metrics, _ = RewardProfiler().profile_from_data(measured_rows, measured_results)
+
+        assert "mask_sample" not in measured_results[0]
+        assert not any("mask_sample" in key for key in agent_level_metrics[0])
+
+    def test_masking_does_not_make_a_complete_collection_look_partial(self) -> None:
+        """A masked rollout ran. Dropping its row alongside it keeps the keys aligned, so
+        profiling does not demand `allow_partial_rollouts` for a run that lost nothing."""
+        verify_responses = [
+            self._verify_response(0, 0, reward=1.0, masked=False),
+            self._verify_response(0, 1, reward=0.0, masked=True),
+        ]
+        rows = [
+            {
+                TASK_INDEX_KEY_NAME: vr[TASK_INDEX_KEY_NAME],
+                ROLLOUT_INDEX_KEY_NAME: vr[ROLLOUT_INDEX_KEY_NAME],
+                "agent_ref": {"name": "agent"},
+            }
+            for vr in verify_responses
+        ]
+        measured_rows, measured_results, _, _ = select_measured(rows, verify_responses)
+
+        # Would raise ValueError about missing rollout results if the rows were left behind.
+        RewardProfiler().profile_from_data(measured_rows, measured_results, allow_partial_rollouts=False)
+
+    def test_nothing_masked_leaves_both_sides_untouched(self) -> None:
+        rows = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "agent_ref": {"name": "agent"}}]
+        results = [self._verify_response(0, 0, reward=1.0, masked=False)]
+
+        measured_rows, _, masked, coverage = select_measured(rows, results)
+
+        assert measured_rows == rows
+        assert masked == []
+        assert coverage == {}
+
+
+class TestMaskingDoesNotHideAnIncompleteCollection:
+    """Narrowing what is measured must not change what counts as collected."""
+
+    def _row(self, task: int, rollout: int, agent: str = "agent") -> dict:
+        return {TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: rollout, "agent_ref": {"name": agent}}
+
+    def _result(self, task: int, rollout: int, reward: float = 1.0, masked: bool = False) -> dict:
+        return {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: rollout,
+            "reward": reward,
+            "mask_sample": masked,
+            "response": {},
+        }
+
+    def test_a_missing_rollout_survives_the_masking_filter(self) -> None:
+        """One measured, one masked, one never collected: the third is still missing."""
+        rows = [self._row(0, 0), self._row(0, 1), self._row(0, 2)]
+        results = [self._result(0, 0), self._result(0, 1, reward=0.0, masked=True)]
+
+        measured_rows, measured_results, masked, _ = select_measured(rows, results)
+
+        assert len(masked) == 1
+        assert self._row(0, 2) in measured_rows
+        with pytest.raises(ValueError, match="Missing rollout results"):
+            RewardProfiler().profile_from_data(measured_rows, measured_results, allow_partial_rollouts=False)
+
+    def test_only_the_masked_pair_is_removed(self) -> None:
+        rows = [self._row(0, 0), self._row(0, 1)]
+        results = [self._result(0, 0), self._result(0, 1, reward=0.0, masked=True)]
+
+        measured_rows, _, _, _ = select_measured(rows, results)
+
+        assert measured_rows == [self._row(0, 0)]
+
+    def test_a_masked_result_with_no_input_row_is_still_a_foreign_result(self) -> None:
+        """Validation runs on the originals, so filtering cannot accept it by removing it."""
+        rows = [self._row(0, 0)]
+        results = [self._result(0, 0), self._result(9, 9, reward=0.0, masked=True)]
+
+        with pytest.raises(ValueError, match="no matching materialized input"):
+            RewardProfiler().align_rows_and_results(rows, results, allow_partial_rollouts=False)
+
+
+class TestCoverageBelongsToTheAgentThatEarnedIt:
+    def _row(self, task: int, rollout: int, agent: str) -> dict:
+        return {TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: rollout, "agent_ref": {"name": agent}}
+
+    def _result(self, task: int, rollout: int, reward: float = 1.0, masked: bool = False) -> dict:
+        return {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: rollout,
+            "reward": reward,
+            "mask_sample": masked,
+            "response": {},
+        }
+
+    def test_one_agents_mask_is_not_attributed_to_another(self) -> None:
+        rows = [self._row(0, 0, "agent_a"), self._row(0, 1, "agent_b")]
+        results = [self._result(0, 0), self._result(0, 1, reward=0.0, masked=True)]
+
+        coverage = coverage_by_agent(rows, results)
+
+        assert "agent_a" not in coverage
+        assert coverage["agent_b"]["coverage/masked_rollouts"] == 1
+
+    def test_a_fully_masked_agent_still_has_coverage(self) -> None:
+        """Its quality metrics are gone; the record of why must not be."""
+        rows = [self._row(0, 0, "broken_agent")]
+        results = [self._result(0, 0, reward=0.0, masked=True)]
+
+        coverage = coverage_by_agent(rows, results)
+
+        assert coverage["broken_agent"]["coverage/masked_rollouts"] == 1
+        assert coverage["broken_agent"]["coverage/measured_rollouts"] == 0
+
+    def test_a_run_with_no_masking_reports_no_coverage_at_all(self) -> None:
+        rows = [self._row(0, 0, "agent_a")]
+        results = [self._result(0, 0)]
+
+        assert coverage_by_agent(rows, results) == {}

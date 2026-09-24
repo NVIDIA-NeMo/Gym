@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,14 +8,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.terminal_bench_4 import oracle, verifier
-from resources_servers.terminal_bench_4.app import empty_response
-from resources_servers.terminal_bench_4.oracle import OracleHarness
 from resources_servers.terminal_bench_4.task import PackageLoader, content_hash
 from resources_servers.terminal_bench_4.tests.test_task import package
 from resources_servers.terminal_bench_4.transfers import stage_trusted_directory
-from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext
 
 
 async def test_local_loader_uses_configured_path_and_revalidates(tmp_path):
@@ -148,48 +143,24 @@ async def test_trusted_staging_rejects_escape_and_arbitrary_destination(tmp_path
     sandbox.upload.assert_not_called()
 
 
-@pytest.mark.parametrize("user", [None, "agent", 1000, "root"])
-@pytest.mark.parametrize("exit_code", [0, 1])
-async def test_oracle_preserves_agent_identity_and_exit_status(tmp_path, monkeypatch, user, exit_code):
+async def test_oracle_staging_uses_the_fixed_trusted_destination(tmp_path, monkeypatch):
     source = tmp_path / "solution"
     source.mkdir()
     (source / "solve.sh").write_text("exit 0")
     stage = AsyncMock()
     monkeypatch.setattr(oracle, "stage_trusted_directory", stage)
-    sandbox = SimpleNamespace(
-        exec=AsyncMock(
-            side_effect=[
-                SimpleNamespace(return_code=0, stdout="uid=test\n/task\n", stderr=""),
-                SimpleNamespace(return_code=exit_code, stdout="solution", stderr=""),
-            ]
-        )
-    )
-    context = HarnessContext(
-        session_id="safe-id",
-        task_id="test",
-        rollout_id="run",
-        instruction="task",
-        user=user,
-        workdir="/task",
-        setup_timeout_sec=30,
-        mcp_servers=[],
-        skills_dir=None,
-    )
-    harness = OracleHarness(
-        sandbox=sandbox,
-        context=context,
-        solution_dir=source,
-        directory=tmp_path / "oracle",
-        response=empty_response(NeMoGymResponseCreateParamsNonStreaming(input=[]), "unused"),
-    )
-    await harness.setup()
-    response, outcome, extra = await harness.execute(30)
+    sandbox = SimpleNamespace(exec=AsyncMock())
+    await oracle.stage_solution(sandbox, source)
     stage.assert_awaited_once_with(sandbox, source, "/solution")
-    for call in sandbox.exec.await_args_list:
-        assert call.kwargs["user"] == user and call.kwargs["cwd"] == "/task"
-    assert outcome.reason == ("completed" if exit_code == 0 else "nonzero_exit")
-    assert extra["oracle_exit_code"] == exit_code and response.output == []
-    assert json.loads((tmp_path / "oracle/identity.json").read_text())["requested_user"] == user
+    sandbox.exec.assert_not_awaited()  # Staging must not execute the solution.
+
+
+async def test_oracle_staging_requires_trusted_solve_script(tmp_path, monkeypatch):
+    stage = AsyncMock()
+    monkeypatch.setattr(oracle, "stage_trusted_directory", stage)
+    with pytest.raises(FileNotFoundError, match="solution/solve.sh"):
+        await oracle.stage_solution(SimpleNamespace(), tmp_path)
+    stage.assert_not_awaited()
 
 
 @pytest.mark.parametrize("stage_tests", [False, True])
