@@ -74,6 +74,7 @@ def _make_server(**overrides) -> FinanceAgentV2ResourcesServer:
         name="finance_agent_v2_test",
         tavily_api_key="dummy-tavily",  # pragma: allowlist secret
         sec_api_key="dummy-sec",  # pragma: allowlist secret
+        edgar_search_mode="live",
         pricing_data_api_key="dummy-tiingo",  # pragma: allowlist secret
         retrieval_model_server=ModelServerRef(type="responses_api_models", name="policy"),
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
@@ -322,11 +323,8 @@ class TestInitialization:
             assert server._tools.get(name) is not None, f"{name} should be available"
 
     def test_tools_unavailable_without_keys(self) -> None:
-        server = _make_server(
-            tavily_api_key=None, sec_api_key=None, pricing_data_api_key=None, retrieval_model_server=None
-        )
+        server = _make_server(tavily_api_key=None, pricing_data_api_key=None, retrieval_model_server=None)
         assert server._tools["web_search"] is None
-        assert server._tools["edgar_search"] is None
         assert server._tools["price_history"] is None
         assert server._tools["retrieve_information"] is None
         # No-key tools remain available.
@@ -365,27 +363,44 @@ class TestToolSurface:
 
 
 # ============================================================================
-# sec_mode
+# edgar_search_mode
 # ============================================================================
 
 
-class TestSecMode:
-    def test_live_is_the_default(self) -> None:
-        server = _make_server()
+class TestEdgarSearchMode:
+    def test_the_mode_is_required(self) -> None:
+        with pytest.raises(ValidationError, match="edgar_search_mode"):
+            _make_server(edgar_search_mode=None)
 
-        assert server._sec_mode == "live"
+    def test_live_without_a_key_fails_at_startup(self) -> None:
+        with pytest.raises(ValueError, match="sec_api_key is not set"):
+            _make_server(edgar_search_mode="live", sec_api_key=None)
+
+    def test_local_does_not_need_a_key(self, tmp_path) -> None:
+        server = _make_server(
+            edgar_search_mode="local",
+            sec_api_key=None,
+            local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")),
+        )
+
+        assert isinstance(server._tools["edgar_search"], LocalEDGARSearch)
+
+    def test_live_uses_sec_api(self) -> None:
+        server = _make_server(edgar_search_mode="live")
+
         assert not isinstance(server._tools["edgar_search"], LocalEDGARSearch)
         assert not isinstance(server._tools["parse_html_page"], LocalParseHtmlPage)
 
-    def test_an_index_alone_selects_local(self, tmp_path) -> None:
-        """Configuring the index is how a training run asks for local mode."""
-        server = _make_server(local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")))
+    def test_local_uses_the_index(self, tmp_path) -> None:
+        server = _make_server(
+            edgar_search_mode="local", local_edgar_index_path=str(build_index(tmp_path / "index.sqlite"))
+        )
 
-        assert server._sec_mode == "local"
         assert isinstance(server._tools["edgar_search"], LocalEDGARSearch)
 
     def test_a_corpus_is_what_moves_filing_reads_off_the_network(self, tmp_path) -> None:
         server = _make_server(
+            edgar_search_mode="local",
             local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")),
             sec_dump_path=str(tmp_path / "corpus"),
         )
@@ -395,7 +410,7 @@ class TestSecMode:
     def test_live_wins_over_a_configured_index(self, tmp_path) -> None:
         """Eval against sec-api.io while the training index stays configured."""
         server = _make_server(
-            sec_mode="live",
+            edgar_search_mode="live",
             local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")),
         )
 
@@ -405,11 +420,11 @@ class TestSecMode:
         """Refused at boot rather than per search, which would surface as a
         rollout of failed tool calls."""
         with pytest.raises(ValueError, match="local_edgar_index_path is not set"):
-            _make_server(sec_mode="local")
+            _make_server(edgar_search_mode="local")
 
     def test_an_unknown_mode_is_refused(self) -> None:
         with pytest.raises(ValidationError, match="Input should be 'live' or 'local'"):
-            _make_server(sec_mode="offline")
+            _make_server(edgar_search_mode="offline")
 
     def test_an_index_needing_a_sidecar_fails_at_startup(self, tmp_path, monkeypatch) -> None:
         """A tool registered as unavailable would let rollouts run and be scored
@@ -417,7 +432,7 @@ class TestSecMode:
         monkeypatch.setattr(local_edgar_search, "SLOW_METADATA_LIMIT_BYTES", 1)
 
         with pytest.raises(ValidationError, match="no metadata sidecar"):
-            _make_server(local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")))
+            _make_server(edgar_search_mode="local", local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")))
 
 
 # ============================================================================

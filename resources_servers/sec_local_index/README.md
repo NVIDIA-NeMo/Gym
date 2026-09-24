@@ -18,7 +18,7 @@ without anyone noticing.
 | --- | --- |
 | `local_edgar_search.py` | The SQLite FTS5 search engine, query translation, result shaping, and the metadata sidecar |
 | `live_edgar_search.py` | The sec-api.io full-text-search call |
-| `edgar_search_service.py` | Argument coercion, normalization, date clamping and error serialization, plus `resolve_sec_mode` |
+| `edgar_search_service.py` | Argument coercion, normalization, date clamping and error serialization |
 | `html_text.py` | The HTML-to-text reduction `parse_html_page` returns |
 | `sec_urls.py` | Parsing SEC Archives URLs into CIK, accession and document parts |
 | `cache.py` | `ToolCache`, the disk-backed tool response cache |
@@ -29,10 +29,11 @@ servers' suites import it, so a schema change is felt in one place.
 
 ## Choosing a mode
 
-Both servers take a `sec_mode` setting of `live` or `local`. Left unset it
-follows `local_edgar_index_path`: local when an index is configured, live
-otherwise. Asking for local mode without an index fails at startup rather than
-once per search.
+Both servers take an `edgar_search_mode` setting of `live` or `local`. It only
+affects `edgar_search`, and is never inferred from which paths are configured.
+`finance_agent_v2` requires it. In `finance_sec_search`, where `edgar_search` is
+optional, leaving it unset turns the tool off. Local mode without an index fails
+at startup rather than once per search.
 
 Local mode makes no network call, which is what training throughput needs. Live
 mode is the one that matches the published benchmark.

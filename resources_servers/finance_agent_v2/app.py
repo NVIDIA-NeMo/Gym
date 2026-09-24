@@ -78,7 +78,6 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
 from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage
 from resources_servers.sec_local_index.cache import ToolCache
-from resources_servers.sec_local_index.edgar_search_service import resolve_sec_mode
 from resources_servers.sec_local_index.local_edgar_search import LocalEdgarSearch
 
 
@@ -121,11 +120,9 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
     sec_api_key: Optional[str] = Field(default=None, description="sec-api.io API key for the edgar_search tool.")
 
     # --- SEC data source -----------------------------------------------------
-    sec_mode: Optional[Literal["live", "local"]] = Field(
-        default=None,
+    edgar_search_mode: Literal["live", "local"] = Field(
         description="Where edgar_search reads filings from. 'live' queries sec-api.io and needs sec_api_key. "
-        "'local' reads local_edgar_index_path. Left unset, it follows local_edgar_index_path: local when one is "
-        "configured, live otherwise.",
+        "'local' reads local_edgar_index_path. Other tools are unaffected.",
     )
     local_edgar_index_path: Optional[str] = Field(
         default=None,
@@ -439,12 +436,11 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             with open(self.config.rubric_judge_prompt_template_fpath, "r") as f:
                 self._rubric_judge_prompt_template = yaml.safe_load(f)["rubric_judge_prompt_template"].strip()
 
-        self._sec_mode = resolve_sec_mode(self.config.sec_mode, self.config.local_edgar_index_path)
         self._local_edgar: Optional[LocalEdgarSearch] = None
-        if self._sec_mode == "local":
+        if self.config.edgar_search_mode == "local":
             if not self.config.local_edgar_index_path:
                 raise ValueError(
-                    "sec_mode is 'local' but local_edgar_index_path is not set. Local mode serves "
+                    "edgar_search_mode is 'local' but local_edgar_index_path is not set. Local mode serves "
                     "edgar_search entirely from that index; without it every search would fail mid-rollout."
                 )
             self._local_edgar = LocalEdgarSearch(
@@ -457,6 +453,8 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                 self.config.local_edgar_index_path,
                 self._local_edgar.coverage,
             )
+        elif not self.config.sec_api_key:
+            raise ValueError("edgar_search_mode is 'live' but sec_api_key is not set.")
 
         self._tools = self._build_tools()
 
@@ -498,7 +496,7 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                 "edgar_search",
                 lambda: LocalEDGARSearch(self._local_edgar, max_end_date=MAX_END_DATE),
             )
-        elif self.config.sec_api_key:
+        else:
             tools["edgar_search"] = self._try_build(
                 "edgar_search",
                 lambda: (
@@ -507,9 +505,6 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                     else EDGARSearch(sec_api_key=self.config.sec_api_key)
                 ),
             )
-        else:
-            logger.info("No sec_api_key configured — edgar_search will be unavailable")
-            tools["edgar_search"] = None
 
         # price_history (Tiingo).
         if self.config.pricing_data_api_key:

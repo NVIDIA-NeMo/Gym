@@ -22,7 +22,6 @@ from pathlib import Path
 import pytest
 
 from resources_servers.sec_local_index import local_edgar_search
-from resources_servers.sec_local_index.edgar_search_service import resolve_sec_mode
 from resources_servers.sec_local_index.local_edgar_search import (
     LocalEdgarSearch,
     OutOfCoverageError,
@@ -107,26 +106,6 @@ def test_max_end_date_has_no_default(tmp_path: Path) -> None:
 
     with pytest.raises(TypeError, match="max_end_date"):
         normalize_request("quantum pineapple")
-
-
-@pytest.mark.parametrize(
-    ("configured", "index_path", "expected"),
-    [
-        (None, None, "live"),
-        (None, "/some/index.sqlite", "local"),
-        ("live", "/some/index.sqlite", "live"),
-        ("local", None, "local"),
-    ],
-)
-def test_sec_mode_defaults_to_the_configured_artifacts(configured, index_path, expected) -> None:
-    """An index path alone selected local mode before sec_mode existed, so it
-    still has to."""
-    assert resolve_sec_mode(configured, index_path) == expected
-
-
-def test_sec_mode_rejects_an_unknown_value() -> None:
-    with pytest.raises(ValueError, match="sec_mode must be"):
-        resolve_sec_mode("offline", None)
 
 
 def test_an_unknown_sidecar_version_is_refused(tmp_path: Path) -> None:

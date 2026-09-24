@@ -24,8 +24,8 @@ finance_sec_search_resources_server:
       # null default => web search disabled unless a key is supplied.
       tavily_api_key: ${oc.select:tavily_api_key,null}
       # live: edgar_search queries sec-api.io (needs sec_api_key). local: it reads
-      # local_edgar_index_path and makes no network call. Unset follows the index path.
-      sec_mode: ${oc.select:sec_mode,null}
+      # local_edgar_index_path and makes no network call. null: edgar_search is off.
+      edgar_search_mode: ${oc.select:edgar_search_mode,null}
       sec_api_key: ${oc.select:sec_api_key,null}
       local_edgar_index_path: ${oc.select:local_edgar_index_path,null}
       local_edgar_metrics_dir: ${oc.select:local_edgar_metrics_dir,null}

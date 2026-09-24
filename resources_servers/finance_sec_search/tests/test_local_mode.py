@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""What sec_mode selects, and what the server does once it has selected it.
+"""What edgar_search_mode selects, and what the server does once it has selected it.
 
 The engine underneath is exercised in
 resources_servers/sec_local_index/tests.
@@ -67,18 +67,35 @@ def test_local_mode_without_an_index_fails_at_startup(tmp_path: Path) -> None:
     of failed tool calls."""
     with pytest.raises(ValueError, match="local_edgar_index_path is not set"):
         FinanceAgentResourcesServer(
-            config=_server_config(tmp_path, sec_mode="local"),
+            config=_server_config(tmp_path, edgar_search_mode="local"),
             server_client=MagicMock(spec=ServerClient),
         )
 
 
-def test_live_mode_is_selected_when_a_key_is_present(tmp_path: Path) -> None:
+def test_live_mode_without_a_key_fails_at_startup(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="sec_api_key is not set"):
+        FinanceAgentResourcesServer(
+            config=_server_config(tmp_path, edgar_search_mode="live"),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+
+def test_live_mode_uses_sec_api(tmp_path: Path) -> None:
     server = FinanceAgentResourcesServer(
-        config=_server_config(tmp_path, sec_mode="live", sec_api_key="test-key"),
+        config=_server_config(tmp_path, edgar_search_mode="live", sec_api_key="test-key"),
         server_client=MagicMock(spec=ServerClient),
     )
 
     assert isinstance(server._edgar_search_service._backend, LiveEdgarSearch)
+
+
+def test_an_index_alone_does_not_turn_on_edgar_search(tmp_path: Path) -> None:
+    server = FinanceAgentResourcesServer(
+        config=_server_config(tmp_path, local_edgar_index_path=str(build_index(tmp_path / "index.sqlite"))),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+    assert server._edgar_search_service is None
 
 
 def test_live_mode_wins_over_a_configured_index(tmp_path: Path) -> None:
@@ -86,7 +103,7 @@ def test_live_mode_wins_over_a_configured_index(tmp_path: Path) -> None:
     server = FinanceAgentResourcesServer(
         config=_server_config(
             tmp_path,
-            sec_mode="live",
+            edgar_search_mode="live",
             sec_api_key="test-key",
             local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")),
         ),
@@ -101,6 +118,7 @@ async def test_server_routes_edgar_search_to_local_index(tmp_path: Path) -> None
     metrics_dir = tmp_path / "metrics"
     config = _server_config(
         tmp_path,
+        edgar_search_mode="local",
         local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")),
         local_edgar_metrics_dir=str(metrics_dir),
         max_end_date="2025-04-07",
@@ -137,6 +155,7 @@ async def test_server_uses_sidecar_when_configured(tmp_path: Path) -> None:
     server = FinanceAgentResourcesServer(
         config=_server_config(
             tmp_path,
+            edgar_search_mode="local",
             local_edgar_index_path=str(index),
             local_edgar_metadata_path=str(sidecar),
             max_end_date="2025-04-07",
@@ -156,6 +175,7 @@ def test_server_refuses_to_boot_when_the_sidecar_is_required(tmp_path: Path, mon
     monkeypatch.setattr(local_edgar_search, "SLOW_METADATA_LIMIT_BYTES", 1)
     config = _server_config(
         tmp_path,
+        edgar_search_mode="local",
         local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")),
     )
 
@@ -167,7 +187,7 @@ def test_server_refuses_to_boot_when_the_sidecar_is_required(tmp_path: Path, mon
 def test_server_refuses_to_boot_on_a_malformed_index(tmp_path: Path) -> None:
     path = tmp_path / "index.sqlite"
     sqlite3.connect(path).close()
-    config = _server_config(tmp_path, local_edgar_index_path=str(path))
+    config = _server_config(tmp_path, edgar_search_mode="local", local_edgar_index_path=str(path))
 
     # Must fail the whole server, not degrade edgar_search to unavailable.
     with pytest.raises(ValidationError, match="missing required tables"):
@@ -175,7 +195,7 @@ def test_server_refuses_to_boot_on_a_malformed_index(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_edgar_search_requires_local_index_configuration(tmp_path: Path) -> None:
+async def test_edgar_search_is_unavailable_when_no_mode_is_set(tmp_path: Path) -> None:
     server = FinanceAgentResourcesServer(
         config=_server_config(tmp_path),
         server_client=MagicMock(spec=ServerClient),
@@ -186,4 +206,4 @@ async def test_edgar_search_requires_local_index_configuration(tmp_path: Path) -
         EdgarSearchRequest(search_query="revenue"),
     )
 
-    assert "sec_api_key is not configured" in response.results
+    assert "edgar_search_mode is not set" in response.results

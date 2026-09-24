@@ -773,6 +773,7 @@ class TestDumpFromSearch:
 
     @pytest.fixture
     def server(self, server_config, tmp_path):
+        server_config.edgar_search_mode = "local"
         server_config.local_edgar_index_path = str(build_index(tmp_path / "index.sqlite"))
         server_config.sec_dump_path = str(tmp_path / "dump")
         # Past the fixture's newest filing, so the exhibit is not clamped away.
@@ -989,6 +990,7 @@ class TestDumpFromSearch:
 
     @pytest.mark.asyncio
     async def test_dump_paths_are_not_collected_without_a_dump(self, server_config, tmp_path) -> None:
+        server_config.edgar_search_mode = "local"
         server_config.local_edgar_index_path = str(build_index(tmp_path / "index.sqlite"))
         server_config.sec_dump_path = None
         server_config.max_end_date = "2030-01-01"
