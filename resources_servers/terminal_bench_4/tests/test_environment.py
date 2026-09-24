@@ -41,7 +41,9 @@ def environment_config(**overrides):
     )
 
 
-def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, config=None, task_config=None):
+def make_environment(
+    tmp_path, monkeypatch, *, compose=False, verifier=False, oracle=False, config=None, task_config=None
+):
     raw = {
         "environment": {
             "docker_image": "public/agent",
@@ -54,7 +56,10 @@ def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, co
         "verifier": {"environment": {"docker_image": "public/verifier", "cpus": 8, "gpus": 1, "gpu_types": ["H100"]}},
     }
     for key, value in (task_config or {}).items():
-        raw.setdefault(key, {}).update(value)
+        if isinstance(value, dict):
+            raw.setdefault(key, {}).update(value)
+        else:
+            raw[key] = value
     task = SimpleNamespace(
         config=TaskSettings.model_validate(raw), name="terminal-bench/test", path=tmp_path / "package"
     )
@@ -72,7 +77,7 @@ def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, co
         monkeypatch.setattr(
             module,
             "resolve_compose",
-            lambda *a: {"services": {"main": {"image": "main", "shm_size": 64}, "db": {"image": "db"}}},
+            lambda *a, **kw: {"services": {"main": {"image": "main", "shm_size": 64}, "db": {"image": "db"}}},
         )
     box = MagicMock()
     box._handle = SimpleNamespace(sandbox_id="owned-box")
@@ -96,7 +101,7 @@ def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, co
     group = SimpleNamespace(services={"main": box, "db": box}, start=AsyncMock(), stop=AsyncMock(), project="project")
     compose_create = MagicMock(return_value=group)
     monkeypatch.setattr(module, "AsyncSandboxCompose", compose_create)
-    env = Environment(task, cfg, "session", tmp_path / "result", verifier=verifier)
+    env = Environment(task, cfg, "session", tmp_path / "result", verifier=verifier, oracle=oracle)
     return env, box, create, compose_create
 
 

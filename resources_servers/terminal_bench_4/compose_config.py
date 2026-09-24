@@ -42,7 +42,9 @@ def _bytes(value: str | int) -> int:
     return int(float(match[1]) * 1024 ** " kmgt".index(match[2] or " "))
 
 
-def resolve_compose(document: dict, main_image: str, image_configs: dict) -> dict:
+def resolve_compose(
+    document: dict, main_image: str, image_configs: dict, *, override_main_image: bool = False
+) -> dict:
     """Apply Harbor's prebuilt-image base and normalize the published task overlay.
 
     Image metadata is acquired and digest-checked upstream. No image registry or
@@ -59,6 +61,10 @@ def resolve_compose(document: dict, main_image: str, image_configs: dict) -> dic
         "command": list(MAIN_COMMAND),
         **services.get("main", {}),
     }
+    if override_main_image:
+        # An explicit oracle image replaces main only, including a task overlay
+        # that names its normal agent image. Sidecars keep their original images.
+        services["main"]["image"] = main_image
     for name, service in services.items():
         image = service.get("image")
         if image not in image_configs:

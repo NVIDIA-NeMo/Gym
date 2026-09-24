@@ -61,10 +61,11 @@ async def fixture(tmp_path, monkeypatch):
     server._loader.load = AsyncMock(return_value=task)
     envs, events, harnesses = [], [], []
 
-    def create(task, config, session_id, directory, verifier=False):
+    def create(task, config, session_id, directory, verifier=False, oracle=False):
         name = "verifier" if verifier else "agent"
         env = SimpleNamespace(
             task=task,
+            oracle=oracle,
             session_id=session_id,
             closed=False,
             resources=[],
@@ -164,6 +165,8 @@ async def test_live_and_golden_harnesses_receive_task_identity(fixture, monkeypa
     f = fixture
     f.server.config.execution_mode = mode
     f.server._loader.load.return_value.config.agent.user = user
+    f.server._loader.load.return_value.config.oracle_docker_image = "trusted/oracle"
+    f.body.oracle_docker_image = "untrusted/request-override"
     f.server._loader.load.return_value.path = f.server.config.artifacts_dir
     oracle_contexts = []
 
@@ -179,6 +182,9 @@ async def test_live_and_golden_harnesses_receive_task_identity(fixture, monkeypa
     result = await f.server.run(f.request, f.body)
     assert result.evaluation_completed
     assert f.harnesses[0].context.user == user
+    assert f.envs[0].oracle is (mode == "oracle")
+    assert not f.envs[1].oracle
+    assert f.envs[0].task.config.oracle_docker_image == "trusted/oracle"
     if mode == "oracle":
         assert oracle_contexts[0].user == user
 

@@ -149,6 +149,8 @@ class Artifact(Settings):
 
 class TaskSettings(Settings):
     schema_version: str = "1.4"
+    # An optional main-image override for reference solutions, never live agents.
+    oracle_docker_image: str | None = Field(default=None, min_length=1, pattern=r"^\S+$")
     task: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     source: str | None = None

@@ -79,12 +79,21 @@ def execution_user(value: str | int | None) -> str | int | None:
 
 
 class Environment:
-    def __init__(self, task, config: EnvironmentConfig, session_id, directory, *, verifier=False):
+    def __init__(
+        self, task, config: EnvironmentConfig, session_id, directory, *, verifier=False, oracle: bool = False
+    ):
+        if verifier and oracle:
+            raise ValueError("Oracle execution uses the agent role, not the verifier role")
         self.task = task
         self.config = config
         self.session_id = session_id
         self.directory = Path(directory)
         self.settings = task.config.verifier_environment if verifier else task.config.environment
+        self.oracle_docker_image = task.config.oracle_docker_image if oracle else None
+        if self.oracle_docker_image is not None:
+            # Change only the image. Keep the agent's identity, workspace,
+            # startup layout, healthcheck, network policy and resource budgets.
+            self.settings = self.settings.model_copy(update={"docker_image": self.oracle_docker_image})
         self.environment_dir = task.path / ("tests" if verifier else "environment")
         self.provider_config = deepcopy(config.sandbox_provider)
         self.pool = "default"
@@ -251,6 +260,7 @@ class Environment:
                 yaml.safe_load((self.environment_dir / "docker-compose.yaml").read_text()),
                 self.settings.docker_image,
                 json.loads(image_path.read_text()),
+                override_main_image=self.oracle_docker_image is not None,
             )
             if self.log_role == "agent":
                 if self.task.name == "terminal-bench/medical-claims-processing":

@@ -84,7 +84,8 @@ does not rebuild an image or make a non-root sandbox capable of root execution.
 | Operation | Execution identity |
 | --- | --- |
 | Stage trusted solution/tests | Root |
-| Golden solution and live Mini-SWE commands | `agent.user`, otherwise current agent-image default |
+| Golden solution | `agent.user`, otherwise selected oracle/agent-image default |
+| Live Mini-SWE commands | `agent.user`, otherwise current agent-image default |
 | Run verifier tests | `verifier.user`, otherwise current verifier-image default |
 | Healthcheck / collection hook without its own user | Current image default for that environment |
 
@@ -101,6 +102,33 @@ roots use the role's UID/GID in either case. Perform a live golden/model smoke
 before qualifying preprocessed task packages and images.
 
 ### Reference solution checks
+
+An optional top-level `oracle_docker_image` in the pinned `task.toml` selects a
+different main image **only** for `execution_mode: oracle`:
+
+```toml
+oracle_docker_image = "registry.example/task-oracle@sha256:<digest>"
+
+[environment]
+docker_image = "registry.example/task-agent@sha256:<digest>"
+```
+
+Without this field, golden execution uses the agent image as before; it does
+not automatically fall back to the verifier image. Live rollouts always use
+`environment.docker_image`, and grading still starts a fresh verifier using
+`verifier.environment.docker_image` (or its existing agent-image fallback).
+The override changes only the agent-side image, including the Compose `main`
+image when applicable. Agent workdir, healthcheck, Compose layout/sidecars,
+network/resources, artifact contract and `agent.user` remain unchanged. Trusted
+solution staging remains root; solution execution remains the agent identity.
+
+The selected oracle image must support that identity and the agent runtime.
+An omitted `agent.user` uses the selected image's default: when changing USER to
+root, preprocessing must explicitly preserve any intended non-root agent user
+in the pinned task. Supply verified OCI startup metadata for the oracle image
+just as for the agent and verifier images. No automatic permission repairs or
+fallback to root are performed. Changing this field requires regenerating the
+package and dataset content pins; a `/run` row cannot override the pinned image.
 
 Set `execution_mode: oracle` for a reference-solution check instead of Mini-SWE.
 The runner stages the trusted `solution/` directory into `/solution` as root,

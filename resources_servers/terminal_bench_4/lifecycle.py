@@ -103,7 +103,13 @@ async def prepare_session(session, loader):
     await session.slots.acquire()
     session.owns_slot = True
     session.task = await loader.load(session.request.task_name, session.request.task_ref)
-    session.environment = Environment(session.task, session.config.environment, session.session_id, session.directory)
+    session.environment = Environment(
+        session.task,
+        session.config.environment,
+        session.session_id,
+        session.directory,
+        oracle=session.config.execution_mode == "oracle",
+    )
     # Construct and validate the verifier configuration before allocating
     # either environment, but allocate its resources only after collection.
     session.verifier_environment = Environment(
