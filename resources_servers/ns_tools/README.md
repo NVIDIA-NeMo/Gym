@@ -27,6 +27,35 @@ gym eval run --no-serve \
     --limit 5
 ```
 
+## Disaggregated execution with OpenSandbox
+
+Use `resources_servers/ns_tools/configs/ns_tools_sandbox.yaml` to opt in. Set
+`OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`, and `NS_SANDBOX_IMAGE` for your
+service and a NeMo Skills sandbox image containing `/start-with-nginx.sh` and
+`curl`:
+
+```bash
+gym env start \
+  --config resources_servers/ns_tools/configs/ns_tools_sandbox.yaml \
+  --resources-server math_with_judge \
+  --model-type vllm_model
+```
+
+The config composes Gym's shipped OpenSandbox provider settings, including its
+TLS, 502 retry and background polling behavior. Service requests run through
+`sandbox.exec` as localhost HTTP requests inside the sandbox; ns_tools does not
+open a second HTTP client or resolve externally exposed service endpoints.
+The sandbox sets `EXECD_API_GRACE_SHUTDOWN=50ms` for short command responses.
+
+Eight direct-created sandboxes are shared by default. Sessions stay on one
+sandbox for stateful Python execution; unhealthy sandboxes are replaced and
+session restoration follows `disable_session_restore`. Use
+`NS_SANDBOX_POOL_SIZE` for capacity and `NS_SANDBOX_TTL_S` for lifetime. An empty
+`NS_SANDBOX_POOL_REF` selects direct creation; set a name to claim a prewarmed
+server-side pool. `NS_SANDBOX_POOL_FALLBACK=false` disables direct fallback.
+A prewarmed template must already run the NeMo Skills service and set the same
+execution grace. The ordinary `ns_tools.yaml` keeps colocated execution.
+
 ## Sample data format
 Each sample requires:
 - `question`: The math question being asked

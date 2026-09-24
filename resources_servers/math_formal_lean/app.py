@@ -17,10 +17,11 @@
 
 import logging
 import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -29,7 +30,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from resources_servers.math_formal_lean.sandbox_client import Lean4SandboxClient
+from resources_servers.math_formal_lean.sandbox_client import GymSandboxLean4Client, Lean4SandboxClient
 
 
 LOG = logging.getLogger(__name__)
@@ -341,6 +342,11 @@ def build_correction_prompt(
 class MathFormalLeanResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_host: str = "127.0.0.1"
     sandbox_port: int = 6000
+    # Sandbox backend: local NS HTTP (default) or provider-backed Gym sandboxes.
+    sandbox_backend: Literal["ns_http", "gym_sandbox"] = "ns_http"
+    # GymSandboxLean4Client kwargs (provider/image/max_concurrent/...) — read only when
+    # sandbox_backend == "gym_sandbox".
+    opensandbox: Dict[str, Any] = Field(default_factory=dict)
     compilation_timeout: float = 30.0
     max_output_characters: int = 1000
     extract_code_mode: str = "last"
@@ -384,16 +390,40 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        self._sandbox_client = Lean4SandboxClient(
-            host=self.config.sandbox_host,
-            port=self.config.sandbox_port,
-            max_output_characters=self.config.max_output_characters,
-        )
+        if self.config.sandbox_backend == "gym_sandbox":
+            self._sandbox_client = GymSandboxLean4Client(
+                max_output_characters=self.config.max_output_characters,
+                **self.config.opensandbox,
+            )
+        else:
+            self._sandbox_client = Lean4SandboxClient(
+                host=self.config.sandbox_host,
+                port=self.config.sandbox_port,
+                max_output_characters=self.config.max_output_characters,
+            )
         self._proof_build_config = ProofBuildConfig(
             extract_code_mode=self.config.extract_code_mode,
             restate_formal_statement=self.config.restate_formal_statement,
             strip_theorem_from_proof=self.config.strip_theorem_from_proof,
         )
+
+    def setup_webserver(self):
+        app = super().setup_webserver()
+        main_app_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            if isinstance(self._sandbox_client, GymSandboxLean4Client):
+                # A cold pod's first compile can exceed a verify's admission window.
+                self._sandbox_client.start_pool()
+            try:
+                async with main_app_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                await self._sandbox_client.close()
+
+        app.router.lifespan_context = lifespan_wrapper
+        return app
 
     async def verify(self, body: MathFormalLeanVerifyRequest) -> MathFormalLeanVerifyResponse:
         """Verify a proof attempt with multi-turn self-correction support.
