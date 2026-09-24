@@ -17,9 +17,13 @@ import atexit
 import json
 import logging
 import os
+import platform
 import shutil
+import subprocess
 import sys
+import tarfile
 import tempfile
+import urllib.request
 from asyncio import Semaphore
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -143,6 +147,15 @@ _SANDBOX_UV = f"{_SANDBOX_RUNTIME_DIR}/uv"
 _SANDBOX_PYTHON = f"{_SANDBOX_RUNTIME_DIR}/venv/bin/python"
 _SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
 _SANDBOX_OBSERVER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_observer.py"
+# uv release targets by the sandbox's `uname -m`; the host binary is reused when the
+# architectures match, otherwise a matching build of the host's uv version is fetched once.
+_UV_RELEASE_TARGETS = {
+    "x86_64": "x86_64-unknown-linux-gnu",
+    "amd64": "x86_64-unknown-linux-gnu",
+    "aarch64": "aarch64-unknown-linux-gnu",
+    "arm64": "aarch64-unknown-linux-gnu",
+}
+_UV_RELEASE_URL = "https://github.com/astral-sh/uv/releases/download/{version}/uv-{target}.tar.gz"
 _HERMES_REQUIREMENT = (
     "hermes-agent @ https://github.com/cmunley1/hermes-agent/archive/26bb847a88493342ca1b194e0455b479073ae21d.tar.gz"
 )
@@ -177,6 +190,36 @@ class _SafeStderrHandler(logging.Handler):
 
 if not LOG.handlers:
     LOG.addHandler(_SafeStderrHandler(level=logging.WARNING))
+
+
+def _host_uv_version(uv_path: str) -> str:
+    """``uv --version`` -> ``0.12.3``."""
+    output = subprocess.run([uv_path, "--version"], check=True, capture_output=True, text=True).stdout
+    parts = output.split()
+    if len(parts) < 2 or parts[0] != "uv":
+        raise RuntimeError(f"Unexpected uv version output: {output!r}")
+    return parts[1]
+
+
+def _download_uv(version: str, target: str, destination: Path) -> None:
+    """Fetch the uv release for ``target`` into ``destination`` (atomic, idempotent)."""
+    url = _UV_RELEASE_URL.format(version=version, target=target)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="nemo-gym-uv-", dir=destination.parent) as tmp:
+        archive = Path(tmp) / "uv.tar.gz"
+        try:
+            with urllib.request.urlopen(url, timeout=120) as response, archive.open("wb") as stream:
+                shutil.copyfileobj(response, stream)
+        except OSError as exc:
+            raise RuntimeError(f"Could not download uv {version} for {target} from {url}: {exc}") from exc
+        with tarfile.open(archive, "r:gz") as tar:
+            member = next((m for m in tar.getmembers() if m.isfile() and m.name.endswith("/uv")), None)
+            if member is None:
+                raise RuntimeError(f"uv release archive {url} has no uv binary")
+            tar.extract(member, tmp, filter="data")
+            extracted = Path(tmp) / member.name
+        extracted.chmod(0o755)
+        os.replace(extracted, destination)
 
 
 def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Optional[str]]:
@@ -224,6 +267,8 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = 900.0
+    # Where uv builds for sandbox architectures other than the host's are cached.
+    uv_cache_dir: str = "~/.cache/nemo_gym/uv"
     sandbox_runner_poll_seconds: float = 0.25
     session_close_timeout_seconds: float = 30.0
     system_prompt: Optional[str] = None
@@ -426,9 +471,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         session_dir = f"/tmp/nemo-gym-hermes-sessions/{agent_session_id}"
         try:
-            uv_path = shutil.which("uv")
-            if uv_path is None:
-                raise RuntimeError("Hermes agent server requires uv to install the sandbox runtime")
+            uv_path = await self._uv_for_sandbox(sandbox, workdir)
             prepare = await sandbox.exec(
                 f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(session_dir)}",
                 cwd=workdir,
@@ -467,6 +510,24 @@ class HermesAgent(SimpleResponsesAPIAgent):
             session_dir=session_dir,
             owns_sandbox=owns_sandbox,
         )
+
+    async def _uv_for_sandbox(self, sandbox: AsyncSandbox, workdir: str) -> Path:
+        """The uv binary to upload: the host's when architectures match, else a matching release."""
+        host_uv = shutil.which("uv")
+        if host_uv is None:
+            raise RuntimeError("Hermes agent server requires uv to install the sandbox runtime")
+        probe = await sandbox.exec("uname -m", cwd=workdir, timeout_s=30)
+        arch = (probe.stdout or "").strip()
+        if not arch or arch == platform.machine():
+            return Path(host_uv)
+        target = _UV_RELEASE_TARGETS.get(arch)
+        if target is None:
+            raise RuntimeError(f"No uv build is known for sandbox architecture {arch!r}")
+        version = await asyncio.to_thread(_host_uv_version, host_uv)
+        cached = Path(self.config.uv_cache_dir).expanduser() / version / target / "uv"
+        if not cached.is_file():
+            await asyncio.to_thread(_download_uv, version, target, cached)
+        return cached
 
     async def _terminate_sandbox_runner(self, state: HermesAgentSessionState) -> None:
         runner_session = state.runner_session
