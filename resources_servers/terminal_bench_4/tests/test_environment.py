@@ -41,7 +41,9 @@ def environment_config(**overrides):
     )
 
 
-def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, config=None, task_config=None):
+def make_environment(
+    tmp_path, monkeypatch, *, compose=False, verifier=False, oracle=False, config=None, task_config=None
+):
     raw = {
         "environment": {
             "docker_image": "public/agent",
@@ -54,7 +56,10 @@ def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, co
         "verifier": {"environment": {"docker_image": "public/verifier", "cpus": 8, "gpus": 1, "gpu_types": ["H100"]}},
     }
     for key, value in (task_config or {}).items():
-        raw.setdefault(key, {}).update(value)
+        if isinstance(value, dict):
+            raw.setdefault(key, {}).update(value)
+        else:
+            raw[key] = value
     task = SimpleNamespace(
         config=TaskSettings.model_validate(raw), name="terminal-bench/test", path=tmp_path / "package"
     )
@@ -72,20 +77,31 @@ def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, co
         monkeypatch.setattr(
             module,
             "resolve_compose",
-            lambda *a: {"services": {"main": {"image": "main", "shm_size": 64}, "db": {"image": "db"}}},
+            lambda *a, **kw: {"services": {"main": {"image": "main", "shm_size": 64}, "db": {"image": "db"}}},
         )
     box = MagicMock()
     box._handle = SimpleNamespace(sandbox_id="owned-box")
     box.start = AsyncMock()
     box.stop = AsyncMock()
-    box.exec = AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/app\n", stderr=""))
+
+    async def execute(command, **kwargs):
+        stdout = "/app\n"
+        if command == "id -u":
+            stdout = "0\n"
+        elif "id -u && id -g" in command:
+            user = kwargs.get("user")
+            uid = user if isinstance(user, int) else 0 if user in (None, "root") else 1000
+            stdout = f"{uid}\n{uid}\n" + (f"{uid}\n" if "id -u --" in command else "")
+        return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
+
+    box.exec = AsyncMock(wraps=execute)
     box.serialize = AsyncMock(return_value={"sandbox_id": "owned-box", "credentials": "must not be copied"})
     create = MagicMock(return_value=box)
     monkeypatch.setattr(module, "AsyncSandbox", create)
     group = SimpleNamespace(services={"main": box, "db": box}, start=AsyncMock(), stop=AsyncMock(), project="project")
     compose_create = MagicMock(return_value=group)
     monkeypatch.setattr(module, "AsyncSandboxCompose", compose_create)
-    env = Environment(task, cfg, "session", tmp_path / "result", verifier=verifier)
+    env = Environment(task, cfg, "session", tmp_path / "result", verifier=verifier, oracle=oracle)
     return env, box, create, compose_create
 
 
@@ -148,6 +164,7 @@ async def test_single_start_workdir_env_user_quiescence_cleanup(tmp_path, monkey
     await env.start()
     box.start.assert_awaited_once()
     assert create.call_args.args[1].image == "public/agent"
+    assert create.call_args.args[1].entrypoint is None
     assert await env.agent_workdir() == "/app"
     box.serialize.assert_not_awaited()
     assert box.exec.await_args.kwargs["user"] == "task-user"
@@ -163,12 +180,160 @@ async def test_single_start_workdir_env_user_quiescence_cleanup(tmp_path, monkey
     assert env.closed and env.resources[0]["sandbox_id"] == "owned-box"
 
 
+@pytest.mark.parametrize("verifier", [False, True])
+@pytest.mark.parametrize(
+    "startup,expected",
+    [
+        (
+            {"Entrypoint": ["/start", "--mode"], "Cmd": ["sh", "-c", "sleep infinity"]},
+            ["/start", "--mode", "sh", "-c", "sleep infinity"],
+        ),
+        ({"Entrypoint": ["/start"], "Cmd": None}, ["/start", "sh", "-c", "sleep infinity"]),
+        ({"Entrypoint": None, "Cmd": ["python3"]}, ["sh", "-c", "sleep infinity"]),
+        ({"Entrypoint": None, "Cmd": ["/bin/bash"]}, ["sh", "-c", "sleep infinity"]),
+        ({"Entrypoint": [], "Cmd": []}, ["sh", "-c", "sleep infinity"]),
+        ({}, ["sh", "-c", "sleep infinity"]),
+    ],
+)
+@pytest.mark.parametrize("catalog", ["compose_image_configs", "single_container_image_configs"])
+async def test_single_container_uses_role_image_startup(tmp_path, monkeypatch, verifier, startup, expected, catalog):
+    images = tmp_path / "single-images.json"
+    images.write_text(
+        json.dumps(
+            {
+                "mirror/agent": {
+                    "image": "mirror/agent",
+                    "os": "linux",
+                    "architecture": "amd64",
+                    "config": startup if not verifier else {"Entrypoint": ["wrong-role"]},
+                },
+                "mirror/verifier": {
+                    "image": "mirror/verifier",
+                    "os": "linux",
+                    "architecture": "amd64",
+                    "config": startup if verifier else {"Entrypoint": ["wrong-role"]},
+                },
+            }
+        )
+    )
+    env, _, create, compose_create = make_environment(
+        tmp_path,
+        monkeypatch,
+        verifier=verifier,
+        config={catalog: images, "image_rewrites": [{"from": "public/", "to": "mirror/"}]},
+    )
+    await env.start()
+    spec = create.call_args.args[1]
+    assert spec.image == "mirror/" + ("verifier" if verifier else "agent")
+    assert spec.entrypoint == expected
+    assert not env.uses_compose
+    compose_create.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "change,error",
+    [
+        ({"image": "different"}, "does not match"),
+        ({"os": "windows"}, "Linux/amd64"),
+        ({"architecture": "arm64"}, "Linux/amd64"),
+        ({"config": None}, "requires an image config"),
+        ({"config": {"Entrypoint": "/start --arg"}}, "Entrypoint.*list of strings"),
+        ({"config": {"Cmd": ["sleep", 1]}}, "Cmd.*list of strings"),
+    ],
+)
+@pytest.mark.parametrize("catalog", ["compose_image_configs", "single_container_image_configs"])
+def test_single_container_rejects_incompatible_startup_metadata(tmp_path, monkeypatch, change, error, catalog):
+    images = tmp_path / "single-images.json"
+    record = {"image": "public/agent", "os": "linux", "architecture": "amd64", "config": {}}
+    images.write_text(json.dumps({"public/agent": record | change}))
+    env, *_ = make_environment(tmp_path, monkeypatch, config={catalog: images})
+    with pytest.raises(ValueError, match=error):
+        env.build_spec()
+
+
+def test_single_container_configured_metadata_must_include_image(tmp_path, monkeypatch):
+    images = tmp_path / "single-images.json"
+    images.write_text("{}")
+    env, *_ = make_environment(tmp_path, monkeypatch, config={"single_container_image_configs": images})
+    with pytest.raises(ValueError, match="No recorded OCI startup metadata"):
+        env.build_spec()
+
+
+def test_compose_only_catalog_retains_legacy_standalone_keepalive(tmp_path, monkeypatch, caplog):
+    images = tmp_path / "compose-images.json"
+    images.write_text("{}")
+    env, *_ = make_environment(tmp_path, monkeypatch, config={"compose_image_configs": images})
+    assert env.build_spec().entrypoint is None
+    assert "No recorded OCI startup metadata" in caplog.text
+
+
+@pytest.mark.parametrize("catalog", ["compose_image_configs", "single_container_image_configs"])
+@pytest.mark.parametrize("record", [None, [], "not a record"])
+def test_invalid_catalog_or_present_record_does_not_fall_back(tmp_path, monkeypatch, catalog, record):
+    images = tmp_path / "images.json"
+    env, *_ = make_environment(tmp_path, monkeypatch, config={catalog: images})
+    images.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="image mapping"):
+        env.build_spec()
+    images.write_text(json.dumps({"public/agent": record}))
+    with pytest.raises(ValueError, match="No recorded OCI startup metadata"):
+        env.build_spec()
+
+
+@pytest.mark.parametrize("same_digest", [False, True])
+def test_standalone_accepts_compose_catalog_digest_spelling_only_for_same_content(tmp_path, monkeypatch, same_digest):
+    digest = "sha256:" + "a" * 64
+    image = "registry/repo:tag@" + digest
+    recorded_image = "registry/repo@" + (digest if same_digest else "sha256:" + "b" * 64)
+    images = tmp_path / "images.json"
+    images.write_text(
+        json.dumps(
+            {
+                image: {
+                    "image": recorded_image,
+                    "os": "linux",
+                    "architecture": "amd64",
+                    "config": {"Entrypoint": ["/start"]},
+                }
+            }
+        )
+    )
+    env, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        config={"compose_image_configs": images},
+        task_config={"environment": {"docker_image": image}},
+    )
+    if same_digest:
+        assert env.build_spec().entrypoint == ["/start", "sh", "-c", "sleep infinity"]
+    else:
+        with pytest.raises(ValueError, match="does not match"):
+            env.build_spec()
+
+
+def test_existing_standalone_catalog_override_is_still_strict(tmp_path, monkeypatch):
+    images = tmp_path / "override.json"
+    images.write_text("{}")
+    env, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        config={
+            "single_container_image_configs": images,
+            "compose_image_configs": tmp_path / "unused-catalog.json",
+        },
+    )
+    with pytest.raises(ValueError, match="No recorded OCI startup metadata"):
+        env.build_spec()
+
+
 async def test_compose_specs_startup_metadata_sidecar_operations(tmp_path, monkeypatch):
     env, box, _, create = make_environment(tmp_path, monkeypatch, compose=True)
+    env.config.single_container_image_configs = tmp_path / "unused-missing.json"
     await env.start()
     kwargs = create.call_args.kwargs
     assert kwargs["service_specs"]["main"].resources.cpu == 2
     assert kwargs["service_specs"]["db"].resources.cpu is None
+    assert kwargs["service_specs"]["main"].entrypoint is None
     document = yaml.safe_load(create.call_args.args[1].read_text())
     assert document["services"]["main"]["labels"] == {"nemo.nvidia.com/shm": "64"}
     await env.exec("echo sidecar", service="db")
@@ -247,7 +412,7 @@ async def test_environment_upload_without_build_spec(tmp_path, monkeypatch):
     upload = AsyncMock()
     monkeypatch.setattr(transfers, "upload_dir", upload)
     await env.start()
-    upload.assert_awaited_once_with(box, env.environment_dir, "/app")
+    upload.assert_awaited_once_with(box, env.environment_dir, "/app", archive_workers=None)
 
 
 @pytest.mark.parametrize("failure", ["logs", "workdir", "quiesce", "delete", "unavailable"])
@@ -260,18 +425,21 @@ async def test_failures_are_visible_and_preserve_cleanup_identities(tmp_path, mo
             env.sandbox("missing")
         return
     if failure == "logs":
-        box.exec.return_value.return_code = 1
+        box.exec.side_effect = [
+            SimpleNamespace(return_code=0, stdout="0\n", stderr=""),
+            SimpleNamespace(return_code=1, stdout="", stderr="log setup failed"),
+        ]
     if failure == "logs":
         with pytest.raises(RuntimeError, match="log directories"):
             await env.start()
     else:
         await env.start()
     if failure == "workdir":
-        box.exec.return_value.return_code = 1
+        box.exec.return_value = SimpleNamespace(return_code=1, stdout="", stderr="workdir failed")
         with pytest.raises(RuntimeError):
             await env.agent_workdir()
     if failure == "quiesce":
-        box.exec.return_value.return_code = 1
+        box.exec.return_value = SimpleNamespace(return_code=1, stdout="", stderr="quiesce failed")
         with pytest.raises(RuntimeError):
             await env.quiesce_agent("session")
     if failure == "delete":
@@ -291,7 +459,7 @@ async def test_readiness_success_and_failure(tmp_path, monkeypatch):
     )
     await env.start()
     await env.healthcheck()
-    box.exec.return_value.return_code = 1
+    box.exec.return_value = SimpleNamespace(return_code=1, stdout="", stderr="healthcheck failed")
     with pytest.raises(HealthcheckError):
         await env.healthcheck()
     env.settings.healthcheck.start_period_sec = 0.01

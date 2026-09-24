@@ -42,6 +42,7 @@ from responses_api_agents.miniswe_sandboxed_agent.models import (
     SandboxedVerifyRequest,
     SeedSessionResponse,
 )
+from responses_api_agents.miniswe_sandboxed_agent.oracle import OracleHarness
 
 
 LOGGER = logging.getLogger(__name__)
@@ -256,17 +257,26 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                             return NeMoGymResponse.model_validate(await get_response_json(model_response))
 
                         global_config = getattr(self.server_client, "global_config_dict", None)
-                        harness = MiniSWEHarness(
-                            sandbox=sandbox,
-                            context=context,
-                            config=self.config.harness,
-                            observability_enabled=isinstance(global_config, Mapping)
-                            and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)),
-                            params=params,
-                            query=query,
-                            model_name=self.config.model_server.name,
-                            directory=artifact_directory or self.config.artifacts_dir / seed.session_id,
-                        )
+                        directory = artifact_directory or self.config.artifacts_dir / seed.session_id
+                        if seed.execution_mode == "oracle":
+                            harness = OracleHarness(
+                                sandbox=sandbox,
+                                context=context,
+                                directory=directory / "oracle",
+                                response=response,
+                            )
+                        else:
+                            harness = MiniSWEHarness(
+                                sandbox=sandbox,
+                                context=context,
+                                config=self.config.harness,
+                                observability_enabled=isinstance(global_config, Mapping)
+                                and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)),
+                                params=params,
+                                query=query,
+                                model_name=self.config.model_server.name,
+                                directory=directory,
+                            )
                         await harness.setup()
                     timings["agent_setup"]["finished_at"] = now()
                     timings["agent_execution"] = {"started_at": now()}
@@ -295,6 +305,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         await provider.aclose()
                     except Exception:
                         LOGGER.exception("Failed to close the mini-SWE sandbox transport")
+        extra["execution_mode"] = seed.execution_mode
         return AgentExecutionResult(
             responses_create_params=params,
             response=response,

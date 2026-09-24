@@ -4,10 +4,7 @@
 """Episode-owned EFS logs, with isolated roles and a collected artifact snapshot."""
 
 import asyncio
-import io
-import json
 import shlex
-import tarfile
 from copy import deepcopy
 from pathlib import PurePosixPath
 from uuid import uuid4
@@ -29,7 +26,6 @@ class SharedLogs:
         self.session_id = environment.session_id + "__logs"
         self.archive_name = ".tb4-artifacts-" + uuid4().hex + ".tar.gz"
         self.archive_digest = None
-        self.archive_owner = None
         self.restored_archive = None
         self.closed = False
         self.resources = []
@@ -98,15 +94,15 @@ class SharedLogs:
         )
 
     async def initialize_role(self, environment):
-        result = await environment.exec("id -u; id -g", timeout_sec=60)
+        result = await environment.exec("id -u; id -g", timeout_sec=60, user=environment.role_user)
         try:
             uid, gid = (int(value) for value in result.stdout.split())
             if result.return_code or min(uid, gid) < 0:
                 raise ValueError("Invalid workload identity")
         except (TypeError, ValueError) as exc:
             raise RuntimeError("Unable to determine the task log owner") from exc
-        # Give the mounted directory to the image's actual user. Keeping it
-        # world-writable would let a dropped verifier child rename protected
+        # Give the mount to the execution role (or unchanged image default).
+        # A world-writable parent would let a dropped verifier child rename protected
         # /logs/verifier and replace its reward file despite chmod 700 there.
         await self.python(
             "import os, sys\n"
@@ -141,41 +137,40 @@ class SharedLogs:
                 return None
         return f"/logs/{self.archive_name}"
 
-    def retain_archive(self, digest, directory):
+    def retain_archive(self, digest):
         self.archive_digest = digest
-        if digest:
-            # Match the ownership headers upload_dir would produce from the
-            # downloaded, data-filtered host snapshot.
-            with tarfile.open(fileobj=io.BytesIO(), mode="w") as tar:
-                info = tar.gettarinfo(str(directory), arcname=".")
-            self.archive_owner = [info.uid, info.gid, info.uname, info.gname]
 
     async def prepare_verifier(self):
         if not self.archive_digest:
             return
         # The exact collected archive survives agent deletion on EFS. Validate
         # its digest and apply the same data filter as download_dir before
-        # repacking, so exclusions, symlinks and permissions match host restore.
+        # repacking, retaining numeric ownership/modes from A rather than the
+        # helper's UID/GID and umask. This matches metadata-aware host restore.
         result = await self.python(
-            "import hashlib, json, pathlib, sys, tarfile, tempfile\n"
-            "root, name, digest, owner = sys.argv[1:]\n"
+            "import hashlib, pathlib, sys, tarfile, tempfile\n"
+            "root, name, digest = sys.argv[1:]\n"
             "root = pathlib.Path(root); source = root / 'agent' / name\n"
             "if source.is_symlink() or not source.is_file(): sys.exit(0)\n"
             "with source.open('rb') as f:\n"
             " if hashlib.file_digest(f, 'sha256').hexdigest() != digest: sys.exit(0)\n"
-            "uid, gid, uname, gname = json.loads(owner)\n"
+            "metadata = {}\n"
+            "def data_filter(info, destination):\n"
+            " filtered = tarfile.data_filter(info, destination)\n"
+            " metadata[pathlib.PurePosixPath(filtered.name).as_posix()] = (info.uid, info.gid, info.mode & 0o777)\n"
+            " return filtered\n"
             "def headers(info):\n"
-            " info.uid, info.gid, info.uname, info.gname = uid, gid, uname, gname\n"
+            " info.uid, info.gid, info.mode = metadata[pathlib.PurePosixPath(info.name).as_posix()]\n"
+            " info.uname = info.gname = ''\n"
             " return info\n"
             "with tempfile.TemporaryDirectory(dir=root) as tmp:\n"
-            " with tarfile.open(source, 'r:gz') as tar: tar.extractall(tmp, filter='data')\n"
+            " with tarfile.open(source, 'r:gz') as tar: tar.extractall(tmp, filter=data_filter)\n"
             " with tarfile.open(root / 'verifier' / name, 'w:gz') as tar:\n"
             "  tar.add(tmp, arcname='.', filter=headers)\n"
             "print('ready')\n",
             self.root,
             self.archive_name,
             self.archive_digest,
-            json.dumps(self.archive_owner),
         )
         if result.stdout.strip() == "ready":
             self.restored_archive = f"/logs/{self.archive_name}"

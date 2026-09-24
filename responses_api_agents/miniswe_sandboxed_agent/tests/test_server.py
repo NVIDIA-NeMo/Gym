@@ -17,6 +17,7 @@ from resources_servers.terminal_bench_4.app import (
     TerminalBench4ResourcesServer,
     TerminalBench4RunRequest,
 )
+from resources_servers.terminal_bench_4.environment import execution_user
 from resources_servers.terminal_bench_4.models import SandboxedVerifyRequest
 from resources_servers.terminal_bench_4.task import TaskSettings
 from resources_servers.terminal_bench_4.tests.test_environment import environment_config
@@ -70,14 +71,18 @@ async def fixture(tmp_path, monkeypatch):
             }
         ),
         instruction="Solve task",
+        path=tmp_path / "trusted-task",
     )
     server._loader.load = AsyncMock(return_value=task)
     envs, events, harnesses = [], [], []
 
-    def create(task, config, session_id, directory, verifier=False):
+    def create(task, config, session_id, directory, verifier=False, oracle=False, archive_workers=None):
+        assert archive_workers is server._archive_workers
         name = "verifier" if verifier else "agent"
         env = SimpleNamespace(
             task=task,
+            oracle=oracle,
+            role_user=execution_user(task.config.verifier.user if verifier else task.config.agent.user),
             session_id=session_id,
             closed=False,
             resources=[],
@@ -89,7 +94,7 @@ async def fixture(tmp_path, monkeypatch):
             provider_config={"local": {}},
             main=SimpleNamespace(
                 serialize=AsyncMock(return_value={"sandbox_id": session_id}),
-                exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/task\n")),
+                exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/task\n", stderr="")),
             ),
             healthcheck=AsyncMock(),
             quiesce_agent=AsyncMock(side_effect=lambda _: events.append("quiesce")),
@@ -153,10 +158,13 @@ async def fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "Environment", create)
     monkeypatch.setattr(module, "MiniSWEHarness", harness)
     monkeypatch.setattr(lifecycle, "download_dir", AsyncMock())
-    monkeypatch.setattr(lifecycle, "collect", AsyncMock(side_effect=lambda *a: events.append("collect")))
-    monkeypatch.setattr(lifecycle, "restore", AsyncMock(side_effect=lambda *a: events.append("restore")))
+    monkeypatch.setattr(lifecycle, "collect", AsyncMock(side_effect=lambda *a, **kw: events.append("collect")))
+    monkeypatch.setattr(lifecycle, "restore", AsyncMock(side_effect=lambda *a, **kw: events.append("restore")))
+    staging = AsyncMock(side_effect=lambda *args, **kw: events.append("stage_solution"))
+    monkeypatch.setattr(lifecycle, "stage_solution", staging)
 
-    async def grade(*args):
+    async def grade(*args, **kwargs):
+        assert kwargs["archive_workers"] is server._archive_workers
         events.append("grade")
         return {"rewards": {"reward": 0.75}}
 
@@ -171,9 +179,98 @@ async def fixture(tmp_path, monkeypatch):
         grade=grader,
         events=events,
         harnesses=harnesses,
+        staging=staging,
     )
     await agent.shutdown()
     await lifecycle.shutdown(list(server._sessions.values()), 0.01)
+    await server._archive_workers.aclose()
+
+
+@pytest.mark.parametrize("mode", ["miniswe", "oracle"])
+@pytest.mark.parametrize("user", [None, "worker", "root", 1000, "1000"])
+async def test_seed_preserves_identity_and_selects_oracle_from_resource_config(fixture, mode, user):
+    f = fixture
+    f.server.config.execution_mode = mode
+    task = f.server._loader.load.return_value
+    task.config.agent.user = user
+    task.config.oracle_docker_image = "trusted/oracle"
+    # Request extras cannot choose a mode/image or redirect trusted staging.
+    f.body.execution_mode = "miniswe" if mode == "oracle" else "oracle"
+    f.body.oracle_docker_image = "untrusted/image"
+    f.body.solution_dir = "/untrusted/solution"
+    result, retry = await asyncio.gather(f.agent.run(f.request, f.body), f.agent.run(f.request, f.body))
+    assert result == retry and result.evaluation_completed
+    assert result.execution_mode == mode
+    assert f.envs[0].oracle is (mode == "oracle") and not f.envs[1].oracle
+    assert f.envs[0].task.config.oracle_docker_image == "trusted/oracle"
+    assert f.envs[0].role_user == execution_user(user)
+    assert all(env.closed for env in f.envs)
+    assert [call.kwargs["url_path"] for call in f.agent.server_client.post.await_args_list] == [
+        "/seed_session",
+        "/verify",
+    ]
+    if mode == "oracle":
+        assert result.oracle_exit_code == 0 and result.response.output == []
+        assert not f.harnesses  # Mini-SWE/model execution was never constructed.
+        f.staging.assert_awaited_once_with(
+            f.envs[0].main, task.path / "solution", archive_workers=f.server._archive_workers
+        )
+        solution = next(
+            call for call in f.envs[0].main.exec.await_args_list if "exec bash /solution/solve.sh" in call.args[0]
+        )
+        assert solution.kwargs["user"] == execution_user(user) and solution.kwargs["cwd"] == "/task"
+    else:
+        f.staging.assert_not_awaited()
+        assert f.harnesses[0].context.user == execution_user(user)
+
+
+async def test_oracle_staging_failure_cleans_up_without_agent_or_grading(fixture):
+    f = fixture
+    f.server.config.execution_mode = "oracle"
+    f.staging.side_effect = RuntimeError("root staging denied")
+    result = await f.agent.run(f.request, f.body)
+    assert not result.evaluation_completed and result.infrastructure_error
+    assert not f.harnesses
+    f.grade.assert_not_awaited()
+    f.envs[0].main.exec.assert_not_awaited()
+    assert "verifier_start" not in f.events and all(env.closed for env in f.envs)
+    assert f.server._slots._value == f.server.config.max_concurrent_sessions
+
+
+@pytest.mark.parametrize("failure", ["nonzero", "timeout", "missing_user"])
+async def test_oracle_failure_keeps_agent_identity_and_verifier_lifecycle(fixture, monkeypatch, failure):
+    f = fixture
+    f.server.config.execution_mode = "oracle"
+    original = lifecycle.Environment
+
+    def environment(*args, **kwargs):
+        env = original(*args, **kwargs)
+        if not kwargs.get("verifier"):
+
+            async def execute(command, **options):
+                assert options["user"] == "task-user"
+                if "command -v setsid" in command and failure == "missing_user":
+                    return SimpleNamespace(return_code=1, stdout="", stderr="identity unavailable")
+                if "exec bash /solution/solve.sh" in command:
+                    if failure == "timeout":
+                        raise TimeoutError("synthetic deadline")
+                    return SimpleNamespace(return_code=7, stdout="", stderr="solution failed")
+                return SimpleNamespace(return_code=0, stdout="/task\n", stderr="")
+
+            env.main.exec.side_effect = execute
+        return env
+
+    monkeypatch.setattr(lifecycle, "Environment", environment)
+    result = await f.agent.run(f.request, f.body)
+    assert (
+        result.termination["reason"]
+        == {"nonzero": "nonzero_exit", "timeout": "timeout", "missing_user": "infrastructure_error"}[failure]
+    )
+    assert result.evaluation_completed is (failure != "missing_user")
+    assert f.grade.await_count == (failure != "missing_user")
+    assert all(env.closed for env in f.envs) and not f.harnesses
+    if failure == "nonzero":
+        assert result.oracle_exit_code == 7
 
 
 async def test_agent_owns_loop_and_replays_exact_result(fixture):
@@ -272,7 +369,7 @@ async def test_disconnected_http_caller_does_not_interrupt_episode(fixture, monk
     monkeypatch.setattr(module, "MiniSWEHarness", harness)
     if stage == "grade":
 
-        async def grade(*args):
+        async def grade(*args, **kwargs):
             await block()
             return {"rewards": {"reward": 0}}
 
@@ -346,7 +443,7 @@ async def test_shutdown_cancels_worker_before_collection_and_cleans_up(fixture, 
     f = fixture
     entered = asyncio.Event()
 
-    async def block(*args):
+    async def block(*args, **kwargs):
         entered.set()
         try:
             await asyncio.Event().wait()
@@ -722,7 +819,7 @@ async def test_verify_takes_over_before_seed_deadline(fixture):
     deadline = session.agent_deadline
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def grade(*args):
+    async def grade(*args, **kwargs):
         entered.set()
         await release.wait()
         return {"rewards": {"reward": 0.75}}

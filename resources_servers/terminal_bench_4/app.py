@@ -27,6 +27,7 @@ from nemo_gym.server_utils import (
     is_nemo_gym_fastapi_entrypoint,
 )
 from resources_servers.terminal_bench_4 import lifecycle
+from resources_servers.terminal_bench_4.archive_workers import ArchiveWorkers
 from resources_servers.terminal_bench_4.environment import EnvironmentConfig
 from resources_servers.terminal_bench_4.lifecycle import NATIVE_VERSION, Session
 from resources_servers.terminal_bench_4.models import (
@@ -49,9 +50,12 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     artifacts_dir: Path = Path("results/terminal_bench_4/resources")
     environment: EnvironmentConfig
     max_concurrent_sessions: int = Field(default=8, gt=0)
+    max_concurrent_archive_operations: int = Field(default=2, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
     seeded_session_timeout_sec: float = Field(default=10 * 60 * 60, gt=0)
     task_download_dir: Path | None = None
+    local_task_packages: bool = False
+    execution_mode: Literal["miniswe", "oracle"] = "miniswe"
 
 
 def atomic_json(path, value):
@@ -66,11 +70,20 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context):
         super().model_post_init(context)
         self._manifest = json.loads(self.config.manifest_path.read_text())
-        self._tasks = {"terminal-bench/" + task["name"]: task for task in self._manifest["tasks"]}
+        prefix = "" if self.config.local_task_packages else "terminal-bench/"
+        self._tasks = {prefix + task["name"]: task for task in self._manifest["tasks"]}
+        if len(self._tasks) != len(self._manifest["tasks"]):
+            raise ValueError("Task manifest contains duplicate names")
         self._sessions: dict[str, Session] = {}
         self._by_identity: dict[str, str] = {}
         self._slots = asyncio.Semaphore(self.config.max_concurrent_sessions)
-        self._loader = PackageLoader(self.config.task_download_dir)
+        local_paths = None
+        if self.config.local_task_packages:
+            if self._manifest.get("format") != "gym-tb4-local-v1":
+                raise ValueError("Local tasks require a gym-tb4-local-v1 manifest")
+            local_paths = {name: Path(task["path"]) for name, task in self._tasks.items()}
+        self._loader = PackageLoader(self.config.task_download_dir, local_paths=local_paths)
+        self._archive_workers = ArchiveWorkers(self.config.max_concurrent_archive_operations)
         self._closing = False
         self.config.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -86,7 +99,10 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     yield state
             finally:
                 self._closing = True
-                await lifecycle.shutdown(list(self._sessions.values()), self.config.shutdown_timeout_sec)
+                try:
+                    await lifecycle.shutdown(list(self._sessions.values()), self.config.shutdown_timeout_sec)
+                finally:
+                    await self._archive_workers.aclose()
 
         app.router.lifespan_context = lifespan
         return app
@@ -145,6 +161,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         kwargs.setdefault("result", {"runtime": "gym-tb4-native", "runtime_version": NATIVE_VERSION})
         session = Session(identity, owner, body, session_id, self.config.artifacts_dir / session_id, **kwargs)
         session.slots = self._slots
+        session.archive_workers = self._archive_workers
         session.config = self.config
         session.persist = lambda: self._persist(session)
         return session
@@ -196,7 +213,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     sandbox_descriptor=await session.environment.main.serialize(),
                     sandbox_provider=session.environment.provider_config,
                     instruction=session.task.instruction,
-                    user=session.task.config.agent.user,
+                    user=session.environment.role_user,
+                    execution_mode=self.config.execution_mode,
                     agent_timeout_sec=session.task.config.agent.timeout_sec,
                     mcp_servers=[s.model_dump() for s in session.task.config.environment.mcp_servers],
                     skills_dir=session.task.config.environment.skills_dir,
