@@ -13,7 +13,9 @@ selected agent, environment server and model configs.
 """
 
 import argparse
+import json
 import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_OUTPUT_ROOT = Path("results/harbor")
 ENVIRONMENT_SERVER_CONFIG = "environment_servers/single_agent_turn/configs/single_agent_turn.yaml"
 RESOURCES_SERVER_CONFIG = "resources_servers/harbor/configs/harbor.yaml"
+# The oracle needs no model, but a run needs a policy model block; this one is never called.
+PLACEHOLDER_MODEL_CONFIG = "responses_api_models/openai_model/configs/openai_model.yaml"
+PLACEHOLDER_MODEL_OVERRIDES = [
+    "+policy_base_url=http://oracle.invalid/v1",
+    "+policy_api_key=unused",
+    "+policy_model_name=oracle",
+]
+ORACLE_AGENT = "oracle_agent"
 SANDBOX_PROVIDER_CONFIG = "nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml"
 # Harness-specific settings a Harbor run needs; keyed by the agent implementation folder.
 AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -177,3 +187,82 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
     config_path, tokens = build_run(prepared, agent, sandbox=getattr(args, "sandbox", None), overrides=overrides)
     print(f"Run config written to {config_path} (datasets folder: {datasets_dir()})")
     dispatch("nemo_gym.cli.eval:e2e_rollout_collection", _merge_config_paths(tokens))
+
+
+def validate_target(args: argparse.Namespace, overrides: list[str]) -> None:
+    """Entry point for ``gym dataset validate <target>``: run every task's reference solution and score it."""
+    from nemo_gym.cli.main import _merge_config_paths, dispatch
+
+    prepared = prepare_target(args.target)
+    agent = resolve_agent(ORACLE_AGENT)
+    unvalidated = [task.task_id for task in prepared.tasks if not task.has_solution]
+    if len(unvalidated) == len(prepared.tasks):
+        print(f"No task in {prepared.folder} has solution/solve.sh; nothing to validate.")
+        return
+    tokens = list(overrides)
+    if not any(token.startswith("+config_paths=") and "responses_api_models/" in token for token in tokens):
+        tokens += [f"+config_paths=[{_config_path(PLACEHOLDER_MODEL_CONFIG)}]", *PLACEHOLDER_MODEL_OVERRIDES]
+    config_path, tokens = build_run(prepared, agent, sandbox=getattr(args, "sandbox", None), overrides=tokens)
+    print(
+        f"Run config written to {config_path}; validating {len(prepared.tasks) - len(unvalidated)} task(s) with the oracle"
+    )
+    dispatch("nemo_gym.cli.eval:e2e_rollout_collection", _merge_config_paths(tokens))
+    rollouts = prepared.output_dir / "rollouts.jsonl"
+    report = summarize_validation(rollouts, unvalidated)
+    print(report.text)
+    if not report.ok:
+        sys.exit(1)
+
+
+@dataclass(frozen=True)
+class ValidationReport:
+    text: str
+    ok: bool
+
+
+def _dig(mapping: Any, *keys: str) -> Any:
+    for key in keys:
+        if not isinstance(mapping, dict):
+            return None
+        mapping = mapping.get(key)
+    return mapping
+
+
+def summarize_validation(rollouts: Path, unvalidated: list[str]) -> ValidationReport:
+    """One line per task: the oracle's reward, or why there is none."""
+    lines = ["task_id\tstatus\treward"]
+    ok = True
+    if rollouts.is_file():
+        for raw in rollouts.read_text().splitlines():
+            if not raw.strip():
+                continue
+            row = json.loads(raw)
+            task_id = _dig(row, "task_id", "task_id") or "?"
+            failure = row.get("failure") or _dig(row, "result", "failure")
+            oracle = _dig(row, "result", "verification", "response", "metadata", "oracle") or _dig(
+                row, "response", "metadata", "oracle"
+            )
+            reward = row.get("reward")
+            if failure:
+                ok = False
+                lines.append(f"{task_id}\tfailed: {str(_dig(failure, 'message') or failure)[:120]}\t-")
+            elif row.get("mask_sample"):
+                ok = False
+                lines.append(
+                    f"{task_id}\tmasked ({row.get('failure_kind') or _dig(row, 'result', 'verification', 'failure_kind')})\t-"
+                )
+            elif oracle == "unvalidated":
+                lines.append(f"{task_id}\tunvalidated (no solution/)\t-")
+            else:
+                if reward is None or reward < 1.0:
+                    ok = False
+                kind = _dig(row, "result", "verification", "failure_kind")
+                note = f" ({kind})" if kind else ""
+                lines.append(f"{task_id}\toracle {oracle or 'ran'}{note}\t{reward}")
+    else:
+        ok = False
+        lines.append(f"-\tno rollouts written at {rollouts}\t-")
+    for task_id in unvalidated:
+        if not any(line.startswith(f"{task_id}\t") for line in lines):
+            lines.append(f"{task_id}\tunvalidated (no solution/)\t-")
+    return ValidationReport(text="\n".join(lines), ok=ok)
