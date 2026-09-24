@@ -38,6 +38,7 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install, component_search_roots
+from nemo_gym.base_responses_api_model import ModelCallCaptureConfig
 from nemo_gym.cli.setup_command import get_venv_path, run_command, setup_env_command
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
@@ -61,6 +62,7 @@ from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
     DRY_RUN_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
+    MODEL_CALL_CAPTURE_DIR_KEY_NAME,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
@@ -387,6 +389,12 @@ class RunHelper:  # pragma: no cover
         # Fail fast before starting Ray if nothing is configured to run (covers env run and the
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
+
+        # Share the parent's absolute capture path with servers running in other working directories.
+        global_config_dict.setdefault(
+            MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+            str(ModelCallCaptureConfig.model_fields[MODEL_CALL_CAPTURE_DIR_KEY_NAME].default),
+        )
 
         # Translate the `telemetry:` block into NEMO_GYM_OTEL_* env vars *before* anything is
         # spawned. run_command copies os.environ into every server process, and that copy is

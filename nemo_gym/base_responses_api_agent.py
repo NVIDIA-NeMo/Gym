@@ -27,6 +27,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.base_responses_api_model import ModelCallCaptureConfig
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import (
@@ -201,7 +202,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         global_config = getattr(self.server_client, "global_config_dict", None)
         if not isinstance(global_config, Mapping):
             return False
-        return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
+        default_enabled = ModelCallCaptureConfig.model_fields[OBSERVABILITY_ENABLED_KEY_NAME].default
+        return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, default_enabled))
 
     def _token_id_capture_enabled(self) -> bool:
         """Whether this agent explicitly opted into training-token capture."""

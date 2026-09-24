@@ -633,6 +633,8 @@ class ServerClient(BaseModel):
     async def request(
         self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
     ) -> ClientResponse:
+        from nemo_gym.base_responses_api_model import ModelCallCaptureConfig
+
         model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
         model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
         if model_server_base_url and server_name == model_server_name:
@@ -649,7 +651,9 @@ class ServerClient(BaseModel):
                 json_obj = json_obj.model_dump(exclude_unset=True)
                 kwargs["json"] = json_obj
 
-        observability_enabled = self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
+        observability_enabled = self.global_config_dict.get(
+            OBSERVABILITY_ENABLED_KEY_NAME, ModelCallCaptureConfig.model_fields[OBSERVABILITY_ENABLED_KEY_NAME].default
+        )
         server_entry = self.global_config_dict.get(server_name)
         rollout_id = current_rollout_id()
         if observability_enabled and server_entry is not None and "resources_servers" in server_entry:

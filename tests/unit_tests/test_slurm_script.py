@@ -717,7 +717,7 @@ def test_with_default_capture_dir_explicit_value_wins():
 
 
 def test_with_default_capture_dir_no_injection_when_observability_off():
-    run = {"split": "benchmark"}
+    run = {"split": "benchmark", "observability_enabled": False}
     out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
     assert "model_call_capture_dir" not in out
 
@@ -740,7 +740,7 @@ def test_build_sbatch_script_auto_default_capture_dir(bench_dir):
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
             "driver": {
                 "container": "python:3.12",
-                "benchmarks": {"gsm8k": {"run": {"observability_enabled": True}}},
+                "benchmarks": {"gsm8k": {"run": {}}},
             },
             "job": {"output_path": "/remote/jobs"},
         }
@@ -774,6 +774,7 @@ def test_build_sbatch_script_explicit_capture_dir_wins(bench_dir):
 
 def test_build_sbatch_script_no_capture_dir_when_observability_off(submit_config, bench_dir):
     benchmark = submit_config.driver.benchmarks["gsm8k"]
+    benchmark.run["observability_enabled"] = False
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
     assert "model_call_capture_dir" not in script

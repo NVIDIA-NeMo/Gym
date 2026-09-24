@@ -18,6 +18,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from nemo_gym.base_responses_api_model import ModelCallCaptureConfig
 from nemo_gym.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.orchestration.api import (
     RUNTIME_ENV_PREFIX,
@@ -419,7 +420,8 @@ def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> di
     Python, once the real path is known. An explicit model_call_capture_dir in
     run always wins over this default.
     """
-    if run.get(OBSERVABILITY_ENABLED_KEY_NAME) and MODEL_CALL_CAPTURE_DIR_KEY_NAME not in run:
+    default_enabled = ModelCallCaptureConfig.model_fields[OBSERVABILITY_ENABLED_KEY_NAME].default
+    if run.get(OBSERVABILITY_ENABLED_KEY_NAME, default_enabled) and MODEL_CALL_CAPTURE_DIR_KEY_NAME not in run:
         return {**run, MODEL_CALL_CAPTURE_DIR_KEY_NAME: str(remote_bench_dir / "model-calls")}
     return run
 

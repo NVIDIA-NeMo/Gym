@@ -74,7 +74,7 @@ def _model_app(capture_dir, name: str) -> FastAPI:
 
     install_model_call_capture(
         app,
-        ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=capture_dir),
+        ModelCallCaptureConfig(model_call_capture_dir=capture_dir),
         model_server_name=name,
     )
     return app
@@ -152,7 +152,6 @@ async def test_verify_correlates_policy_and_judge_calls_and_preserves_raw_captur
     capture_dir = tmp_path / "captures"
     config = OmegaConf.create(
         {
-            "observability_enabled": True,
             "policy": {"responses_api_models": {"model": {"host": "policy.test", "port": 80}}},
             "tool_model": {"responses_api_models": {"model": {"host": "tool-model.test", "port": 80}}},
             "judge": {"responses_api_models": {"model": {"host": "judge.test", "port": 80}}},

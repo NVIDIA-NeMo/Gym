@@ -18,7 +18,7 @@ Every Gym model server derives from ``SimpleResponsesAPIModel``, which wires the
 dialects (/v1/responses, /v1/chat/completions, /v1/messages) and installs the model-call capture
 middleware.
 
-Capture is opt-in, off by default. A pure-ASGI middleware records correlated /v1/responses,
+Capture is enabled by default. A pure-ASGI middleware records correlated /v1/responses,
 /v1/chat/completions, and /v1/messages exchanges -- including failed calls -- into a
 per-rollout CaptureStore, forwarding bytes downstream unchanged so it composes with
 streaming (SSE) responses. Best-effort; never alters the response. Correlation is
@@ -47,6 +47,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
+from nemo_gym import RESULTS_DIR
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
@@ -436,8 +437,8 @@ def _validate_chat_params(body: dict) -> NeMoGymChatCompletionCreateParamsNonStr
 class ModelCallCaptureConfig(BaseModel):
     """Run-wide model-call capture settings from Gym's global config."""
 
-    observability_enabled: bool = False
-    model_call_capture_dir: Optional[Path] = None
+    observability_enabled: bool = True
+    model_call_capture_dir: Optional[Path] = RESULTS_DIR / "model_calls"
 
     @model_validator(mode="after")
     def validate_capture_dir(self) -> "ModelCallCaptureConfig":
