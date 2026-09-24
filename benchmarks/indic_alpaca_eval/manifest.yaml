@@ -1,0 +1,28 @@
+name: indic_alpaca_eval
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: Indic AlpacaEval instructions with custom reference-free rubric scoring and export for upstream pairwise evaluation.
+modality: text
+licensing: CC-BY-NC-4.0
+authors:
+- anushakamathofficial
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+resources_server: arena_judge
+agent_server: simple_agent
+datasets:
+- name: indic_alpaca_eval
+  type: benchmark
+  jsonl_fpath: benchmarks/indic_alpaca_eval/data/indic_alpaca_eval_benchmark.jsonl
+  prepare_script: benchmarks/indic_alpaca_eval/prepare.py
+  prompt_config: benchmarks/prompts/generic/default.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/generic/default.yaml
+lifecycle: active
