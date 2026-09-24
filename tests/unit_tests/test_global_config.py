@@ -2056,6 +2056,35 @@ class TestConfigLoadErrors:
         }
         parser._raise_on_agent_without_environment_server(config)
 
+    def test_multi_agent_environment_server_satisfies_agent_routing(self) -> None:
+        parser = GlobalConfigDictParser()
+        config = DictConfig(
+            {
+                name: {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "entrypoint": "app.py",
+                            "resources_server": {"type": "resources_servers", "name": "usersim"},
+                        }
+                    }
+                }
+                for name in ("usersim_user", "usersim_assistant", "usersim_judge", "usersim_summary")
+            }
+        )
+        config["usersim_environment"] = {
+            "environment_servers": {
+                "usersim": {
+                    "entrypoint": "app.py",
+                    "user_agent": {"type": "responses_api_agents", "name": "usersim_user"},
+                    "assistant_agent": {"type": "responses_api_agents", "name": "usersim_assistant"},
+                    "judge_agent": {"type": "responses_api_agents", "name": "usersim_judge"},
+                    "summary_agent": {"type": "responses_api_agents", "name": "usersim_summary"},
+                }
+            }
+        }
+
+        parser._raise_on_agent_without_environment_server(config)
+
     def test_all_repo_configs_load_without_duplicate_keys(self) -> None:
         # OmegaConf.load (the loader `gym env start` actually uses) rejects duplicate YAML keys,
         # but a plain PyYAML parse silently allows them (last-writer-wins). A repeated key like a
