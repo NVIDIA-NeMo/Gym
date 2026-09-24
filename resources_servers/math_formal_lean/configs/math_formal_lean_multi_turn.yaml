@@ -21,6 +21,7 @@ math_formal_lean_refinement_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      checkpoint_replayable_verify: true
       # Agent controls the retry loop
       max_correction_turns: 2
       # Include all attempts in output (for training data)

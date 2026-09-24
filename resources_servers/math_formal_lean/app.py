@@ -18,7 +18,7 @@
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -339,6 +339,8 @@ def build_correction_prompt(
 
 
 class MathFormalLeanResourcesServerConfig(BaseResourcesServerConfig):
+    CHECKPOINT_RECOVERY_MODE: ClassVar[Literal["stateless"]] = "stateless"
+
     sandbox_host: str = "127.0.0.1"
     sandbox_port: int = 6000
     compilation_timeout: float = 30.0
