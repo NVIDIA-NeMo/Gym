@@ -202,7 +202,9 @@ fi
 this_node_hostname=\$(hostname)
 read -r -a nodes <<< "\$ALL_NODES"
 
-router_common_args=(--log-level error --prometheus-host 0.0.0.0 --prometheus-port $ROUTER_METRICS_PORT)
+# TODO @bxyu-nvidia: revert
+# router_common_args=(--log-level error --prometheus-host 0.0.0.0 --prometheus-port $ROUTER_METRICS_PORT)
+router_common_args=(--log-level info --prometheus-host 0.0.0.0 --prometheus-port $ROUTER_METRICS_PORT)
 read -r -a router_extra_args <<< $(printf '%q' "${ROUTER_ARGS:-}")
 if (( \${#router_extra_args[@]} )); then
     router_common_args+=("\${router_extra_args[@]}")
