@@ -75,7 +75,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
-from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, HermesSandboxSession
+from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, HarnessProcessInfo, HermesSandboxSession
 
 
 def _usage_from_result(result: dict[str, Any]) -> Optional[NeMoGymResponseUsage]:
@@ -237,6 +237,8 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     sandbox_runner_timeout_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
+    # Where uv builds for sandbox architectures other than the host's are cached.
+    uv_cache_dir: str = DEFAULT_UV_CACHE_DIR
     session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
@@ -446,7 +448,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             ),
         )
         try:
-            await state.install_runtime(install_timeout=self.config.sandbox_install_timeout_seconds)
+            await state.install_runtime(
+                install_timeout=self.config.sandbox_install_timeout_seconds, uv_cache_dir=self.config.uv_cache_dir
+            )
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
