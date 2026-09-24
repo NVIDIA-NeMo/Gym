@@ -1,0 +1,4 @@
+# Pinned upstream checkout and prepared benchmark rows are fetched at run time; the task
+# content is third-party data and is not redistributed from this repository.
+/ORAgentBench/
+/benchmark.jsonl

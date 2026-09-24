@@ -1,0 +1,113 @@
+# Resources server: owns task containers, runs upstream's validators, and computes the reward.
+oragentbench:
+  resources_servers:
+    oragentbench:
+      allowed_agents: [terminus_2_multi_step_sandboxed_agent, terminus_2_sandboxed_agent]
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: ORAgentBench end-to-end operations-research tasks in containers, scored by upstream's own validators
+      value: Evaluate agents on 107 executable operations-research modelling and solving tasks (ORAgentBench)
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        # Upper bound on a container's life; the longest task budget is 2700 + 3 x 1200 s of agent time.
+        ttl_s: 14400
+        ready_timeout_s: 600
+        derive_cpu_env: true
+        env: {}
+        # Upstream task.toml: cpus = 4, memory_mb = 8192, storage_mb = 20480.
+        resources:
+          cpu: 4
+          memory_mib: 8192
+          disk_gib: 20
+        provider_options: {}
+        metadata:
+          benchmark: oragentbench
+      # Model-free validation modes: none | reference | no_action | wrong_file | hung_process.
+      validation_mode: none
+      reference_solve_timeout_s: 2700.0
+      reference_solve_time_limit_s: null
+      debug: false
+
+# Agent: Gym's sandboxed Terminus 2 loop, run once per Harbor step.
+oragentbench_agent:
+  responses_api_agents:
+    terminus_2_multi_step_sandboxed_agent:
+      entrypoint: app.py
+      num_workers: 4
+      resources_server:
+        type: resources_servers
+        name: oragentbench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      max_turns: null
+      parser_name: json
+      enable_summarize: true
+      proactive_summarization_threshold: 8000
+      tmux_pane_width: 160
+      tmux_pane_height: 40
+      dump_trajectory: false
+      debug: false
+      model_context_limit: 262144
+      model_output_limit: null
+      llm_request_timeout: 600
+      interleaved_thinking: false
+
+      sandbox_provider: sandbox
+      # Fallback only: every step's budget comes from task.toml through /prepare_step (2700 s single-step).
+      sandbox_timeout: 2700
+      sandbox_config: {}
+      remote_tmux_binary_path: null
+      # Upstream task.toml declares `[environment] skills_dir = "/skills"`; Terminus 2 lists the skills there.
+      skills_dir: /skills
+
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/oragentbench/data/example.jsonl
+        license: MIT
+      - name: benchmark
+        type: validation
+        jsonl_fpath: resources_servers/oragentbench/data/benchmark.jsonl
+        # Upstream declares CC BY 4.0 for data, but task content derives from OR papers and IndustryOR
+        # whose rights upstream asserts without itemising; recorded as TBD pending a rights decision.
+        license: TBD
+
+# Policy model. Only `reasoning.effort=high` is published upstream; nothing else is sent.
+policy_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${policy_base_url}
+      openai_api_key: ${policy_api_key}
+      openai_model: ${oc.env:ORAGENTBENCH_POLICY_MODEL,${policy_model_name}}
+      openai_default_headers: {}
+      extra_body:
+        reasoning:
+          effort: high
+
+# Local Docker sandbox provider. The benchmark forbids internet access from the task container.
+sandbox:
+  default_metadata:
+    sandbox-api: docker-cli
+  docker:
+    create:
+      keepalive_shell: /bin/sh
+      keepalive_cmd: "while :; do sleep 2147483647; done"
+      start_timeout_s: 600
+      use_init: true
+      apply_resource_limits: true
+      publish_host: 127.0.0.1
+      network: none
+    exec:
+      default_timeout_s: 180
+      concurrency: 32
+    probe:
+      command: printf docker-sandbox-ready
+      expected_stdout: docker-sandbox-ready
+      timeout_s: 30
+      deadline_s: 60
+      stable_count: 1
