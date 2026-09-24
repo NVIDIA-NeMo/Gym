@@ -70,7 +70,10 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
     assert termination.reason == "completed", termination
     assert extra["harness_version"] == "2.4.6"
     assert extra["runtime"]["pid"] != os.getpid()
-    assert extra["runtime"]["pid"] == harness.sandbox.runners[0].pid
+    cleanup = json.loads((harness.directory / "cleanup.json").read_text())
+    assert extra["runtime"]["pid"] == cleanup["worker_pid"]
+    assert cleanup["supervisor_pid"] == harness.sandbox.runners[0].pid
+    assert cleanup["remaining_pids"] == []
     assert len(response.output) == 9
     assert response.usage.total_tokens == 39
     assert response.tool_choice == "required"

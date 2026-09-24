@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from responses_api_agents.miniswe_sandboxed_agent import mcp_client as module
+from nemo_gym.sandbox import mcp_client as module
 from responses_api_agents.miniswe_sandboxed_agent.harness import responses_input
 from responses_api_agents.miniswe_sandboxed_agent.sandbox_runner import GymModel
 

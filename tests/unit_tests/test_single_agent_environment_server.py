@@ -278,3 +278,11 @@ def test_dependency_failure_messages_are_bounded() -> None:
 def test_retry_requires_a_transient_dependency_error() -> None:
     assert _is_retryable_dependency_error(TimeoutError()) is True
     assert _is_retryable_dependency_error(ValueError("invalid response")) is False
+
+
+def test_dependency_failure_preserves_installer_diagnostics() -> None:
+    from environment_servers.single_agent.app import _dependency_error_message
+
+    error = RuntimeError("422 setup failed")
+    error.response_content = b'{"detail":"uv pip install exited 127: missing python3"}'
+    assert _dependency_error_message(error) == "422 setup failed: uv pip install exited 127: missing python3"

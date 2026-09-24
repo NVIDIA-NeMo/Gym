@@ -18,40 +18,60 @@ which forwards them to the configured model server with the existing capture and
 session correlation. The sandbox does not need direct access to model credentials.
 Tool observations and the native trajectory return over the same sandbox transport.
 
-`app.py` owns the Gym `/run` loop: it calls the configured resources server's
-`/seed_session`, connects to the returned sandbox, and stores agent state keyed by
-client and resource session IDs. It then calls `responses()` directly; that method
-retrieves the state and executes the sandbox runner. `/run` sends the response and
-termination to `/verify` after execution stops and releases its session state and
-transport. The resources server retains provisioning, renewal, grading, and
-sandbox destruction. Retried runs share one execution, and seeded cookies are
-forwarded to model and verification calls.
+Use `episode.py` and the generic
+[agent configuration](configs/miniswe_sandboxed_agent.yaml) with a
+`single_agent` EnvironmentServer. Bind `agent_server`, `resources_server`, the
+model server, and the sandbox provider in the run configuration, then submit
+`SingleAgentEpisodeRequest` to the **EnvironmentServer** `/run` endpoint.
+The native agent needs only its model reference; benchmark data stays in Resources.
+The standalone YAML retains the existing `resources_server.name: ???` selector
+for CLI agent composition. The environment configuration fills that selector;
+native session execution uses the sandbox handed over by EnvironmentServer.
 
-`/v1/responses` requires an initialized mini-SWE session; it neither provisions
-nor verifies a benchmark. Separate agent-session endpoints are not needed for
-this `/run` flow. In full swapping, an environment-server request to
-`/v1/responses` will replace the direct method call.
+The native lifecycle is:
 
-Cancellation stops the runner and its tool process groups before verification.
-The adapter retains completed Responses items and downloads the native partial
-trajectory when available. Runtime metadata records the sandbox hostname, process
-ID, and Python executable so execution placement can be checked.
+1. Resources `/seed_session` creates and prepares the task sandbox.
+2. Agent `/v1/agent_sessions` connects to `SandboxAccess` and installs the runtime.
+   It publishes the session cookie only after setup succeeds.
+3. Agent `/ng-rollout/{capture_key}/v1/responses` activates the installed mini-SWE
+   loop once in the supplied workdir and as the task user.
+4. Agent `/v1/agent_sessions/close` confirms process cleanup, removes its runtime
+   files, disconnects, and returns observations.
+5. Resources `/verify` grades the task; `/close_session` releases owner resources.
 
-`models.py` defines the agent's local view of the HTTP protocol; it imports no
-resources implementation. Seeding supplies `session_id`, `sandbox_descriptor`,
-`sandbox_provider`, `instruction`, and optional `task_id`, `user`,
-`agent_timeout_sec`, `mcp_servers`, and `skills_dir`. A failed seed can supply
-`termination`; a completed session can supply `verified_response` for replay.
-Task-specific `/run` fields are forwarded unchanged. Verification receives the
-response and agent execution status; its result only needs Gym's
-`BaseVerifyResponse` fields. Additional benchmark result fields pass through
-unchanged. Other harnesses can implement the same HTTP exchange without importing
-mini-SWE or TB4 code.
+Setup, execution, verification, and sandbox destruction have separate owners.
+No host CLI execution is used by native sessions. Setup checks Linux, architecture,
+`python3`, `bash`, and `setsid`; failures retain installer output in episode diagnostics.
+Runtime files, HOME, and caches are isolated under a unique `/tmp` directory outside
+the task repository. Task dependencies are not replaced. Only runtime settings and
+explicit task MCP configuration enter the sandbox; model and provider credentials
+stay in Gym.
 
-Agent shutdown uses one `shutdown_timeout_sec` budget for finishing an in-flight
-seed request, stopping the sandbox runner, and requesting verification or cleanup. If the
-seed response remains unavailable, it cancels the local request and returns;
-the resources server's seeded-session deadline cleans up the abandoned sandbox.
+The adapter accepts a string or text-only task messages. `instructions`, sampling,
+reasoning, and output limits are forwarded to each model call. `max_output_tokens`
+is a **per-call** limit; `harness.step_limit` and `agent_max_timeout_sec` bound the
+activation. Unsupported stateful inputs, custom tools, and request options fail
+before launch. A session permits one activation; duplicate or concurrent activation
+returns 409. Cookie ownership, episode identity, and the capture route must match.
+
+One Linux child subreaper supervises each activation. Close waits for the worker
+and all tool descendants, including double-forked and detached children, before
+reporting success. A missing launch handle or cleanup receipt cannot establish
+successful cleanup. Such failures block grading and retain state for close retries.
+Concurrent closes serialize; successful close receipts remain available for
+`closed_session_retention_sec` (default 300 seconds), after which stale cookies
+return 404. Failed sessions remain process-local until recovery or server restart;
+owner/provider expiry handles crashes. Cleanup is not a security boundary against
+hostile sandbox code. Supervisor overhead has not been measured at scale.
+
+Cancellation retains completed Responses items and the available native partial
+trajectory. Runtime metadata includes sandbox hostname, PID, UID, Python executable,
+and harness version. Missing aggregate usage remains unknown. Inference smokes do
+not establish training token-ID/logprob support.
+
+The legacy `app.py` entrypoint remains available for existing callers using the
+agent `/run` and the legacy resource seed/verify exchange. New sandbox integrations
+should use the native EnvironmentServer flow above.
 
 Agent configuration owns `model_server`, `harness`, `agent_max_timeout_sec`, and
 `artifacts_dir`. Harness setup (including reconnect and working-directory discovery)
@@ -99,8 +119,9 @@ These changes affect benchmark trajectories and results compared with the prior
 unbounded-observation profile.
 
 Task skills are exposed by their supplied directory. For MCP tasks, setup installs
-`mcp==1.29.0` into a task-local virtual environment, discovers the declared tools,
-and adds their schemas and invocation command to the prompt. The CLI supports
+`mcp==1.29.0` into the isolated runtime. Activation starts the MCP client under the
+same supervisor, discovers tools, and adds their schemas and invocation command
+to the prompt. The CLI supports
 stdio, SSE, and streamable HTTP; calls execute inside the main sandbox so service
 names retain their task-network meaning. A persistent MCP session preserves state
 across calls. MCP tools are visible as schemas and CLI instructions in the task
@@ -126,7 +147,7 @@ Enable `observability_enabled: true` in Gym's run configuration to collect
 callers pass `observability_enabled=True`; collection is disabled by default.
 Responses without an ID retain their turn and record a
 `model_call_reference_unavailable` gap.
-The agent sends the resources session ID as `x-session-id` on every Gym model request,
+The agent sends its agent session ID as `x-session-id` on every Gym model request,
 so capture can assign failed attempts and retries to the same invocation even
 when there is no response ID. Successful responses retain exact response refs;
 decisions are recorded before mini-SWE parses them, including rejected output.

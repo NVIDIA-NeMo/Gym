@@ -60,6 +60,8 @@ class ProcessSandbox:
 
 @pytest.fixture
 async def runner_factory(tmp_path, monkeypatch):
+    if sys.platform != "linux":
+        pytest.skip("The real sandbox supervisor requires Linux child subreapers")
     sandboxes = []
 
     async def install(harness):

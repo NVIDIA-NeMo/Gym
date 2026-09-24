@@ -110,6 +110,9 @@ class MiniSWEHarness:
         self.observability_enabled = observability_enabled
         self.extra_instruction = ""
         self.result = None
+        self.launch_attempted = False
+        self.cleanup_confirmed = False
+        self.disposed = False
         self.remote_directory = f"/tmp/nemo-gym-miniswe-{uuid4().hex}"
 
     async def setup(self) -> None:
@@ -123,54 +126,49 @@ class MiniSWEHarness:
                 f"\nTask skills are in {self.context.skills_dir}. Read the relevant SKILL.md files.\n"
             )
         if self.context.mcp_servers:
-            (self.directory / "mcp.json").write_text(json.dumps(self.context.mcp_servers))
-            remote = f"/tmp/{self.context.session_id}-mcp"
-            command = f"python3 -m venv {remote} && {remote}/bin/pip -q install mcp==1.29.0 httpx-aiohttp==0.2.0"
+            remote = self.remote_directory + "/mcp"
             result = await self.sandbox.exec(
-                command, user=self.context.user, cwd=self.context.workdir, timeout_s=self.context.setup_timeout_sec
-            )
-            if result.return_code:
-                raise RuntimeError(f"Task MCP client setup failed: {result.stderr}")
-            await self.sandbox.upload(Path(__file__).with_name("mcp_client.py"), remote + "/client.py")
-            await self.sandbox.upload(self.directory / "mcp.json", remote + "/servers.json")
-            cli = f"{remote}/bin/python {remote}/client.py"
-            daemon = (
-                f"echo $$ >> /tmp/{self.context.session_id}.pids; "
-                f"echo $$ >> {self.remote_directory}/processes; exec {cli} serve"
-            )
-            started = await self.sandbox.exec(
-                "bash -c "
-                + quote(
-                    f"setsid --fork bash -c {quote(daemon)} > {remote}/server.log 2>&1 < /dev/null; "
-                    f"for i in $(seq 1 60); do [ -S {remote}/server.sock ] && exit 0; sleep 1; done; "
-                    f"cat {remote}/server.log; exit 1"
-                ),
+                f"mkdir -p {remote} && {self.remote_directory}/uv pip install "
+                f"--python {self.remote_directory}/venv/bin/python mcp==1.29.0 httpx-aiohttp==0.2.0",
                 user=self.context.user,
                 cwd=self.context.workdir,
-                timeout_s=65,
+                timeout_s=self.context.setup_timeout_sec,
+                env=self.runtime_env,
             )
-            if started.return_code:
-                raise RuntimeError(f"Task MCP session setup failed: {started.stdout}")
-            listed = await self.sandbox.exec(
-                cli + " list", user=self.context.user, cwd=self.context.workdir, timeout_s=60
-            )
-            if listed.return_code:
-                raise RuntimeError(f"Task MCP discovery failed: {listed.stderr}")
-            self.extra_instruction += (
-                f"\nTask MCP tools (JSON schemas): {listed.stdout}\n"
-                f"Call with: {cli} call SERVER TOOL 'JSON_ARGUMENTS'.\n"
-            )
+            if result.return_code:
+                raise RuntimeError(f"Task MCP client setup failed ({result.return_code}): {result.stderr}")
+            from nemo_gym.sandbox import mcp_client
+
+            local = self.directory / "mcp.json"
+            local.write_text(json.dumps(self.context.mcp_servers))
+            await self.sandbox.upload(Path(mcp_client.__file__), remote + "/client.py")
+            await self.sandbox.upload(local, remote + "/servers.json")
+
+    @property
+    def runtime_env(self) -> dict[str, str]:
+        return {
+            "HOME": self.remote_directory + "/home",
+            "XDG_CACHE_HOME": self.remote_directory + "/cache",
+            "UV_CACHE_DIR": self.remote_directory + "/cache/uv",
+            "UV_PYTHON_INSTALL_DIR": self.remote_directory + "/python",
+        }
 
     async def _install_runner(self) -> None:
         remote = self.remote_directory
         result = await self.sandbox.exec(
-            f"mkdir -p {remote} && python3 -c 'import platform; print(platform.machine())'",
+            f"mkdir -p {remote}/home {remote}/cache && "
+            'for tool in python3 bash setsid; do command -v "$tool" >/dev/null || '
+            '{ echo "Missing prerequisite: $tool" >&2; exit 127; }; done && '
+            'python3 -c \'import platform; assert platform.system() == "Linux", "Linux required"; print(platform.machine())\'',
             user=self.context.user,
             cwd=self.context.workdir,
             timeout_s=self.context.setup_timeout_sec,
         )
         if result.return_code:
-            raise RuntimeError(f"mini-SWE bootstrap probe failed: {result.stdout}\n{result.stderr}")
+            raise RuntimeError(
+                f"mini-SWE prerequisites (Linux, python3, bash, setsid) probe failed "
+                f"({result.return_code}): {result.stdout}\n{result.stderr}"
+            )
         arch = result.stdout.strip()
         if arch not in {"x86_64", "aarch64"}:
             raise RuntimeError(f"Unsupported mini-SWE sandbox architecture: {arch!r}")
@@ -196,12 +194,15 @@ class MiniSWEHarness:
             f"python3 -c {quote(script)} && "
             f"{remote}/uv venv {remote}/venv --python 3.13 && "
             f"{remote}/uv pip install --python {remote}/venv/bin/python mini-swe-agent==2.4.6",
+            env=self.runtime_env,
             user=self.context.user,
             cwd=self.context.workdir,
             timeout_s=self.context.setup_timeout_sec,
         )
         if result.return_code:
-            raise RuntimeError(f"mini-SWE runner installation failed: {result.stdout}\n{result.stderr}")
+            raise RuntimeError(
+                f"mini-SWE uv venv/pip installation failed ({result.return_code}): {result.stdout}\n{result.stderr}"
+            )
         await self.sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), remote + "/runner.py")
 
     async def _upload_json(self, name: str, payload: dict) -> None:
@@ -223,6 +224,7 @@ class MiniSWEHarness:
                 "step_limit": self.config.step_limit,
                 "step_timeout_sec": min(budget, self.config.step_timeout_sec),
                 "process_registry": f"/tmp/{self.context.session_id}.pids",
+                "mcp_directory": self.remote_directory + "/mcp" if self.context.mcp_servers else None,
             },
         )
         remote = self.remote_directory
@@ -231,11 +233,13 @@ class MiniSWEHarness:
             f"echo $$ >> /tmp/{self.context.session_id}.pids; "
             f"exec {remote}/venv/bin/python {remote}/runner.py {remote}"
         )
+        self.launch_attempted = True
         result = await self.sandbox.exec(
             f"setsid --fork bash -c {quote(command)} > {remote}/runner.log 2>&1 < /dev/null",
             user=self.context.user,
             cwd=self.context.workdir,
             timeout_s=30,
+            env=self.runtime_env,
         )
         if result.return_code:
             raise RuntimeError(f"mini-SWE runner launch failed: {result.stdout}\n{result.stderr}")
@@ -254,7 +258,7 @@ class MiniSWEHarness:
             f"if [ -f {remote}/output.json ]; then echo output; "
             f"elif [ -f {remote}/request-{index}.json ]; then echo request; "
             f"elif [ -f {remote}/runner.pid ] && ! kill -0 $(cat {remote}/runner.pid) 2>/dev/null; then "
-            "echo exited; else echo waiting; fi",
+            f"if [ -f {remote}/output.json ]; then echo output; else echo exited; fi; else echo waiting; fi",
             user=self.context.user,
             timeout_s=30,
         )
@@ -268,18 +272,40 @@ class MiniSWEHarness:
         return {"kind": kind}
 
     async def close(self) -> None:
-        """Stop runner and tool process groups before resources begins verification."""
+        """Require supervisor evidence that the worker and all descendants stopped."""
+        if self.cleanup_confirmed or not self.launch_attempted:
+            return
         remote = self.remote_directory
         result = await self.sandbox.exec(
-            f"if [ -f {remote}/processes ]; then "
-            f"while read pid; do kill -TERM -- -$pid 2>/dev/null || true; done < {remote}/processes; "
-            "sleep 0.2; "
-            f"while read pid; do kill -KILL -- -$pid 2>/dev/null || true; done < {remote}/processes; fi",
+            f"touch {remote}/stop; "
+            f"for i in $(seq 1 100); do [ -f {remote}/cleanup.json ] && break; sleep 0.1; done; "
+            f"test -f {remote}/cleanup.json && cat {remote}/cleanup.json",
             user=self.context.user,
-            timeout_s=10,
+            timeout_s=15,
         )
         if result.return_code:
-            raise RuntimeError(f"mini-SWE process cleanup failed: {result.stderr}")
+            raise RuntimeError(f"mini-SWE cleanup unconfirmed ({result.return_code}): {result.stderr}")
+        evidence = json.loads(result.stdout)
+        if evidence.get("status") != "stopped" or evidence.get("remaining_pids") != []:
+            raise RuntimeError(f"mini-SWE descendant cleanup failed: {evidence}")
+        (self.directory / "cleanup.json").write_text(json.dumps(evidence, indent=2))
+        self.cleanup_confirmed = True
+
+    async def dispose(self) -> None:
+        """Remove only this adapter's session files, after confirmed process cleanup."""
+        if self.disposed:
+            return
+        if self.launch_attempted and not self.cleanup_confirmed:
+            raise RuntimeError("Cannot remove runtime files before confirmed cleanup")
+        result = await self.sandbox.exec(
+            f"rm -rf -- {quote(self.remote_directory)} && rm -f -- /tmp/{self.context.session_id}.pids && "
+            f"test ! -e {quote(self.remote_directory)} && test ! -e /tmp/{self.context.session_id}.pids",
+            user=self.context.user,
+            timeout_s=30,
+        )
+        if result.return_code:
+            raise RuntimeError(f"mini-SWE session file cleanup failed ({result.return_code}): {result.stderr}")
+        self.disposed = True
 
     async def _read_result(self) -> dict:
         remote = self.remote_directory
@@ -374,7 +400,7 @@ class MiniSWEHarness:
                     event = await self._next_event(index)
                     kind = event["kind"]
                     if kind == "waiting":
-                        await asyncio.sleep(0.05)
+                        await asyncio.sleep(0.2)
                         continue
                     if kind == "exited":
                         logs = await self.sandbox.exec(f"cat {self.remote_directory}/runner.log", timeout_s=30)
@@ -452,7 +478,7 @@ class MiniSWEHarness:
             try:
                 await self.close()
             except Exception as error:
-                LOGGER.exception("Failed to stop mini-SWE processes; resources must quiesce the sandbox")
+                LOGGER.exception("Failed to confirm mini-SWE cleanup; native session close must retry")
                 termination = HarnessOutcome(reason="infrastructure_error", detail=f"Process cleanup failed: {error}")
             if active_tool is not None:
                 active_tool.status = (

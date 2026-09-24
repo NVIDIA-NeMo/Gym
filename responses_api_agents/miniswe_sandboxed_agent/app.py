@@ -62,13 +62,14 @@ class MiniSWESession:
 
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
     num_workers: Literal[1] = 1
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     harness: MiniSWEConfig = Field(default_factory=MiniSWEConfig)
     artifacts_dir: Path = Path("results/miniswe_sandboxed_agent")
     agent_max_timeout_sec: float | None = Field(default=None, gt=0)
     setup_timeout_sec: float = Field(default=360, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
+    closed_session_retention_sec: float = Field(default=300, gt=0)
 
 
 def now() -> str:
@@ -156,6 +157,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         return state.result[0]
 
     async def run(self, request: Request, body: MiniSWERunRequest) -> MiniSWEVerifyResponse:
+        if self.config.resources_server is None:
+            raise HTTPException(422, "Use EnvironmentServer /run and native agent sessions")
         if self._closing:
             raise HTTPException(503, "Agent server is shutting down")
         payload = body.model_dump(mode="json")
@@ -265,7 +268,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                             rollout_id=rollout_id,
                             instruction=seed.instruction,
                             user=seed.user,
-                            workdir=cwd.stdout.strip(),
+                            workdir=seed.workdir or cwd.stdout.strip(),
                             setup_timeout_sec=self.config.setup_timeout_sec,
                             mcp_servers=seed.mcp_servers,
                             skills_dir=seed.skills_dir,

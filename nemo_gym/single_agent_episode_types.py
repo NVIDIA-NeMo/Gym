@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
-from nemo_gym.base_resources_server import BaseVerifyResponse, ResourcesVerifyRequest
+from nemo_gym.base_resources_server import ResourcesVerifyRequest, ResourcesVerifyResponse
 from nemo_gym.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
@@ -34,7 +34,7 @@ class SingleAgentEpisodeResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    verification: BaseVerifyResponse
+    verification: ResourcesVerifyResponse
     agent_observations: AgentObservationBundle | None = None
 
 

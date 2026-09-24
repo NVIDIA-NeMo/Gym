@@ -3,6 +3,7 @@
 
 """Resources-backed single-agent environment server."""
 
+import json
 from typing import Any, Literal
 
 from aiohttp import ClientConnectionError, ClientResponseError
@@ -16,10 +17,10 @@ from nemo_gym.base_environment_server import (
     HandledEpisodeError,
 )
 from nemo_gym.base_resources_server import (
-    BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
@@ -109,7 +110,7 @@ class SingleAgentEnvironmentServer(BaseEnvironmentServer[SingleAgentEpisodeReque
         except Exception as error:
             raise self._failure(
                 stage="seed",
-                message=str(error),
+                message=_dependency_error_message(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -182,7 +183,7 @@ class SingleAgentEnvironmentServer(BaseEnvironmentServer[SingleAgentEpisodeReque
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                message=str(error),
+                message=_dependency_error_message(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -224,7 +225,7 @@ class SingleAgentEnvironmentServer(BaseEnvironmentServer[SingleAgentEpisodeReque
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                message=str(error),
+                message=_dependency_error_message(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -233,7 +234,7 @@ class SingleAgentEnvironmentServer(BaseEnvironmentServer[SingleAgentEpisodeReque
         except Exception as error:
             raise self._failure(
                 stage="cleanup",
-                message=str(error),
+                message=_dependency_error_message(error),
                 terminal=True,
                 partial_response=agent_response,
             ) from error
@@ -255,11 +256,11 @@ class SingleAgentEnvironmentServer(BaseEnvironmentServer[SingleAgentEpisodeReque
                 cookies=resources_cookies,
             )
             await raise_for_status(verify_http_response)
-            verification = BaseVerifyResponse.model_validate(await get_response_json(verify_http_response))
+            verification = ResourcesVerifyResponse.model_validate(await get_response_json(verify_http_response))
         except Exception as error:
             raise self._failure(
                 stage="verification",
-                message=str(error),
+                message=_dependency_error_message(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
             ) from error
@@ -269,7 +270,7 @@ class SingleAgentEnvironmentServer(BaseEnvironmentServer[SingleAgentEpisodeReque
         except Exception as error:
             raise self._failure(
                 stage="cleanup",
-                message=str(error),
+                message=_dependency_error_message(error),
                 terminal=True,
                 partial_response=agent_response,
             ) from error
@@ -321,6 +322,21 @@ def _is_retryable_dependency_error(error: Exception) -> bool:
     if isinstance(error, ClientResponseError):
         return error.status in {408, 425, 429} or error.status >= 500
     return isinstance(error, (ClientConnectionError, TimeoutError))
+
+
+def _dependency_error_message(error: Exception) -> str:
+    """Keep actionable setup/cleanup diagnostics returned by a dependency."""
+    content = getattr(error, "response_content", None)
+    if not isinstance(content, bytes) or not content:
+        return str(error)
+    detail = content.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(detail)
+        if isinstance(payload, dict) and "detail" in payload:
+            detail = str(payload["detail"])
+    except ValueError:
+        pass
+    return f"{error}: {detail[:8192]}"
 
 
 if __name__ == "__main__":

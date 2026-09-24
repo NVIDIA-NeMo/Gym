@@ -12,13 +12,14 @@ from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSee
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from responses_api_agents.miniswe_sandboxed_agent import episode
 from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedConfig, empty_response
 from responses_api_agents.miniswe_sandboxed_agent.episode import MiniSWEEpisodeAgent
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
-from responses_api_agents.miniswe_sandboxed_agent.models import AgentExecutionResult
 
 
-def fixture(tmp_path):
+@pytest.fixture
+def native(tmp_path, monkeypatch):
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"borrowed": {"local": {}}}
     agent = MiniSWEEpisodeAgent(
@@ -44,125 +45,148 @@ def fixture(tmp_path):
             "workdir": "/problem",
         },
     )
-    return agent, request, seed
+    harness = MagicMock()
+    harness.setup, harness.execute = AsyncMock(), AsyncMock()
+    harness.close, harness.dispose = AsyncMock(), AsyncMock()
+    harness.result = None
+
+    def make_harness(**kwargs):
+        harness.context = kwargs["context"]
+        harness.query = kwargs["query"]
+        return harness
+
+    monkeypatch.setattr(episode, "MiniSWEHarness", make_harness)
+    provider = SimpleNamespace(aclose=AsyncMock())
+    monkeypatch.setattr(episode, "create_provider", lambda _: provider)
+    monkeypatch.setattr(episode.AsyncSandbox, "connect", AsyncMock())
+    return SimpleNamespace(agent=agent, request=request, seed=seed, harness=harness, provider=provider)
 
 
-async def test_native_agent_deduplicates_activation_and_never_calls_resources(tmp_path, monkeypatch):
-    agent, request, seed = fixture(tmp_path)
-    params = NeMoGymResponseCreateParamsNonStreaming(input="Fix the public project")
-    finished = asyncio.Event()
+def result(params, reason="nonzero_exit"):
+    return empty_response(params, "model"), HarnessOutcome(reason=reason, detail="LimitsExceeded"), {}
 
-    async def execute(execution_seed, received_params, **kwargs):
-        assert execution_seed.instruction == params.input
-        assert execution_seed.workdir == "/problem"
-        assert execution_seed.task_id == "problem-17"
-        assert kwargs["quiesce"] is True
-        await finished.wait()
-        return AgentExecutionResult(
-            responses_create_params=received_params,
-            response=empty_response(received_params, "model"),
-            agent_started=True,
-            termination=HarnessOutcome(reason="nonzero_exit", detail="LimitsExceeded"),
-        )
 
-    monkeypatch.setattr(MiniSWEEpisodeAgent, "execute", AsyncMock(side_effect=execute))
-    seeded = await agent.seed_agent_session(request, seed)
-    assert await agent.seed_agent_session(request, seed) == seeded
-    first = asyncio.create_task(agent.responses(request, params))
-    await asyncio.sleep(0)
-    first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first
-    retry = asyncio.create_task(agent.responses(request, params))
-    finished.set()
-    response = await retry
-    agent.execute.assert_awaited_once()
+async def seed_and_close(f):
+    seeded = await f.agent.seed_agent_session(f.request, f.seed)
+    return AgentCloseSessionRequest(agent_session_id=seeded.agent_session_id, episode_id=f.seed.episode_id)
+
+
+async def test_setup_precedes_publication_and_activation_is_once(native):
+    f = native
+
+    async def setup():
+        assert "miniswe_agent_session_id" not in f.request.session
+
+    f.harness.setup.side_effect = setup
+    close = await seed_and_close(f)
+    assert (await f.agent.seed_agent_session(f.request, f.seed)).agent_session_id == close.agent_session_id
+    f.harness.setup.assert_awaited_once()
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="Fix the public project", instructions="Be concise", max_output_tokens=500, temperature=0.2
+    )
+    f.harness.execute.return_value = result(params)
+    response = await f.agent.responses(f.request, params)
+    assert f.harness.context.instruction == params.input
+    assert f.harness.context.workdir == "/problem"
+    assert f.harness.context.task_id == "problem-17"
+    assert f.harness.params == params
     assert response.status == "incomplete"
-    assert response.metadata["termination_detail"] == "LimitsExceeded"
-    close = AgentCloseSessionRequest(agent_session_id=seeded.agent_session_id, episode_id=seed.episode_id)
-    assert await agent.close_agent_session(request, close) == await agent.close_agent_session(request, close)
-    agent.server_client.post.assert_not_called()
+    with pytest.raises(HTTPException, match="one activation"):
+        await f.agent.responses(f.request, params)
+    assert await f.agent.close_agent_session(f.request, close) == await f.agent.close_agent_session(f.request, close)
+    f.harness.close.assert_awaited_once()
+    f.harness.dispose.assert_awaited_once()
+    f.provider.aclose.assert_awaited_once()
+    f.agent.server_client.post.assert_not_called()
     with pytest.raises(HTTPException, match="closed"):
-        await agent.responses(request, params)
+        await f.agent.responses(f.request, params)
 
 
-async def test_native_agent_rejects_identity_changes_and_foreign_cookie(tmp_path):
-    agent, request, seed = fixture(tmp_path)
-    seeded = await agent.seed_agent_session(request, seed)
-    changed = seed.model_copy(deep=True)
+async def test_seed_failure_does_not_publish_session(native):
+    f = native
+    f.harness.setup.side_effect = RuntimeError("image cannot install runtime")
+    with pytest.raises(HTTPException, match="install runtime"):
+        await f.agent.seed_agent_session(f.request, f.seed)
+    assert not f.agent._agent_sessions
+    assert "miniswe_agent_session_id" not in f.request.session
+    f.harness.dispose.assert_awaited_once()
+    f.provider.aclose.assert_awaited_once()
+
+
+async def test_native_agent_rejects_identity_changes_and_foreign_cookie(native):
+    f = native
+    close = await seed_and_close(f)
+    changed = f.seed.model_copy(deep=True)
     changed.task_id = TaskId(taskset="other", task_id="task")
     with pytest.raises(HTTPException, match="bound"):
-        await agent.seed_agent_session(request, changed)
+        await f.agent.seed_agent_session(f.request, changed)
     with pytest.raises(HTTPException, match="Close identity"):
-        await agent.close_agent_session(
-            request,
-            AgentCloseSessionRequest(
-                agent_session_id=seeded.agent_session_id, episode_id=EpisodeId(rollout_id="other")
-            ),
+        await f.agent.close_agent_session(
+            f.request, close.model_copy(update={"episode_id": EpisodeId(rollout_id="other")})
         )
-    request.path_params["rollout_id"] = "rollout"
+    f.request.path_params["rollout_id"] = "rollout"
     with pytest.raises(HTTPException, match="Rollout route"):
-        await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    request.session[SESSION_ID_KEY] = "foreign-owner"
+        await f.agent.responses(f.request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    f.request.session[SESSION_ID_KEY] = "foreign-owner"
     with pytest.raises(HTTPException, match="Unknown"):
-        await agent.close_agent_session(
-            request, AgentCloseSessionRequest(agent_session_id=seeded.agent_session_id, episode_id=seed.episode_id)
-        )
+        await f.agent.close_agent_session(f.request, close)
 
 
-async def test_native_close_cancels_and_joins_activation(tmp_path, monkeypatch):
-    agent, request, seed = fixture(tmp_path)
-    started, stopped = asyncio.Event(), asyncio.Event()
-
-    async def execute(execution_seed, params, **kwargs):
-        started.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            stopped.set()
-            return AgentExecutionResult(
-                responses_create_params=params,
-                response=empty_response(params, "model"),
-                termination=HarnessOutcome(reason="cancelled"),
-            )
-
-    monkeypatch.setattr(MiniSWEEpisodeAgent, "execute", AsyncMock(side_effect=execute))
-    seeded = await agent.seed_agent_session(request, seed)
-    pending = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
-    await started.wait()
-    await agent.close_agent_session(
-        request, AgentCloseSessionRequest(agent_session_id=seeded.agent_session_id, episode_id=seed.episode_id)
-    )
-    assert stopped.is_set()
-    assert (await pending).metadata["termination_reason"] == "cancelled"
-
-
-async def test_retried_close_does_not_interrupt_worker_cleanup(tmp_path, monkeypatch):
-    agent, request, seed = fixture(tmp_path)
+async def test_retried_close_does_not_interrupt_worker_cleanup(native):
+    f = native
     started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    params = NeMoGymResponseCreateParamsNonStreaming(input="task")
 
-    async def execute(execution_seed, params, **kwargs):
+    async def execute(budget):
         started.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             cleaning.set()
             await release.wait()
-            return AgentExecutionResult(
-                responses_create_params=params,
-                response=empty_response(params, "model"),
-                termination=HarnessOutcome(reason="cancelled"),
-            )
+            return result(params, "cancelled")
 
-    monkeypatch.setattr(MiniSWEEpisodeAgent, "execute", AsyncMock(side_effect=execute))
-    seeded = await agent.seed_agent_session(request, seed)
-    pending = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
+    f.harness.execute.side_effect = execute
+    close = await seed_and_close(f)
+    pending = asyncio.create_task(f.agent.responses(f.request, params))
     await started.wait()
-    body = AgentCloseSessionRequest(agent_session_id=seeded.agent_session_id, episode_id=seed.episode_id)
-    first_close = asyncio.create_task(agent.close_agent_session(request, body))
+    first_close = asyncio.create_task(f.agent.close_agent_session(f.request, close))
     await cleaning.wait()
-    retry_close = asyncio.create_task(agent.close_agent_session(request, body))
+    retry_close = asyncio.create_task(f.agent.close_agent_session(f.request, close))
     await asyncio.sleep(0)
     release.set()
     assert (await pending).metadata["termination_reason"] == "cancelled"
     assert await first_close == await retry_close
+    f.harness.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("failure", ["close", "dispose", "disconnect"])
+async def test_failed_cleanup_retains_state_for_retry(native, failure):
+    f = native
+    close = await seed_and_close(f)
+    operation = f.provider.aclose if failure == "disconnect" else getattr(f.harness, failure)
+    operation.side_effect = RuntimeError("cleanup unconfirmed")
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        await f.agent.close_agent_session(f.request, close)
+    state = f.agent._agent_sessions[close.agent_session_id]
+    assert state.close_result is None
+    assert state.closing
+    operation.side_effect = None
+    await f.agent.close_agent_session(f.request, close)
+    assert state.close_result is not None
+    state.closed_at -= f.agent.config.closed_session_retention_sec + 1
+    with pytest.raises(HTTPException, match="Unknown"):
+        await f.agent.close_agent_session(f.request, close)
+
+
+async def test_unsupported_options_rejected_before_activation(native):
+    f = native
+    await seed_and_close(f)
+    for kwargs in ({"previous_response_id": "previous"}, {"tool_choice": "none"}, {"tools": []}):
+        with pytest.raises(HTTPException, match="Unsupported"):
+            await f.agent.responses(f.request, NeMoGymResponseCreateParamsNonStreaming(input="task", **kwargs))
+    f.harness.execute.assert_not_awaited()
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "developer", "content": "Keep tests"}, {"role": "user", "content": "Fix bug"}]
+    )
+    assert episode.task_instruction(params) == "developer: Keep tests\n\nuser: Fix bug"

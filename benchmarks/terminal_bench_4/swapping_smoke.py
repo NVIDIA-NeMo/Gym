@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 
 import aiohttp
@@ -31,7 +32,15 @@ from responses_api_models.openai_model.app import SimpleModelServer, SimpleModel
 
 async def main(args: argparse.Namespace) -> None:
     values = dotenv_values(args.env_file) if args.env_file else {}
-    for key in ("OPENSANDBOX_DOMAIN", "OPENSANDBOX_API_KEY", "OPENAI_API_KEY"):
+    for key in (
+        "OPENSANDBOX_DOMAIN",
+        "OPENSANDBOX_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENSANDBOX_DOMAIN_CPU",
+        "OPENSANDBOX_API_KEY_CPU",
+        "OPENSANDBOX_DOMAIN_GPU",
+        "OPENSANDBOX_API_KEY_GPU",
+    ):
         if values.get(key):
             os.environ[key] = values[key]
     output = args.output.resolve()
@@ -43,6 +52,16 @@ async def main(args: argparse.Namespace) -> None:
     provider = env["sandbox_provider"]
     provider["opensandbox"]["connection"]["api_key"] = os.environ["OPENSANDBOX_API_KEY"]
     provider["opensandbox"]["operations"]["background_exec"] = True
+    providers = {"sandbox": provider}
+    if args.split_endpoints:
+        env["sandbox_split_endpoints"] = True
+        for pool in ("cpu", "gpu"):
+            selected = deepcopy(provider)
+            selected["opensandbox"]["connection"].update(
+                domain=os.environ["OPENSANDBOX_DOMAIN_" + pool.upper()],
+                api_key=os.environ["OPENSANDBOX_API_KEY_" + pool.upper()],
+            )
+            providers["sandbox_" + pool] = selected
 
     def common(name: str) -> dict:
         return dict(name=name, host="127.0.0.1", port=ports[name], entrypoint="app.py")
@@ -54,10 +73,12 @@ async def main(args: argparse.Namespace) -> None:
     )
     model_ref = dict(type="responses_api_models", name="policy_model")
     resource_ref = dict(type="resources_servers", name="resources")
-    if args.pair == "tb4-hermes":
+    if args.pair.startswith("tb4-"):
         resource_config = common("resources") | dict(
             environment=env,
             sandbox_provider_ref="sandbox",
+            sandbox_provider_ref_cpu="sandbox_cpu" if args.split_endpoints else None,
+            sandbox_provider_ref_gpu="sandbox_gpu" if args.split_endpoints else None,
             artifacts_dir=str(output / "resources"),
             task_download_dir=str(args.task_cache),
         )
@@ -74,8 +95,16 @@ async def main(args: argparse.Namespace) -> None:
             compression_enabled=False,
         )
         agent_cls, agent_schema = HermesAgent, HermesAgentConfig
+        if args.pair == "tb4-miniswe":
+            agent_config = common("agent") | dict(
+                model_server=model_ref,
+                harness=dict(step_limit=args.steps, step_timeout_sec=30),
+                agent_max_timeout_sec=args.agent_timeout,
+                artifacts_dir=str(output / "agent"),
+            )
+            agent_cls, agent_schema = MiniSWEEpisodeAgent, MiniSWESandboxedConfig
         manifest = json.loads((root / "benchmarks/terminal_bench_4/manifest.json").read_text())
-        task = next(t for t in manifest["tasks"] if t["name"] == "interleaved-vigenere")
+        task = next(t for t in manifest["tasks"] if t["name"] == args.task)
         task_id = "terminal-bench/" + task["name"]
         data = dict(task_name=task_id, task_ref=task["ref"], dataset_ref=manifest["ref"])
         params = dict(input=[], max_output_tokens=4096)
@@ -107,12 +136,12 @@ async def main(args: argparse.Namespace) -> None:
         task_id = data["instance_id"]
     config = OmegaConf.create(
         dict(
-            sandbox=provider,
+            **providers,
             observability_enabled=True,
             model_call_capture_dir=str(output / "model_calls"),
             resources={
                 "resources_servers": {
-                    "terminal_bench_4" if args.pair == "tb4-hermes" else "swebench_pro": resource_config
+                    "terminal_bench_4" if args.pair.startswith("tb4-") else "swebench_pro": resource_config
                 }
             },
             agent={
@@ -179,7 +208,7 @@ async def main(args: argparse.Namespace) -> None:
             ),
             flush=True,
         )
-        if not verification or not verification.get("evaluation_completed"):
+        if result.get("failure") or not verification or not verification.get("evaluation_completed"):
             raise RuntimeError("Smoke did not complete official verification")
     finally:
         for server in servers:
@@ -190,7 +219,7 @@ async def main(args: argparse.Namespace) -> None:
 
 def cli() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pair", choices=["tb4-hermes", "swepro-miniswe"], required=True)
+    parser.add_argument("--pair", choices=["tb4-hermes", "tb4-miniswe", "swepro-miniswe"], required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--swe-row", type=Path, help="Prepared public SWE Pro JSONL; runs its first row")
@@ -198,6 +227,9 @@ def cli() -> None:
     parser.add_argument(
         "--model", help="Hosted OpenAI model; defaults to GPT-4.1 for Hermes and GPT-5.4-mini for mini-SWE"
     )
+    parser.add_argument("--task", default="interleaved-vigenere", help="Pinned TB4 task name")
+    parser.add_argument("--split-endpoints", action="store_true", help="Use CPU/GPU provider environment variables")
+    parser.add_argument("--agent-timeout", type=float, default=180)
     parser.add_argument("--steps", type=int, default=3)
     args = parser.parse_args()
     if args.pair == "swepro-miniswe" and args.swe_row is None:
