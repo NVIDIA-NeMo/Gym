@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Batch evaluation settings. Supply credentials in env.yaml or the environment.
+# Auxiliary models match the Super 3.5 reference, not the historical pilot judges.
+config_paths:
+  - benchmarks/nemotron_3.5_super/core_text.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+  - benchmarks/nemotron_3.5_super/shared_model_endpoints.yaml
+
+num_samples_in_parallel: 512
+num_repeats:
+  apex_shortlist_math_with_judge_simple_agent: 16
+  lmarena_v2_benchmark_agent: 3
+  _default: 1
+num_repeats_add_seed:
+  apex_shortlist_math_with_judge_simple_agent: true
+  lmarena_v2_benchmark_agent: true
+  _default: false
+route_failures_to_sidecar: true
+uv_pip_set_python: true
+uv_cache_dir: /tmp/gym-batch-uv-${oc.env:SLURM_JOB_ID,local}
+model_endpoint_readiness_timeout_seconds: 1800
+policy_model:
+  responses_api_models:
+    vllm_model:
+      sampling_overrides:
+        temperature: 1.0
+        top_p: 0.95
+
+nv_inference_api_key: ${oc.env:NV_INFERENCE_API_KEY}
+gpt-5_4-mini-2026-03-17:
+  responses_api_models:
+    openai_model:
+      extra_body:
+        _delete_key: max_output_tokens
+        reasoning_effort: medium
+
+hle_batch_judge:
+  # Rename the shared instance, preserving existing batch overrides without an extra server.
+  _inherit_from: hle_benchmark_equivalence_judge_model
+  responses_api_models:
+    openai_model:
+      max_concurrent_requests: 32
+hle_equivalence_llm_judge_resources_server:
+  resources_servers:
+    equivalence_llm_judge:
+      judge_model_server:
+        name: hle_batch_judge
+      judge_endpoint_max_concurrency: 32
+      # Match the Super 3.5 reference's output contract; free-form GPT-4o verdicts vary in formatting.
+      judge_responses_create_params:
+        input: []
+        temperature: 0.0
+        top_p: 0.95
+        text:
+          format:
+            type: json_schema
+            name: hle_judge
+            schema:
+              type: object
+              properties:
+                correct:
+                  type: string
+                  enum: [HLE_JUDGE_CORRECT, HLE_JUDGE_INCORRECT]
+                extracted_final_answer:
+                  type: string
+                reasoning:
+                  type: string
+                confidence:
+                  type: integer
+              required: [correct, extracted_final_answer, reasoning, confidence]
+              additionalProperties: false
+            strict: true
+      judge_equal_label: HLE_JUDGE_CORRECT
+      judge_not_equal_label: HLE_JUDGE_INCORRECT
+hle_equivalence_llm_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      max_steps: 1
+
+genrm_model:
+  responses_api_models:
+    openai_model:
+      max_concurrent_requests: 32
+omniscience_omniscience_resources_server:
+  resources_servers:
+    omniscience:
+      judge_responses_create_params:
+        max_output_tokens: 32768
+omniscience_omniscience_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: omniscience
+          type: benchmark
+          jsonl_fpath: benchmarks/omniscience/data/omniscience_benchmark.jsonl
+          prompt_config: benchmarks/omniscience/prompts/generation.yaml
+          prepare_script: benchmarks/omniscience/prepare.py
+          num_repeats: 10
+
+judge_api_key: ${nv_inference_api_key}
+lmarena_v2_benchmark_resources_server:
+  resources_servers:
+    arena:
+      max_rollout_failure_rate: 0.015
+
+ifbench_benchmark_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: ifbench
+          type: benchmark
+          jsonl_fpath: benchmarks/ifbench/data/ifbench_benchmark.jsonl
+          prompt_config: benchmarks/ifbench/prompts/default.yaml
+          prepare_script: benchmarks/ifbench/prepare.py
+          num_repeats: 8
