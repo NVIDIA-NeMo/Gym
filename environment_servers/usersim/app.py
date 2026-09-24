@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -118,24 +117,31 @@ class _AgentSession:
 
 
 class _GymModelFacade:
-    """Synchronous model facade expected by UserSim's generator."""
+    """Async model facade expected by UserSim's generator."""
 
     def __init__(self, alias: str, bridge: "_ConversationBridge") -> None:
         self.alias = alias
         self.model_name = bridge.environment_server.config.target_for_alias(alias).name
         self._bridge = bridge
 
-    def completion(self, messages: Sequence[Any], **kwargs: Any) -> SimpleNamespace:
+    async def acompletion(self, messages: Sequence[Any], **kwargs: Any) -> SimpleNamespace:
         unsupported = set(kwargs) - {"max_tokens", "max_completion_tokens", "tools"}
         if unsupported:
             raise NotImplementedError(f"Unsupported UserSim completion options: {sorted(unsupported)}")
         max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
-        return self._bridge.complete_from_worker(
-            self.alias,
-            messages,
-            max_tokens=max_tokens,
-            tools=kwargs.get("tools"),
-        )
+        try:
+            async with asyncio.timeout(self._bridge.environment_server.config.actor_call_timeout_seconds):
+                return await self._bridge.invoke(
+                    self.alias,
+                    messages,
+                    max_tokens=max_tokens,
+                    tools=kwargs.get("tools"),
+                )
+        except TimeoutError as error:
+            raise TimeoutError(
+                f"Timed out after {self._bridge.environment_server.config.actor_call_timeout_seconds}s "
+                f"waiting for {self.alias}"
+            ) from error
 
 
 class _ResourcesOwnedModelFacade:
@@ -143,7 +149,7 @@ class _ResourcesOwnedModelFacade:
 
     model_name = "resources-server"
 
-    def completion(self, _messages: Sequence[Any], **_kwargs: Any) -> SimpleNamespace:
+    async def acompletion(self, _messages: Sequence[Any], **_kwargs: Any) -> SimpleNamespace:
         raise RuntimeError(
             "UserSim attempted to invoke api_response_model in the Environment Server; "
             "API-response synthesis must run through the Resources Server tool endpoint"
@@ -169,14 +175,13 @@ def _create_usersim_generator(
 
 
 class _ConversationBridge:
-    """Bridge UserSim's synchronous model facade to Gym's async clients."""
+    """Bridge UserSim's async model facade to Gym Agent Servers."""
 
     def __init__(
         self,
         environment_server: "UserSimEnvironmentServer",
         request: UserSimEpisodeRequest,
         task: UserSimTaskInput,
-        event_loop: asyncio.AbstractEventLoop,
         resources_cookies: dict[str, str],
         agent_sessions: dict[str, _AgentSession],
         assistant_tools: list[dict[str, Any]],
@@ -184,40 +189,12 @@ class _ConversationBridge:
         self.environment_server = environment_server
         self.request = request
         self.task = task
-        self.event_loop = event_loop
         self.resources_cookies = resources_cookies
         self.agent_sessions = agent_sessions
         self.assistant_tools = assistant_tools
         self.invocations: list[UserSimInvocation] = []
 
-    def complete_from_worker(
-        self,
-        alias: str,
-        messages: Sequence[Any],
-        *,
-        max_tokens: int | None,
-        tools: Sequence[Any] | None = None,
-    ) -> SimpleNamespace:
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
-        if running_loop is self.event_loop:
-            raise RuntimeError("UserSim's synchronous ConversationLoop must run outside the Environment Server loop")
-
-        future = asyncio.run_coroutine_threadsafe(
-            self._invoke(alias, messages, max_tokens=max_tokens, tools=tools),
-            self.event_loop,
-        )
-        try:
-            return future.result(timeout=self.environment_server.config.actor_call_timeout_seconds)
-        except FutureTimeoutError as error:
-            future.cancel()
-            raise TimeoutError(
-                f"Timed out after {self.environment_server.config.actor_call_timeout_seconds}s waiting for {alias}"
-            ) from error
-
-    async def _invoke(
+    async def invoke(
         self,
         alias: str,
         messages: Sequence[Any],
@@ -392,13 +369,12 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             self,
             request,
             task,
-            asyncio.get_running_loop(),
             resources_cookies,
             agent_sessions,
             seed.assistant_tools,
         )
         try:
-            raw_result = await asyncio.to_thread(self._run_usersim, bridge, seed.scenario)
+            raw_result = await self._run_usersim(bridge, seed.scenario)
             result = UserSimSimulationResult.model_validate(raw_result)
             _finalize_termination(bridge.invocations, result)
             if not any(invocation.role == "assistant" for invocation in bridge.invocations):
@@ -457,7 +433,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             ),
         )
 
-    def _run_usersim(self, bridge: _ConversationBridge, scenario: UserSimScenario) -> dict[str, Any]:
+    async def _run_usersim(self, bridge: _ConversationBridge, scenario: UserSimScenario) -> dict[str, Any]:
         from usersim.engine.config import ConversationSimulatorConfig
         from usersim.engine.core.llm import set_debug_log_path
         from usersim.engine.generator import ConversationSimulatorGenerator
@@ -475,7 +451,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         generator = _create_usersim_generator(ConversationSimulatorGenerator, config, models)
         data = scenario.model_dump(mode="python", exclude={"locale", "probe_data"})
         data.update(scenario.probe_data)
-        return generator.generate(data)
+        return await generator.agenerate(data)
 
     def responses_path(self, target_name: str, request: UserSimEpisodeRequest) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}
