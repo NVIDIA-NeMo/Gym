@@ -39,9 +39,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -50,17 +50,34 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import get_server_url
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
-    dir_contains_audio_video,
+    dir_media_modalities,
     make_rng,
     panel_summary,
-    select_av_judges,
 )
+from resources_servers.gdpval.scoring import SCORING_ERROR_KEY
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _is_invalid_judge_result(judge_result: Any) -> bool:
+    """True when the judge did not actually produce a usable judgement.
+
+    A missing result is obviously invalid, but the scorers also return a
+    *populated* metadata dict on failure -- ``no_valid_scores`` when every trial
+    failed to parse, ``truncated_json`` when only a partial score was salvaged,
+    ``no_score_in_response`` when the reply carried no score. Each yields 0.0 or a
+    biased-low partial, and testing only for ``None`` lands them in the mean
+    looking like real scores, indistinguishable from a poor deliverable.
+    """
+    if judge_result is None:
+        return True
+    return isinstance(judge_result, dict) and bool(judge_result.get(SCORING_ERROR_KEY))
+
 
 _DEFAULT_JUDGE_PROMPT_FPATH = str(Path(__file__).parent / "prompts" / "judge_prompt.j2")
 _DEFAULT_REFERENCE_ELO = 1000.0
@@ -147,10 +164,83 @@ class JudgePanelMember(BaseModel):
     create_params_overrides: Dict[str, Any] = {}
     # Relative sampling weight; defaults to equal weighting across the panel.
     weight: float = 1.0
-    # Set True for a member that natively reads audio/video (e.g. Gemini 3.1 Pro
-    # Preview). Tasks whose deliverables/references contain audio or video files
-    # are routed to the AV-capable member(s) instead of the sampled panel.
-    handles_audio_video: bool = False
+    # Per-modality media capability, tracked SEPARATELY because a judge can read
+    # one but not the other:
+    #   - Gemini (e.g. Gemini 3.1 Pro Preview): audio AND video.
+    #   - self-hosted MiniMax-M3: video ONLY (no audio tower in its config).
+    #   - GPT / Claude: neither.
+    # Tasks are routed per the modalities they contain: video goes to
+    # video-capable members; audio deliverables a judge can't read are dropped
+    # with a warning (video/images/text are still graded). The removed
+    # ``handles_audio_video`` flag is migrated onto both (see below).
+    handles_audio: bool = False
+    handles_video: bool = False
+    # Representation and request limits are provider-specific. Keeping them on
+    # the panel member prevents one global knob from breaking a different API.
+    # They apply to comparison mode only: rubric mode sends every member the
+    # server-level ``judge_media_mode`` and does not run the transport preflight.
+    media_mode: Optional[Literal["native_pdf", "images_and_text", "native_pdf_overflow_images"]] = None
+    max_native_pdf_pages: Optional[int] = None
+    max_native_pdf_documents: Optional[int] = None
+    max_native_pdf_bytes: Optional[int] = None
+    # Provider limit for one native PDF document. Unlike the aggregate
+    # max_native_pdf_bytes eligibility ceiling, overflow mode rasterizes only
+    # documents above this lossless representation threshold.
+    max_native_pdf_bytes_per_document: Optional[int] = None
+    max_image_base64_bytes: Optional[int] = Field(default=None, gt=0)
+    max_total_image_base64_bytes: Optional[int] = Field(default=None, gt=0)
+    max_video_files: Optional[int] = Field(default=None, ge=0)
+    # Tried in order for images_and_text. The first lossless projection below
+    # max_serialized_request_bytes wins; otherwise this member is excluded.
+    raster_dpi_tiers: Tuple[int, ...] = ()
+    max_serialized_request_bytes: Optional[int] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_handles_audio_video(cls, data: Any) -> Any:
+        """Map the removed ``handles_audio_video`` flag onto both modality flags.
+
+        Unknown keys are otherwise ignored, so an overlay that still sets the old
+        flag would silently lose audio/video routing.
+        """
+        if not isinstance(data, dict) or "handles_audio_video" not in data:
+            return data
+        data = dict(data)
+        legacy = data.pop("handles_audio_video")
+        conflicting = sorted(key for key in ("handles_audio", "handles_video") if key in data)
+        if conflicting:
+            raise ValueError(
+                f"judge panel member sets the removed handles_audio_video together with {conflicting}; "
+                "set only handles_audio and handles_video"
+            )
+        LOGGER.warning(
+            "judge panel member %r: handles_audio_video is deprecated; "
+            "applying it as handles_audio and handles_video. Set those two flags instead.",
+            data.get("name") or data.get("model"),
+        )
+        data["handles_audio"] = legacy
+        data["handles_video"] = legacy
+        return data
+
+
+def _strict_comparison_trial_failure(
+    *,
+    attempted_matchups: int,
+    num_trials: int,
+    total_judged: int,
+    total_invalid: int,
+    ref_errors: Dict[str, List[str]],
+) -> Optional[str]:
+    """Describe an incomplete strict comparison result, or return ``None``."""
+
+    expected_judged = num_trials * attempted_matchups
+    if attempted_matchups <= 0 or ref_errors or total_invalid != 0 or total_judged != expected_judged:
+        return (
+            f"matchups={attempted_matchups} judged={total_judged}/{expected_judged} "
+            f"invalid={total_invalid} "
+            f"reference_errors={sum(len(errors) for errors in ref_errors.values())}"
+        )
+    return None
 
 
 class GDPValResourcesServerConfig(BaseResourcesServerConfig):
@@ -179,6 +269,17 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # swap/no-swap to debias position effects.
     num_comparison_trials: int = 4
 
+    # Fail the whole verify request unless every planned comparison trial
+    # produced a valid vote. This keeps incomplete panel responses out of
+    # Stirrup's resume cache and prevents a later multistage plan from being
+    # selected from fewer votes than the configured scientific contract.
+    strict_comparison_trials: bool = False
+
+    # Stage 1 only: explicit imported task IDs with no finish marker may count
+    # as audited losses. Missing paths outside this list remain failures.
+    count_eval_missing_as_loss: bool = False
+    missing_eval_task_ids: List[str] = Field(default_factory=list)
+
     # ELO assigned to the (legacy single) reference model in pairwise mode.
     # Ignored when ``reference_models`` is set (each carries its own ``elo``).
     reference_elo: float = _DEFAULT_REFERENCE_ELO
@@ -188,6 +289,52 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # read tables/charts. Costs ~5-30s per Office file.
     preconvert_office_to_pdf: bool = True
     preconvert_max_concurrent: int = 4
+
+    # How deliverable/reference files are presented to the judge:
+    # - ``"native_pdf"`` (default): PDFs and (preconverted) Office docs are sent
+    #   as ``application/pdf`` data URLs. Works for frontier judges (Gemini/GPT/
+    #   Claude) that decode PDFs server-side.
+    # - ``"images_and_text"``: each PDF/Office page is rasterized to a PNG image
+    #   block and the extracted text is attached alongside. Required for image-
+    #   only local VLM judges (e.g. a gym-spawned Kimi K2.6) that cannot decode a
+    #   raw PDF data URL. Applies to every judge mode (rubric text/visual/
+    #   structured and pairwise comparison). See ``media_conversion.py``.
+    judge_media_mode: Literal["native_pdf", "images_and_text"] = "native_pdf"
+    # ``images_and_text`` render knobs (ignored in ``native_pdf`` mode).
+    judge_pdf_render_dpi: int = 144
+    judge_pdf_max_pages: int = 50
+    # Attach the extracted text copy alongside the page images. Off → images only.
+    judge_pdf_include_text: bool = True
+    # Exact request-wide image cap for raster and PDF-overflow transports.
+    judge_max_images_per_request: int = 450
+    # Include nested task inputs while leaving submission directories shallow.
+    judge_reference_files_recursive: bool = False
+    # Use the eval tree's prepared copies of the original benchmark inputs,
+    # persisted from host downloads separately from model-authored submissions.
+    # Enable only after validating those inputs during preparation.
+    judge_reference_files_from_eval: bool = False
+    # Whether the (single) local judge natively reads audio / video, tracked
+    # SEPARATELY because MiniMax-M3 — the reference self-hosted judge — reads video
+    # but NOT audio (its config has an image + video tower but no audio config). So
+    # for MiniMax-M3 set ``judge_handles_video: true`` and leave
+    # ``judge_handles_audio`` false. In ``images_and_text`` mode a readable
+    # modality is forwarded to the judge using the vLLM-standard ``video_url`` /
+    # ``input_audio`` content types instead of a filename-only stub; an unreadable
+    # modality is stubbed. Among frontier judges only Gemini reads AV — mark that
+    # per-member on the panel via ``handles_audio`` / ``handles_video`` rather than
+    # these server-level flags.
+    judge_handles_audio: bool = False
+    judge_handles_video: bool = False
+
+    # What to do when a task carries VIDEO files but NO available judge can read
+    # video. Grading video with a video-blind judge yields unreliable scores.
+    # Defaults to ``"warn"`` — log a prominent warning and fall back to grading
+    # with the (video-blind) panel. Set to ``"error"`` to instead fail the task
+    # hard. NOTE: this guards VIDEO only. AUDIO is always handled leniently — if a
+    # task has audio deliverables no judge can read (e.g. any task judged solely by
+    # MiniMax-M3, which has no audio tower), those audio files are dropped with a
+    # warning and the rest of the deliverable (video/images/text) is still graded.
+    on_missing_av_judge: Literal["error", "warn"] = "warn"
 
     judge_model_server: ModelServerRef
     judge_responses_create_params_overrides: Dict[str, Any] = {}
@@ -234,6 +381,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class GDPValVerifyRequest(BaseVerifyRequest):
+    model_config = ConfigDict(populate_by_name=True)
+
     task_id: str
     sector: Optional[str] = None
     occupation: Optional[str] = None
@@ -248,12 +397,41 @@ class GDPValVerifyRequest(BaseVerifyRequest):
     # reference. Used by the multi-stage ELO driver to select a different set of
     # reference models per judgementstage without reconfiguring the server.
     reference_ids: Optional[List[str]] = None
+    # Preserve multistage identity through /verify so Stirrup's namespace-keyed
+    # cache and the incrementally tagged output remain auditable.
+    verify_cache_namespace: Optional[str] = None
+    stage_index: Optional[int] = None
+    expected_final_stage_index: Optional[int] = None
+    expected_stage_row_count: Optional[int] = None
+    ng_task_index: Optional[int] = Field(default=None, alias="_ng_task_index")
+    ng_rollout_index: Optional[int] = Field(default=None, alias="_ng_rollout_index")
+    ng_attempt_index: Optional[int] = Field(default=None, alias="_ng_attempt_index")
+
+
+# The reference model has no deliverable for this task, so no battle can be
+# scored. An infrastructure gap, not a model outcome. Kept here rather than in
+# nemo_gym: the harness only needs the generic terminal flag, and the class name
+# is GDPVal vocabulary.
+REFERENCE_MISSING_FAILURE_CLASS = "reference_missing"
+EVAL_MISSING_FAILURE_CLASS = "eval_missing"
+TRANSPORT_INELIGIBLE_FAILURE_CLASS = "transport_ineligible"
+
+
+class TransportIneligibleError(ValueError):
+    """Every judge was excluded by deterministic media/transport eligibility."""
 
 
 class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
+    # Underscore-prefixed harness keys (``_ng_failure_class``,
+    # ``_ng_failure_terminal``) cannot be declared as pydantic fields, and the
+    # default ``extra="ignore"`` drops them silently -- a verify response that
+    # tried to stamp a failure class was serialised without it.
+    model_config = ConfigDict(extra="allow")
+
     verify_mode: Literal["rubric", "comparison"] = "rubric"
     judge_response: Optional[Dict[str, Any]] = None
     invalid_judge_response: Optional[bool] = None
+    invalid_judge_retryable: Optional[bool] = None
     # Majority-decision flags across all (ref_repeat × trial) judge votes —
     # kept for back-compat with older verify responses (still bool-valued).
     win: Optional[bool] = None
@@ -319,9 +497,16 @@ class GDPValResourcesServer(SimpleResourcesServer):
             return self.config.judge_panel
         # Degenerate 1-member panel: inherit the legacy create-params overrides
         # (model/api_key are split out during resolution, the rest become the
-        # member's reasoning/generation knobs).
+        # member's reasoning/generation knobs). The single judge inherits the
+        # server-level per-modality media flags so routing / the missing-video
+        # check treat a self-hosted MiniMax-M3 judge as video-capable (but not
+        # audio-capable).
         return [
-            JudgePanelMember(create_params_overrides=dict(self.config.judge_responses_create_params_overrides or {}))
+            JudgePanelMember(
+                create_params_overrides=dict(self.config.judge_responses_create_params_overrides or {}),
+                handles_audio=self.config.judge_handles_audio,
+                handles_video=self.config.judge_handles_video,
+            )
         ]
 
     def _resolve_judges(self) -> List[ResolvedJudge]:
@@ -344,7 +529,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             server = member.model_server or self.config.judge_model_server
             overrides = dict(member.create_params_overrides or {})
             model = member.model or overrides.pop("model", None) or legacy_overrides.get("model", "judge")
-            api_key = overrides.pop("api_key", None) or legacy_overrides.get("api_key", "dummy")
+            api_key = overrides.pop("api_key", None) or legacy_overrides.get("api_key", "sk-dummy")
             judges.append(
                 ResolvedJudge(
                     name=member.name or model or f"judge_{i}",
@@ -353,10 +538,110 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     api_key=api_key,
                     create_overrides=overrides or None,
                     weight=member.weight,
-                    handles_audio_video=member.handles_audio_video,
+                    handles_audio=member.handles_audio,
+                    handles_video=member.handles_video,
+                    media_mode=member.media_mode or self.config.judge_media_mode,
+                    max_native_pdf_pages=member.max_native_pdf_pages,
+                    max_native_pdf_documents=member.max_native_pdf_documents,
+                    max_native_pdf_bytes=member.max_native_pdf_bytes,
+                    max_native_pdf_bytes_per_document=member.max_native_pdf_bytes_per_document,
+                    max_image_base64_bytes=member.max_image_base64_bytes,
+                    max_total_image_base64_bytes=member.max_total_image_base64_bytes,
+                    max_video_files=member.max_video_files,
+                    raster_dpi_tiers=tuple(member.raster_dpi_tiers),
+                    max_serialized_request_bytes=member.max_serialized_request_bytes,
                 )
             )
+        # Transport routing (needed/sections_by_judge, per-judge receipts, and
+        # vote pooling) all key on the resolved name. Two members collapsing to
+        # one name would silently send one judge the other's payload
+        # representation and merge their votes.
+        names = [judge.name for judge in judges]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(
+                "judge panel members must resolve to unique names (set an explicit "
+                f"'name' on members sharing a model): duplicates={duplicates}"
+            )
         return judges
+
+    def _route_media_judges(
+        self, judges: List[ResolvedJudge], *, task_id: str, modalities: Set[str], label: str
+    ) -> Tuple[List[ResolvedJudge], bool, bool]:
+        """Route a media-bearing task to capable judges, per modality.
+
+        *modalities* is the subset of ``{"audio", "video"}`` the task carries.
+
+        Routing prefers judges that can read EVERY modality present, so an
+        audio+video (or audio-only) task lands on a fully-capable member (e.g.
+        Gemini) when one exists. When no single judge covers everything, the two
+        modalities are handled with different strictness:
+
+        - **Video** is guarded: the panel is narrowed to the video-capable
+          member(s). If NONE can read video, grading it with a video-blind judge
+          is unreliable, so this warns and keeps the panel
+          (``on_missing_av_judge="warn"``, default) or raises (``"error"``).
+        - **Audio** is best-effort: if no (routed) judge can read it — the common
+          MiniMax-M3 case, which has no audio tower — the audio files are dropped
+          downstream with a warning and the rest of the deliverable
+          (video/images/text) is still graded. Never fatal.
+
+        Returns ``(routed_judges, audio_capable, video_capable)`` where the
+        capability booleans describe the *routed* panel and gate how deliverable
+        files are converted for the judge.
+        """
+
+        def _reads(judge: ResolvedJudge, modality: str) -> bool:
+            return getattr(judge, f"handles_{modality}", False)
+
+        fully_capable = [j for j in judges if all(_reads(j, m) for m in modalities)]
+        if fully_capable:
+            routed = fully_capable
+            if [j.name for j in routed] != [j.name for j in judges]:
+                print(
+                    f"[gdpval] task {task_id} has {'/'.join(sorted(modalities))} {label}; routing to "
+                    f"judge(s) {[j.name for j in routed]} that read those modalities",
+                    flush=True,
+                )
+        else:
+            # No single judge covers every modality. Guard video hard; audio is
+            # handled leniently below.
+            routed = judges
+            if "video" in modalities:
+                video_judges = [j for j in routed if _reads(j, "video")]
+                if video_judges:
+                    if [j.name for j in video_judges] != [j.name for j in routed]:
+                        print(
+                            f"[gdpval] task {task_id} has video {label}; routing to "
+                            f"video-capable judge(s) {[j.name for j in video_judges]}",
+                            flush=True,
+                        )
+                    routed = video_judges
+                else:
+                    msg = (
+                        f"task {task_id} has video {label} but no configured judge can read video "
+                        f"(panel: {[j.name for j in routed]}). Among frontier judges only Gemini reads "
+                        f"video; a self-hosted MiniMax-M3 judge does too (set judge_handles_video=true, "
+                        f"or handles_video=true on a panel member). Grading video with a video-blind "
+                        f"judge produces meaningless scores."
+                    )
+                    if self.config.on_missing_av_judge == "error":
+                        raise ValueError(f"[gdpval] {msg}")
+                    LOGGER.warning("%s Falling back to the full panel — scores for this task are UNRELIABLE.", msg)
+
+        video_capable = any(_reads(j, "video") for j in routed)
+        audio_capable = any(_reads(j, "audio") for j in routed)
+
+        if "audio" in modalities and not audio_capable:
+            LOGGER.warning(
+                "[gdpval] task %s has audio %s but the routed judge(s) %s cannot read audio "
+                "(e.g. MiniMax-M3 has no audio tower); audio files will NOT be judged. The rest "
+                "of the deliverable (video/images/text) is still graded.",
+                task_id,
+                label,
+                [j.name for j in routed],
+            )
+        return routed, audio_capable, video_capable
 
     async def verify(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
         if self.config.reward_mode == "comparison":
@@ -370,21 +655,22 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 verify_mode="rubric",
+                judge_response={"scoring_error": "missing_rubric"},
                 invalid_judge_response=True,
+                invalid_judge_retryable=False,
             )
 
         judges = self._resolve_judges()
-        # Route tasks with audio/video deliverables to the AV-capable judge(s) —
-        # most judges can't read those modalities natively.
-        if dir_contains_audio_video(body.deliverables_dir):
-            av_judges = select_av_judges(judges)
-            if [j.name for j in av_judges] != [j.name for j in judges]:
-                print(
-                    f"[gdpval] task {body.task_id} has audio/video deliverables; routing to "
-                    f"{[j.name for j in av_judges]}",
-                    flush=True,
-                )
-            judges = av_judges
+        # Route tasks with audio/video deliverables per modality: video goes to
+        # video-capable judge(s) (error/warn when none); audio a judge can't read
+        # is dropped downstream with a warning.
+        modalities = dir_media_modalities(body.deliverables_dir)
+        audio_capable = any(getattr(j, "handles_audio", False) for j in judges)
+        video_capable = any(getattr(j, "handles_video", False) for j in judges)
+        if modalities:
+            judges, audio_capable, video_capable = self._route_media_judges(
+                judges, task_id=body.task_id, modalities=modalities, label="deliverables"
+            )
         # Seed per task so a rerun samples the same judge(s); the ``rubric`` tag
         # keeps the stream distinct from the comparison path.
         rng = make_rng(self.config.judge_sampling_seed, body.task_id, "rubric")
@@ -398,10 +684,22 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 read_deliverable_files,
             )
 
-            read = read_deliverable_files(body.deliverables_dir)
+            # Office/PDF text extraction and page rasterization are CPU-bound and
+            # can run for seconds on a large deliverable; keep them off the event
+            # loop so co-located requests aren't stalled.
+            read = await asyncio.to_thread(read_deliverable_files, body.deliverables_dir)
             if read:
                 deliverable_text = read
-            blocks = convert_deliverables_to_content_blocks(body.deliverables_dir)
+            blocks = await asyncio.to_thread(
+                convert_deliverables_to_content_blocks,
+                body.deliverables_dir,
+                media_mode=self.config.judge_media_mode,
+                render_dpi=self.config.judge_pdf_render_dpi,
+                max_pages=self.config.judge_pdf_max_pages,
+                include_text=self.config.judge_pdf_include_text,
+                audio_capable=audio_capable,
+                video_capable=video_capable,
+            )
             if blocks:
                 deliverable_content_blocks = blocks
 
@@ -459,7 +757,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             reward=float(reward),
             verify_mode="rubric",
             judge_response=judge_result,
-            invalid_judge_response=(judge_result is None),
+            invalid_judge_response=_is_invalid_judge_result(judge_result),
         )
 
     async def _preconvert_and_log(self, target_dir: Path, *, label: str) -> None:
@@ -480,8 +778,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
         from resources_servers.gdpval.comparison import (
             JUDGE_REQUEST_TIMEOUT_SECONDS,
             Judge,
+            apply_native_pdf_overflow,
             build_file_section,
             clean_up_paths,
+            filter_media_eligible_judges,
+            plan_native_pdf_overflow,
+            preflight_judge_transport,
+            preview_trial_judges,
             run_trials,
             task_attempted,
         )
@@ -507,21 +810,85 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         if not ref_dirs_by_id:
             print(f"[gdpval] no reference deliverable for task {body.task_id}", flush=True)
+            if self.config.strict_comparison_trials:
+                raise RuntimeError(
+                    f"strict comparison trial contract failed for task {body.task_id}: reference_missing"
+                )
+            # Not a model outcome: no reference deliverable exists, so no battle
+            # can be scored. Stamped as a terminal failure rather than returned
+            # as a zero-reward success -- a success row carrying no battle
+            # evidence is rejected outright by the non-final-stage coverage gate
+            # (_partial_stage_outcome), which no partial_completion setting can
+            # relax, so one missing reference file used to kill the whole run.
+            # Terminal because retrying cannot make the file appear; as an
+            # omission it is then governed by the stage's partial_completion
+            # fractions like any other unusable row.
             return GDPValVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
                 verify_mode="comparison",
                 judge_response={"error": "reference_missing"},
+                **{
+                    NG_FAILURE_CLASS_KEY: REFERENCE_MISSING_FAILURE_CLASS,
+                    NG_TERMINAL_KEY: True,
+                },
             )
 
         if eval_task_dir is None or not task_attempted(str(eval_task_dir)):
             print(f"[gdpval] eval deliverable missing for task {body.task_id}", flush=True)
+            if (
+                self.config.count_eval_missing_as_loss
+                and body.stage_index == 1
+                and body.task_id in self.config.missing_eval_task_ids
+            ):
+                per_reference = {
+                    ref_id: {
+                        "wins": 0,
+                        "losses": self.config.num_comparison_trials * len(dirs),
+                        "ties": 0,
+                        "reference_elo": self._references[ref_id].elo,
+                        "ref_repeat_count": len(dirs),
+                    }
+                    for ref_id, dirs in ref_dirs_by_id.items()
+                }
+                total_losses = sum(counts["losses"] for counts in per_reference.values())
+                return GDPValVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    verify_mode="comparison",
+                    judge_response={
+                        "manual_imputation": "eval_missing_as_loss",
+                        "per_reference": per_reference,
+                        "total_wins": 0,
+                        "total_losses": total_losses,
+                        "total_ties": 0,
+                        "total_judged": total_losses,
+                        "total_invalid": 0,
+                        "ref_errors": {},
+                    },
+                    win=False,
+                    loss=True,
+                    tie=False,
+                    total_wins=0,
+                    total_losses=total_losses,
+                    total_ties=0,
+                    per_reference=per_reference,
+                )
+            if self.config.strict_comparison_trials:
+                raise RuntimeError(f"strict comparison trial contract failed for task {body.task_id}: eval_missing")
+            # Terminal for the same reason as reference_missing above: a
+            # zero-reward success row carries no battle evidence, is rejected by
+            # the coverage gate, and permanently gates the key on resume. A
+            # classified terminal failure is instead re-validated on resume.
             return GDPValVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
                 verify_mode="comparison",
                 judge_response={"error": "eval_missing"},
-                loss=True,
+                **{
+                    NG_FAILURE_CLASS_KEY: EVAL_MISSING_FAILURE_CLASS,
+                    NG_TERMINAL_KEY: True,
+                },
             )
 
         if self.config.preconvert_office_to_pdf:
@@ -544,6 +911,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     base_url=judge.base_url,
                     api_key=judge.api_key,
                     timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+                    # comparison.send_judge_request owns the retry policy; the
+                    # SDK default would multiply every explicit attempt by 3.
+                    max_retries=0,
                 )
             return client_cache[key]
 
@@ -554,30 +924,42 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 model=rj.model,
                 create_overrides=rj.create_overrides or None,
                 weight=rj.weight,
-                handles_audio_video=rj.handles_audio_video,
+                handles_audio=rj.handles_audio,
+                handles_video=rj.handles_video,
+                media_mode=rj.media_mode,
+                max_native_pdf_pages=rj.max_native_pdf_pages,
+                max_native_pdf_documents=rj.max_native_pdf_documents,
+                max_native_pdf_bytes=rj.max_native_pdf_bytes,
+                max_native_pdf_bytes_per_document=rj.max_native_pdf_bytes_per_document,
+                max_image_base64_bytes=rj.max_image_base64_bytes,
+                max_total_image_base64_bytes=rj.max_total_image_base64_bytes,
+                max_video_files=rj.max_video_files,
+                raster_dpi_tiers=rj.raster_dpi_tiers,
+                max_serialized_request_bytes=rj.max_serialized_request_bytes,
             )
             for rj in resolved_judges
         ]
 
         # Route tasks with audio/video files (in the eval submission or any
-        # reference) to the AV-capable judge(s) — most judges can't read those
-        # modalities natively. Detection peeks into zip archives too.
-        av_routed = dir_contains_audio_video(eval_task_dir) or any(
-            dir_contains_audio_video(d) for dirs in ref_dirs_by_id.values() for d in dirs
-        )
-        if av_routed:
-            av_judges = select_av_judges(judges)
-            if [j.name for j in av_judges] != [j.name for j in judges]:
-                print(
-                    f"[gdpval] task {body.task_id} has audio/video files; routing comparison to "
-                    f"{[j.name for j in av_judges]}",
-                    flush=True,
-                )
-            judges = av_judges
+        # reference) per modality: video to video-capable judge(s) (error/warn
+        # when none); audio no judge can read is dropped downstream with a
+        # warning. Detection peeks into zips.
+        modalities: Set[str] = set(dir_media_modalities(eval_task_dir))
+        for dirs in ref_dirs_by_id.values():
+            for d in dirs:
+                modalities |= dir_media_modalities(d)
+        av_routed = bool(modalities)
+        audio_capable = any(getattr(j, "handles_audio", False) for j in judges)
+        video_capable = any(getattr(j, "handles_video", False) for j in judges)
+        if modalities:
+            judges, audio_capable, video_capable = self._route_media_judges(
+                judges, task_id=body.task_id, modalities=modalities, label="files"
+            )
 
         total_wins = 0
         total_losses = 0
         total_ties = 0
+        total_invalid = 0
         # Per-reference-model vote tallies + a flat list of every (ref × repeat)
         # matchup for back-compat with the single-reference judge_response shape.
         per_reference: Dict[str, Dict[str, Any]] = {}
@@ -590,10 +972,69 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # every reference that judged successfully.
         ref_errors: Dict[str, List[str]] = {}
         attempted_matchups = 0
+        transport_ineligible_matchups = 0
         last_error: Optional[Exception] = None
-        try:
-            eval_submission = build_file_section(str(eval_task_dir), clean_up_list)
+        # Cache each semantic side independently by representation and DPI.
+        # Native sections are also the exact source for provider-cap preflight.
+        section_cache: Dict[Tuple[str, str, int], List[dict]] = {}
 
+        async def _section(path: Optional[Path], mode: str, render_dpi: int) -> List[dict]:
+            key = (str(path) if path is not None else "<none>", mode, render_dpi)
+            if key not in section_cache:
+                # In raster mode a PDF longer than judge_pdf_max_pages would
+                # otherwise carry a DPI-independent truncation marker that
+                # excludes the judge at every tier. Render up to the request
+                # image budget; genuinely over-budget documents still truncate
+                # and are excluded on real caps.
+                page_cap = self.config.judge_pdf_max_pages
+                if mode == "images_and_text":
+                    page_cap = max(page_cap, self.config.judge_max_images_per_request)
+                section_cache[key] = await asyncio.to_thread(
+                    build_file_section,
+                    str(path) if path is not None else None,
+                    clean_up_list,
+                    media_mode=mode,
+                    render_dpi=render_dpi,
+                    max_pages=page_cap,
+                    include_text=self.config.judge_pdf_include_text,
+                    audio_capable=audio_capable,
+                    video_capable=video_capable,
+                    recursive=bool(
+                        self.config.judge_reference_files_recursive and path and path.name == "reference_files"
+                    ),
+                )
+            return section_cache[key]
+
+        def _image_count(*sections: List[dict]) -> int:
+            return sum(
+                1
+                for section in sections
+                for block in section
+                if block.get("type") == "image_url"
+                and str((block.get("image_url") or {}).get("url", "")).startswith("data:image/")
+            )
+
+        def _native_pdf_stats(*sections: List[dict]) -> Dict[str, int]:
+            import base64
+
+            from resources_servers.gdpval.media_conversion import pdf_page_count
+
+            pages = documents = byte_count = 0
+            prefix = "data:application/pdf;base64,"
+            for section in sections:
+                for block in section:
+                    if block.get("type") != "image_url":
+                        continue
+                    url = str((block.get("image_url") or {}).get("url", ""))
+                    if not url.startswith(prefix):
+                        continue
+                    payload = base64.b64decode(url[len(prefix) :], validate=True)
+                    documents += 1
+                    byte_count += len(payload)
+                    pages += pdf_page_count(payload)
+            return {"pages": pages, "documents": documents, "bytes": byte_count}
+
+        try:
             # Judge the eval submission against every reference model, and within
             # each model against every available reference repeat. Raw vote
             # counts (not just per-matchup majority) are summed so the win rate
@@ -602,51 +1043,232 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 ref_wins = ref_losses = ref_ties = 0
                 ref_judged_repeats = 0
                 for ref_dir in dirs:
-                    refs_subdir = ref_dir / "reference_files"
-                    refs = build_file_section(
-                        str(refs_subdir) if refs_subdir.is_dir() else None,
-                        clean_up_list,
-                    )
-                    ref_submission = build_file_section(str(ref_dir), clean_up_list)
+                    refs_root = eval_task_dir if self.config.judge_reference_files_from_eval else ref_dir
+                    refs_subdir = refs_root / "reference_files"
                     attempted_matchups += 1
                     # Seed per (task, ref_id, ref_repeat) so judge sampling is
                     # reproducible and each reference subset draws independently —
                     # this makes multi-stage ELO reruns replayable per stage.
                     rng = make_rng(self.config.judge_sampling_seed, body.task_id, ref_id, ref_dir.name)
                     try:
+                        matchup_judges = list(judges)
+                        media_exclusions: List[Dict[str, Any]] = []
+                        render_dpi = self.config.judge_pdf_render_dpi
+                        native = {
+                            "refs": await _section(
+                                refs_subdir if refs_subdir.is_dir() else None,
+                                "native_pdf",
+                                render_dpi,
+                            ),
+                            "submission_a": await _section(ref_dir, "native_pdf", render_dpi),
+                            "submission_b": await _section(eval_task_dir, "native_pdf", render_dpi),
+                        }
+                        native_stats = await asyncio.to_thread(_native_pdf_stats, *native.values())
+                        estimated_images = native_stats["pages"] + _image_count(*native.values())
+                        overflow_judges = [
+                            judge for judge in matchup_judges if judge.media_mode == "native_pdf_overflow_images"
+                        ]
+                        overflow_plan: Optional[Dict[str, Any]] = None
+                        if overflow_judges:
+                            caps = {
+                                judge.max_native_pdf_pages
+                                for judge in overflow_judges
+                                if judge.max_native_pdf_pages is not None
+                            }
+                            if len(caps) != 1:
+                                raise ValueError(f"overflow judges require one explicit native page cap, got {caps}")
+                            byte_caps = {
+                                judge.max_native_pdf_bytes_per_document
+                                for judge in overflow_judges
+                                if judge.max_native_pdf_bytes_per_document is not None
+                            }
+                            if len(byte_caps) != 1:
+                                raise ValueError(
+                                    f"overflow judges require one explicit native PDF byte cap, got {byte_caps}"
+                                )
+                            overflow_plan = await asyncio.to_thread(
+                                plan_native_pdf_overflow,
+                                native,
+                                native_page_cap=caps.pop(),
+                                native_pdf_bytes_per_document=byte_caps.pop(),
+                                image_cap=self.config.judge_max_images_per_request,
+                                render_page_cap=self.config.judge_pdf_max_pages,
+                            )
+                        matchup_judges, media_exclusions = filter_media_eligible_judges(
+                            matchup_judges,
+                            native_stats=native_stats,
+                            estimated_images=estimated_images,
+                            image_cap=self.config.judge_max_images_per_request,
+                            overflow_plan=overflow_plan,
+                        )
+                        if not matchup_judges:
+                            raise TransportIneligibleError("media routing excluded every judge")
+
+                        sections_by_judge: Dict[str, Dict[str, List[dict]]] = {}
+                        transport_receipts: Dict[str, Dict[str, Any]] = {}
+                        failed_names: Set[str] = set()
+                        # Sampling is replayed from the untouched RNG after any
+                        # pre-dispatch exclusion. Only modes that can actually be
+                        # sampled are materialized, avoiding needless raster work.
+                        while True:
+                            active = [judge for judge in matchup_judges if judge.name not in failed_names]
+                            if not active:
+                                raise TransportIneligibleError("transport preflight excluded every judge")
+                            schedule = preview_trial_judges(active, self.config.num_comparison_trials, rng)
+                            needed = {judge.name: judge for judge in schedule}
+                            new_failure = False
+                            for judge_name, judge in needed.items():
+                                if judge_name in sections_by_judge or judge_name in failed_names:
+                                    continue
+                                candidates: List[Tuple[Optional[int], Dict[str, List[dict]]]] = []
+                                attempted_preflights: List[Dict[str, Any]] = []
+                                if judge.media_mode == "native_pdf":
+                                    candidates.append((None, native))
+                                elif judge.media_mode == "native_pdf_overflow_images":
+                                    if overflow_plan is None:
+                                        raise ValueError("overflow mode selected without a plan")
+                                    transformed = native
+                                    if overflow_plan.get("selected"):
+                                        transformed = await asyncio.to_thread(
+                                            apply_native_pdf_overflow,
+                                            native,
+                                            overflow_plan,
+                                            render_dpi=render_dpi,
+                                            max_pages=self.config.judge_pdf_max_pages,
+                                            include_text=self.config.judge_pdf_include_text,
+                                        )
+                                    candidates.append((render_dpi, transformed))
+                                elif judge.media_mode == "images_and_text":
+                                    tiers = judge.raster_dpi_tiers or (render_dpi,)
+                                    if any(dpi < 36 or dpi > 600 for dpi in tiers):
+                                        raise ValueError(f"invalid raster DPI tiers for {judge.name}: {tiers}")
+                                    # Build and preflight one tier at a time. A
+                                    # 300-page task can allocate tens of MiB per
+                                    # tier, so eagerly materializing every tier
+                                    # defeats the purpose of adaptive routing.
+                                    for dpi in tiers:
+                                        candidate_sections = {
+                                            "refs": await _section(
+                                                refs_subdir if refs_subdir.is_dir() else None,
+                                                "images_and_text",
+                                                dpi,
+                                            ),
+                                            "submission_a": await _section(ref_dir, "images_and_text", dpi),
+                                            "submission_b": await _section(eval_task_dir, "images_and_text", dpi),
+                                        }
+                                        receipt = await asyncio.to_thread(
+                                            preflight_judge_transport,
+                                            judge,
+                                            body.prompt or "",
+                                            candidate_sections,
+                                        )
+                                        receipt["render_dpi"] = dpi
+                                        attempted_preflights.append(receipt)
+                                        if receipt["eligible"]:
+                                            sections_by_judge[judge_name] = candidate_sections
+                                            transport_receipts[judge_name] = receipt
+                                            break
+                                        # Do not retain rejected raster payloads;
+                                        # only the small receipt survives.
+                                        for path in (
+                                            refs_subdir if refs_subdir.is_dir() else None,
+                                            ref_dir,
+                                            eval_task_dir,
+                                        ):
+                                            section_cache.pop(
+                                                (
+                                                    str(path) if path is not None else "<none>",
+                                                    "images_and_text",
+                                                    dpi,
+                                                ),
+                                                None,
+                                            )
+                                else:
+                                    raise ValueError(f"unknown judge media mode: {judge.media_mode}")
+
+                                if judge_name in sections_by_judge:
+                                    continue
+                                for dpi, candidate_sections in candidates:
+                                    receipt = await asyncio.to_thread(
+                                        preflight_judge_transport,
+                                        judge,
+                                        body.prompt or "",
+                                        candidate_sections,
+                                    )
+                                    receipt["render_dpi"] = dpi
+                                    attempted_preflights.append(receipt)
+                                    if receipt["eligible"]:
+                                        sections_by_judge[judge_name] = candidate_sections
+                                        transport_receipts[judge_name] = receipt
+                                        break
+                                if judge_name not in sections_by_judge:
+                                    failed_names.add(judge_name)
+                                    new_failure = True
+                                    media_exclusions.append(
+                                        {
+                                            "mode": judge.media_mode,
+                                            "judges": [judge.name],
+                                            "reason": "transport_preflight",
+                                            "attempts": attempted_preflights,
+                                        }
+                                    )
+                            if not new_failure:
+                                matchup_judges = active
+                                break
+
                         result = await asyncio.to_thread(
                             run_trials,
-                            judges=judges,
+                            judges=matchup_judges,
                             task_prompt=body.prompt or "",
-                            refs=refs,
-                            submission_a=ref_submission,
-                            submission_b=eval_submission,
+                            refs=native["refs"],
+                            submission_a=native["submission_a"],
+                            submission_b=native["submission_b"],
+                            sections_by_judge=sections_by_judge,
                             num_trials=self.config.num_comparison_trials,
                             return_raw_responses=self.config.persist_raw_judge_responses,
                             rng=rng,
                         )
+                        result["transport_by_judge"] = transport_receipts
+                        if media_exclusions:
+                            result["media_routing_exclusions"] = media_exclusions
+                        if overflow_plan and overflow_plan.get("selected"):
+                            result["native_pdf_overflow"] = overflow_plan
                     except Exception as e:  # noqa: BLE001 — isolate per-matchup judge failures
                         last_error = e
+                        if isinstance(e, TransportIneligibleError):
+                            transport_ineligible_matchups += 1
                         ref_errors.setdefault(ref_id, []).append(f"{ref_dir.name}: {e!r}")
                         print(
                             f"[gdpval] judge failed for task {body.task_id} ref {ref_id}/{ref_dir.name}: {e!r}",
                             flush=True,
                         )
                         continue
+                    finally:
+                        # Reference-side payloads are matchup-local; only the
+                        # eval side repeats across matchups. Evicting the rest
+                        # bounds cache residency to one matchup plus the eval
+                        # sections instead of every reference x repeat.
+                        eval_key_prefix = str(eval_task_dir)
+                        for cache_key in [k for k in section_cache if k[0] != eval_key_prefix]:
+                            section_cache.pop(cache_key, None)
                     # ``run_trials`` casts submission_a=ref, submission_b=eval, so
                     # ``win_count_b`` is eval wins.
                     ref_wins += result["win_count_b"]
                     ref_losses += result["win_count_a"]
                     ref_ties += result["tie_count"]
+                    total_invalid += result.get("invalid_count", 0)
                     ref_judged_repeats += 1
                     # Fold per-judge counts into eval-perspective panel totals
                     # (B=eval, A=ref) so the per-member balance is auditable.
                     for jname, jc in (result.get("per_judge") or {}).items():
-                        agg = per_judge_totals.setdefault(jname, {"wins": 0, "losses": 0, "ties": 0, "trials": 0})
+                        agg = per_judge_totals.setdefault(
+                            jname, {"wins": 0, "losses": 0, "ties": 0, "trials": 0, "invalid_count": 0}
+                        )
                         agg["wins"] += jc.get("win_count_b", 0)
                         agg["losses"] += jc.get("win_count_a", 0)
                         agg["ties"] += jc.get("tie_count", 0)
                         agg["trials"] += jc.get("trials", 0)
+                        agg["invalid_count"] += jc.get("invalid_count", 0)
                     per_ref_results.append({"ref_id": ref_id, "ref_repeat": ref_dir.name, **result})
 
                 # Only record references that produced at least one valid matchup;
@@ -670,11 +1292,36 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # it as a failure (matches pre-resilience behavior) rather than emitting
         # a fake neutral reward that would pollute the metrics.
         if attempted_matchups > 0 and not per_reference:
+            if transport_ineligible_matchups == attempted_matchups:
+                # Deterministic eligibility exclusion of every judge on every
+                # matchup: retrying the same payload cannot succeed, so a
+                # generic 500 would only burn attempts and silently drop the
+                # task. Terminal within the run; re-validated on resume (caps,
+                # renderers, or panel config may change between runs).
+                return GDPValVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    verify_mode="comparison",
+                    judge_response={"error": "transport_ineligible", "ref_errors": ref_errors},
+                    **{
+                        NG_FAILURE_CLASS_KEY: TRANSPORT_INELIGIBLE_FAILURE_CLASS,
+                        NG_TERMINAL_KEY: True,
+                    },
+                )
             raise RuntimeError(
                 f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; last error: {last_error!r}"
             )
 
         total_judged = total_wins + total_losses + total_ties
+        strict_failure = _strict_comparison_trial_failure(
+            attempted_matchups=attempted_matchups,
+            num_trials=self.config.num_comparison_trials,
+            total_judged=total_judged,
+            total_invalid=total_invalid,
+            ref_errors=ref_errors,
+        )
+        if self.config.strict_comparison_trials and strict_failure is not None:
+            raise RuntimeError(f"strict comparison trial contract failed for task {body.task_id}: {strict_failure}")
         if total_wins > total_losses:
             reward = 1.0
         elif total_losses > total_wins:
@@ -693,6 +1340,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 "total_losses": total_losses,
                 "total_ties": total_ties,
                 "total_judged": total_judged,
+                "total_invalid": total_invalid,
                 "reference_count": len(per_reference),
                 # Back-compat: total matchups across all references × repeats.
                 "ref_repeat_count": len(per_ref_results),
@@ -718,7 +1366,33 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         if self.config.reward_mode != "comparison":
-            return await super().aggregate_metrics(body)
+            # A scorer-side failure still carries reward=0.0 for schema
+            # compatibility. Do not let those sentinel zeros lower the model's
+            # reward: profile only rows backed by a usable judge response and
+            # expose coverage explicitly so an all-invalid run cannot resemble
+            # a genuinely low-scoring run.
+            valid_responses = [vr for vr in body.verify_responses if not bool(vr.get("invalid_judge_response"))]
+            valid_count = len(valid_responses)
+            invalid_count = len(body.verify_responses) - valid_count
+            total_count = len(body.verify_responses)
+            if valid_responses:
+                base = await super().aggregate_metrics(AggregateMetricsRequest(verify_responses=valid_responses))
+            else:
+                base = AggregateMetrics()
+            # These describe only the rows supplied to aggregation. Runtime
+            # judge failures live in the collection sidecar and are intentionally
+            # not presented as run-level coverage here.
+            coverage: Dict[str, Any] = {
+                "rubric/aggregate_rows_total": total_count,
+                "rubric/aggregate_rows_included": valid_count,
+                "rubric/legacy_invalid_rows_excluded": invalid_count,
+                "rubric/aggregate_rows_included_fraction": valid_count / total_count if total_count else 0.0,
+            }
+            return AggregateMetrics(
+                group_level_metrics=base.group_level_metrics,
+                agent_metrics={**base.agent_metrics, **coverage},
+                key_metrics={**base.key_metrics, **coverage},
+            )
 
         from resources_servers.gdpval.comparison import (
             calculate_elo,
@@ -784,29 +1458,54 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # reference subset each time), so the same ``(task_index, rollout_index)``
         # appears once per stage — distinguished only by ``stage_index``.
         staged: Dict[int, List[Dict[str, Any]]] = {}
+        expected_stage_row_counts: Dict[int, Set[int]] = {}
+        expected_final_stage_values: Set[int] = set()
+        expected_final_stage_rows = 0
         for vr in body.verify_responses:
             stage_index = vr.get("stage_index")
             if stage_index is not None:
-                staged.setdefault(int(stage_index), []).append(vr)
+                normalized_stage_index = int(stage_index)
+                staged.setdefault(normalized_stage_index, []).append(vr)
+                expected_stage_row_count = vr.get("expected_stage_row_count")
+                if expected_stage_row_count is not None:
+                    expected_stage_row_counts.setdefault(normalized_stage_index, set()).add(
+                        int(expected_stage_row_count)
+                    )
+            expected_final_stage_index = vr.get("expected_final_stage_index")
+            if expected_final_stage_index is not None:
+                expected_final_stage_values.add(int(expected_final_stage_index))
+                expected_final_stage_rows += 1
+
+        expected_stage_declared = bool(expected_final_stage_values)
+        expected_stage_consistent = len(expected_final_stage_values) <= 1
+        expected_final_stage_index = (
+            next(iter(expected_final_stage_values)) if len(expected_final_stage_values) == 1 else None
+        )
 
         # RewardProfiler (the base aggregation) keys rollouts by
         # ``(task_index, rollout_index)`` and rejects duplicates. Multi-stage
         # rollouts collide on that key by design, so feed the base profiler the
-        # LAST stage alone — the headline stage, whose keys are unique — instead
-        # of the pooled set. Single-stage / untagged runs use the full body.
+        # selected headline stage alone, whose keys are unique, instead of the
+        # pooled set. New orchestrators declare ``expected_final_stage_index``;
+        # old artifacts retain max-observed-stage behavior for compatibility.
+        # If a declared stage is absent, max-observed is used only for the base
+        # diagnostic profile — it is never promoted to the comparison headline.
         base_body = body
         if staged:
-            base_body = AggregateMetricsRequest(verify_responses=staged[max(staged)])
+            base_stage_index = (
+                expected_final_stage_index
+                if expected_stage_consistent and expected_final_stage_index in staged
+                else max(staged)
+            )
+            base_body = AggregateMetricsRequest(verify_responses=staged[base_stage_index])
 
         # Pooled (across every stage / reference) win stats — always emitted as
         # descriptive metrics regardless of staging.
         wins, losses, ties, per_ref_totals = _accumulate(list(body.verify_responses))
 
         judged = wins + losses + ties
-        if judged == 0:
+        if judged == 0 and not staged:
             return await super().aggregate_metrics(base_body)
-
-        win_rate = (wins + 0.5 * ties) / judged
 
         base = await super().aggregate_metrics(base_body)
         # Total win stats (always emitted).
@@ -815,8 +1514,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
             "comparison/losses": losses,
             "comparison/ties": ties,
             "comparison/judged": judged,
-            "comparison/win_rate": win_rate,
         }
+        if judged:
+            extra["comparison/win_rate"] = (wins + 0.5 * ties) / judged
 
         # Per-reference win stats (always emitted when present).
         for ref_id, (rw, rl, rt, ref_elo) in per_ref_totals.items():
@@ -832,37 +1532,93 @@ class GDPValResourcesServer(SimpleResourcesServer):
             if ref_elo is not None:
                 extra[f"comparison/ref/{ref_id}/reference_elo"] = ref_elo
 
-        # When stages are present, fit each stage's ELO independently and report
-        # the LAST stage's fit as the headline ``comparison/eval_elo`` (the
-        # multi-stage design refines on a larger task set vs nearby references in
-        # later stages), while exposing every stage's estimate as a
-        # ``comparison/stage_<k>/*`` extra for visibility. Untagged runs keep the
-        # original single-pass behavior below.
+        # When stages are present, fit each stage independently. New runs name
+        # the required headline stage explicitly; a missing/unfit required stage
+        # is degraded and deliberately emits no ``comparison/eval_elo`` rather
+        # than silently substituting an earlier or pooled fit. Old artifacts
+        # without the expectation field retain max-observed-stage behavior.
         if staged:
             extra["comparison/num_stages"] = len(staged)
-            headline: Optional[tuple[Optional[float], Optional[float], int]] = None
-            last_index = max(staged)
+            stage_fits: Dict[int, tuple[Optional[float], Optional[float], int]] = {}
             for stage_index in sorted(staged):
                 stage_responses = staged[stage_index]
                 _, _, _, stage_ref_totals = _accumulate(stage_responses)
                 stage_elo, stage_norm, stage_nref = _fit_mle(stage_ref_totals)
+                stage_fits[stage_index] = (stage_elo, stage_norm, stage_nref)
                 prefix = f"comparison/stage_{stage_index}"
                 if stage_elo is not None:
                     extra[f"{prefix}/eval_elo"] = stage_elo
                     extra[f"{prefix}/normalized_elo"] = stage_norm
                 extra[f"{prefix}/num_references"] = stage_nref
                 extra[f"{prefix}/num_tasks"] = len({vr.get("task_id") for vr in stage_responses})
-                if stage_index == last_index:
-                    headline = (stage_elo, stage_norm, stage_nref)
+                imputed, judged_rows = [], []
+                for vr in stage_responses:
+                    judge_response = vr.get("judge_response")
+                    if (
+                        isinstance(judge_response, dict)
+                        and judge_response.get("manual_imputation") == "eval_missing_as_loss"
+                    ):
+                        imputed.append(vr)
+                    elif sum(_votes(vr)) > 0:
+                        judged_rows.append(vr)
+                extra[f"{prefix}/judged_tasks"] = len({vr.get("task_id") for vr in judged_rows})
+                extra[f"{prefix}/judged_votes"] = sum(sum(_votes(vr)) for vr in judged_rows)
+                extra[f"{prefix}/imputed_loss_tasks"] = len({vr.get("task_id") for vr in imputed})
+                extra[f"{prefix}/imputed_loss_votes"] = sum(_votes(vr)[1] for vr in imputed)
 
-            # Headline = last stage's fit. Fall back to the pooled MLE only if
-            # the last stage failed to produce a rating, so the run still
-            # surfaces a number.
+            headline_stage_index: Optional[int] = None
+            headline: Optional[tuple[Optional[float], Optional[float], int]] = None
+            if expected_stage_declared:
+                extra["comparison/expected_final_stage_declared_rows"] = expected_final_stage_rows
+                extra["comparison/expected_final_stage_consistent"] = int(expected_stage_consistent)
+                if expected_final_stage_index is not None:
+                    extra["comparison/expected_final_stage_index"] = expected_final_stage_index
+
+                final_stage_present = expected_stage_consistent and expected_final_stage_index in staged
+                final_stage_rows = staged.get(expected_final_stage_index, [])
+                observed_final_stage_count = len(
+                    {
+                        (
+                            vr.get("_ng_task_index", vr.get("task_id")),
+                            vr.get("_ng_rollout_index", 0),
+                        )
+                        for vr in final_stage_rows
+                    }
+                )
+                expected_count_values = expected_stage_row_counts.get(expected_final_stage_index, set())
+                expected_count_consistent = len(expected_count_values) == 1
+                expected_final_stage_count = next(iter(expected_count_values)) if expected_count_consistent else None
+                final_stage_complete = (
+                    final_stage_present
+                    and expected_final_stage_count is not None
+                    and observed_final_stage_count == expected_final_stage_count
+                )
+                candidate = stage_fits.get(expected_final_stage_index)
+                final_stage_fit = candidate is not None and candidate[0] is not None
+                if final_stage_complete and final_stage_fit:
+                    headline_stage_index = expected_final_stage_index
+                    headline = candidate
+                extra["comparison/final_stage_present"] = int(final_stage_present)
+                extra["comparison/final_stage_complete"] = int(final_stage_complete)
+                extra["comparison/final_stage_fit"] = int(final_stage_fit)
+                extra["comparison/final_stage_degraded"] = int(not (final_stage_complete and final_stage_fit))
+                extra["comparison/observed_final_stage_row_count"] = observed_final_stage_count
+                extra["comparison/expected_final_stage_row_count_consistent"] = int(expected_count_consistent)
+                if expected_final_stage_count is not None:
+                    extra["comparison/expected_final_stage_row_count"] = expected_final_stage_count
+            else:
+                # Backward compatibility for artifacts generated before the
+                # expected-stage field was introduced.
+                headline_stage_index = max(staged)
+                headline = stage_fits[headline_stage_index]
+                if headline[0] is None:
+                    headline = _fit_mle(per_ref_totals)
+                    headline_stage_index = None
+
             if headline is not None and headline[0] is not None:
                 eval_elo, normalized_elo, num_references = headline
-            else:
-                eval_elo, normalized_elo, num_references = _fit_mle(per_ref_totals)
-            if eval_elo is not None:
+                if headline_stage_index is not None:
+                    extra["comparison/headline_stage_index"] = headline_stage_index
                 extra["comparison/eval_elo"] = eval_elo
                 extra["comparison/normalized_elo"] = normalized_elo
                 extra["comparison/num_references"] = num_references
@@ -892,7 +1648,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                             eval_elo, float(ref_elo)
                         )
             else:
-                eval_elo, normalized_elo = calculate_elo(win_rate, self.config.reference_elo)
+                eval_elo, normalized_elo = calculate_elo((wins + 0.5 * ties) / judged, self.config.reference_elo)
                 extra["comparison/eval_elo"] = eval_elo
                 extra["comparison/normalized_elo"] = normalized_elo
                 extra["comparison/reference_elo"] = self.config.reference_elo
