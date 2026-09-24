@@ -47,6 +47,15 @@ artifacts, including collected remote `/logs/agent` files, remain under the tria
 directory. The seed's connection configuration is used only for the internal
 agent/resource exchange and is not persisted in session records.
 
+Artifact transfer retains source numeric UID/GID and `0777` permission bits for
+files and directories, independently of the host's user and umask. Host-side
+metadata lives in the trial's `artifact-metadata/`, outside the collected tree.
+Restore uses root only to reapply this metadata; verifier execution still uses
+the configured verifier identity. Archive path/link checks remain enabled and
+set-ID/sticky bits are stripped. ACLs and extended attributes are not transferred.
+The EFS snapshot path follows the same rules. Missing metadata or failed archive
+restore is an infrastructure error, not a metadata-losing file-copy fallback.
+
 ## Optional local training packages and reference solutions
 
 The official public-package path remains the default. Set `local_task_packages:

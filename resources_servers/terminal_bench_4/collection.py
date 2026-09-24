@@ -8,7 +8,7 @@ import shlex
 from functools import partial
 from pathlib import Path
 
-from resources_servers.terminal_bench_4.transfers import download_dir, download_file
+from resources_servers.terminal_bench_4.transfers import artifact_metadata_path, download_dir, download_file
 
 
 async def collect(environment, directory, diagnostics):
@@ -73,6 +73,7 @@ async def collect(environment, directory, diagnostics):
                     pass
                 try:
                     sandbox = environment.sandbox(artifact.service)
+                    metadata_path = artifact_metadata_path(directory, artifact.host_path)
                     if record["type"] == "directory":
                         shared_archive = (
                             shared_logs.collection_archive(artifact, collected_artifacts) if shared_logs else None
@@ -84,12 +85,13 @@ async def collect(environment, directory, diagnostics):
                             exclude=artifact.exclude,
                             exec_command=partial(environment.exec, service=artifact.service),
                             shared_archive=shared_archive,
+                            metadata_path=metadata_path,
                         )
                         if shared_archive:
-                            shared_logs.retain_archive(digest, target)
+                            shared_logs.retain_archive(digest)
                     else:
                         record["exclude"] = []
-                        await download_file(sandbox, artifact.source, target)
+                        await download_file(sandbox, artifact.source, target, metadata_path=metadata_path)
                     record["status"] = "ok"
                 except Exception as exc:
                     record["status"] = "failed"

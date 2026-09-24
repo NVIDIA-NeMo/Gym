@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 
 from resources_servers.terminal_bench_4.task import resolve_env
 from resources_servers.terminal_bench_4.transfers import (
+    artifact_metadata_path,
     download_dir,
     prepare_directory,
     stage_trusted_directory,
@@ -64,25 +65,28 @@ async def restore(environment, artifacts_dir):
         if not host.exists():
             continue
         target = artifact.source
+        metadata_path = artifact_metadata_path(Path(artifacts_dir), artifact.host_path)
         if host.is_dir():
             await prepare_directory(environment, target, empty=True)
             if shared_logs and shared_logs.restored_archive and target == "/logs/artifacts":
                 archive = shlex.quote(shared_logs.restored_archive)
                 result = await environment.main.exec(
-                    f"tar -xzf {archive} -C /logs/artifacts; status=$?; rm -f {archive}; exit $status",
+                    f"tar --numeric-owner --same-owner --same-permissions -xzf {archive} -C /logs/artifacts; "
+                    f"status=$?; rm -f {archive}; exit $status",
                     timeout_s=600,
+                    user="root",
                 )
                 if result.return_code == 0:
                     continue
                 # Retain the normal transfer fallback if remote extraction is
                 # unavailable, clearing any partial extraction first.
                 await prepare_directory(environment, target, empty=True)
-            await upload_dir(environment.main, host, target)
+            await upload_dir(environment.main, host, target, metadata_path=metadata_path)
         else:
             parent = str(PurePosixPath(target).parent)
             if parent and parent != target:
                 await prepare_directory(environment, parent)
-            await upload_file(environment.main, host, target)
+            await upload_file(environment.main, host, target, metadata_path=metadata_path)
 
 
 async def run_verifier(environment, directory, diagnostics):
