@@ -37,6 +37,7 @@ from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
     ATIF_PROVENANCE_KEY,
     JUDGE_FAILED_FAILURE_CLASS,
+    JUDGE_INVALID_FAILURE_CLASS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
@@ -58,11 +59,13 @@ from nemo_gym.rollout_reverification import (
     _is_judge_failure,
     _load_cache_keys_by_status,
     _load_reverified_results,
+    _normalize_invalid_judge_result,
     _parse_output_line_key,
     _prepare_atif_payloads,
     _prepare_output_fpaths,
     _prepare_payloads,
     _recovery_rollout_predicate,
+    _reject_multistage_recovery_source,
     _resources_server_exposes_tools_over_mcp,
     _rollout_verify_debug_summary,
     _run_verification_payloads,
@@ -829,6 +832,24 @@ class TestBuildVerifyPayload:
 
         assert set(result.keys()) == {"task", "response"}
 
+    def test_preserves_file_and_reference_context_required_by_verifier(self) -> None:
+        pair = InputRolloutPair(
+            input={"task": "q1", "deliverables_dir": "/stale"},
+            rollout={
+                "response": {"output": "x"},
+                "deliverables_dir": "/artifacts/task-1/repeat_0",
+                "reference_ids": ["ref-b"],
+                "reward": 0.0,
+                NG_FAILURE_CLASS_KEY: JUDGE_INVALID_FAILURE_CLASS,
+            },
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert result["deliverables_dir"] == "/artifacts/task-1/repeat_0"
+        assert result["reference_ids"] == ["ref-b"]
+        assert "reward" not in result and NG_FAILURE_CLASS_KEY not in result
+
 
 # ---------------------------------------------------------------------------
 # Judge-failure recovery helpers (--judge-failed-only)
@@ -838,6 +859,7 @@ class TestBuildVerifyPayload:
 class TestIsJudgeFailure:
     def test_true_only_for_judge_failed_class(self) -> None:
         assert _is_judge_failure({NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}) is True
+        assert _is_judge_failure({NG_FAILURE_CLASS_KEY: JUDGE_INVALID_FAILURE_CLASS}) is True
 
     def test_false_for_other_failure_classes(self) -> None:
         assert _is_judge_failure({NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) is False
@@ -848,6 +870,15 @@ class TestIsJudgeFailure:
     def test_legacy_judge_failed_boolean_is_not_honored(self) -> None:
         """v2 marks judge failures only via _ng_failure_class; the older boolean is ignored."""
         assert _is_judge_failure({"_ng_failure_judge_failed": True}) is False
+
+    def test_invalid_judge_result_is_retryable_unless_verifier_marks_it_permanent(self) -> None:
+        retryable = _normalize_invalid_judge_result({"invalid_judge_response": True})
+        assert retryable[NG_FAILURE_CLASS_KEY] == JUDGE_INVALID_FAILURE_CLASS
+        assert NG_TERMINAL_KEY not in retryable
+
+        permanent = _normalize_invalid_judge_result({"invalid_judge_response": True, "invalid_judge_retryable": False})
+        assert permanent[NG_FAILURE_CLASS_KEY] == "permanent"
+        assert permanent[NG_TERMINAL_KEY] is True
 
 
 class TestRecoveryRolloutPredicate:
@@ -991,6 +1022,50 @@ class TestLoadCacheKeysByStatus:
             ],
         )
         cache = _load_cache_keys_by_status(paths)
+        assert cache.terminal_keys == {(5, 0)}
+
+    def test_legacy_terminal_timeout_is_retryable(self, tmp_path: Path) -> None:
+        paths = self._paths(tmp_path)
+        self._write(
+            paths.failures,
+            [
+                {
+                    TASK_INDEX_KEY_NAME: 5,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    NG_FAILURE_CLASS_KEY: "timeout_exceeded",
+                    NG_TERMINAL_KEY: True,
+                },
+                {
+                    TASK_INDEX_KEY_NAME: 6,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    NG_FAILURE_CLASS_KEY: "skipped",
+                    NG_TERMINAL_KEY: True,
+                },
+            ],
+        )
+
+        cache = _load_cache_keys_by_status(paths, retry_terminal_timeouts=True)
+
+        assert cache.terminal_keys == {(6, 0)}
+
+    def test_terminal_timeout_stays_terminal_by_default(self, tmp_path: Path) -> None:
+        paths = self._paths(tmp_path)
+        self._write(
+            paths.failures,
+            [
+                {
+                    TASK_INDEX_KEY_NAME: 5,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    NG_FAILURE_CLASS_KEY: "timeout_exceeded",
+                    NG_TERMINAL_KEY: True,
+                },
+                # Unstamped skip: terminal only under the opt-in contract.
+                {TASK_INDEX_KEY_NAME: 6, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "skipped"},
+            ],
+        )
+
+        cache = _load_cache_keys_by_status(paths)
+
         assert cache.terminal_keys == {(5, 0)}
 
     def test_maxed_out_keys_when_attempts_reach_configured_max(
@@ -2571,7 +2646,13 @@ class TestRunFromConfigResumeFromCache:
     """
 
     def _make_config(
-        self, tmp_path: Path, *, resume_from_cache: bool, disable_aggregation: bool = True, overwrite: bool = False
+        self,
+        tmp_path: Path,
+        *,
+        resume_from_cache: bool,
+        disable_aggregation: bool = True,
+        overwrite: bool = False,
+        **overrides: bool,
     ) -> RolloutReverificationConfig:
         return RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
@@ -2580,12 +2661,19 @@ class TestRunFromConfigResumeFromCache:
             disable_aggregation=disable_aggregation,
             resume_from_cache=resume_from_cache,
             overwrite=overwrite,
+            **overrides,
         )
 
     def _row(self, agent: str, task: int, rollout: int = 0) -> dict:
         return {AGENT_REF_KEY_NAME: {"name": agent}, TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: rollout}
 
-    def _patch(self, monkeypatch: pytest.MonkeyPatch, pairs: list[InputRolloutPair], dispatched: list) -> None:
+    def _patch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        pairs: list[InputRolloutPair],
+        dispatched: list,
+        result: dict | None = None,
+    ) -> None:
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification._yield_inputs_and_rollouts_paired", lambda *_a, **_kw: iter(pairs)
         )
@@ -2595,7 +2683,7 @@ class TestRunFromConfigResumeFromCache:
             dispatched.extend(payloads)
 
             async def fut(p: dict) -> tuple[dict, dict]:
-                return p, {"reward": 0.5}
+                return p, dict(result or {"reward": 0.5})
 
             return [fut(p) for p in payloads]
 
@@ -2642,6 +2730,58 @@ class TestRunFromConfigResumeFromCache:
         assert len(returned) == 2
         assert [r[TASK_INDEX_KEY_NAME] for r in returned] == [0, 1]
         assert next(r for r in returned if r[TASK_INDEX_KEY_NAME] == 0)["reward"] == 1.0
+
+    @pytest.mark.parametrize(("retry_terminal_timeouts", "expected_dispatch"), [(False, [0]), (True, [0, 1])])
+    async def test_terminal_timeout_is_retried_on_resume_only_when_opted_in(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        retry_terminal_timeouts: bool,
+        expected_dispatch: list[int],
+    ) -> None:
+        (tmp_path / "output_failures.jsonl").write_bytes(
+            orjson.dumps({**self._row("agent_a", 1), NG_FAILURE_CLASS_KEY: "timeout_exceeded", NG_TERMINAL_KEY: True})
+            + b"\n"
+        )
+        pairs = [InputRolloutPair(input=self._row("agent_a", t), rollout={"response": {}}) for t in range(2)]
+        dispatched: list = []
+        self._patch(monkeypatch, pairs, dispatched)
+
+        await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, resume_from_cache=True, retry_terminal_timeouts=retry_terminal_timeouts)
+        )
+
+        assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched) == expected_dispatch
+
+    async def test_invalid_judge_result_is_scored_by_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        pairs = [InputRolloutPair(input=self._row("agent_a", 0), rollout={"response": {}})]
+        self._patch(monkeypatch, pairs, [], result={"reward": 0.0, "invalid_judge_response": True})
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, resume_from_cache=False)
+        )
+
+        assert [(r[TASK_INDEX_KEY_NAME], r["reward"]) for r in returned] == [(0, 0.0)]
+        assert NG_FAILURE_CLASS_KEY not in returned[0]
+        assert self._read_jsonl(tmp_path / "output_failures.jsonl") == []
+
+    async def test_invalid_judge_result_goes_to_the_sidecar_when_opted_in(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        pairs = [InputRolloutPair(input=self._row("agent_a", 0), rollout={"response": {}})]
+        self._patch(monkeypatch, pairs, [], result={"reward": 0.0, "invalid_judge_response": True})
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, resume_from_cache=False, retry_invalid_judge_responses=True)
+        )
+
+        assert returned == []
+        failures = self._read_jsonl(tmp_path / "output_failures.jsonl")
+        assert [(r[TASK_INDEX_KEY_NAME], r[NG_FAILURE_CLASS_KEY]) for r in failures] == [
+            (0, JUDGE_INVALID_FAILURE_CLASS)
+        ]
 
     async def test_overwrite_without_resume_deletes_prior_output_and_reruns_everything(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2774,6 +2914,7 @@ class TestRunFromConfigJudgeFailedOnly:
         overwrite: bool = False,
         append: bool = False,
         output_name: str = "recovered.jsonl",
+        **overrides: bool,
     ) -> RolloutReverificationConfig:
         return RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
@@ -2784,6 +2925,7 @@ class TestRunFromConfigJudgeFailedOnly:
             resume_from_cache=resume_from_cache,
             overwrite=overwrite,
             append=append,
+            **overrides,
         )
 
     def _mat(self, task: int, rollout: int = 0, agent: str = "agent_a") -> dict:
@@ -2891,6 +3033,101 @@ class TestRunFromConfigJudgeFailedOnly:
         # judge_failed_only), so the output is un-prefixed (no `unsafe_`), regardless of RS mode
         assert (tmp_path / "recovered.jsonl").exists()
         assert not (tmp_path / "unsafe_recovered.jsonl").exists()
+
+    async def test_migrates_legacy_invalid_main_row_before_seeding(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        legacy_invalid = self._success(0, reward=0.0)
+        legacy_invalid["invalid_judge_response"] = True
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(0)],
+            successes=[legacy_invalid],
+            failures=[],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched, recovered_reward=0.8)
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, retry_invalid_judge_responses=True)
+        )
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in dispatched] == [0]
+        assert [row["reward"] for row in returned] == [0.8]
+        assert self._read_jsonl(tmp_path / "rollouts.jsonl") == []
+        migrated = self._read_jsonl(tmp_path / "rollouts_failures.jsonl")
+        assert migrated[0][NG_FAILURE_CLASS_KEY] == JUDGE_INVALID_FAILURE_CLASS
+
+    async def test_invalid_main_row_is_seeded_not_migrated_by_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        scored_invalid = self._success(0, reward=0.0)
+        scored_invalid["invalid_judge_response"] = True
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(0), self._mat(1)],
+            successes=[scored_invalid],
+            failures=[self._failure(1)],
+        )
+        rollouts_before = (tmp_path / "rollouts.jsonl").read_bytes()
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched, recovered_reward=0.8)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in dispatched] == [1]
+        assert [(row[TASK_INDEX_KEY_NAME], row["reward"]) for row in returned] == [(0, 0.0), (1, 0.8)]
+        assert (tmp_path / "rollouts.jsonl").read_bytes() == rollouts_before
+        assert [row[TASK_INDEX_KEY_NAME] for row in self._read_jsonl(tmp_path / "rollouts_failures.jsonl")] == [1]
+
+    @pytest.mark.parametrize(
+        ("stage_row_in", "retry_invalid_judge_responses"),
+        [("sidecar", False), ("sidecar", True), ("rollouts", True)],
+    )
+    async def test_rejects_multistage_rows_before_writing_anything(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        stage_row_in: str,
+        retry_invalid_judge_responses: bool,
+    ) -> None:
+        """The multi-stage check runs before the output is created, successes are seeded, or the
+        rollouts file is rewritten by the invalid-judge migration."""
+        staged_failure = {**self._failure(1), "stage_index": 1}
+        staged_invalid = {**self._success(2, reward=0.0), "stage_index": 1, "invalid_judge_response": True}
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(3)],
+            successes=[self._success(0)] + ([staged_invalid] if stage_row_in == "rollouts" else []),
+            failures=[staged_failure] if stage_row_in == "sidecar" else [],
+        )
+        before = {name: (tmp_path / name).read_bytes() for name in ("rollouts.jsonl", "rollouts_failures.jsonl")}
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        with pytest.raises(ConfigError, match="does not support multi-stage rows"):
+            await RolloutReverificationHelper().run_from_config(
+                self._make_config(tmp_path, retry_invalid_judge_responses=retry_invalid_judge_responses)
+            )
+
+        assert dispatched == []
+        assert {name: (tmp_path / name).read_bytes() for name in before} == before
+        assert not (tmp_path / "recovered.jsonl").exists()
+        assert not (tmp_path / "recovered_failures.jsonl").exists()
+
+    def test_staged_rows_in_the_rollouts_file_are_ignored_unless_they_would_be_migrated(self, tmp_path: Path) -> None:
+        staged_success = {**self._success(0), "stage_index": 1}
+        staged_invalid = {**self._success(1, reward=0.0), "stage_index": 1, "invalid_judge_response": True}
+        self._setup_fixture(tmp_path, materialized=[], successes=[staged_success, staged_invalid], failures=[])
+        rollouts = tmp_path / "rollouts.jsonl"
+
+        # Recovery reads only the sidecar, and without the opt-in nothing moves into it.
+        _reject_multistage_recovery_source(rollouts, retry_invalid_judge_responses=False)
+        with pytest.raises(ConfigError, match="does not support multi-stage rows"):
+            _reject_multistage_recovery_source(rollouts, retry_invalid_judge_responses=True)
+
+        rollouts.write_bytes(orjson.dumps(staged_success) + b"\n\n")
+        _reject_multistage_recovery_source(rollouts, retry_invalid_judge_responses=True)
 
     async def test_prints_two_sources_warning(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -3120,8 +3357,24 @@ class TestRunFromConfigJudgeFailedOnly:
         with pytest.raises(FileNotFoundError, match="rollouts_failures.jsonl"):
             await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
 
+    @pytest.mark.parametrize(
+        ("retry_invalid_judge_responses", "refail_result", "expected_class"),
+        [
+            # Default: the verifier itself routes the failed judge call to the sidecar.
+            (False, {"reward": 0.0, NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}, JUDGE_FAILED_FAILURE_CLASS),
+            # Opt-in: resource servers return this semantic invalid marker directly, and reverify
+            # must normalize it into the retry sidecar itself.
+            (True, {"reward": 0.0, "invalid_judge_response": True}, JUDGE_INVALID_FAILURE_CLASS),
+        ],
+        ids=["judge_failed by default", "invalid judge response opted in"],
+    )
     async def test_resume_incrementally_recovers_judge_failures_across_invocations(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        retry_invalid_judge_responses: bool,
+        refail_result: dict,
+        expected_class: str,
     ) -> None:
         """--judge-failed-only + --resume: a first pass recovers some judge failures while others re-fail;
         a second --resume pass re-verifies ONLY the still-failing ones and completes the population.
@@ -3139,26 +3392,29 @@ class TestRunFromConfigJudgeFailedOnly:
         def first_pass(payload: dict) -> dict:
             if payload[TASK_INDEX_KEY_NAME] == 1:
                 return {"reward": 1.0, "verdict": "correct"}
-            return {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_failed"}
+            return refail_result
 
         dispatched1: list = []
         self._patch_with_result(monkeypatch, dispatched1, first_pass)
-        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+        await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, retry_invalid_judge_responses=retry_invalid_judge_responses)
+        )
 
         # all three judge failures were attempted; output has seeded 0 + recovered 1; 2,3 in the sidecar
         assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched1) == [1, 2, 3]
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered.jsonl")) == [0, 1]
-        assert sorted(r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered_failures.jsonl")) == [
-            2,
-            3,
-        ]
+        first_failures = self._read_jsonl(tmp_path / "recovered_failures.jsonl")
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in first_failures) == [2, 3]
+        assert {r[NG_FAILURE_CLASS_KEY] for r in first_failures} == {expected_class}
 
         # Second pass (--resume): only the still-failing 2,3 are retried (0,1 are cached in the output),
         # and now succeed.
         dispatched2: list = []
         self._patch_with_result(monkeypatch, dispatched2, lambda _p: {"reward": 1.0, "verdict": "correct"})
         returned = await RolloutReverificationHelper().run_from_config(
-            self._make_config(tmp_path, resume_from_cache=True)
+            self._make_config(
+                tmp_path, resume_from_cache=True, retry_invalid_judge_responses=retry_invalid_judge_responses
+            )
         )
 
         assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched2) == [2, 3]

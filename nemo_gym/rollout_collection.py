@@ -13,10 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import bisect
 import glob as glob_module
 import json
 import logging
 import os
+import tempfile
+import time
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
@@ -27,7 +30,6 @@ from datetime import timedelta
 from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
-from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
@@ -51,7 +53,9 @@ from nemo_gym.config_types import (
     ConfigPathNotFoundError,
     UploadRolloutsConfigMixin,
 )
+from nemo_gym.deliverables import is_deliverable
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -169,15 +173,21 @@ def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) ->
 #     NOWHERE: the absence of a row is the canonical signal. Resume's
 #     set-difference re-dispatches them naturally; per-task timeout bounds
 #     the chain-hop wallclock.
+#   - Rows that ``dispatch_budget_s`` never started go nowhere either. Gym
+#     marks them ``cancelled`` with ``_ng_dispatch_drained``: no rollout
+#     ran, so there is nothing to capture, tokenize or average.
 #   - On resume, ``_load_from_cache`` reads BOTH files: main jsonl tells
 #     it what's permanently done, sidecar tells it how many attempts each
 #     non-success has consumed (capped at NEMO_GYM_MAX_ROLLOUT_ATTEMPTS,
 #     default 3). Rows flagged ``_ng_failure_terminal=True`` are never
-#     retried regardless of attempt count.
+#     retried regardless of attempt count, unless ``retry_terminal_timeouts``
+#     opts into the retry contract in ``is_terminal_failure``.
 # ---------------------------------------------------------------------------
 
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
+# Set only by Gym, on the result it builds for a row the dispatch budget never started.
+NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
@@ -578,7 +588,7 @@ def _attach_ng_perf(
         result[NG_PERF_KEY] = ng_perf
 
 
-def _get_max_rollout_attempts() -> int:
+def get_max_rollout_attempts() -> int:
     """Read ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` (positive int) or default to 3."""
     raw = os.environ.get("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS")
     if raw is None or raw == "":
@@ -597,6 +607,9 @@ def _get_max_rollout_attempts() -> int:
         return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
 
+_get_max_rollout_attempts = get_max_rollout_attempts  # Backwards-compatible alias
+
+
 def _normalize_health_check_ignored_checks(value) -> List[str]:
     from nemo_gym.rollout_health import normalize_ignored_checks
 
@@ -606,7 +619,9 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
-        default=None, description="Limit the number of concurrent samples running at once."
+        default=None,
+        gt=0,
+        description="Limit the number of concurrent samples running at once. Must be positive when set.",
     )
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
@@ -720,6 +735,265 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
         return data
 
 
+NG_ELAPSED_KEY = "elapsed_seconds"
+
+
+class DispatchLatencyTracker:
+    """Per-task latency observed by the dispatcher, and the drain margin from it.
+
+    Rollouts/hr is the number operators watch, and on its own it is misleading:
+    raising concurrency raises aggregate throughput while making every individual
+    task slower, so the run looks healthier right up until tasks start breaching
+    their per-task timeout. Reporting the latency percentiles next to the rate
+    makes that trade visible while there is still time to react to it.
+    """
+
+    def __init__(self) -> None:
+        # Kept sorted: the adaptive drain margin reads a quantile before every dispatch.
+        self._durations: List[float] = []
+        self._drained = 0
+
+    def record(self, seconds: float) -> None:
+        if seconds > 0:
+            bisect.insort(self._durations, seconds)
+
+    def record_drained(self) -> None:
+        self._drained += 1
+
+    @property
+    def drained(self) -> int:
+        return self._drained
+
+    def quantile(self, q: float) -> Optional[float]:
+        if not self._durations:
+            return None
+        ordered = self._durations
+        pos = (len(ordered) - 1) * q
+        low = int(pos)
+        high = min(low + 1, len(ordered) - 1)
+        return ordered[low] * (1 - (pos - low)) + ordered[high] * (pos - low)
+
+    def drain_margin(self, configured: Optional[float]) -> Optional[float]:
+        """Seconds of headroom a task needs before it is worth starting.
+
+        An explicit value wins. Otherwise adapt to this run's own p75, once
+        enough tasks have finished for that to mean anything.
+        """
+        if configured is not None:
+            return configured
+        if len(self._durations) < 5:
+            return None
+        return self.quantile(0.75)
+
+    def summary(self) -> str:
+        if not self._durations:
+            lines = ["No completed rollouts to report latency for."]
+        else:
+            total = sum(self._durations)
+            lines = [
+                f"Per-task latency over {len(self._durations)} completed rollout(s): "
+                f"median {self.quantile(0.5) / 60:.1f} min, "
+                f"p90 {self.quantile(0.9) / 60:.1f} min, "
+                f"p99 {self.quantile(0.99) / 60:.1f} min, "
+                f"max {max(self._durations) / 60:.1f} min",
+                f"Task-time delivered: {total / 3600:.1f} task-hours",
+            ]
+        if self._drained:
+            lines.append(
+                f"Drained (not dispatched, no time left in the budget): {self._drained}. "
+                "These wrote no row and will be re-dispatched on resume."
+            )
+        return "\n".join(lines)
+
+
+def _dispatch_drained_result(remaining_s: float, margin_s: Optional[float]) -> Dict[str, Any]:
+    """The result Gym builds for a row the dispatch budget never started.
+
+    No row is written anywhere: absence is the resume signal, so the task is
+    re-dispatched intact next allocation instead of being started and killed
+    part-way through. ``_ng_dispatch_drained`` keeps it out of capture, token
+    finalization, progress metrics and the rollouts upload, since nothing ran.
+    """
+    return {
+        NG_FAILURE_CLASS_KEY: CANCELLED,
+        NG_NO_PERSIST_KEY: True,
+        NG_DISPATCH_DRAINED_KEY: True,
+        "error_message": (
+            f"not dispatched: {remaining_s:.0f}s left in dispatch budget, below the {margin_s:.0f}s drain margin"
+            if margin_s is not None
+            else "not dispatched: dispatch budget exhausted"
+        ),
+    }
+
+
+def observed_elapsed(record: Dict[str, Any]) -> Optional[float]:
+    """Best-effort per-rollout wallclock from a result/failure row."""
+    for candidate in (
+        record.get(NG_ELAPSED_KEY),
+        ((record.get("response") or {}).get("metadata") or {}).get(NG_ELAPSED_KEY),
+    ):
+        try:
+            if candidate is not None:
+                value = float(candidate)
+                if value > 0:
+                    return value
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: bool = False) -> bool:
+    """Whether a persisted failure must be gated on resume.
+
+    By default a row is terminal iff it is stamped ``_ng_failure_terminal``, so
+    an agent that marks its timeouts terminal on purpose keeps them gated.
+
+    ``retry_terminal_timeouts`` is for agents whose older builds incorrectly
+    stamped per-attempt timeouts terminal. A timeout reflects the
+    load/remaining walltime of that attempt, so it remains retryable (up to the
+    normal max-attempt cap). A skipped sample is unusable regardless of which
+    agent version wrote the sidecar and stays terminal.
+
+    The class names below are ``_ng_failure_class`` labels that agents and
+    resources servers already write to the failures sidecar. They predate
+    ``nemo_gym.failure_kinds`` and are not registered there:
+
+    - ``timeout_exceeded`` (Stirrup, pinchbench): the per-task timeout; ``agent_timeout``
+      in the shared vocabulary.
+    - ``reference_missing``, ``eval_missing``, ``transport_ineligible`` (GDPVal): environment
+      faults with no shared name (namespaced, they would be ``gdpval:<kind>``).
+    - ``skipped`` (Stirrup): the sample cannot be run; no shared name.
+
+    As ``failure_kinds`` requires, this function decides retryability for the
+    occurrence, under an explicit caller opt-in; the names carry no retry meaning.
+    """
+    if not retry_terminal_timeouts:
+        return bool(record.get(NG_TERMINAL_KEY))
+    failure_class = record.get(NG_FAILURE_CLASS_KEY)
+    if failure_class == "timeout_exceeded":
+        return False
+    if failure_class in ("reference_missing", "eval_missing", "transport_ineligible"):
+        # Environment faults: the deliverable tree can be repaired after the
+        # run (remounted reference view, restored eval dir). Terminal within a
+        # run, but re-validated on resume; the /verify recheck is cheap and the
+        # normal max-attempt cap still bounds re-dispatch.
+        return False
+    if failure_class == "skipped":
+        return True
+    return bool(record.get(NG_TERMINAL_KEY))
+
+
+_MIGRATED_INVALID_JUDGE_KEY = "_ng_migrated_invalid_judge_response"
+
+
+def migrate_invalid_judge_main_rows(output_fpath: Path) -> int:
+    """Move legacy invalid-judge rows from the main JSONL into the sidecar.
+
+    Old builds persisted ``invalid_judge_response=True`` as a zero-reward main
+    success, which both contaminated aggregation and gated resume. Sidecar-first
+    migration is idempotent via a marker keyed by
+    stage/task/rollout/attempt; the main file is then atomically rewritten so
+    a crash cannot lose retry state.
+
+    Run it only for environments that opt in (``retry_invalid_judge_responses``):
+    other verifiers score an invalid judge response as a zero-reward row on purpose.
+
+    Migrated rows are classed ``judge_invalid``, the sidecar label reverification uses for
+    the same condition (``judge_unparseable`` in ``nemo_gym.failure_kinds``).
+    """
+    if not output_fpath.exists():
+        return 0
+
+    invalid_count = 0
+    with output_fpath.open("rb") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if orjson.loads(stripped).get("invalid_judge_response"):
+                invalid_count += 1
+    if not invalid_count:
+        return 0
+
+    def migration_key(row: Mapping[str, Any]) -> Tuple[Any, Any, Any, Any]:
+        return (
+            int(row.get("stage_index", 0) or 0),
+            row.get(TASK_INDEX_KEY_NAME),
+            row.get(ROLLOUT_INDEX_KEY_NAME),
+            int(row.get(ATTEMPT_INDEX_KEY_NAME, 0) or 0),
+        )
+
+    failures_fpath = failures_path_for(output_fpath)
+    failures_fpath.parent.mkdir(parents=True, exist_ok=True)
+    already_migrated: set[Tuple[Any, Any, Any, Any]] = set()
+    if failures_fpath.exists():
+        with failures_fpath.open("rb") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                row = orjson.loads(stripped)
+                if row.get(_MIGRATED_INVALID_JUDGE_KEY):
+                    already_migrated.add(migration_key(row))
+
+    mode = output_fpath.stat().st_mode & 0o7777
+    temp_path: Optional[Path] = None
+    try:
+        with (
+            tempfile.NamedTemporaryFile(
+                mode="wb", dir=output_fpath.parent, prefix=f".{output_fpath.name}.migrate-", delete=False
+            ) as output_handle,
+            output_fpath.open("rb") as source,
+            failures_fpath.open("ab") as failures_handle,
+        ):
+            temp_path = Path(output_handle.name)
+            for line in source:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                legacy = orjson.loads(stripped)
+                if not legacy.get("invalid_judge_response"):
+                    output_handle.write(stripped + b"\n")
+                    continue
+
+                key = migration_key(legacy)
+                if key in already_migrated:
+                    continue
+                migrated = dict(legacy)
+                migrated[NG_FAILURE_CLASS_KEY] = migrated.get(NG_FAILURE_CLASS_KEY) or "judge_invalid"
+                migrated.pop(NG_TERMINAL_KEY, None)
+                deliverables_dir = migrated.get("deliverables_dir")
+                try:
+                    has_cached_deliverable = bool(
+                        deliverables_dir
+                        and Path(deliverables_dir).is_dir()
+                        and any(is_deliverable(path) for path in Path(deliverables_dir).iterdir())
+                    )
+                except (OSError, TypeError):
+                    has_cached_deliverable = False
+                if has_cached_deliverable:
+                    migrated["reuse_cached_deliverable"] = True
+                else:
+                    migrated.pop("reuse_cached_deliverable", None)
+                migrated[_MIGRATED_INVALID_JUDGE_KEY] = True
+                failures_handle.write(orjson.dumps(migrated) + b"\n")
+                already_migrated.add(key)
+
+            # Make every retry record durable before removing the corresponding
+            # legacy success from the main file.
+            failures_handle.flush()
+            os.fsync(failures_handle.fileno())
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, output_fpath)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+    return invalid_count
+
+
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     """
     Perform a batch of rollout collection.
@@ -831,6 +1105,15 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         return self
 
     @model_validator(mode="after")
+    def _validate_dispatch_concurrency(self) -> "RolloutCollectionConfig":
+        if self.dispatch_budget_s is not None and self.num_samples_in_parallel is None:
+            raise ValueError(
+                "dispatch_budget_s requires a finite positive num_samples_in_parallel; "
+                "unbounded dispatch can POST the entire queue before the budget is re-checked"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_fan_out(self) -> "RolloutCollectionConfig":
         for key, agents in (self.fan_out or {}).items():
             if not agents:
@@ -850,6 +1133,64 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     def materialized_jsonl_fpath(self) -> Path:
         output_fpath = Path(self.output_jsonl_fpath)
         return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+
+    dispatch_budget_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Seconds from collection start during which new rollouts may be dispatched. Set it to "
+            "the usable walltime of the allocation (Slurm walltime minus startup and teardown). "
+            "Once the budget is spent, queued tasks are left undispatched rather than started and "
+            "killed mid-flight: they write no row, so a `resume_from_cache` run re-dispatches them "
+            "with a full allocation ahead of them. Unset (default) preserves the old behaviour of "
+            "dispatching everything regardless of how little time is left."
+        ),
+    )
+
+    drain_margin_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Refuse to dispatch a new rollout when fewer than this many seconds remain in "
+            "``dispatch_budget_s`` — a task that cannot finish is pure waste. When unset, the "
+            "margin adapts to the run's own observed p75 task duration (after 5 completions), "
+            "which needs no per-benchmark tuning. Ignored unless dispatch_budget_s is set."
+        ),
+    )
+
+    dispatch_longest_first: bool = Field(
+        default=False,
+        description=(
+            "Dispatch tasks with the longest previously-observed runtime first, so long tasks start "
+            "early in an allocation instead of straddling its boundary. Only affects runs resuming "
+            "from a cache that recorded timings; tasks never seen before keep their input order and "
+            "are dispatched after the known-long ones. No runtime estimate is made for unseen tasks."
+        ),
+    )
+
+    retry_terminal_timeouts: bool = Field(
+        default=False,
+        description=(
+            "On resume, retry failures-sidecar rows of class `timeout_exceeded` even when they are stamped "
+            "`_ng_failure_terminal`, up to NEMO_GYM_MAX_ROLLOUT_ATTEMPTS. The environment faults "
+            "`reference_missing`, `eval_missing` and `transport_ineligible`, which can be repaired between "
+            "runs, are retried the same way, and `skipped` rows are never retried, stamped or not. For sidecars "
+            "whose per-attempt timeouts were stamped terminal but should be retried. Off (default): a sidecar row "
+            "is terminal iff it is stamped `_ng_failure_terminal`, so an agent that marks its timeouts terminal "
+            "on purpose keeps them gated."
+        ),
+    )
+
+    retry_invalid_judge_responses: bool = Field(
+        default=False,
+        description=(
+            "On resume, move rows flagged `invalid_judge_response` out of the rollouts jsonl and into the "
+            "failures sidecar as retryable `judge_invalid` attempts, so they leave the score and are judged "
+            "again (reusing the persisted deliverable when there is one). For environments whose invalid judge "
+            "responses were written as zero-reward successes but should be judged again. Off (default): the "
+            "rollouts jsonl is left as is, so a verifier that scores invalid judge responses as zero keeps those rows."
+        ),
+    )
 
 
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -1218,6 +1559,8 @@ class RolloutCollectionHelper(BaseModel):
     def _load_from_cache(
         self, config: RolloutCollectionConfig
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
+        if config.retry_invalid_judge_responses:
+            migrate_invalid_judge_main_rows(Path(config.output_jsonl_fpath))
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
         with Path(config.output_jsonl_fpath).open("rb") as f:
@@ -1235,6 +1578,8 @@ class RolloutCollectionHelper(BaseModel):
         failures_fpath = failures_path_for(Path(config.output_jsonl_fpath))
         attempts_by_key: Counter = Counter()
         terminal_keys: set = set()
+        elapsed_by_key: Dict[Tuple, float] = {}
+        reuse_cached_keys: set[Tuple[Any, Any]] = set()
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
                 for line in f:
@@ -1246,8 +1591,16 @@ class RolloutCollectionHelper(BaseModel):
                         continue
                     k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
                     attempts_by_key[k] += 1
-                    if fr.get(NG_TERMINAL_KEY):
+                    if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
                         terminal_keys.add(k)
+                    if fr.get("reuse_cached_deliverable"):
+                        reuse_cached_keys.add(k)
+                    # A failed attempt still tells us how long this task runs -
+                    # the only duration signal available for a task that has not
+                    # succeeded yet. Keep the longest attempt seen.
+                    observed = observed_elapsed(fr)
+                    if observed is not None:
+                        elapsed_by_key[k] = max(elapsed_by_key.get(k, 0.0), observed)
 
         max_attempts = _get_max_rollout_attempts()
         maxed_out = {k for k, n in attempts_by_key.items() if n >= max_attempts}
@@ -1259,9 +1612,31 @@ class RolloutCollectionHelper(BaseModel):
         # captured model calls are keyed separately from the prior attempt's (see
         # maybe_rollout_id_from_run_body). The first attempt (0) is left unstamped -> bare rollout id.
         for row in input_rows:
-            attempt = attempts_by_key.get(get_key(row), 0)
+            key = get_key(row)
+            attempt = attempts_by_key.get(key, 0)
             if attempt > 0:
                 row[ATTEMPT_INDEX_KEY_NAME] = attempt
+            if key in reuse_cached_keys:
+                # A failed judging attempt can still have a valid persisted
+                # policy deliverable. Preserve the sidecar's signal so resume
+                # rejudges that artifact instead of rerunning the policy.
+                row["reuse_cached_deliverable"] = True
+
+        # Longest-first: known-long tasks go to the front so they get a whole
+        # allocation to finish in rather than being cut off at its boundary.
+        # Tasks with no recorded timing keep their relative input order behind
+        # them - guessing from row content is worse than not guessing.
+        if config.dispatch_longest_first and elapsed_by_key:
+            known = [r for r in input_rows if get_key(r) in elapsed_by_key]
+            unknown = [r for r in input_rows if get_key(r) not in elapsed_by_key]
+            known.sort(key=lambda r: elapsed_by_key[get_key(r)], reverse=True)
+            input_rows = known + unknown
+            if known:
+                print(
+                    f"Dispatching longest-first: {len(known)} row(s) with known timings "
+                    f"(longest {elapsed_by_key[get_key(known[0])] / 60:.0f} min) ahead of "
+                    f"{len(unknown)} unseen row(s)"
+                )
 
         key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
         rows = [key_to_row[get_key(result)] for result in results]
@@ -1271,7 +1646,7 @@ class RolloutCollectionHelper(BaseModel):
 - {len(original_input_rows)} original input rows
 - {len(rows)} rows already done (in main jsonl)
 - {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
-- {len(terminal_keys)} sidecar-terminal (timeout_exceeded / skipped) → not retried
+- {len(terminal_keys)} sidecar-terminal (for example skipped) → not retried
 - {len(maxed_out)} hit max_attempts={max_attempts} → not retried
 - {len(input_rows)} rows that still need to be run"""
         )
@@ -1345,7 +1720,10 @@ class RolloutCollectionHelper(BaseModel):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
+            # A fresh run must not inherit retry attempts or published metrics
+            # from an older run that used the same output path.
             failures_fpath.unlink(missing_ok=True)
+            aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -1416,7 +1794,7 @@ class RolloutCollectionHelper(BaseModel):
         agent_name_to_dropped = defaultdict(Counter)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         dispatched_per_agent = Counter(counts_left)
-        start_time = time()
+        start_time = time.time()
 
         if config.route_failures_to_sidecar:
             print(
@@ -1428,9 +1806,22 @@ class RolloutCollectionHelper(BaseModel):
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
         failure_counts: Counter = Counter()
+        latency_tracker = DispatchLatencyTracker()
+        if config.dispatch_budget_s is not None:
+            print(
+                f"Dispatch budget: {config.dispatch_budget_s / 60:.0f} min. New rollouts stop being "
+                + (
+                    f"dispatched with under {config.drain_margin_s / 60:.0f} min left."
+                    if config.drain_margin_s is not None
+                    else "dispatched once less time remains than this run's observed p75 task duration."
+                )
+            )
         for future in self._run_examples_with_metadata(
             input_rows,
             semaphore=semaphore,
+            dispatch_budget_s=config.dispatch_budget_s,
+            drain_margin_s=config.drain_margin_s,
+            latency_tracker=latency_tracker,
             route_failures_to_sidecar=config.route_failures_to_sidecar,
         ):
             completed = await future
@@ -1453,7 +1844,7 @@ class RolloutCollectionHelper(BaseModel):
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
             # No rollout happened, so there is nothing to capture, tokenize or average.
-            no_result = failure_class in _NO_RESULT_FAILURE_CLASSES
+            no_result = failure_class in _NO_RESULT_FAILURE_CLASSES or bool(result.get(NG_DISPATCH_DRAINED_KEY))
 
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
@@ -1512,8 +1903,9 @@ class RolloutCollectionHelper(BaseModel):
             serialized = orjson.dumps(result)
 
             if no_persist:
-                # kill_shaped: don't write anywhere. Set-difference on resume
-                # naturally re-dispatches; per-task timeout bounds wallclock.
+                # kill_shaped, or drained by the dispatch budget: written to neither
+                # the jsonl nor the sidecar. Set-difference on resume naturally
+                # re-dispatches; per-task timeout bounds wallclock.
                 pass
             elif failure_class is not None:
                 # Non-kill_shaped failure → sidecar. The aggregator only reads
@@ -1580,7 +1972,7 @@ class RolloutCollectionHelper(BaseModel):
                 while pcts_to_print and current_pct >= pcts_to_print[0]:
                     pcts_to_print.pop(0)
 
-                time_taken_s = time() - start_time
+                time_taken_s = time.time() - start_time
                 time_taken = timedelta(seconds=int(time_taken_s))
                 rollouts_per_min = len(results) / (time_taken_s / 60)
                 print_str = f"Finished {len(results)} / {len(input_rows)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
@@ -1628,6 +2020,8 @@ class RolloutCollectionHelper(BaseModel):
         results_file.close()
         failures_file.close()
 
+        print(latency_tracker.summary())
+
         # Explicitly counted failures can provide a score even when no rollout
         # succeeded. Determine eligibility before rejecting an otherwise empty run.
         counted = _failure_rows_counted_as_zero(
@@ -1636,16 +2030,25 @@ class RolloutCollectionHelper(BaseModel):
             {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in persisted_results},
         )
         if input_rows and not persisted_results and not counted:
+            drained_note = (
+                f" {latency_tracker.drained} of them were never started because dispatch_budget_s ran out; "
+                "resume_from_cache dispatches them in the next run."
+                if latency_tracker.drained
+                else ""
+            )
             raise RuntimeError(
                 f"None of the {len(input_rows)} dispatched rollouts produced a result "
-                f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
+                f"{dict(failure_counts)}.{drained_note} Inspect {failures_fpath}; the run has no score to report."
             )
         if owned_token_source is not None:
             await owned_token_source.close()
 
         if config.upload_rollouts and get_exporters():  # pragma: no cover
             print("Uploading rollouts. This may take a few minutes if your data is large.")
-            export_rollouts([_rollout_for_export(result) for result in results])
+            # A drained row never ran, so it is not a rollout to upload.
+            export_rollouts(
+                [_rollout_for_export(result) for result in results if not result.get(NG_DISPATCH_DRAINED_KEY)]
+            )
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
@@ -1967,6 +2370,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
+        *,
+        dispatch_budget_s: Optional[float] = None,
+        drain_margin_s: Optional[float] = None,
+        latency_tracker: Optional["DispatchLatencyTracker"] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -1981,10 +2388,27 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         self._validate_agent_names(examples, server_client.global_config_dict)
         self._validate_agent_pairings(examples, server_client.global_config_dict)
         semaphore = semaphore or nullcontext()
+        tracker = latency_tracker if latency_tracker is not None else DispatchLatencyTracker()
+        # `is not None`, not truthiness: 0.0 is a real budget that is already
+        # spent, and must drain rather than disable the check.
+        deadline = (time.monotonic() + dispatch_budget_s) if dispatch_budget_s is not None else None
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
             async with semaphore:
-                started_at = time()
+                # Drain check happens *after* acquiring a slot, so it sees the
+                # real remaining time at the moment this task would start rather
+                # than at queueing time.
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    margin = tracker.drain_margin(drain_margin_s)
+                    if remaining <= 0 or (margin is not None and remaining < margin):
+                        tracker.record_drained()
+                        return _CompletedRollout(
+                            row=row, result=_dispatch_drained_result(remaining, margin), rollout_latency_ms=None
+                        )
+
+                started = time.monotonic()
+                started_at = time.time()
                 res = None
                 try:
                     res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
@@ -1992,7 +2416,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     result = await get_response_json(res)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
-                    rollout_latency_ms = (time() - started_at) * 1000
+                    rollout_latency_ms = (time.time() - started_at) * 1000
+                    tracker.record(time.monotonic() - started)
                     return _CompletedRollout(row=row, result=result, rollout_latency_ms=rollout_latency_ms)
                 except Exception as e:
                     print(
@@ -2012,13 +2437,25 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         row=row, result=_agent_request_failure_row(e, status), rollout_latency_ms=None
                     )
 
-        return tqdm.as_completed(
-            map(_post_subroutine, examples),
-            desc="Collecting rollouts",
-            miniters=10,
-            total=len(examples),
-            maxinterval=60,
-        )
+        def _in_input_order() -> Iterator[Future]:
+            # Materialise the tasks in input order. `asyncio.as_completed` builds its
+            # own task set from `set(fs)`, which discards iteration order before any
+            # coroutine reaches the semaphore -- so passing bare coroutines makes
+            # `dispatch_longest_first` a no-op. Scheduling them here means `call_soon`
+            # queues them FIFO and they acquire the semaphore in the order given;
+            # `as_completed` then only decides the order completions are *yielded*.
+            # This runs on the first iteration, as `tqdm.as_completed` did, so callers
+            # still need a running event loop only once they start consuming.
+            ordered_tasks = [asyncio.ensure_future(_post_subroutine(row)) for row in examples]
+            yield from tqdm.as_completed(
+                ordered_tasks,
+                desc="Collecting rollouts",
+                miniters=10,
+                total=len(examples),
+                maxinterval=60,
+            )
+
+        return _in_input_order()
 
     def run_examples(
         self,
@@ -2026,6 +2463,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
+        *,
+        dispatch_budget_s: Optional[float] = None,
+        drain_margin_s: Optional[float] = None,
+        latency_tracker: Optional["DispatchLatencyTracker"] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -2038,8 +2479,17 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         that ends every rollout still in flight. It defaults off because those rollouts then leave
         the score.
 
-        Every future resolves to exactly the ``(row, result)`` pair Gym's own `/run` endpoint
-        returned — no Gym-private fields are ever added to ``result``.
+        ``dispatch_budget_s`` stops starting rows that many seconds after this call, and
+        ``drain_margin_s`` stops sooner for rows that would not have time to finish.
+
+        Rows start in the order given, once the returned iterator is first consumed.
+
+        A row that ran resolves to exactly the ``(row, result)`` pair Gym's own `/run` endpoint
+        returned — no Gym-private fields are added to ``result``. A row that produced no `/run`
+        result resolves to a Gym-built ``result`` carrying Gym-private fields instead: a row drained
+        by the dispatch budget gets ``_ng_failure_class="cancelled"`` with the ``_ng_dispatch_drained``
+        and ``_ng_no_persist`` markers, and a failed `/run` under ``route_failures_to_sidecar`` gets a
+        failure row with ``_ng_failure_*`` fields.
         """
 
         async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
@@ -2053,6 +2503,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 head_server_config=head_server_config,
                 semaphore=semaphore,
                 route_failures_to_sidecar=route_failures_to_sidecar,
+                dispatch_budget_s=dispatch_budget_s,
+                drain_margin_s=drain_margin_s,
+                latency_tracker=latency_tracker,
             ),
         )
 
