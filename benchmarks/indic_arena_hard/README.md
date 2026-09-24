@@ -125,15 +125,22 @@ export NVIDIA_API_KEY
 python benchmarks/indic_arena_hard/prepare.py \
     --dataset-dir "$DATASET_DIR" --languages hi
 
-# Three-task smoke run; Gym starts and shuts down the required servers.
-gym eval run \
-    --config benchmarks/indic_arena_hard/gemini_pointwise.yaml \
+# Start the servers in this terminal and keep them running.
+gym env start --config benchmarks/indic_arena_hard/gemini_pointwise.yaml
+
+# In a second terminal, activate the same Gym environment and run three tasks.
+gym eval run --no-serve \
     --agent indic_arena_hard_arena_judge_simple_agent \
     --input benchmarks/indic_arena_hard/data/indic_arena_hard_benchmark.jsonl \
     --output results/indic_arena_hard_gemini_pointwise.jsonl \
     --prompt-config benchmarks/prompts/generic/default.yaml \
-    --limit 3 --num-repeats 1 --concurrency 1 --max-output-tokens 4096
+    --limit 3 --num-repeats 1 --concurrency 1 \
+    --max-output-tokens 4096 --temperature 0
 ```
+
+Stop the servers with Ctrl+C in the first terminal when evaluation finishes.
+The explicit input file requires `--no-serve`; the server-start command above
+loads the Gemini model and pointwise judge configuration.
 
 Both candidate and judge default to a 4,096-token output limit. The CLI flag above
 changes the candidate limit; the judge limit is
@@ -151,3 +158,12 @@ scores. Scores for this dataset are not directly comparable to the original
 
 This integration is experimental and inherits `verified: false`. Both modes require
 configured policy/judge endpoints; only pairwise mode requires baseline answers.
+
+A live smoke test on September 23, 2026 used three Hindi prompts with the Gemini
+preset above, one repeat, and concurrency one. All three answers completed within
+the 4,096-token limit and produced valid pointwise judgments with no failed
+rollouts. The self-judge assigned 100/100 to each; this validates the workflow,
+not benchmark quality or comparability with Arena Hard win rates. Trajectory
+capture was disabled, so Gym's trajectory health checks reported `unobserved`;
+the saved answers, response status, judgments, and aggregate metrics were inspected
+directly.
