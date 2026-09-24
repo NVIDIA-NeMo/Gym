@@ -15,11 +15,16 @@
 
 import asyncio
 import json
+import os
+import signal
+import sys
 import threading
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import orjson
+import psutil
 import pytest
 import yaml
 from fastapi import Request
@@ -45,6 +50,57 @@ from responses_api_agents.claude_code_agent.app import (
     parse_stream_json,
 )
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process group lifecycle")
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("detached", [False, True])
+def test_invocation_stop_reaps_launcher_descendants(tmp_path: Path, cancel: bool, detached: bool) -> None:
+    agent = _make_agent(timeout=1)
+    child_pid = tmp_path / "child.pid"
+    launcher = (
+        "import subprocess,sys; from pathlib import Path; "
+        f"child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'], start_new_session={detached!r}); "
+        f"Path({str(child_pid)!r}).write_text(str(child.pid)); child.wait()"
+    )
+    rescue_needed = False
+
+    async def run() -> None:
+        async def rescue() -> None:
+            nonlocal rescue_needed
+            await asyncio.sleep(3)
+            rescue_needed = True
+            if child_pid.exists():
+                with suppress(ProcessLookupError):
+                    os.kill(int(child_pid.read_text()), signal.SIGKILL)
+
+        watchdog = asyncio.create_task(rescue())
+        try:
+            task = asyncio.create_task(agent._run_claude_code("hello"))
+            if cancel:
+                while not child_pid.exists() and not task.done():
+                    await asyncio.sleep(0.01)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                _, _, metadata = await task
+                assert metadata["error_type"] == "timeout"
+        finally:
+            watchdog.cancel()
+            await asyncio.gather(watchdog, return_exceptions=True)
+
+    with (
+        patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+        patch.object(ClaudeCodeAgent, "_build_command", return_value=[sys.executable, "-c", launcher]),
+    ):
+        asyncio.run(run())
+    assert not rescue_needed, "stopping the launcher left its stdout-holding child alive"
+    assert child_pid.exists()
+    try:
+        assert psutil.Process(int(child_pid.read_text())).status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        pass
 
 
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
@@ -506,6 +562,9 @@ class TestRunClaudeCode:
         with (
             patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
             patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            patch(
+                "responses_api_agents.claude_code_agent.app._kill_process_tree", side_effect=lambda proc: proc.kill()
+            ),
             patch("responses_api_agents.claude_code_agent.app.asyncio.wait_for", fake_wait_for),
         ):
             output_items, model, metadata = asyncio.run(agent._run_claude_code("hello"))
@@ -551,6 +610,10 @@ class TestRunClaudeCode:
             with (
                 patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
                 patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+                patch(
+                    "responses_api_agents.claude_code_agent.app._kill_process_tree",
+                    side_effect=lambda proc: proc.kill(),
+                ),
             ):
                 task = asyncio.create_task(agent._run_claude_code("hello", observation_collector=collect))
                 await communicating.wait()
