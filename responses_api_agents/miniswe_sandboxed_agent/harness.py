@@ -14,7 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 import yaml
-from aiohttp import ClientResponseError
+from aiohttp import ClientResponseError, ClientTimeout
 from minisweagent.config import builtin_config_dir
 from minisweagent.models.utils.actions_toolcall import (
     BASH_TOOL,
@@ -39,6 +39,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.server_utils import request
 
 
 MINI_CONFIG = yaml.safe_load((builtin_config_dir / "mini.yaml").read_text())
@@ -162,18 +163,37 @@ class MiniSWEHarness:
 
     async def _install_runner(self) -> None:
         remote = self.remote_directory
-        # Bootstrap for the sandbox's architecture, independently of the Gym host.
+        result = await self.sandbox.exec(
+            f"mkdir -p {remote} && python3 -c 'import platform; print(platform.machine())'",
+            user=self.context.user,
+            cwd=self.context.workdir,
+            timeout_s=self.context.setup_timeout_sec,
+        )
+        if result.return_code:
+            raise RuntimeError(f"mini-SWE bootstrap probe failed: {result.stdout}\n{result.stderr}")
+        arch = result.stdout.strip()
+        if arch not in {"x86_64", "aarch64"}:
+            raise RuntimeError(f"Unsupported mini-SWE sandbox architecture: {arch!r}")
+        # Minimal task images may lack CA certificates. Fetch uv with Gym's TLS
+        # transport, selecting the sandbox's architecture rather than the host's.
+        url = f"https://github.com/astral-sh/uv/releases/download/0.10.12/uv-{arch}-unknown-linux-musl.tar.gz"
+        archive_path = self.directory / "uv.tar.gz"
+        try:
+            async with await request("GET", url, timeout=ClientTimeout(total=120)) as response:
+                response.raise_for_status()
+                archive_path.write_bytes(await response.read())
+            await self.sandbox.upload(archive_path, remote + "/uv.tar.gz")
+        finally:
+            archive_path.unlink(missing_ok=True)
         script = (
-            "import io,pathlib,platform,tarfile,urllib.request; "
-            "arch={'x86_64':'x86_64','aarch64':'aarch64'}[platform.machine()]; "
-            "url=f'https://github.com/astral-sh/uv/releases/download/0.10.12/uv-{arch}-unknown-linux-musl.tar.gz'; "
-            "archive=tarfile.open(fileobj=io.BytesIO(urllib.request.urlopen(url,timeout=120).read()),mode='r:gz'); "
+            "import pathlib,tarfile; "
+            f"archive=tarfile.open('{remote}/uv.tar.gz',mode='r:gz'); "
             "member=next(m for m in archive if m.name.endswith('/uv')); "
             f"target=pathlib.Path('{remote}/uv'); "
             "target.write_bytes(archive.extractfile(member).read()); target.chmod(0o755)"
         )
         result = await self.sandbox.exec(
-            f"mkdir -p {remote} && python3 -c {quote(script)} && "
+            f"python3 -c {quote(script)} && "
             f"{remote}/uv venv {remote}/venv --python 3.13 && "
             f"{remote}/uv pip install --python {remote}/venv/bin/python mini-swe-agent==2.4.6",
             user=self.context.user,
