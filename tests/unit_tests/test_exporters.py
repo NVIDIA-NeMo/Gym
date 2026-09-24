@@ -42,6 +42,7 @@ from nemo_gym.exporters import (
 from nemo_gym.exporters.base import BaseExporter
 from nemo_gym.exporters.mlflow import MLflowExporter, _flatten_config, _sanitize_key
 from nemo_gym.exporters.wandb import WandbExporter
+from nemo_gym.secret_utils import recursively_hide_secrets
 
 
 class RecordingConfig(ExporterConfig):
@@ -258,6 +259,15 @@ class TestWandbConfigAvailability:
     def test_a_masked_key_does_not_count_as_configured(self) -> None:
         assert not WANDBConfig(wandb_project="proj", wandb_name="run", wandb_api_key="****").is_available
 
+    def test_a_config_masked_for_display_is_not_available(self, wandb_config: DictConfig) -> None:
+        # `gym env resolve` masks the live config before setting up exporters, so masking must switch the
+        # exporter off through the key alone and leave the run's name readable.
+        recursively_hide_secrets(wandb_config)
+        masked = WANDBConfig.model_validate(wandb_config)
+
+        assert (masked.wandb_project, masked.wandb_name) == ("proj", "run")
+        assert not masked.is_available
+
 
 class TestWandbExporter:
     def test_setup_initializes_a_run_under_the_results_dir(
@@ -403,6 +413,14 @@ class TestMLflowConfigAvailability:
     def test_a_masked_token_does_not_count_as_configured(self, mlflow_config: DictConfig) -> None:
         masked = MLFlowConfig.model_validate({**mlflow_config, "mlflow_tracking_token": "****"})
 
+        assert not masked.is_available
+
+    def test_a_config_masked_for_display_is_not_available(self, mlflow_config: DictConfig) -> None:
+        recursively_hide_secrets(mlflow_config)
+        masked = MLFlowConfig.model_validate(mlflow_config)
+
+        assert masked.mlflow_tracking_uri == "https://tracking.example"
+        assert (masked.mlflow_experiment_name, masked.mlflow_run_name) == ("gym", "run")
         assert not masked.is_available
 
 
