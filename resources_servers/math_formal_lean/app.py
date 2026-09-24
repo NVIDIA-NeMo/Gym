@@ -30,6 +30,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from resources_servers.math_formal_lean.sandbox_client import Lean4SandboxClient
+from resources_servers.math_formal_lean.toolchain import ToolchainCheck
 
 
 LOG = logging.getLogger(__name__)
@@ -348,6 +349,10 @@ class MathFormalLeanResourcesServerConfig(BaseResourcesServerConfig):
     strip_theorem_from_proof: bool = True
     # Multi-turn self-correction settings (error feedback always provided on failure)
     refinement_prompt_template: Optional[str] = None  # Use default if None
+    # Opt-in: the Lean/Mathlib version the task rows are written against (e.g. "4.12.0"). When
+    # set, the server probes the sandbox once before its first compile and logs an error on a
+    # mismatch -- see toolchain.py for why that failure is otherwise silent. Unset = no probe.
+    expected_lean_version: Optional[str] = None
 
 
 class MathFormalLeanRunRequest(BaseRunRequest):
@@ -393,6 +398,9 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
             extract_code_mode=self.config.extract_code_mode,
             restate_formal_statement=self.config.restate_formal_statement,
             strip_theorem_from_proof=self.config.strip_theorem_from_proof,
+        )
+        self._toolchain: Optional[ToolchainCheck] = (
+            ToolchainCheck(self.config.expected_lean_version) if self.config.expected_lean_version else None
         )
 
     async def verify(self, body: MathFormalLeanVerifyRequest) -> MathFormalLeanVerifyResponse:
@@ -440,6 +448,9 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
             data_point=data_point,
             config=self._proof_build_config,
         )
+
+        if self._toolchain is not None:
+            await self._toolchain.run(self._sandbox_client)
 
         compiler_output = await self._sandbox_client.execute_lean4(
             code=predicted_proof,

@@ -1,0 +1,20 @@
+# Chain to the resources server + agent config.
+config_paths:
+  - resources_servers/formal_conjectures/configs/formal_conjectures.yaml
+
+formal_conjectures_benchmark_agent:
+  _inherit_from: formal_conjectures_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: formal_conjectures_resources_server
+      datasets:
+      - name: formal_conjectures
+        type: benchmark
+        jsonl_fpath: benchmarks/formal-conjectures/data/formal_conjectures_benchmark.jsonl
+        prepare_script: benchmarks/formal-conjectures/prepare.py
+        prompt_config: benchmarks/prompts/eval/formal-conjectures/default.yaml
+        license: Apache 2.0
+        # Smoke-test budget. Raise for a real baseline; these tasks are cheap to verify
+        # (~5s per compile) compared with LeanCat's ~90s.
+        num_repeats: 8

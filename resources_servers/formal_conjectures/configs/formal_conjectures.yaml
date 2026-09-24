@@ -1,0 +1,38 @@
+# Formal Conjectures: fill one `sorry` in a Lean 4 file, verified by Lean itself.
+#
+# Requires a NeMo-Skills sandbox built on **Mathlib v4.33.1** reachable at
+# sandbox_host:sandbox_port. FC pins that toolchain; on another Mathlib the tasks fail with
+# ordinary-looking compile errors and the run reports a plausible, meaningless number. The
+# server probes the sandbox once on the first verify and logs an ERROR if it disagrees.
+formal_conjectures_resources_server:
+  resources_servers:
+    formal_conjectures:
+      entrypoint: app.py
+      domain: math
+      description: Fill a removed proof in a Formal Conjectures Lean 4 file, checked with
+        `#print axioms` against Mathlib v4.33.1
+      value: Measures Lean proof construction on library-grounded mathematics outside the
+        competition-math distribution, with ground truth from upstream's own proofs
+      sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
+      sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
+      compilation_timeout: 300.0
+      verified: false
+      datasets:
+      # Eval-only: these are held-out problems with no train split, so no `train` dataset is
+      # declared (cf. scicode / polymath / critpt).
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/formal_conjectures/data/example.jsonl
+        prompt_config: benchmarks/prompts/eval/formal-conjectures/default.yaml
+        license: Apache 2.0
+
+formal_conjectures_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: formal_conjectures_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model

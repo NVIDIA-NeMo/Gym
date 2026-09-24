@@ -18,13 +18,19 @@
 Reference sandbox implementation:
 - Server: https://github.com/NVIDIA-NeMo/NeMo-Skills/tree/main/nemo_skills/code_execution/local_sandbox
 - Dockerfile: https://github.com/NVIDIA-NeMo/NeMo-Skills/blob/main/dockerfiles/Dockerfile.sandbox
+
+Uses Gym's shared aiohttp client (``nemo_gym.server_utils.request``) rather than httpx, as
+``AGENTS.md`` requires.
 """
 
+import asyncio
 import json
 import logging
 from typing import Any, Dict
 
-import httpx
+import aiohttp
+
+from nemo_gym.server_utils import request
 
 
 LOG = logging.getLogger(__name__)
@@ -38,6 +44,7 @@ class Lean4SandboxClient:
         host: str = "127.0.0.1",
         port: int = 6000,
         max_output_characters: int = 1000,
+        timeout_buffer: float = 5.0,
     ):
         """Initialize sandbox client.
 
@@ -45,25 +52,13 @@ class Lean4SandboxClient:
             host: Sandbox server hostname
             port: Sandbox server port
             max_output_characters: Maximum characters in output
+            timeout_buffer: Seconds the HTTP client waits beyond the compile timeout, so the
+                sandbox rather than the client reports a genuine compile timeout.
         """
         self.host = host
         self.port = port
         self.max_output_characters = max_output_characters
-        self._client: httpx.AsyncClient | None = None
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create the async HTTP client."""
-        if self._client is None:
-            self._client = httpx.AsyncClient(
-                limits=httpx.Limits(max_keepalive_connections=100, max_connections=100),
-            )
-        return self._client
-
-    async def close(self) -> None:
-        """Close the HTTP client."""
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        self.timeout_buffer = timeout_buffer
 
     def _get_execute_url(self) -> str:
         """Get the sandbox execute endpoint URL."""
@@ -90,27 +85,27 @@ class Lean4SandboxClient:
             "max_output_characters": self.max_output_characters,
         }
 
-        client = await self._get_client()
-
         try:
-            response = await client.post(
-                url=self._get_execute_url(),
-                content=json.dumps(request_data),
-                timeout=timeout + 5.0,  # Add buffer for network overhead
-                headers={"Content-Type": "application/json"},
+            response = await request(
+                "POST",
+                self._get_execute_url(),
+                json=request_data,
+                timeout=aiohttp.ClientTimeout(total=timeout + self.timeout_buffer),
             )
 
-            if response.status_code == 502:
-                LOG.warning("Sandbox returned 502 error")
-                return {"process_status": "error", "stdout": "", "stderr": "Sandbox 502 error"}
+            if response.status != 200:
+                body = (await response.text())[: self.max_output_characters]
+                LOG.warning("Sandbox returned HTTP %d", response.status)
+                return {"process_status": "error", "stdout": "", "stderr": f"Sandbox HTTP {response.status}: {body}"}
 
-            return response.json()
+            # content_type=None: the sandbox has been seen to answer with text/plain.
+            return await response.json(content_type=None)
 
-        except httpx.TimeoutException:
+        except asyncio.TimeoutError:
             LOG.warning("Sandbox request timed out after %.1f seconds", timeout)
             return {"process_status": "timeout", "stdout": "", "stderr": "Client timed out"}
 
-        except httpx.HTTPError as e:
+        except aiohttp.ClientError as e:
             LOG.error("HTTP error communicating with sandbox: %s", e)
             return {"process_status": "error", "stdout": "", "stderr": str(e)}
 
@@ -127,11 +122,12 @@ class Lean4SandboxClient:
         Returns:
             True if sandbox is healthy, False otherwise
         """
-        url = f"http://{self.host}:{self.port}/health"
-        client = await self._get_client()
-
         try:
-            response = await client.get(url=url, timeout=timeout)
-            return response.status_code == 200
-        except httpx.HTTPError:
+            response = await request(
+                "GET",
+                f"http://{self.host}:{self.port}/health",
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            )
+            return response.status == 200
+        except (aiohttp.ClientError, asyncio.TimeoutError):
             return False
