@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Literal
+from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import Body
@@ -279,12 +280,14 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         cleanup: CleanupContext,
     ) -> UserSimEpisodeResponse:
         task = request.task.task_input
+        resources_session_id = f"resources-session-{uuid4().hex}"
         resources_cookies: dict[str, str]
         try:
             seed_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/seed_session",
                 json=ResourcesSeedSessionRequest(
+                    resources_session_id=resources_session_id,
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
                     task_data=task.model_dump(mode="json"),
@@ -295,6 +298,8 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             if not resources_cookies:
                 raise ValueError("Resources seed did not establish a session cookie")
             seed = UserSimSeedResponse.model_validate(await get_response_json(seed_http_response))
+            if seed.resources_session_id != resources_session_id:
+                raise ValueError("Resources seed returned a different resources_session_id")
         except Exception as error:
             raise self._failure("seed", error) from error
 
@@ -321,7 +326,9 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         }
         for alias, target in agent_targets.items():
             try:
+                agent_session_id = f"agent-session-{alias}-{uuid4().hex}"
                 session_request = AgentSeedSessionRequest(
+                    agent_session_id=agent_session_id,
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
                     tool_accesses=tool_accesses if alias == "assistant_model" else [],
@@ -336,6 +343,8 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                 session_response = AgentSeedSessionResponse.model_validate(
                     await get_response_json(session_http_response)
                 )
+                if session_response.agent_session_id != agent_session_id:
+                    raise ValueError(f"{alias} seed returned a different agent_session_id")
                 session = _AgentSession(
                     alias=alias,
                     target=target,

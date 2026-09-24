@@ -44,7 +44,21 @@ class _Client(ServerClient):
 
     async def post(self, server_name: str, url_path: str, **kwargs: Any) -> _Response:
         self.calls.append((server_name, url_path, kwargs))
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if url_path == "/seed_session":
+            payload = orjson.loads(response.body)
+            payload["resources_session_id"] = kwargs["json"].resources_session_id
+            response.body = orjson.dumps(payload)
+        elif url_path in {"/v1/agent_sessions", "/v1/agent_sessions/close"}:
+            payload = orjson.loads(response.body)
+            body = kwargs["json"]
+            payload["agent_session_id"] = body["agent_session_id"] if isinstance(body, dict) else body.agent_session_id
+            response.body = orjson.dumps(payload)
+        elif url_path == "/close_session":
+            payload = orjson.loads(response.body)
+            payload["resources_session_id"] = kwargs["json"].resources_session_id
+            response.body = orjson.dumps(payload)
+        return response
 
     def _resolve_base_url(self, server_name: str) -> str:
         return f"http://{server_name}:8000"
