@@ -25,6 +25,7 @@ from pytest import MonkeyPatch, mark, raises
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
 from nemo_gym.openai_utils import (
+    CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
@@ -180,6 +181,7 @@ OPENAI_2_44_OPTIONAL_CHAT_FIELDS = {
     "prompt_cache_retention",
     "safety_identifier",
     "verbosity",
+    *CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
 }
 
 PARAMETERIZE_DATA = [
@@ -3443,6 +3445,140 @@ class TestVLLMConverter:
         ]
         assert expected_messages == actual_messages
 
+    @staticmethod
+    def _chat_client_capturing_upstream(**config_overrides: Any) -> tuple[TestClient, dict[str, Any]]:
+        """Chat-path vllm_model behind a TestClient; returns the kwargs sent upstream."""
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            **config_overrides,
+        )
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        app = server.setup_webserver()
+        captured_kwargs: dict[str, Any] = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.clear()
+            captured_kwargs.update(kwargs)
+            return NeMoGymChatCompletion(
+                id="chtcmpl",
+                object="chat.completion",
+                created=FIXED_TIME,
+                model="dummy_model",
+                choices=[
+                    NeMoGymChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=NeMoGymChatCompletionMessage(role="assistant", content="response", tool_calls=[]),
+                    )
+                ],
+            ).model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+        return TestClient(app), captured_kwargs
+
+    def test_request_chat_template_kwargs_precedence(self, caplog):
+        """Config baseline -> direct request field -> metadata override.
+
+        Stirrup sends ``chat_template_kwargs`` as a body field; the strict
+        schema must accept it, and when forwarding is opted in the proxy merges
+        it above the configured baseline and below per-request metadata.
+        """
+        client, captured_kwargs = self._chat_client_capturing_upstream(
+            chat_template_kwargs={"enable_thinking": False, "baseline_only": 1},
+            forward_request_chat_template_kwargs=True,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "chat_template_kwargs": {"enable_thinking": True, "request_only": 2},
+                },
+            )
+        assert response.status_code == 200
+        assert captured_kwargs["chat_template_kwargs"] == {
+            "enable_thinking": True,
+            "baseline_only": 1,
+            "request_only": 2,
+        }
+        assert "chat_template_kwargs" not in caplog.text
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": {"enable_thinking": True},
+                "metadata": {"chat_template_kwargs": json.dumps({"enable_thinking": False})},
+            },
+        )
+        assert response.status_code == 200
+        assert captured_kwargs["chat_template_kwargs"]["enable_thinking"] is False
+
+        rejected = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "chat_template_kwargs": "not-a-mapping"},
+        )
+        assert rejected.status_code == 422
+
+    def test_request_chat_template_kwargs_dropped_by_default(self, caplog):
+        """By default the field is accepted at ingress but not forwarded.
+
+        Agents attach ``enable_thinking`` on every call; honoring it would
+        change the policy's generation regime relative to runs collected
+        without it, so the default drops it and warns once per server.
+        """
+        client, captured_kwargs = self._chat_client_capturing_upstream(chat_template_kwargs={"enable_thinking": True})
+        request = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "chat_template_kwargs": {"enable_thinking": False, "request_only": 2},
+        }
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            for _ in range(2):
+                response = client.post("/v1/chat/completions", json=request)
+                assert response.status_code == 200
+                assert captured_kwargs["chat_template_kwargs"] == {"enable_thinking": True}
+
+        warnings = [record for record in caplog.records if "chat_template_kwargs" in record.getMessage()]
+        assert len(warnings) == 1
+        assert warnings[0].levelno == logging.WARNING
+        assert "forward_request_chat_template_kwargs is false" in warnings[0].getMessage()
+
+    def test_empty_request_chat_template_kwargs_does_not_warn(self, caplog):
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            response = client.post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}], "chat_template_kwargs": {}},
+            )
+        assert response.status_code == 200
+        assert "chat_template_kwargs" not in captured_kwargs
+        assert "chat_template_kwargs" not in caplog.text
+
+    def test_provider_reasoning_extensions_forwarded_unchanged(self):
+        """``thinking`` / ``output_config`` pass ingress and reach vLLM as sent on the chat path."""
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+        extensions = {"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}}
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], **extensions},
+        )
+        assert response.status_code == 200
+        assert {field: captured_kwargs[field] for field in extensions} == extensions
+
     def test_metadata_chat_template_kwargs_override(self, monkeypatch: MonkeyPatch):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -4403,6 +4539,31 @@ class TestCompletionsBackendEndToEnd:
         assert captured["kwargs"]["max_tokens"] == 8
         # Server-config model wins over whatever the caller put in "model".
         assert captured["kwargs"]["model"] == "base-model"
+
+    def test_request_chat_template_kwargs_dropped_with_warning(self, monkeypatch: MonkeyPatch, caplog) -> None:
+        """The completions path never forwards a request's top-level chat_template_kwargs."""
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+        model = _make_completions_backend_model()
+        _, captured = self._install_fake_client(
+            model,
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 1,
+                "model": "base-model",
+                "choices": [{"index": 0, "text": "world", "finish_reason": "stop"}],
+            },
+        )
+        test_client = TestClient(model.setup_webserver())
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            resp = test_client.post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hello"}], "chat_template_kwargs": {"x": 1}},
+            )
+        assert resp.status_code == 200, resp.text
+        assert "chat_template_kwargs" not in captured["kwargs"]
+        assert "use_completions_api is true" in caplog.text
 
     def test_responses_with_string_input_routes_to_completions(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))

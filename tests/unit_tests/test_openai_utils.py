@@ -70,6 +70,7 @@ from openai.types.responses.response_output_item import (
 from pydantic import ValidationError
 
 from nemo_gym.openai_utils import (
+    CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     MAX_NUM_TRIES,
     RESPONSES_TO_TRAIN,
     NeMoGymAsyncOpenAI,
@@ -772,6 +773,39 @@ class TestNeMoGymChatCompletionSchemas:
 
         assert round_tripped == params
         assert [part["type"] for part in params.messages[0]["content"]] == ["input_audio", "file"]
+
+    @pytest.mark.parametrize("audio_format", ["m4a", "flac"])
+    def test_input_audio_accepts_formats_outside_sdk_literal(self, audio_format: str) -> None:
+        part = {"type": "input_audio", "input_audio": {"data": "AAAA", "format": audio_format}}
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {"messages": [{"role": "user", "content": [part]}]}
+        )
+
+        assert params.messages[0]["content"][0] == part
+
+    def test_input_audio_still_requires_format(self) -> None:
+        part = {"type": "input_audio", "input_audio": {"data": "AAAA"}}
+
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+                {"messages": [{"role": "user", "content": [part]}]}
+            )
+
+    def test_provider_extension_fields_pass_strict_schema(self) -> None:
+        extensions = {
+            "chat_template_kwargs": {"enable_thinking": False},
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "high"},
+        }
+        assert set(extensions) == CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [], **extensions})
+
+        assert params.model_dump(exclude_unset=True) == {"messages": [], **extensions}
+        for field in CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS:
+            with pytest.raises(ValidationError):
+                NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [], field: "not-a-mapping"})
 
     def test_custom_tool_and_training_tool_call_round_trip(self) -> None:
         payload = {
@@ -1909,7 +1943,7 @@ def test_chat_request_field_set_matches_sdk_without_deprecated_fields() -> None:
     Deprecated fields remain disabled.
     """
     sdk_fields = set(get_type_hints(CompletionCreateParamsNonStreaming, include_extras=True))
-    expected = sdk_fields - {"function_call", "functions"}
+    expected = (sdk_fields - {"function_call", "functions"}) | CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
     actual = set(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
     assert actual == expected, (
         f"openai {openai.__version__} Chat request fields changed: "
