@@ -155,12 +155,38 @@ The wrapper ships a `DynamicMaxTokensChatCompletionsClient`
 
 Set `model_id` to the same checkpoint (or HF id) you are serving via
 vLLM and the tokeniser match is exact.  Leave it unset and the client
-falls back to a conservative character-count estimate — slower to
-allocate completion budget but always safe.  `completion_token_buffer`
+falls back to a character-count estimate of the whole serialized history,
+tool calls included. `completion_token_buffer`
 absorbs the residual gap between our estimate and the exact prompt the
 server renders (chat-template wrappers, tool-schema injection).  The
 default `1000` works in practice; raise it (e.g. 2000–5000) if you see
 sporadic HTTP 400 responses at the vLLM proxy.
+
+When the loaded tokenizer successfully renders the complete prompt, estimated
+remaining context is a strict output bound and a prompt with no remaining room
+raises `ContextOverflowError` before dispatch. If full rendering is unsupported,
+JSON and character estimates can substantially overcount retained reasoning, so
+the client still dispatches the configured completion floor; the hard
+completion cap applies in both modes. Launchers serving a local checkpoint
+should still pass that checkpoint as `model_id`; the fallback is a resilience
+path, not a replacement for template-exact tokenization.
+
+#### Client and agent options
+
+These are constructor arguments of `DynamicMaxTokensChatCompletionsClient`
+(`nemo_client.py`) and `NeMoAgent` (`nemo_agent.py`).
+
+| Argument | Default | Description |
+|---|---|---|
+| `min_completion_tokens` (client) | `1024` | Target per-call completion floor. The hard cap always applies, and when the tokenizer renders the complete prompt the remaining context is also a strict bound. Approximate estimates keep this floor even when they exceed the context. Agents that write a whole script or deliverable in one tool call may need a higher floor: a 1024-token completion cannot reliably hold one. |
+| `prompt_estimator_truncate_history_thinking` (client) | `None` | Estimator-only. When set, it is passed to `apply_chat_template` as `truncate_history_thinking`; when `True`, the JSON and character fallbacks also drop completed reasoning from assistant turns before the last user turn, as Nemotron's template does. It is never sent to the provider and never changes the recorded history. |
+| `truncation_recovery` (client) | `False` | When `True`, a turn that uses its whole completion budget without a schema-valid tool call is followed by one turn that requests thinking off and appends a one-time instruction to act now. The instruction is sent to the model but not recorded in the trajectory. |
+| `min_compaction_summary_words` (agent) | `1` | Minimum word count for a context-compaction summary, counted after a leading `<think>` block is stripped. The agent makes up to 3 summary attempts (the last one without tools) and raises instead of replacing the history with an unusable summary. |
+
+Thinking control (`enable_thinking`, and the thinking-off turn of
+`truncation_recovery`) is sent as `extra_body.chat_template_kwargs`. It only
+takes effect if the model server passes request `chat_template_kwargs` through
+to vLLM.
 
 ## Advanced Features
 
@@ -368,11 +394,34 @@ Some GDPVal tasks ask the model to install packages or run untrusted code. By de
 agent uses a local sandbox; setting `gdpval_container_path` to an Apptainer `.sif` routes
 all `code_exec` calls through a persistent container.
 
-Build the supplied container definition:
+Build the supplied container definition. Build **from the `containers/`
+directory**: the definition stages the vendored GDPval-AA v2 manifests via
+`%files`, and apptainer resolves those paths relative to the directory the
+build runs in, so a build started from the repository root cannot find them.
 
 ```bash
-apptainer build gdpval.sif responses_api_agents/stirrup_agent/containers/gdpval.def
+cd responses_api_agents/stirrup_agent/containers
+apptainer build gdpval.sif gdpval.def
 ```
+
+The definition builds on x86_64 and arm64. x86_64 installs the published pin
+set in full and matches the reference sandbox. arm64 drops only the pins listed
+in `gdpval_aa_v2_arm64_exclusions.txt`, which ship x86_64 wheels and no source
+distribution; any other pin that fails to install aborts the build rather than
+shipping a degraded sandbox.
+
+Verify a built image before running an eval in it. The verifier is staged into
+the image and audits it against both vendored manifests, then exercises the
+toolchain end to end:
+
+```bash
+apptainer exec --writable-tmpfs --cleanenv --pid \
+  --no-mount home,tmp,bind-paths --home /root \
+  gdpval.sif python /opt/gdpval/verify_gdpval_sandbox.py
+```
+
+A green build only proves the build steps exited 0; this is what catches a tool
+that is installed but cannot produce a file.
 
 Then:
 
