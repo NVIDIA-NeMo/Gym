@@ -549,7 +549,9 @@ async def raise_for_status(response: ClientResponse, content: Optional[bytes] = 
         if content is None:
             content = await response.content.read()
         if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
-            print(f"""Request info: {response.request_info}
+            # Not the full `request_info`: its headers carry `Authorization: Bearer <api key>`.
+            request_info = response.request_info
+            print(f"""Request info: {request_info.method} {_redacted_url(str(request_info.real_url))}
 Response content: {content}""")
 
         try:

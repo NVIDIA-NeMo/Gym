@@ -54,7 +54,7 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
-from nemo_gym.secret_utils import recursively_hide_secrets
+from nemo_gym.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
 from nemo_gym.server_utils import (
     DictConfig,
 )
@@ -1546,6 +1546,47 @@ contested: second_inner
             "key": "****",
             "not": "not",
         }
+
+    @mark.parametrize(
+        ("key", "masked"),
+        [
+            ("policy_api_key", True),
+            ("hf_token", True),
+            ("otlp_headers", True),
+            ("db_password", True),
+            ("DB_PASSWORD", True),
+            ("client_secret", True),
+            ("auth_credential", True),
+            ("bearer_auth", True),
+            ("session_cookie", True),
+            ("OPENAI_API_KEY", True),
+            ("apiKey", True),
+            ("Authorization", True),
+            ("author", False),
+            ("session_id", False),
+            ("wandb_project", False),
+            ("mlflow_tracking_uri", False),
+            (1, False),
+        ],
+    )
+    def test_recursively_hide_secrets_masks_secret_shaped_keys(self, key, masked: bool) -> None:
+        value = "sk-FAKE-CANARY"  # pragma: allowlist secret
+        dict_config = DictConfig({key: value, "nested": {key: value}})
+
+        recursively_hide_secrets(dict_config)
+
+        expected = "****" if masked else value
+        assert dict_config[key] == expected
+        assert dict_config["nested"][key] == expected
+
+    def test_hide_secrets_in_overrides_masks_keys_case_insensitively(self) -> None:
+        overrides = ["++DB_PASSWORD=sk-FAKE-CANARY", "+policy.OPENAI_API_KEY=sk-FAKE-CANARY", "++wandb_project=proj"]
+
+        assert hide_secrets_in_overrides(overrides) == [
+            "++DB_PASSWORD=****",
+            "+policy.OPENAI_API_KEY=****",
+            "++wandb_project=proj",
+        ]
 
     def test_recursively_replace_keys(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
