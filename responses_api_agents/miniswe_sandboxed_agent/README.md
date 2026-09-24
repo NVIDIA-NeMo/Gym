@@ -10,7 +10,9 @@ benchmark code and has no dataset, provisioning, verification, or sandbox lifecy
 The mini-SWE `DefaultAgent` and its shell commands run inside the task sandbox.
 Setup installs the pinned package into an isolated Python 3.13 environment and
 uploads `sandbox_runner.py`. The task image needs `python3`, `bash`, and `setsid`,
-plus network access to download uv, Python, and mini-SWE dependencies during setup.
+plus network access to download Python and mini-SWE dependencies during setup.
+Gym downloads uv for the sandbox's architecture and uploads it, so bootstrap
+also works in task images without system CA certificates.
 Model requests travel over an atomic JSON file relay to the Gym agent server,
 which forwards them to the configured model server with the existing capture and
 session correlation. The sandbox does not need direct access to model credentials.
