@@ -313,6 +313,26 @@ def _resolve_server_dir(rel_path: Path) -> Path:
     )
 
 
+def _server_launch_command(
+    dir_path: Path,
+    global_config_dict: DictConfig,
+    server_name: str,
+    entrypoint_fpath: Path,
+    escaped_config_dict_yaml_str: str,
+) -> str:
+    """Shell command that sets up a server's venv and starts its entrypoint with that venv's own interpreter.
+
+    The interpreter is named explicitly instead of relying on the bare `python` that `source bin/activate`
+    puts on PATH: a venv copied or moved after creation still names its original prefix in `bin/activate`,
+    so activating it would silently run a different interpreter than `uv_venv_dir` selected.
+    """
+    venv_python_fpath = get_venv_path(dir_path, global_config_dict) / "bin" / "python"
+    return f"""{setup_env_command(dir_path, global_config_dict, server_name)} \\
+    && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
+    {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(server_name)} \\
+    {shlex.quote(str(venv_python_fpath))} {shlex.quote(str(entrypoint_fpath))}"""
+
+
 class RunConfig(BaseNeMoGymCLIConfig):
     """
     Start NeMo Gym servers for agents, models, and resources.
@@ -441,10 +461,11 @@ class RunHelper:  # pragma: no cover
             # Resolve cwd-first (a local server), else the install location for built-ins.
             dir_path = _resolve_server_dir(Path(first_key, second_key))
 
-            command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
-    && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
-    {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
-    python {str(entrypoint_fpath)}"""
+            # Name the venv in the logs: the server runs that venv's interpreter (see _server_launch_command).
+            print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
+            command = _server_launch_command(
+                dir_path, global_config_dict, top_level_path, entrypoint_fpath, escaped_config_dict_yaml_str
+            )
 
             process = run_command(command, dir_path, server_name=top_level_path)
             self._processes[top_level_path] = process

@@ -47,6 +47,7 @@ from nemo_gym.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     USE_ABSOLUTE_IP,
+    UV_LOCK_TIMEOUT_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     _openai_version_matches_nemo_gym_constraint,
@@ -62,6 +63,8 @@ from nemo_gym.server_utils import (
 
 class TestGlobalConfig:
     def _mock_versions_for_testing(self, monkeypatch: MonkeyPatch) -> None:
+        # An exported UV_LOCK_TIMEOUT becomes the resolved default; keep snapshots hermetic.
+        monkeypatch.delenv("UV_LOCK_TIMEOUT", raising=False)
         monkeypatch.setattr(nemo_gym.global_config, "openai_version", "test openai version")
         monkeypatch.setattr(nemo_gym.global_config, "ray_version", "test ray version")
 
@@ -84,6 +87,7 @@ class TestGlobalConfig:
             "model_endpoint_readiness_timeout_seconds": 600,
             "allow_openai_version_skew": False,
             "uv_cache_dir": str(CACHE_DIR.expanduser().resolve() / "uv"),
+            "uv_lock_timeout_seconds": 1800,
             "uv_venv_dir": str(WORKING_DIR),
             "results_dir": str(RESULTS_DIR.expanduser().resolve()),
             "cache_dir": str(CACHE_DIR.expanduser().resolve()),
@@ -94,6 +98,7 @@ class TestGlobalConfig:
 
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.delenv("UV_LOCK_TIMEOUT", raising=False)
         monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         # Explicitly handle any local .env.yaml files. Either read or don't read.
@@ -118,6 +123,7 @@ class TestGlobalConfig:
     def test_offline_resolution_uses_invalid_port_without_probing(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
         monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+        monkeypatch.delenv("UV_LOCK_TIMEOUT", raising=False)
         probe = MagicMock(side_effect=AssertionError("offline resolution must not probe sockets"))
         hostname = MagicMock(side_effect=AssertionError("offline resolution must not resolve hostnames"))
         setup_exporters = MagicMock(side_effect=AssertionError("offline resolution must not start exporters"))
@@ -146,6 +152,56 @@ class TestGlobalConfig:
         hostname.assert_not_called()
         setup_exporters.assert_not_called()
         assert "UV_CACHE_DIR" not in nemo_gym.global_config.environ
+        assert "UV_LOCK_TIMEOUT" not in nemo_gym.global_config.environ
+        assert config[UV_LOCK_TIMEOUT_KEY_NAME] == 1800
+
+    def test_uv_lock_timeout_is_exported_and_overridable(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.setattr(nemo_gym.global_config, "environ", dict())
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+
+        default_config = get_global_config_dict()
+
+        assert default_config[UV_LOCK_TIMEOUT_KEY_NAME] == 1800
+        assert nemo_gym.global_config.environ["UV_LOCK_TIMEOUT"] == "1800"
+
+        monkeypatch.setattr(nemo_gym.global_config, "environ", dict())
+        self._mock_parse_environment(monkeypatch, DictConfig({UV_LOCK_TIMEOUT_KEY_NAME: 60}))
+
+        overridden_config = get_global_config_dict()
+
+        assert overridden_config[UV_LOCK_TIMEOUT_KEY_NAME] == 60
+        assert nemo_gym.global_config.environ["UV_LOCK_TIMEOUT"] == "60"
+
+    @mark.parametrize(
+        ("exported", "configured", "expected"),
+        [
+            ("3600", {}, 3600),  # a timeout the user already exported survives
+            ("3600", {UV_LOCK_TIMEOUT_KEY_NAME: 60}, 60),  # the config key wins over the export
+            ("not a number", {}, 1800),  # uv cannot use a non-integer value either
+        ],
+    )
+    def test_uv_lock_timeout_precedence(
+        self, monkeypatch: MonkeyPatch, exported: str, configured: dict, expected: int
+    ) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.setattr(nemo_gym.global_config, "environ", {"UV_LOCK_TIMEOUT": exported})
+        self._mock_parse_environment(monkeypatch, DictConfig(configured))
+
+        config = get_global_config_dict()
+
+        assert config[UV_LOCK_TIMEOUT_KEY_NAME] == expected
+        assert nemo_gym.global_config.environ["UV_LOCK_TIMEOUT"] == str(expected)
+
+    def test_null_uv_lock_timeout_leaves_the_environment_alone(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.setattr(nemo_gym.global_config, "environ", dict())
+        self._mock_parse_environment(monkeypatch, DictConfig({UV_LOCK_TIMEOUT_KEY_NAME: None}))
+
+        config = get_global_config_dict()
+
+        assert config[UV_LOCK_TIMEOUT_KEY_NAME] is None
+        assert "UV_LOCK_TIMEOUT" not in nemo_gym.global_config.environ
 
     def _mock_parse_environment(self, monkeypatch: MonkeyPatch, config_dict: "DictConfig") -> None:
         """Standard parser mocks (no env var, no .env.yaml, fixed hydra config)."""
