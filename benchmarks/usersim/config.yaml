@@ -9,10 +9,6 @@ usersim:
   resources_servers:
     usersim:
       personas_cache_dir: benchmarks/usersim/data/personas
-
-usersim_assistant:
-  responses_api_agents:
-    simple_agent:
       datasets:
         - name: usersim
           type: benchmark
@@ -20,4 +16,5 @@ usersim_assistant:
           prepare_script: benchmarks/usersim/prepare.py
           prompt_config: null
           num_repeats: 1
+          agent: usersim_assistant
           license: Apache 2.0
