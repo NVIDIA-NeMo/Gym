@@ -135,3 +135,45 @@ def test_rejects_invalid_source_rows(source: dict, problem: str) -> None:
     with pytest.warns(UserWarning), pytest.raises(ValueError, match=message):
         module.prepare(languages=["hi"])
     assert not module.OUTPUT_FPATH.exists()
+
+
+@pytest.mark.parametrize("languages", [None, ["hi"]])
+def test_local_parquet_preparation_without_hub(source: dict, tmp_path: Path, languages: list[str] | None) -> None:
+    local_dir = tmp_path / "download"
+    for language, rows in source.items():
+        path = local_dir / "data" / language / "test.parquet"
+        path.parent.mkdir(parents=True)
+        Dataset.from_list(rows).to_parquet(path)
+    module.datasets.get_dataset_config_names.side_effect = AssertionError("Local preparation must not query the Hub")
+    module.datasets.load_dataset.side_effect = AssertionError("Local preparation must not load from the Hub")
+    baseline_file = _baseline_file(
+        tmp_path,
+        [{"language": language, "row_id": "shared-id", "generation": f"{language} baseline"} for language in source],
+    )
+    output = module.prepare(dataset_dir=str(local_dir), languages=languages, baseline_file=baseline_file)
+    with output.open(encoding="utf-8") as fin:
+        rows = [json.loads(line) for line in fin]
+    assert {row["language"] for row in rows} == set(languages or source)
+    for row in rows:
+        assert row["question"] == source[row["language"]][0]["prompt"]
+        assert row["baseline_answer"] == f"{row['language']} baseline"
+        assert row["human_evaluation_pending"] is True
+    module.datasets.get_dataset_config_names.assert_not_called()
+    module.datasets.load_dataset.assert_not_called()
+
+
+def test_local_directory_without_parquet_fails_without_hub(source: dict, tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="No data/<language>/test.parquet"):
+        module.prepare(dataset_dir=str(tmp_path))
+    module.datasets.get_dataset_config_names.assert_not_called()
+    module.datasets.load_dataset.assert_not_called()
+
+
+def test_local_missing_language_fails_without_hub(source: dict, tmp_path: Path) -> None:
+    path = tmp_path / "data" / "en" / "test.parquet"
+    path.parent.mkdir(parents=True)
+    Dataset.from_list(source["en"]).to_parquet(path)
+    with pytest.raises(ValueError, match="Unsupported languages.*hi"):
+        module.prepare(dataset_dir=str(tmp_path), languages=["hi"])
+    module.datasets.get_dataset_config_names.assert_not_called()
+    module.datasets.load_dataset.assert_not_called()

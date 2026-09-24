@@ -8,7 +8,7 @@ and scoring come from the shared English configuration.
 
 ## Data
 
-Preparation pins dataset revision `cc08e98842cd04d659092dc8b13cf00a848b435c`.
+Hub preparation pins dataset revision `cc08e98842cd04d659092dc8b13cf00a848b435c`.
 By default it includes all 15 configurations: `en`, `as`, `bn`, `gu`, `hi`, `kn`,
 `ml`, `mr`, `ne`, `or`, `pa`, `sa`, `ta`, `te`, and `ur`. There are 504 English
 rows and 7,055 translated rows (503 Urdu rows, 504 in each other language).
@@ -20,8 +20,12 @@ all translation-review fields are preserved. The full language name is retained
 as `language_name`; `language` and `subset_for_metrics` hold the language code.
 Every task uses the standard `hard_prompt` judge category.
 
-Data is downloaded at runtime and is ignored by Git. Use an existing Hugging Face
-login (`hf auth login`) or set `HF_HOME` to your existing Hugging Face cache
+Data is read from a local download or downloaded at runtime; generated JSONL is
+ignored by Git. Pass `--dataset-dir` to the downloaded dataset repository containing
+`data/<language>/test.parquet` to prepare entirely offline, without a token.
+Local mode uses the files as supplied and discovers the languages present on disk;
+it does not enforce the Hub revision pin. For Hub downloads, use an existing
+Hugging Face login (`hf auth login`) or set `HF_HOME` to your Hugging Face cache
 directory. Tokens belong in the private local credential store, never in configs.
 
 ## Baseline answers
@@ -48,11 +52,20 @@ inspection or generation; do not use it to report pairwise benchmark scores.
 Run from the repository root with the same Gym environment as the English benchmark.
 
 ```bash
+# Prepare an existing local download (no network or token needed).
+DATASET_DIR=/path/to/huggingface_datasets/anushakamathofficial/indic_arena_hard
+python benchmarks/indic_arena_hard/prepare.py --dataset-dir "$DATASET_DIR"
+
+# The same local source can be passed through Gym.
+gym eval prepare --benchmark indic_arena_hard \
+    +prepare_script_args.dataset_dir="$DATASET_DIR"
+
 # Download all prompts for inspection (no baseline answers).
 gym eval prepare --benchmark indic_arena_hard
 
 # Prepare selected languages with baseline answers before judging.
 python benchmarks/indic_arena_hard/prepare.py \
+    --dataset-dir "$DATASET_DIR" \
     --languages hi ta \
     --baseline-file path/to/baselines.jsonl
 

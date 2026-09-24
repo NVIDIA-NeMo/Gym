@@ -8,6 +8,7 @@ import warnings
 from pathlib import Path
 
 import datasets
+import pyarrow.parquet as pq
 
 
 HF_DATASET = "anushakamathofficial/indic_arena_hard"
@@ -47,14 +48,24 @@ def _load_baselines(path: Path) -> dict[tuple[str, str], str]:
     return baselines
 
 
-def prepare(*, languages: list[str] | None = None, baseline_file: str | None = None) -> Path:
-    """Load the pinned HF test splits, optionally join baselines, and write Gym JSONL.
+def prepare(
+    *, languages: list[str] | None = None, baseline_file: str | None = None, dataset_dir: str | None = None
+) -> Path:
+    """Load local or pinned HF test splits, optionally join baselines, and write Gym JSONL.
 
     By default include all language configurations, including English. Without a
     baseline file the output is for prompt inspection/generation only, as in
     m_arena_hard. Baseline rows must contain language (code), row_id, generation.
+    dataset_dir points to a downloaded repository with data/<language>/test.parquet;
+    when supplied, preparation reads those files without accessing the Hub.
     """
-    supported = datasets.get_dataset_config_names(HF_DATASET, revision=HF_REVISION)
+    local_dir = Path(dataset_dir).expanduser() if dataset_dir is not None else None
+    if local_dir is not None:
+        supported = sorted(path.parent.name for path in local_dir.glob("data/*/test.parquet") if path.is_file())
+        if not supported:
+            raise FileNotFoundError(f"No data/<language>/test.parquet files found under {local_dir}")
+    else:
+        supported = datasets.get_dataset_config_names(HF_DATASET, revision=HF_REVISION)
     languages = supported if languages is None else list(dict.fromkeys(languages))
     if not languages:
         raise ValueError("Select at least one language.")
@@ -73,8 +84,13 @@ def prepare(*, languages: list[str] | None = None, baseline_file: str | None = N
     entries: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for language in languages:
-        print(f"Loading {HF_DATASET} ({language}) ...")
-        dataset = datasets.load_dataset(HF_DATASET, name=language, split="test", revision=HF_REVISION)
+        if local_dir is not None:
+            path = local_dir / "data" / language / "test.parquet"
+            print(f"Loading {path} ...")
+            dataset = pq.read_table(path).to_pylist()
+        else:
+            print(f"Loading {HF_DATASET} ({language}) ...")
+            dataset = datasets.load_dataset(HF_DATASET, name=language, split="test", revision=HF_REVISION)
         if not len(dataset):
             raise ValueError(f"No test rows found for {language}.")
         for row in dataset:
@@ -104,5 +120,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--baseline-file", help="JSONL with language (code), row_id, generation; required for meaningful judging."
     )
+    parser.add_argument("--dataset-dir", help="Local dataset repository containing data/<language>/test.parquet.")
     args = parser.parse_args()
-    prepare(languages=args.languages, baseline_file=args.baseline_file)
+    prepare(languages=args.languages, baseline_file=args.baseline_file, dataset_dir=args.dataset_dir)
