@@ -237,6 +237,26 @@ wandb_name: my-run
 wandb_api_key: your-wandb-key
 ```
 
+### Server Logs
+
+To keep managed server output in files while silencing selected servers in the console, set these top-level
+global options in `env.yaml` or your run config:
+
+```yaml
+nemo_gym_log_dir: /absolute/path/to/logs
+nemo_gym_log_suppress_stdout_server_names: [policy_model]
+```
+
+`nemo_gym_log_dir` appends each managed server's combined stdout and stderr to a separate `<server_name>.log`
+file while also echoing that output to the console. The suppression list disables only that console echo for
+the named servers; their stdout and stderr still reach the log files, and failures retain nonzero exit status.
+Other servers continue to echo normally.
+
+Use exact top-level server instance IDs, such as `policy_model`, not implementation names such as `openai_model`.
+The value must be a list of strings, even for one server. Omit it or use `[]` to suppress none.
+Without `nemo_gym_log_dir`, the suppression setting has no effect. It covers managed server startup and prefetch
+subprocess output, not the Gym orchestrator or head server's own output.
+
 ### Multi-Node Configuration
 
 **`use_absolute_ip`** — Controls the default host servers bind to.

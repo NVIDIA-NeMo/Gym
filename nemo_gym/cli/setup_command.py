@@ -22,12 +22,14 @@ from subprocess import Popen
 from sys import stderr, stdout
 from typing import IO, Any
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
+    NEMO_GYM_LOG_SUPPRESS_STDOUT_SERVER_NAMES_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
@@ -236,10 +238,20 @@ def run_command(
 
     log_dir = global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME)
     if log_dir:
+        suppress_stdout_server_names = global_config_dict.get(NEMO_GYM_LOG_SUPPRESS_STDOUT_SERVER_NAMES_KEY_NAME, [])
+        if not isinstance(suppress_stdout_server_names, (list, ListConfig)) or any(
+            not isinstance(name, str) for name in suppress_stdout_server_names
+        ):
+            raise ConfigError(
+                f"{NEMO_GYM_LOG_SUPPRESS_STDOUT_SERVER_NAMES_KEY_NAME} must be a list of server names "
+                "(strings), for example [policy_model]. Use [] to suppress none."
+            )
         safe_name = (server_name or working_dir_path.name).replace("/", "_")
         log_path = Path(log_dir) / f"{safe_name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         command = f"set -o pipefail; ({command}) 2>&1 | tee -a {log_path}"
+        if server_name in suppress_stdout_server_names:
+            command += " >/dev/null"
 
     redirect_stdout = stdout if stdout_target is None else stdout_target
     redirect_stderr = stderr if stderr_target is None else stderr_target
