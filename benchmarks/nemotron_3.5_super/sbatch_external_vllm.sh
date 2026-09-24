@@ -77,6 +77,7 @@ ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
 ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
 ROUTER_POLICY="${ROUTER_POLICY:-cache_aware}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
+# Optional whitespace-separated flags, e.g. ROUTER_ARGS="--balance-abs-threshold 32 --balance-rel-threshold 1.1".
 
 eval_command=$(cat <<EOF
 set -euo pipefail
@@ -202,6 +203,10 @@ this_node_hostname=\$(hostname)
 read -r -a nodes <<< "\$ALL_NODES"
 
 router_common_args=(--log-level error --prometheus-host 0.0.0.0 --prometheus-port $ROUTER_METRICS_PORT)
+read -r -a router_extra_args <<< $(printf '%q' "${ROUTER_ARGS:-}")
+if (( \${#router_extra_args[@]} )); then
+    router_common_args+=("\${router_extra_args[@]}")
+fi
 
 if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
     PREFILL_HEAD=\${nodes[0]}
