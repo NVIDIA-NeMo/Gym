@@ -94,3 +94,28 @@ def test_a_non_object_item_raises_for_the_caller_to_handle():
         assistant_fingerprint([42])
     with pytest.raises(ValueError):
         conversation_digest(["not a dict"])
+
+
+def test_conversation_digest_ignores_instruction_content_but_not_its_position():
+    """OpenCode regenerates its system prompt per request with today's date.
+
+    A rollout crossing a UTC day boundary changes only that text; the parent
+    link must survive it. Conversation turns are still verified.
+    """
+    day1 = [
+        {"role": "system", "content": "You are opencode. Today's date: Wed Sep 23 2026"},
+        {"role": "user", "content": "fix the bug"},
+        {"role": "assistant", "content": "looking"},
+    ]
+    day2 = [dict(day1[0], content="You are opencode. Today's date: Thu Sep 24 2026"), *day1[1:]]
+    assert conversation_digest(day1) == conversation_digest(day2)
+    developer = [{"role": "developer", "content": "v1"}, *day1[1:]]
+    assert conversation_digest(developer) == conversation_digest([{"role": "developer", "content": "v2"}, *day1[1:]])
+    # The instruction item still counts by role and position.
+    assert conversation_digest(day1) != conversation_digest(day1[1:])
+    assert conversation_digest(day1) != conversation_digest(developer)
+    # Conversation turns are still covered.
+    assert conversation_digest(day1) != conversation_digest([day1[0], dict(day1[1], content="fix the test"), day1[2]])
+    assert conversation_digest(day1) != conversation_digest([*day1[:2], dict(day1[2], content="done")])
+    # The assistant fingerprint never looked at instruction items.
+    assert assistant_fingerprint(day1) == assistant_fingerprint(day2)

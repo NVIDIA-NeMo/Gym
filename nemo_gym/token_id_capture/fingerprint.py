@@ -22,8 +22,12 @@ Lineage state stays confined to the capture locus and the finalizer.
 
 ``assistant_fingerprint`` hashes only model-authored turns.
 It identifies the call that produced the last model-authored turn.
-``conversation_digest`` hashes every turn, including tool results.
+``conversation_digest`` hashes every conversation turn, including tool results.
 A parent resolver uses it to verify context before reusing tokens.
+Harness instruction items (``system`` / ``developer``) count by position only:
+harnesses regenerate them per request with volatile fields (OpenCode's system
+prompt carries today's date), and hashing their content poisoned every rollout
+that crossed a UTC day boundary. Version 2 of the digest skips their content.
 
 Chat, Responses, and Anthropic shapes normalize to the same hash input.
 The hash layout is tagged and length-delimited.
@@ -41,10 +45,11 @@ import orjson
 
 # Increment when fingerprint canonicalization or hash layout changes.
 # Resolvers ignore entries stamped with a different version.
-FINGERPRINT_VERSION = 1
+FINGERPRINT_VERSION = 2
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
+_INSTRUCTION_ROLES = frozenset({"system", "developer"})
 
 
 def assistant_fingerprint(messages: list[dict]) -> str:
@@ -80,12 +85,21 @@ def conversation_digest(messages: list[dict]) -> str:
     ``assistant_fingerprint`` ignores user and tool content.
     This digest covers that omitted context.
     A mismatch rejects the parent before its tokens are reused.
+
+    Instruction items (``system`` / ``developer`` roles) contribute their role
+    and position but not their content: the harness owns them and may rewrite
+    volatile fields between calls (a date, a clock), which is not a rewritten
+    conversation. Reusing the parent's tokens then serves the instruction text
+    the model actually saw, which is what training needs.
     """
     hasher = hashlib.sha256(_CONTEXT_DOMAIN)
     for message in messages or []:
         if not isinstance(message, dict):
             raise ValueError(f"request item is not an object: {type(message).__name__}")
-        _update_field(hasher, b"\x00", str(message.get("role") or message.get("type") or ""))
+        role = str(message.get("role") or message.get("type") or "")
+        _update_field(hasher, b"\x00", role)
+        if _is_instruction_item(message):
+            continue
         for content_type, payload in _content_of(message.get("content")):
             _update_field(hasher, b"\x01", content_type)
             _update_field(hasher, b"\x02", payload)
@@ -118,6 +132,11 @@ def canonicalize_tool_arguments(value: Any) -> str:
     else:
         parsed = value
     return _canonical_json(parsed)
+
+
+def _is_instruction_item(message: dict) -> bool:
+    """Return whether the harness, not the conversation, authored this item."""
+    return message.get("role") in _INSTRUCTION_ROLES
 
 
 def _is_assistant_authored(message: dict) -> bool:
