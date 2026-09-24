@@ -54,6 +54,29 @@ def _wants_usage(stream_options: Any) -> bool:
     return bool(isinstance(stream_options, dict) and stream_options.get("include_usage"))
 
 
+def drop_prompt_cache_hints(body: dict[str, Any]) -> dict[str, Any]:
+    """Drop Anthropic-style ``cache_control`` hints from content parts and tool specs.
+
+    Some OpenAI-compatible clients attach them; no Gym backend acts on them and the strict
+    params models reject unknown fields.
+    """
+
+    def without_hint(value: Any) -> Any:
+        return {k: v for k, v in value.items() if k != "cache_control"} if isinstance(value, dict) else value
+
+    def clean_message(message: Any) -> Any:
+        if isinstance(message, dict) and isinstance(message.get("content"), list):
+            return {**message, "content": [without_hint(part) for part in message["content"]]}
+        return message
+
+    cleaned = dict(body)
+    if isinstance(body.get("messages"), list):
+        cleaned["messages"] = [clean_message(message) for message in body["messages"]]
+    if isinstance(body.get("tools"), list):
+        cleaned["tools"] = [without_hint(tool) for tool in body["tools"]]
+    return cleaned
+
+
 def sanitize_streaming_chat_body(body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Map a streaming-dialect chat body onto the strict non-streaming params shape.
 
