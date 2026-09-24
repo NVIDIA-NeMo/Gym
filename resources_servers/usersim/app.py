@@ -8,7 +8,6 @@ import hashlib
 import json
 import logging
 from collections.abc import Mapping, Sequence
-from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -90,7 +89,7 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     personas_cache_dir: Path = Path("~/.cache/nemo-gym/usersim/personas")
     personas_dataset_version: str = Field("0.0.2", pattern=r"^[A-Za-z0-9._-]+$")
     usersim_revision: str = Field(
-        "693865d7b33c3d96283a9742703c8c89413a9d2b",
+        "dabc14c970aa5a60b8bbef36016fd6ddbed00bb6",
         pattern=r"^[0-9a-f]{40}$",
     )
     personas_locales: list[str] = Field(default_factory=lambda: ["en_US"])
@@ -258,36 +257,30 @@ def _response_output_messages(response: NeMoGymResponse) -> list[dict[str, Any]]
 
 
 class _ResourcesModelFacade:
-    """Synchronous UserSim facade backed by a Gym Model Server."""
+    """Async UserSim facade backed by a Gym Model Server."""
 
     def __init__(
         self,
         server: "UserSimResourcesServer",
         model: ModelServerRef,
-        event_loop: asyncio.AbstractEventLoop,
     ) -> None:
         self.server = server
         self.model = model
         self.model_name = model.name
-        self.event_loop = event_loop
 
-    def completion(self, messages: Sequence[Any], **kwargs: Any) -> SimpleNamespace:
+    async def acompletion(self, messages: Sequence[Any], **kwargs: Any) -> SimpleNamespace:
         unsupported = set(kwargs) - {"max_tokens", "max_completion_tokens", "response_format"}
         if unsupported:
             raise NotImplementedError(f"Unsupported UserSim support-model options: {sorted(unsupported)}")
         max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
-        future = asyncio.run_coroutine_threadsafe(
-            self._completion(
-                messages,
-                max_tokens=max_tokens,
-                response_format=kwargs.get("response_format"),
-            ),
-            self.event_loop,
-        )
         try:
-            return future.result(timeout=self.server.config.model_call_timeout_seconds)
-        except FutureTimeoutError as error:
-            future.cancel()
+            async with asyncio.timeout(self.server.config.model_call_timeout_seconds):
+                return await self._completion(
+                    messages,
+                    max_tokens=max_tokens,
+                    response_format=kwargs.get("response_format"),
+                )
+        except TimeoutError as error:
             raise TimeoutError(
                 f"Timed out after {self.server.config.model_call_timeout_seconds}s waiting for {self.model.name}"
             ) from error
@@ -463,18 +456,13 @@ class UserSimResourcesServer(SimpleResourcesServer):
         except ValidationError as error:
             raise HTTPException(status_code=422, detail=error.errors()) from error
         session_id = request.session[SESSION_ID_KEY]
-        result = await asyncio.to_thread(self._resolve_seed, task.sampling, session_id)
+        result = self._resolve_seed(task.sampling, session_id)
         result = result.model_copy(
             update={"scenario": result.scenario.model_copy(update={"probe_data": task.probe_data})}
         )
         runtime = None
         if result.scenario.probe_type in TOOL_PROBES:
-            runtime = await asyncio.to_thread(
-                self._create_probe_runtime,
-                result.scenario,
-                task,
-                asyncio.get_running_loop(),
-            )
+            runtime = self._create_probe_runtime(result.scenario, task)
             scenario = result.scenario
             if scenario.probe_type == "tool_calling":
                 scenario = scenario.model_copy(
@@ -493,7 +481,6 @@ class UserSimResourcesServer(SimpleResourcesServer):
         self,
         scenario: UserSimScenario,
         task: UserSimTaskInput,
-        event_loop: asyncio.AbstractEventLoop,
     ) -> Any:
         from usersim.engine.config import ConversationSimulatorConfig
         from usersim.engine.core.behavioral import compute_behavioral_profile, get_conversation_language
@@ -506,13 +493,11 @@ class UserSimResourcesServer(SimpleResourcesServer):
             models["api_response_model"] = _ResourcesModelFacade(
                 self,
                 self.config.tool_simulation_model,
-                event_loop,
             )
         if self.config.probe_scorer_model is not None:
             models["judge_model"] = _ResourcesModelFacade(
                 self,
                 self.config.probe_scorer_model,
-                event_loop,
             )
         data = {
             **task.probe_data,
@@ -553,7 +538,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         if scorer_name is None:
             return None, None, True
 
-        result_extras = seeded.runtime.evidence()["result_extras"] if seeded.runtime is not None else {}
+        result_extras = (await seeded.runtime.evidence())["result_extras"] if seeded.runtime is not None else {}
         trajectory = {
             **native_result.model_dump(mode="python"),
             **result_extras,
@@ -568,7 +553,6 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 "judge_model": _ResourcesModelFacade(
                     self,
                     self.config.probe_scorer_model,
-                    asyncio.get_running_loop(),
                 )
             }
         else:
@@ -577,7 +561,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         try:
             from usersim.engine.evaluator.scorers import get_scorer
 
-            scores = await asyncio.to_thread(get_scorer(scorer_name), trajectory, scorer_models)
+            scores = await get_scorer(scorer_name)(trajectory, scorer_models)
         except Exception as error:
             logger.exception("Native UserSim scorer %s failed", scorer_name)
             scores = {
@@ -598,7 +582,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         if seeded.runtime is None:
             raise HTTPException(status_code=404, detail="This episode does not expose probe tools")
         try:
-            payload = await asyncio.to_thread(seeded.runtime.simulate_tool_call, tool_name, body)
+            payload = await seeded.runtime.simulate_tool_call(tool_name, body)
         except ValueError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         try:
@@ -629,9 +613,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 verification_input.usersim_result.conversation_messages,
                 verification_input.invocations,
             )
-            native_result = UserSimSimulationResult.model_validate(
-                await asyncio.to_thread(seeded.runtime.finalize, transcript)
-            )
+            native_result = UserSimSimulationResult.model_validate(await seeded.runtime.finalize(transcript))
         native_scorer_name, native_scores, native_scorer_pass = await self._score_native_result(
             seeded,
             native_result,

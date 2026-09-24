@@ -141,7 +141,7 @@ def test_seed_session_resolves_replayable_scenario(tmp_path: Path) -> None:
     assert first.json()["usersim_context"] == second.json()["usersim_context"]
     assert first.json()["usersim_context"]["personas_dataset_version"] == "0.0.2"
     assert len(first.json()["usersim_context"]["personas_panel_sha256"]) == 64
-    assert first.json()["usersim_context"]["usersim_revision"] == "693865d7b33c3d96283a9742703c8c89413a9d2b"
+    assert first.json()["usersim_context"]["usersim_revision"] == "dabc14c970aa5a60b8bbef36016fd6ddbed00bb6"
     scenario = first.json()["scenario"]
     assert scenario["persona"]["first_name"] in {"Morgan", "Avery"}
     assert scenario["probe_type"] == "general_open_ended"
@@ -217,7 +217,7 @@ def test_probe_tools_are_scoped_to_seeded_session(
             }
         ]
 
-        def simulate_tool_call(self, name, body):
+        async def simulate_tool_call(self, name, body):
             if name != "safe_action":
                 raise ValueError(f"Tool {name!r} is not available")
             return json.dumps({"session_seed": body["seed"]})
@@ -330,7 +330,7 @@ def test_verify_applies_native_scorer_to_non_tool_probe(
     calls: list[tuple[str, dict, dict]] = []
 
     def fake_get_scorer(name: str):
-        def score(trajectory: dict, models: dict) -> dict:
+        async def score(trajectory: dict, models: dict) -> dict:
             calls.append((name, trajectory, models))
             return {"status_proposal": status_proposal, "error": error}
 
@@ -384,7 +384,7 @@ def test_verify_translates_native_scorer_exception_to_failed_evidence(
     scorers = pytest.importorskip("usersim.engine.evaluator.scorers")
 
     def fake_get_scorer(_name: str):
-        def score(_trajectory: dict, _models: dict) -> dict:
+        async def score(_trajectory: dict, _models: dict) -> dict:
             raise RuntimeError("scorer unavailable")
 
         return score
