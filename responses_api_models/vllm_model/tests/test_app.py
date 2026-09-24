@@ -15,6 +15,7 @@
 import asyncio
 import json
 import logging
+from copy import deepcopy
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
@@ -3650,8 +3651,8 @@ class TestVLLMConverter:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _make_reasoning_history_model(*, preserve_content: bool) -> VLLMModel:
-    config = VLLMModelConfig(
+def _make_reasoning_history_config(**overrides: Any) -> VLLMModelConfig:
+    return VLLMModelConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
@@ -3662,8 +3663,12 @@ def _make_reasoning_history_model(*, preserve_content: bool) -> VLLMModel:
         return_token_id_information=False,
         uses_reasoning_parser=True,
         uses_interleaved_reasoning=True,
-        preserve_reasoning_in_assistant_content=preserve_content,
+        **overrides,
     )
+
+
+def _make_reasoning_history_model(*, preserve_content: bool, **overrides: Any) -> VLLMModel:
+    config = _make_reasoning_history_config(preserve_reasoning_in_assistant_content=preserve_content, **overrides)
     return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
 
 
@@ -3705,6 +3710,60 @@ class TestAssistantReasoningHistoryPreprocess:
 
         assistant = result["messages"][1]
         assert assistant == {"role": "assistant", "content": original}
+
+
+class TestReasoningFieldConfig:
+    @staticmethod
+    def _body(content: Any) -> dict[str, Any]:
+        # Preprocessing strips reasoning in place; copy so parametrized cases stay independent.
+        return {"model": "caller-model", "messages": [{"role": "assistant", "content": deepcopy(content)}]}
+
+    @mark.parametrize(
+        "reasoning_field,expected_keys",
+        [
+            ("both", {"reasoning", "reasoning_content"}),
+            ("reasoning", {"reasoning"}),
+            ("reasoning_content", {"reasoning_content"}),
+        ],
+    )
+    @mark.parametrize(
+        "content",
+        ["<think>reason</think>act", [{"type": "text", "text": "<think>reason</think>act"}]],
+        ids=["string", "list"],
+    )
+    def test_reasoning_field_selects_outgoing_keys(
+        self, monkeypatch: MonkeyPatch, reasoning_field: str, expected_keys: set[str], content: Any
+    ) -> None:
+        monkeypatch.delenv("NEMO_GYM_REASONING_FIELD", raising=False)
+        model = _make_reasoning_history_model(preserve_content=False, reasoning_field=reasoning_field)
+        assistant = model._preprocess_chat_completion_create_params(MagicMock(), self._body(content))["messages"][0]
+
+        assert {key for key in ("reasoning", "reasoning_content") if key in assistant} == expected_keys
+        assert all(assistant[key] == "reason" for key in expected_keys)
+
+    @mark.parametrize("env_value,expected", [(None, "both"), ("", "both"), ("  reasoning ", "reasoning")])
+    def test_default_falls_back_to_env_var(self, monkeypatch: MonkeyPatch, env_value: Any, expected: str) -> None:
+        if env_value is None:
+            monkeypatch.delenv("NEMO_GYM_REASONING_FIELD", raising=False)
+        else:
+            monkeypatch.setenv("NEMO_GYM_REASONING_FIELD", env_value)
+        assert _make_reasoning_history_config().reasoning_field == expected
+
+    def test_config_overrides_env_var(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setenv("NEMO_GYM_REASONING_FIELD", "reasoning")
+        assert (
+            _make_reasoning_history_config(reasoning_field="reasoning_content").reasoning_field == "reasoning_content"
+        )
+
+    def test_invalid_config_value_is_rejected(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.delenv("NEMO_GYM_REASONING_FIELD", raising=False)
+        with raises(ValueError, match="reasoning_field"):
+            _make_reasoning_history_config(reasoning_field="reasoning_text")
+
+    def test_invalid_env_var_is_rejected_at_config_time(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setenv("NEMO_GYM_REASONING_FIELD", "reasoning_text")
+        with raises(ValueError, match="NEMO_GYM_REASONING_FIELD"):
+            _make_reasoning_history_config()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

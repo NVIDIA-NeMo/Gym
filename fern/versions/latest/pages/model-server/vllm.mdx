@@ -241,6 +241,7 @@ Make sure your input JSONL respects the selected mode in the [Constraint matrix]
 | `model` | `str` | — | **Required.** Model name as registered in vLLM. |
 | `return_token_id_information` | `bool` | — | **Required.** Set `true` for training (token IDs + log probs), `false` for inference only. |
 | `uses_reasoning_parser` | `bool` | — | **Required.** Set `true` for reasoning models (extracts `<think>` tags), `false` otherwise. |
+| `reasoning_field` | `str` | `both` | Which key(s) carry the `<think>` reasoning that vllm_model extracts from replayed assistant messages (`uses_reasoning_parser: true`, `uses_interleaved_reasoning: true`, `preserve_reasoning_in_assistant_content: false`): `both`, `reasoning`, or `reasoning_content`. Use a single key for servers that reject a message carrying both. When unset, falls back to the `NEMO_GYM_REASONING_FIELD` environment variable, then `both`. |
 | `replace_developer_role_with_system` | `bool` | `false` | Convert "developer" role to "system" for models that don't support developer role. |
 | `chat_template_kwargs` | `dict` | `null` | Override chat template parameters. Forwarded to upstream chat completions when `use_completions_api: false`, or to `apply_chat_template` when `use_completions_api: true` and `render_chat_template: true`. |
 | `extra_body` | `dict` | `null` | Pass additional vLLM-specific parameters (e.g., `guided_json`). |
