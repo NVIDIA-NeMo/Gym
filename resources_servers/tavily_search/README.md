@@ -1,5 +1,5 @@
 # Description
-RL enviroment which allows access to web search (Search Provider: Tavily)
+RL environment which allows access to web search (Search Provider: Tavily)
 
 ## Prerequisites and setup
 
