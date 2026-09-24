@@ -1,0 +1,21 @@
+# Resources server for Harbor-format tasks. `gym eval run <folder | harbor:dataset>` generates a
+# per-taskset instance that inherits from this one and fills in `tasksets` and `datasets`.
+harbor_resources_server:
+  resources_servers:
+    harbor:
+      entrypoint: app.py
+      domain: other
+      verified: false
+
+      # Top-level sandbox provider block in the merged config (see nemo_gym/sandbox/providers/*/configs).
+      sandbox_provider: sandbox
+      sandbox_ready_timeout_s: 900
+      # Sandbox lifetime = [agent].timeout_sec + [verifier].timeout_sec + this slack.
+      sandbox_ttl_slack_s: 900
+      sandbox_provider_options: {}
+      sandbox_metadata:
+        benchmark: harbor
+      artifacts_dir: results/harbor/verifier
+
+      # taskset name -> {folder, tasks: {task_id: digest}}; written by the loader.
+      tasksets: {}
