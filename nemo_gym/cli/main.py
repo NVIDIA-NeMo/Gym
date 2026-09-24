@@ -764,6 +764,12 @@ def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch(targets[args.storage], overrides)
 
 
+def _dataset_validate(args: argparse.Namespace, overrides: list[str]) -> None:
+    from nemo_gym.tasks.harbor.cli import validate_target
+
+    validate_target(args, overrides)
+
+
 # One-line help for each command group, shown in `gym --help`.
 GROUPS = {
     "list": "List available components (benchmarks, environments, agents, models, resources-servers).",
@@ -886,6 +892,25 @@ COMMANDS = {
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("output", "output_jsonl_fpath", "Output JSONL file.", aliases=("-o",)),
             SEARCH_DIR,
+        ),
+    ),
+    "dataset validate": Command(
+        target=_dataset_validate,
+        summary="Run each Harbor task's reference solution through the verifier and report the rewards.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "target",
+                    metavar="TARGET",
+                    help="Harbor task folder, folder of task folders, or `harbor:<dataset>[@<version>]`.",
+                )
+            ),
+            SANDBOX,
+            CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+            _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent tasks."),
+            _value_flag("limit", "limit", "Maximum number of tasks to validate."),
         ),
     ),
     "dataset collate": Command(
