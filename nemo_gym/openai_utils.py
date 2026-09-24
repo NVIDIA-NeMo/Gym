@@ -967,6 +967,7 @@ def accumulate_response_usage(
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
     usage: Optional[NeMoGymResponseUsage] = None
+    native_finish_reason: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
 
 
 ########################################
@@ -1012,6 +1013,7 @@ NeMoGymChatCompletionOutputMessage: TypeAlias = Annotated[
 
 class NeMoGymChoice(Choice):
     message: NeMoGymChatCompletionOutputMessage
+    native_finish_reason: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class NeMoGymChatCompletion(ChatCompletion):
