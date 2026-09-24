@@ -503,6 +503,20 @@ class TestCLISetupCommandRunCommand:
         assert popen.call_args.kwargs["stdout"] == "isolated stdout"
         assert popen.call_args.kwargs["stderr"] == "isolated stderr"
 
+    def test_extra_env_passed_to_process_environment(self, monkeypatch: MonkeyPatch) -> None:
+        Popen_mock, _ = self._setup(monkeypatch)
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+            extra_env={"SECRET_KEY": "supersecret", "NEMO_GYM_CONFIG_PATH": "my_path"},
+        )
+
+        env = Popen_mock.call_args.kwargs["env"]
+        assert env["SECRET_KEY"] == "supersecret"
+        assert env["NEMO_GYM_CONFIG_PATH"] == "my_path"
+        assert env["PYTHONPATH"] == "/my path"
+
 
 class TestGetNemoGymInstallFlags:
     """Test _get_nemo_gym_install_flags helper function."""

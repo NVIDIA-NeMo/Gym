@@ -312,6 +312,72 @@ class TestRunHelperDryRunSpinup:
             runner.wait_for_dry_run_spinup()
 
 
+class TestRunHelperLaunchEnvironment:
+    """RunHelper.run must pass config dict and path via process environment rather than command line."""
+
+    def test_secrets_passed_in_env_not_command_line(self, monkeypatch: MonkeyPatch) -> None:
+        from nemo_gym.global_config import (
+            NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+            NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+        )
+
+        cfg = OmegaConf.create(
+            {
+                "dry_run": True,
+                "verbose": False,
+                "test_server": {
+                    "resources_servers": {
+                        "dummy": {
+                            "entrypoint": "app.py",
+                            "domain": "other",
+                            "host": "127.0.0.1",
+                            "port": 8000,
+                            "secret_token": "sk-super-secret-12345",
+                        }
+                    }
+                },
+            }
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **kwargs: cfg)
+        monkeypatch.setattr(nemo_gym.cli.env, "configure_telemetry_env", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "init_telemetry", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", MagicMock())
+        mock_head_instance = MagicMock()
+        monkeypatch.setattr(
+            nemo_gym.cli.env.HeadServer,
+            "run_webserver",
+            MagicMock(return_value=(MagicMock(), MagicMock(), mock_head_instance)),
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "_resolve_server_dir", lambda p: Path("/mock/server/dir"))
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *args: "echo setup")
+        mock_client = MagicMock()
+        mock_client.poll_for_status.return_value = "success"
+        monkeypatch.setattr(nemo_gym.cli.env, "ServerClient", MagicMock(return_value=mock_client))
+
+        captured_calls = []
+
+        def mock_run_command(cmd, dir_path, server_name="", extra_env=None, **kwargs):
+            mock_proc = MagicMock()
+            mock_proc.pid = 12345
+            captured_calls.append((cmd, extra_env))
+            return mock_proc
+
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", mock_run_command)
+        runner = RunHelper()
+        runner.wait_for_dry_run_spinup = MagicMock()
+        runner.start(MagicMock())
+
+        assert len(captured_calls) == 1
+        cmd, extra_env = captured_calls[0]
+        # Command line must NOT contain the sensitive config dict or secret token
+        assert "NEMO_GYM_CONFIG_DICT=" not in cmd
+        assert "sk-super-secret-12345" not in cmd
+        # Process environment block MUST contain the config dict with the secret
+        assert extra_env is not None
+        assert "sk-super-secret-12345" in extra_env[NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME]
+        assert extra_env[NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME] == "test_server"
+
+
 class TestRunHelperServerReadiness:
     def test_marks_head_ready_only_after_servers_and_model_endpoints(self) -> None:
         runner = RunHelper()
