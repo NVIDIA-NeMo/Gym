@@ -477,6 +477,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     bash_timeout: Optional[int] = Field(default=None, gt=0)
     extra_args: list[str] = []
     models_config: dict[str, Any] = Field(default_factory=dict)
+    # Merged over the default ~/.pi/agent/settings.json, e.g. {"httpIdleTimeoutMs": 0}
+    settings: dict[str, Any] = Field(default_factory=dict)
     context_window: int = 262144
     max_output_tokens: int = 131072
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
@@ -921,6 +923,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             "compaction": {"enabled": self.config.auto_compaction},
             "httpIdleTimeoutMs": timeout_ms,
             "retry": {"provider": {"timeoutMs": timeout_ms}},
+            **self.config.settings,
         }
 
     def _build_models_config(self, rollout_id: Optional[str] = None) -> dict[str, Any]:
