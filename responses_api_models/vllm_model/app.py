@@ -841,6 +841,12 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
         client = self._resolve_client(request)
+        # Rank-affine routing downstream: expose the Gym session (one per rollout)
+        # as the backend's canonical conversation id so a disaggregated server can
+        # pin every turn of a conversation to the ADP rank holding its prefix.
+        _session_id = request.session.get(SESSION_ID_KEY)
+        if _session_id and not body_dict.get("conversation_params"):
+            body_dict["conversation_params"] = {"conversation_id": str(_session_id)}
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
