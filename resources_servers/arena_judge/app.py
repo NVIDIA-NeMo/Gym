@@ -12,10 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Arena Hard v2 pairwise LLM-judge resources server.
+"""Arena Hard pairwise judging and optional reference-free rubric evaluation.
 
-Implements the upstream [arena-hard-auto](https://github.com/lmarena/arena-hard-auto)
-judging protocol:
+By default implements the upstream [arena-hard-auto](https://github.com/lmarena/arena-hard-auto)
+pairwise judging protocol:
 
 1. Candidate answer is judged against a per-task ``baseline_answer`` with
    a category-specific system+user prompt (``hard_prompt`` →
@@ -31,6 +31,10 @@ bootstrap 95% CI over pooled pairwise battles, per arena-hard-auto's
 ``show_result.py``) is computed in ``compute_metrics`` on top of the
 per-task verdict collation. Per-category breakdowns are emitted for any
 ``category`` field observed on the input rows.
+
+Optional pointwise mode evaluates one answer on four 0–4 rubric dimensions
+without a baseline and reports custom 0–100 scores, including per-language
+means. These scores are not Arena-Elo win rates.
 """
 
 from __future__ import annotations
@@ -41,11 +45,12 @@ import logging
 import math
 import re
 from collections import defaultdict
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional
 
 import numpy as np
 import pandas as pd
-from pydantic import ConfigDict, Field
+from fastapi import HTTPException
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sklearn.linear_model import LogisticRegression
 
 from nemo_gym.base_resources_server import (
@@ -85,6 +90,21 @@ _VALID_VERDICTS: ClassVar = ("A>>B", "A>B", "A=B", "B>A", "B>>A")
 # arena-hard-auto's ``WEIGHT=3``: an A>>B verdict contributes 3 battles).
 _STRICT_WEIGHT = 3
 
+_POINTWISE_DIMENSIONS = ("correctness", "relevance", "completeness", "language_quality")
+RubricScore = Annotated[int, Field(strict=True, ge=0, le=4)]
+
+
+class PointwiseJudgement(BaseModel):
+    """Strict reference-free rubric output; each dimension is an integer from 0 to 4."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    correctness: RubricScore
+    relevance: RubricScore
+    completeness: RubricScore
+    language_quality: RubricScore
+    explanation: str = Field(min_length=1)
+
 
 def sanitize_generation(generation: str) -> str:
     """Drop UTF-8 surrogate halves and null bytes that break OpenAI-compatible judges.
@@ -100,7 +120,10 @@ def sanitize_generation(generation: str) -> str:
 
 
 class ArenaJudgeConfig(BaseResourcesServerConfig):
-    """Arena Hard v2 pairwise-judge server config."""
+    """Select standard pairwise Arena Hard or custom reference-free pointwise scoring."""
+
+    evaluation_mode: Literal["pairwise", "pointwise"] = "pairwise"
+    pointwise_prompt_path: str = "resources_servers/arena_judge/prompts/pointwise.yaml"
 
     judge_model_server: ModelServerRef
     # The judge is called via /v1/chat/completions; this is the endpoint
@@ -174,15 +197,23 @@ class ArenaJudgeVerifyResponse(BaseVerifyResponse):
     # True if the gen-base judge call produced no parseable verdict.
     invalid_gen_base: bool = False
     invalid_base_gen: bool = False
+    evaluation_mode: Literal["pairwise", "pointwise"] = "pairwise"
+    judgement_pointwise: Optional[str] = None
+    pointwise_scores: Optional[Dict[str, int]] = None
+    pointwise_score: Optional[float] = None
+    invalid_pointwise: bool = False
 
 
 class ArenaJudgeServer(SimpleResourcesServer):
-    """Pairwise LLM-judge server for arena-hard-v2."""
+    """Configurable pairwise and reference-free judging for Arena Hard prompts."""
 
     config: ArenaJudgeConfig
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
+        if self.config.evaluation_mode == "pointwise":
+            self._pointwise_prompt = load_prompt_config(self.config.pointwise_prompt_path)
+            return
         # Eagerly load + validate both category prompts at startup so
         # misconfiguration surfaces before any rollouts are dispatched.
         self._prompts: Dict[str, PromptConfig] = {
@@ -208,6 +239,13 @@ class ArenaJudgeServer(SimpleResourcesServer):
         if self.config.sanitize_generations:
             candidate_answer = sanitize_generation(candidate_answer)
             baseline_answer = sanitize_generation(baseline_answer)
+        if self.config.evaluation_mode == "pointwise":
+            return await self._verify_pointwise(body, question, candidate_answer)
+        if not baseline_answer.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="Pairwise Arena Hard requires a nonempty baseline_answer. Supply a baseline or use pointwise mode.",
+            )
         category = body.category or self.config.default_category
         if category not in self._prompts:
             logger.warning(
@@ -235,6 +273,7 @@ class ArenaJudgeServer(SimpleResourcesServer):
         # (post-fallback) isn't a duplicate kwarg to the response constructor.
         body_dict = body.model_dump()
         body_dict.pop("category", None)
+        body_dict.pop("evaluation_mode", None)
 
         # Per-rollout binary reward from the gen-base direction.
         # Candidate wins (reward=1.0) if it strictly beats the baseline in
@@ -243,6 +282,7 @@ class ArenaJudgeServer(SimpleResourcesServer):
 
         return ArenaJudgeVerifyResponse(
             **body_dict,
+            evaluation_mode="pairwise",
             reward=reward,
             judgement_gen_base=gen_base_text,
             judgement_base_gen=base_gen_text,
@@ -252,6 +292,41 @@ class ArenaJudgeServer(SimpleResourcesServer):
             invalid_gen_base=gen_base_verdict is None,
             invalid_base_gen=base_gen_verdict is None,
         )
+
+    async def _verify_pointwise(
+        self, body: ArenaJudgeVerifyRequest, question: str, candidate_answer: str
+    ) -> ArenaJudgeVerifyResponse:
+        # An empty generation is a valid zero, distinct from a malformed judge response.
+        if not candidate_answer.strip():
+            text = "Empty candidate answer; assigned zero without a judge call."
+            scores = dict.fromkeys(_POINTWISE_DIMENSIONS, 0)
+        else:
+            text = await self._judge_text(self._pointwise_prompt, {"question": question, "answer": candidate_answer})
+            parsed = self._parse_pointwise(text)
+            scores = {name: getattr(parsed, name) for name in _POINTWISE_DIMENSIONS} if parsed is not None else None
+        score = 100.0 * sum(scores.values()) / 16.0 if scores is not None else None
+        return ArenaJudgeVerifyResponse.model_validate(
+            body.model_dump()
+            | {
+                "evaluation_mode": "pointwise",
+                "reward": score / 100.0 if score is not None else 0.0,
+                "judgement_pointwise": text,
+                "pointwise_scores": scores,
+                "pointwise_score": score,
+                "invalid_pointwise": scores is None,
+            }
+        )
+
+    @staticmethod
+    def _parse_pointwise(text: str) -> Optional[PointwiseJudgement]:
+        text = text.strip()
+        fenced = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", text, flags=re.DOTALL)
+        if fenced:
+            text = fenced.group(1)
+        try:
+            return PointwiseJudgement.model_validate_json(text)
+        except ValidationError:
+            return None
 
     # ------------------------------------------------------------------
     # Judge dispatch
@@ -267,9 +342,12 @@ class ArenaJudgeServer(SimpleResourcesServer):
         answer. A successful call with no parseable label yields (text, None), the
         existing "invalid verdict" outcome.
         """
-        prompt = self._prompts[category]
-        fill = {"question": question, "answer_1": answer_1, "answer_2": answer_2}
+        text = await self._judge_text(
+            self._prompts[category], {"question": question, "answer_1": answer_1, "answer_2": answer_2}
+        )
+        return text, self._parse_verdict(text)
 
+    async def _judge_text(self, prompt: PromptConfig, fill: Dict[str, str]) -> str:
         messages: List[Dict[str, str]] = []
         if prompt.system is not None:
             messages.append({"role": "system", "content": prompt.system.format_map(fill)})
@@ -286,8 +364,7 @@ class ArenaJudgeServer(SimpleResourcesServer):
             response_model=NeMoGymChatCompletion,
         )
         text = self._extract_chat_completion_text(judge_response)
-        verdict = self._parse_verdict(text)
-        return text, verdict
+        return text
 
     # ------------------------------------------------------------------
     # Verdict / response helpers
@@ -366,6 +443,16 @@ class ArenaJudgeServer(SimpleResourcesServer):
         }
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        if self.config.evaluation_mode == "pointwise":
+            metrics = {f"pointwise/{key}": value for key, value in self._pointwise_metrics(tasks).items()}
+            languages: Dict[str, List[List[Dict[str, Any]]]] = defaultdict(list)
+            for task in tasks:
+                if task and task[0].get("language"):
+                    languages[task[0]["language"]].append(task)
+            for language, language_tasks in languages.items():
+                for key, value in self._pointwise_metrics(language_tasks).items():
+                    metrics[f"pointwise/language/{language}/{key}"] = value
+            return metrics
         metrics = compute_pass_majority_metrics(
             tasks,
             score_fn=self._arena_score_fn,
@@ -386,11 +473,38 @@ class ArenaJudgeServer(SimpleResourcesServer):
         metrics.update(self._compute_arena_elo_metrics(tasks))
         return metrics
 
+    @staticmethod
+    def _pointwise_metrics(tasks: List[List[Dict[str, Any]]]) -> Dict[str, float]:
+        # Average repeats within each task before averaging tasks. Invalid judge
+        # outputs are excluded from rubric means and counted explicitly.
+        task_scores: List[float] = []
+        dimensions: Dict[str, List[float]] = {name: [] for name in _POINTWISE_DIMENSIONS}
+        valid_count = invalid_count = 0
+        for task in tasks:
+            valid = [r for r in task if not r.get("invalid_pointwise", False) and r.get("pointwise_score") is not None]
+            valid_count += len(valid)
+            invalid_count += len(task) - len(valid)
+            if not valid:
+                continue
+            task_scores.append(float(np.mean([r["pointwise_score"] for r in valid])))
+            for name in dimensions:
+                dimensions[name].append(float(np.mean([r["pointwise_scores"][name] for r in valid])))
+        return {
+            "score": float(np.mean(task_scores)) if task_scores else float("nan"),
+            "valid_scores": valid_count,
+            "invalid_scores": invalid_count,
+            "scored_tasks": len(task_scores),
+            **{name: float(np.mean(values)) if values else float("nan") for name, values in dimensions.items()},
+        }
+
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         key: Dict[str, Any] = {}
         for name in ("mean/input_tokens", "mean/output_tokens"):
             if name in agent_metrics:
                 key[name] = agent_metrics[name]
+        if self.config.evaluation_mode == "pointwise":
+            key.update({name: value for name, value in agent_metrics.items() if name.startswith("pointwise/")})
+            return key
         # Arena-Elo is the headline for this benchmark.
         for name in ("arena_elo/score", "arena_elo/ci_lower", "arena_elo/ci_upper", "arena_elo/invalid_scores"):
             if name in agent_metrics:

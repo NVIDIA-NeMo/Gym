@@ -20,6 +20,26 @@ all translation-review fields are preserved. The full language name is retained
 as `language_name`; `language` and `subset_for_metrics` hold the language code.
 Every task uses the standard `hard_prompt` judge category.
 
+## Evaluation modes
+
+Set `arena_judge_mode` in the benchmark config, or override it with
+`++arena_judge_mode=pointwise` when starting an evaluation:
+
+- `pairwise` (default): the English Arena Hard protocol, comparing against saved
+  baseline answers with swapped positions and reporting Arena-Elo. Missing or blank
+  baselines are rejected before calling the judge.
+- `pointwise`: custom evaluation of one answer without any baseline. One judge call
+  rates correctness, relevance, completeness, and language quality from 0 to 4 each.
+  `pointwise/score` is their equally weighted average, rescaled to 0–100;
+  rollout `reward` is that score divided by 100. This is not an Arena Hard win rate.
+
+Pointwise metrics average repeats within each task, then average tasks. They also
+include `pointwise/language/<code>/score` and each dimension's mean on its 0–4 scale.
+An empty candidate answer scores zero without a judge call. Malformed judge output
+gets reward zero and `invalid_pointwise: true`; it is excluded from rubric means and
+counted in `pointwise/invalid_scores`. Check that count alongside the score. Failed
+judge API calls go to Gym's failures sidecar rather than being scored as answers.
+
 Data is read from a local download or downloaded at runtime; generated JSONL is
 ignored by Git. Pass `--dataset-dir` to the downloaded dataset repository containing
 `data/<language>/test.parquet` to prepare entirely offline, without a token.
@@ -44,8 +64,8 @@ The baseline JSONL format is:
 Rows are joined by `(language, row_id)`. Missing, duplicate, and empty baseline
 answers fail preparation before replacing the output. Without `--baseline-file`,
 preparation warns and emits empty `baseline_answer` values, matching the existing
-multilingual Arena Hard preparation workflow. That output is only for prompt
-inspection or generation; do not use it to report pairwise benchmark scores.
+multilingual Arena Hard preparation workflow. That output can be used for pointwise
+evaluation or prompt generation; pairwise scoring still requires baseline answers.
 
 ## Usage
 
@@ -85,14 +105,49 @@ Omit `--languages` to prepare every configuration, including English, with a
 complete baseline file. Use `--languages en` for the dataset's English control.
 Re-running preparation without baselines replaces the output with prompts only.
 
+## Gemini pointwise run
+
+[`gemini_pointwise.yaml`](gemini_pointwise.yaml) configures
+`https://inference-api.nvidia.com/v1` and `gcp/google/gemini-3.8-flash` as both the
+candidate and judge for a smoke run. The `inference_provider` adapter sends candidate
+requests to Chat Completions, matching this endpoint. Judge calls use the same API.
+Set `ARENA_JUDGE_MODEL` to use another judge model on this endpoint; scoring with the
+same model as candidate and judge should be treated as a self-evaluation smoke test.
+
+From the repository root, after activating the Gym environment:
+
+```bash
+# Enter a valid key interactively; it stays out of shell history and config files.
+read -rsp 'NVIDIA API key: ' NVIDIA_API_KEY
+export NVIDIA_API_KEY
+
+# Prepare one language from the local download, without baseline answers.
+python benchmarks/indic_arena_hard/prepare.py \
+    --dataset-dir "$DATASET_DIR" --languages hi
+
+# Three-task smoke run; Gym starts and shuts down the required servers.
+gym eval run \
+    --config benchmarks/indic_arena_hard/gemini_pointwise.yaml \
+    --agent indic_arena_hard_arena_judge_simple_agent \
+    --input benchmarks/indic_arena_hard/data/indic_arena_hard_benchmark.jsonl \
+    --output results/indic_arena_hard_gemini_pointwise.jsonl \
+    --prompt-config benchmarks/prompts/generic/default.yaml \
+    --limit 3 --num-repeats 1 --concurrency 1 --max-output-tokens 4096
+```
+
+Both candidate and judge default to a 4,096-token output limit. The CLI flag above
+changes the candidate limit; the judge limit is
+`judge_chat_completions_create_params.max_tokens` on the resources server.
+Remove `--limit 3` to evaluate the entire prepared split after inspecting smoke results.
+
 ## Metrics and validation status
 
-The shared [Arena judge](../../resources_servers/arena_judge/README.md) reports
+In pairwise mode the shared [Arena judge](../../resources_servers/arena_judge/README.md) reports
 `arena_elo/score`, bootstrap confidence bounds, invalid verdict counts, and
 win/tie/loss decompositions. It currently aggregates Arena-Elo by category,
 not language. Prepare and evaluate each language separately for per-language
 scores. Scores for this dataset are not directly comparable to the original
 500-question English benchmark because the prompts and baselines differ.
 
-This integration is experimental and inherits `verified: false`; model baselining
-requires language-specific baseline answers and configured policy/judge endpoints.
+This integration is experimental and inherits `verified: false`. Both modes require
+configured policy/judge endpoints; only pairwise mode requires baseline answers.

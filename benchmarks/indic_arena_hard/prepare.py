@@ -54,8 +54,8 @@ def prepare(
     """Load local or pinned HF test splits, optionally join baselines, and write Gym JSONL.
 
     By default include all language configurations, including English. Without a
-    baseline file the output is for prompt inspection/generation only, as in
-    m_arena_hard. Baseline rows must contain language (code), row_id, generation.
+    baseline file the output supports pointwise scoring or prompt generation;
+    pairwise scoring requires baselines. Baseline rows contain language, row_id, generation.
     dataset_dir points to a downloaded repository with data/<language>/test.parquet;
     when supplied, preparation reads those files without accessing the Hub.
     """
@@ -77,7 +77,7 @@ def prepare(
     if baselines is None:
         warnings.warn(
             "No baseline file supplied: baseline_answer will be empty. "
-            "Use --baseline-file before running pairwise judging; these rows are for prompt inspection/generation only.",
+            "Use pointwise mode for reference-free scoring, or --baseline-file before running pairwise judging.",
             stacklevel=2,
         )
 
@@ -118,7 +118,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--languages", nargs="+", help="HF language configs to include (default: all, including en).")
     parser.add_argument(
-        "--baseline-file", help="JSONL with language (code), row_id, generation; required for meaningful judging."
+        "--baseline-file", help="JSONL with language (code), row_id, generation; required for pairwise judging."
     )
     parser.add_argument("--dataset-dir", help="Local dataset repository containing data/<language>/test.parquet.")
     args = parser.parse_args()

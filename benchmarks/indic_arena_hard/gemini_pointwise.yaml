@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Smoke-test preset: Gemini generates and judges via the NVIDIA chat endpoint.
+config_paths:
+  - benchmarks/indic_arena_hard/config.yaml
+  - responses_api_models/inference_provider/configs/inference_provider.yaml
+
+arena_judge_mode: pointwise
+policy_base_url: https://inference-api.nvidia.com/v1
+policy_api_key: ${oc.env:NVIDIA_API_KEY,MISSING}
+policy_model_name: gcp/google/gemini-3.8-flash
+
+# The provider adapter converts Gym Responses requests to Chat Completions.
+policy_model:
+  responses_api_models:
+    inference_provider:
+      num_concurrent_requests: 2
+
+arena_judge_judge_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: ${policy_base_url}
+      openai_api_key: ${oc.env:NVIDIA_API_KEY,MISSING}
+      openai_model: ${oc.env:ARENA_JUDGE_MODEL,gcp/google/gemini-3.8-flash}
+      max_http_attempts: 1
+      max_concurrent_requests: 2
+
+responses_create_params:
+  max_output_tokens: 4096
+  temperature: 0.0

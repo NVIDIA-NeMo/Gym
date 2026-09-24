@@ -26,7 +26,7 @@ class TaskData(BaseModel):
     )
     baseline_answer: Optional[str] = Field(
         default=None,
-        description="The frozen baseline model's answer the candidate is judged against (both A/B orderings).",
+        description="Frozen reference answer, required in pairwise mode and unused in pointwise mode.",
         json_schema_extra={"consumed_by": ["verify"]},
     )
     category: Optional[str] = Field(

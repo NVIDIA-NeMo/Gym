@@ -6,6 +6,9 @@ protocol: two judge calls per rollout with swapped answer positions,
 category-specific prompts, and an Arena-Elo score (MLE logistic
 regression + 100-round bootstrap 95% CI) as the headline metric.
 
+Set `evaluation_mode: pointwise` for an optional custom reference-free rubric.
+The default remains `pairwise`; pointwise scores are not Arena-Elo scores.
+
 ## What it does
 
 For each rollout, the server makes **two** judge calls to control for
@@ -38,12 +41,16 @@ Each JSONL row must carry the following top-level fields (pydantic
 `extra="allow"` flows them through):
 
 - `question` — the user prompt sent to the candidate model
-- `baseline_answer` — reference answer to compare against
+- `baseline_answer` — nonempty reference answer required for pairwise mode;
+  optional and unused in pointwise mode
 - `category` — one of `hard_prompt` / `creative_writing` (rows without
   one fall back to `default_category` in the config)
 - `uid` — arena-hard-auto problem id (optional)
 
 ## Example usage
+
+Pairwise requests with missing or blank baselines return HTTP 422 before any judge
+call. To evaluate without references, explicitly select pointwise mode.
 
 ```bash
 # Running servers
@@ -76,6 +83,23 @@ supported path across OpenAI-compatible providers for a simple
 text-verdict judge.
 
 ## Metrics
+
+In `pointwise` mode, the server loads [`prompts/pointwise.yaml`](prompts/pointwise.yaml)
+(override via `pointwise_prompt_path`) and makes one judge call per nonempty answer.
+The rubric gives correctness, relevance, completeness, and language quality integer
+scores from 0 to 4. Each dimension has equal weight. The response includes
+`judgement_pointwise`, `pointwise_scores`, `pointwise_score` (0–100),
+`evaluation_mode`, and `invalid_pointwise`; `reward` is the score normalized to 0–1.
+An empty answer receives zero without a judge call. Invalid JSON or missing/out-of-range
+dimensions yield reward zero and are counted but excluded from aggregate rubric means.
+
+Pointwise aggregation reports `pointwise/score`, `pointwise/valid_scores`,
+`pointwise/invalid_scores`, `pointwise/scored_tasks`, dimension means (0–4), and
+`pointwise/language/<language>/...` when language metadata is present. Repeats are
+averaged per task before averaging tasks. No Arena-Elo or pass@k metrics are emitted
+by this scoring mode; if no valid scores exist the rubric means are unavailable (NaN).
+
+In default `pairwise` mode:
 
 `compute_metrics()` emits:
 
