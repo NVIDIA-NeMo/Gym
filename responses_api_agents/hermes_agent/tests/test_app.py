@@ -37,12 +37,15 @@ from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.sandbox import SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_utils import ServerClient
+from responses_api_agents.hermes_agent import app as hermes_module
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
     HermesAgentConfig,
     HermesAgentRunRequest,
     ModelServerRef,
     ResourcesServerRef,
+    _download_uv,
+    _host_uv_version,
     _split_input_to_user_and_history,
     _trajectory_to_output_items,
 )
@@ -128,7 +131,8 @@ class TestSanity:
         assert state.sandbox is sandbox
         assert state.workdir == "/app"
         assert state.session_dir.endswith("/session")
-        assert sandbox.exec.await_count == 2
+        # uname probe, mkdir, install
+        assert sandbox.exec.await_count == 3
         assert sandbox.upload.await_count == 3
 
     async def test_missing_sandbox_access_uses_configured_fallback(self, monkeypatch) -> None:
@@ -699,3 +703,83 @@ class TestObservability:
                     rollout_id="rid",
                 )
             )
+
+
+class TestSandboxUv:
+    """The uploaded uv must match the sandbox's architecture, not the agent host's."""
+
+    @staticmethod
+    def _sandbox(arch: str) -> AsyncMock:
+        sandbox = AsyncMock()
+        sandbox.exec.return_value = MagicMock(return_code=0, stdout=f"{arch}\n", stderr="")
+        return sandbox
+
+    async def test_same_architecture_uses_host_uv(self, monkeypatch, tmp_path) -> None:
+        hermes = HermesAgent(config=_config(uv_cache_dir=str(tmp_path)), server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(hermes_module.shutil, "which", lambda name: "/usr/bin/uv")
+        monkeypatch.setattr(hermes_module.platform, "machine", lambda: "aarch64")
+
+        assert await hermes._uv_for_sandbox(self._sandbox("aarch64"), "/app") == hermes_module.Path("/usr/bin/uv")
+        assert not any(tmp_path.iterdir())
+
+    async def test_other_architecture_downloads_matching_build_once(self, monkeypatch, tmp_path) -> None:
+        hermes = HermesAgent(config=_config(uv_cache_dir=str(tmp_path)), server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(hermes_module.shutil, "which", lambda name: "/usr/bin/uv")
+        monkeypatch.setattr(hermes_module.platform, "machine", lambda: "aarch64")
+        monkeypatch.setattr(hermes_module, "_host_uv_version", lambda uv: "0.12.3")
+        downloads: list[tuple[str, str]] = []
+
+        def fake_download(version, target, destination):
+            downloads.append((version, target))
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"uv")
+
+        monkeypatch.setattr(hermes_module, "_download_uv", fake_download)
+
+        first = await hermes._uv_for_sandbox(self._sandbox("x86_64"), "/app")
+        second = await hermes._uv_for_sandbox(self._sandbox("x86_64"), "/app")
+
+        assert first == second == tmp_path / "0.12.3" / "x86_64-unknown-linux-gnu" / "uv"
+        assert downloads == [("0.12.3", "x86_64-unknown-linux-gnu")]
+
+    async def test_unknown_architecture_is_an_error(self, monkeypatch, tmp_path) -> None:
+        hermes = HermesAgent(config=_config(uv_cache_dir=str(tmp_path)), server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(hermes_module.shutil, "which", lambda name: "/usr/bin/uv")
+        monkeypatch.setattr(hermes_module.platform, "machine", lambda: "aarch64")
+        with pytest.raises(RuntimeError, match="No uv build"):
+            await hermes._uv_for_sandbox(self._sandbox("riscv64"), "/app")
+
+    async def test_missing_host_uv_is_an_error(self, monkeypatch) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(hermes_module.shutil, "which", lambda name: None)
+        with pytest.raises(RuntimeError, match="requires uv"):
+            await hermes._uv_for_sandbox(self._sandbox("x86_64"), "/app")
+
+    def test_host_uv_version_parses(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            hermes_module.subprocess,
+            "run",
+            lambda *a, **k: SimpleNamespace(stdout="uv 0.12.3 (aarch64-unknown-linux-gnu)\n"),
+        )
+        assert _host_uv_version("/usr/bin/uv") == "0.12.3"
+        monkeypatch.setattr(hermes_module.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="nope"))
+        with pytest.raises(RuntimeError, match="Unexpected uv version"):
+            _host_uv_version("/usr/bin/uv")
+
+    def test_download_uv_extracts_binary(self, monkeypatch, tmp_path) -> None:
+        import tarfile
+
+        release_dir = tmp_path / "0.12.3"
+        release_dir.mkdir()
+        archive = release_dir / "uv-x86_64-unknown-linux-gnu.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            binary = tmp_path / "uv"
+            binary.write_bytes(b"#!/bin/sh\necho uv\n")
+            tar.add(binary, arcname="uv-x86_64-unknown-linux-gnu/uv")
+        monkeypatch.setattr(hermes_module, "_UV_RELEASE_URL", tmp_path.as_uri() + "/{version}/uv-{target}.tar.gz")
+        destination = tmp_path / "cache" / "0.12.3" / "x86_64-unknown-linux-gnu" / "uv"
+
+        _download_uv("0.12.3", "x86_64-unknown-linux-gnu", destination)
+
+        assert destination.read_bytes().startswith(b"#!/bin/sh")
+        assert destination.stat().st_mode & 0o111
