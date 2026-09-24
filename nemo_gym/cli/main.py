@@ -644,6 +644,26 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
         sys.exit(1)
 
 
+def _register_intake_target(parser: argparse.ArgumentParser) -> None:
+    """Either submit a rundir or ask after one already submitted, never both."""
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--lustre",
+        metavar="CLUSTER:PATH",
+        help="Rundir on shared storage the service reads itself; no bytes leave this machine.",
+    )
+    group.add_argument("--status", metavar="ID", help="Report on an earlier submission's job id and exit.")
+
+
+def _eval_intake(args: argparse.Namespace, overrides: list[str]) -> None:
+    # `--json` is the only flag routed through Hydra; the rest are read off `args`.
+    if overrides != (["+json=true"] if getattr(args, "json", False) else []):
+        args._parser.error("intake does not accept Hydra overrides")
+    from nemo_gym.cli.intake import intake
+
+    intake(args)
+
+
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
@@ -1208,6 +1228,41 @@ COMMANDS = {
                     help="Emit the submission record (or, with --resolve-only, the resolved config) as JSON.",
                 ),
             ),
+        ),
+    ),
+    "eval intake": Command(
+        target=_eval_intake,
+        summary="Submit a finished rundir to a benchmark-run data layer for intake.",
+        flags=(
+            Flag(register=_register_intake_target),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--base-url",
+                    metavar="URL",
+                    help="Data layer base URL (default: $NEMO_GYM_INTAKE_BASE_URL).",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--label", metavar="NAME", help="Name the run is filed under (default: the rundir's own name)."
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--no-wait",
+                    action="store_true",
+                    help="Return once the request is durable, without waiting for the parse to finish.",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--timeout",
+                    type=float,
+                    metavar="SECONDS",
+                    help="How long to wait for the parse, in seconds (default: 1800).",
+                )
+            ),
+            JSON,
         ),
     ),
     "eval compare": Command(
