@@ -213,6 +213,38 @@ history_policy:
   params: {low_water: 3, high_water: 10}
 ```
 
+An opt-in sink window keeps the earliest screenshots alongside the recent
+window; intervening turns remain text in chronological order:
+
+```yaml
+history_policy:
+  name: sink_window
+  params: {sink: 1, low_water: 4, high_water: 4}
+```
+
+Here the four live images include one sink image and three recent images.
+Equal watermarks produce a sliding window. Setting `low_water: 3` and
+`high_water: 10` instead accumulates up to ten images and compacts back to
+three, including the sink. The low watermark must exceed `sink` to leave
+room for the current observation. Existing fixed/hysteresis policy identities
+and normal-path prompt rendering remain unchanged; selecting a sink is an
+intentional recipe change, not a default or a guaranteed score improvement.
+
+`snapshot_image_intervals` records the selected half-open turn intervals.
+For non-contiguous plans, consumers must use these intervals or per-turn
+decisions, not the legacy scalar `image_window_start` accessor. The telemetry
+field `snapshot_window_start` describes the trailing interval.
+
+On a context-length rejection, the adapter can shrink the recent-image window
+within its existing retry budget, preserving the sink and current observation.
+It stops when no smaller valid image set exists. Each actual shrink is recorded
+in `prompt_shrink_events`, including on recovered steps; this recovery can
+change outcomes relative to the previous unchanged-request retries. Normal
+parse failures do not trigger shrinking, and model deadlines propagate to the
+runner without parser retries. The adapter reports specific failure kinds and
+the terminal attempt's completion fact; runner/runtime admission still owns
+masking, and the evaluator still owns reward.
+
 `agent_contract_parity_mode: strict` is the default. It resolves the training
 and evaluation profiles at startup and refuses to start if their model
 protocol, history policy, or other Gym-owned adapter options differ. To run an
