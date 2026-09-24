@@ -626,7 +626,7 @@ class TestGenRMCompareResourcesServer:
         assert duplicate.reward == 1.0
         run_compare.assert_awaited_once()
         cohort = next(iter(server._verify_cohorts.values()))
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
     async def test_new_group_attempt_is_isolated_from_completed_cohort(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -722,7 +722,7 @@ class TestGenRMCompareResourcesServer:
         assert "superseded by attempt 1" in str(old_result[0].detail)
         old_cohort = next(cohort for cohort in server._verify_cohorts.values() if cohort.group_attempt == 0)
         assert old_cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in old_cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in old_cohort.members.values())
 
     async def test_late_older_group_attempt_is_rejected(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -855,7 +855,7 @@ class TestGenRMCompareResourcesServer:
         assert server._verify_cohorts[cohort.key] is cohort
         assert cohort.phase == "failed"
         assert cohort.collection_timeout_task is None
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
     async def test_disconnected_waiter_does_not_retire_logical_cohort(self, config):
         config = config.model_copy(
@@ -875,7 +875,7 @@ class TestGenRMCompareResourcesServer:
 
         assert cohort.phase == "collecting"
         assert len(cohort.members) == 1
-        assert all(member.body is not None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is not None and not member.waiters for member in cohort.members.values())
 
     async def test_evaluation_failure_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -895,35 +895,46 @@ class TestGenRMCompareResourcesServer:
         )
         cohort = next(iter(server._verify_cohorts.values()))
         assert cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
-    async def test_input_materialization_failure_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
+    async def test_input_materialization_failure_releases_legacy_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
-        run_compare = AsyncMock()
+        run_compare = AsyncMock(return_value=([1.0, 2.0], {}, [], []))
         monkeypatch.setattr(server, "_run_compare", run_compare)
         monkeypatch.setattr(server, "_response_digest", lambda response: response.id)
+
+        first = asyncio.create_task(server.verify(self._verify_request(0, task_index=26)))
+        await asyncio.sleep(0)
+        cohort = next(iter(server._verify_cohorts.values()))
+        assert list(cohort.members) == [0]
+        assert len(cohort.members[0].waiters) == 1 and not first.done()
+        convert = server._comparison_response
 
         def fail_model_dump(*args, **kwargs):
             raise ValueError("response conversion failed")
 
-        monkeypatch.setattr(NeMoGymResponse, "model_dump", fail_model_dump)
-        results = await asyncio.gather(
-            server.verify(self._verify_request(0, task_index=26)),
-            server.verify(self._verify_request(1, task_index=26)),
-            return_exceptions=True,
-        )
-
-        assert all(
-            isinstance(result, HTTPException)
-            and result.status_code == 503
-            and "response conversion failed" in str(result.detail)
-            for result in results
-        )
+        monkeypatch.setattr(server, "_comparison_response", fail_model_dump)
+        with pytest.raises(HTTPException) as error:
+            await server.verify(self._verify_request(1, task_index=26))
+        assert error.value.status_code == 503 and "response conversion failed" in error.value.detail
+        with pytest.raises(HTTPException) as error:
+            await asyncio.wait_for(first, 0.5)
+        assert error.value.status_code == 503 and "fresh _ng_group_id" in error.value.detail
         run_compare.assert_not_awaited()
-        cohort = next(iter(server._verify_cohorts.values()))
-        assert cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert cohort.phase == "failed" and list(cohort.members) == [0]
+        assert cohort.collection_timeout_task is None
+        assert all(not member.waiters and member.response_obj is None for member in cohort.members.values())
+
+        monkeypatch.setattr(server, "_comparison_response", convert)
+        with pytest.raises(HTTPException) as error:
+            await server.verify(self._verify_request(1, task_index=26))
+        assert error.value.status_code == 503
+        recovered = await asyncio.gather(
+            *(server.verify(self._verify_request(i, task_index=26, group_id="fresh-conversion")) for i in range(2))
+        )
+        assert [result.reward for result in recovered] == [1.0, 2.0]
+        run_compare.assert_awaited_once()
 
     async def test_evaluation_cancellation_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -954,7 +965,7 @@ class TestGenRMCompareResourcesServer:
             for result in results
         )
         assert cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
     async def test_server_instances_do_not_share_cohorts(self, config):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})

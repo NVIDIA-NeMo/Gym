@@ -175,6 +175,69 @@ async def run(services, index, *, group="group", attempt=0):
     return result.status, await result.json()
 
 
+async def test_conversion_failure_releases_http_peer_and_requires_new_attempt(services, monkeypatch):
+    async def verify(index, *, attempt=0):
+        payload = member(index, attempt=attempt).model_dump(mode="json", by_alias=True)
+        payload["response"]["output"] = [
+            {
+                "id": f"message-{index}",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "4", "annotations": []}],
+            }
+        ]
+        result = await services.client.post(server_name="resource", url_path="/verify", json=payload)
+        return result.status, await result.json()
+
+    # These direct verify requests use fixed IDs, so fault injection targets one member.
+    original = services.resource._comparison_response
+    first = asyncio.create_task(verify(0))
+    await until(lambda: bool(services.resource._verify_cohorts))
+    cohort = next(iter(services.resource._verify_cohorts.values()))
+    assert list(cohort.members) == [0] and len(cohort.members[0].waiters) == 1
+
+    def fail_one(response):
+        if response.id == "answer-1":
+            raise ValueError("injected conversion failure")
+        return original(response)
+
+    monkeypatch.setattr(services.resource, "_comparison_response", fail_one)
+    status, body = await verify(1)
+    assert status == 503 and "injected conversion failure" in body["detail"]
+    peer_status, peer_body = await asyncio.wait_for(first, 0.5)
+    assert peer_status == 503 and "injected conversion failure" in peer_body["detail"]
+    assert cohort.phase == "failed" and all(not m.waiters for m in cohort.members.values())
+    assert services.resource._active_group_count == 0 and services.judge_calls == 0
+    monkeypatch.setattr(services.resource, "_comparison_response", original)
+    assert (await verify(1))[0] == 503
+    results = await asyncio.gather(*(verify(i, attempt=1) for i in range(4)))
+    assert all(status == 200 and body["reward"] == 3.0 for status, body in results)
+    assert services.judge_calls == 4
+
+
+async def test_judge_task_start_failure_releases_all_http_waiters(services, monkeypatch):
+    create_task = asyncio.create_task
+    failures = []
+
+    def fail_judging(coro, **kwargs):
+        if kwargs.get("name", "").startswith("genrm-cohort-evaluation"):
+            failures.append(kwargs["name"])
+            raise RuntimeError("injected task startup failure")
+        return create_task(coro, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_task", fail_judging)
+    results = await asyncio.gather(*(run(services, i) for i in range(4)))
+    # SimpleAgent translates the resources server's 503 into a failed /run (500).
+    for status, body in results:
+        assert status == 500 and "reward" not in body
+        assert "GenRM cohort task startup failed: RuntimeError: injected task startup failure" in body
+    assert len(failures) == 1 and services.judge_calls == 0
+    cohort = next(iter(services.resource._verify_cohorts.values()))
+    assert cohort.phase == "failed" and services.resource._active_group_count == 0
+    assert all(not member.waiters and member.response_obj is None for member in cohort.members.values())
+
+
 async def test_incomplete_run_fails_without_reward(services):
     services.resource.config.cohort_collection_timeout_s = 0.05
     status, body = await run(services, 0)
@@ -260,7 +323,7 @@ async def test_verify_disconnect_allows_exact_reattachment_over_tcp(services, du
     requests[0].cancel()
     await asyncio.gather(requests[0], return_exceptions=True)
     await until(lambda: not old.members[0].waiters)
-    assert old.phase in ("collecting", "evaluating") and old.members[0].body is not None
+    assert old.phase in ("collecting", "evaluating") and old.members[0].response_obj is not None
     requests[0] = asyncio.create_task(verify(0))
     requests += [asyncio.create_task(verify(i)) for i in range(count, 4)]
     services.judge_release.set()
@@ -495,6 +558,10 @@ async def test_transient_http_failure_recovers_without_regenerating_answers(serv
 
 @pytest.mark.parametrize("recovers", [True, False])
 async def test_interrupted_judge_body_retries_without_regenerating_answers(services, recovers):
+    # Allow Uvicorn to close the truncated response before the independent request
+    # deadline can win on a loaded runner. Keep both failure paths bounded.
+    services.resource.config.judge_request_timeout_s = 2.0
+    services.resource.config.cohort_evaluation_timeout_s = 10.0
     services.truncated_judge_responses = 1 if recovers else 100
     results = await asyncio.gather(*(run(services, i) for i in range(4)))
     assert services.policy_calls == 4
