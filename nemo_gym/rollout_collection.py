@@ -780,6 +780,19 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             "Useful for mean@k."
         ),
     )
+    idx: int = Field(default=0, ge=0, description="Zero-based input chunk to collect; requires idx < num_chunks.")
+    num_chunks: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Split the loaded input rows into contiguous chunks before repetition. The final chunk receives the "
+            "remainder. Every chunk run must use a distinct output_jsonl_fpath; sharing one can overwrite or mix "
+            "the rollout and derived artifacts. For one global aggregate, set disable_aggregation=true on every "
+            "chunk and combine the outputs with `gym eval aggregate`. Task and rollout identities match an "
+            "unchunked run."
+        ),
+    )
+
     num_repeats_add_seed: bool = Field(
         default=False,
         description='When num_repeats > 1, pass a per-rollout "seed" via metadata.extra_body (honored by vLLM model servers).',
@@ -796,6 +809,12 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=None,
         description="Run-level skills config (skills.path). Makes a directory of Agent Skills standard skills available to the agent at rollout time and stamps each result with a skills_ref. Applied to a skill-agnostic dataset; not a dataset-row field.",
     )
+
+    @model_validator(mode="after")
+    def _validate_chunk_index(self) -> "RolloutCollectionConfig":
+        if self.idx >= self.num_chunks:
+            raise ValueError("idx must be smaller than num_chunks")
+        return self
 
     @field_validator("num_repeats", mode="before")
     @classmethod
@@ -1091,7 +1110,12 @@ class RolloutCollectionHelper(BaseModel):
         agents_missing_from_num_repeats: set[str] = set()
         rows: List[Dict] = []
         overridden_agents: set[Tuple[str, str]] = set()
-        for row_idx, row_str, row in tqdm(raw_rows, desc="Preprocessing and repeating rows"):
+        chunk_size = len(raw_rows) // config.num_chunks
+        chunk_start = chunk_size * config.idx
+        chunk_end = chunk_size * (config.idx + 1) if config.idx < config.num_chunks - 1 else len(raw_rows)
+        for source_position, (row_idx, row_str, row) in enumerate(
+            tqdm(raw_rows, desc="Preprocessing and repeating rows")
+        ):
             # Routing basis: the name this row routes by — its agent_ref.name when present, else
             # its task_source (resolved to an agent by resolve_task_sources once the merged config
             # is in hand). agent_map[<basis>] > agent_map._default > row agent_ref > task_source.
@@ -1183,7 +1207,10 @@ class RolloutCollectionHelper(BaseModel):
                         extra_body["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
                         metadata["extra_body"] = json.dumps(extra_body)
 
-                    rows.append(row)
+                    # Advance identity counters for every source row, including other chunks, so
+                    # repeated identical rows keep the same rollout IDs and seeds across shards.
+                    if chunk_start <= source_position < chunk_end:
+                        rows.append(row)
 
         if overridden_agents:
             warnings.warn(
