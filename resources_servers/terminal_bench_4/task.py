@@ -280,7 +280,12 @@ class PackageLoader:
                 if actual != ref[7:]:
                     raise ValueError(f"Package content hash mismatch for {name}: expected {ref}, got sha256:{actual}")
                 task = await asyncio.to_thread(Task.read, target, name, ref)
-                task.stage_tests = True
+                # Match the verifier environment's prebuilt-image convention.
+                # Do not replace baked assets with the host's build context.
+                tests = task.path / "tests"
+                task.stage_tests = (
+                    not (tests / "Dockerfile").exists() and not (tests / "docker-compose.yaml").is_file()
+                )
                 return task
         if not re.fullmatch(r"terminal-bench/[a-z0-9][a-z0-9-]*", name) or not re.fullmatch(
             r"sha256:[a-f0-9]{64}", ref

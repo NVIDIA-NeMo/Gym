@@ -48,11 +48,16 @@ absolute host `path`. Names are used verbatim in this mode. Each package uses
 the same strict task schema and content-hash check as public packages; rows
 cannot supply arbitrary package paths. Shared-verifier tasks remain unsupported.
 
-Local packages stage their host-owned `tests/` tree into `/tests` in the fresh
-verifier, as root, after restoring the declared artifacts. They do not inject
-tests into the agent's working directory. The test command still runs as
-`verifier.user`; when absent, the existing image-default behavior is preserved.
-Images must support the requested identities and root setup operations.
+Local packages follow the verifier build-layout convention: `tests/Dockerfile`
+or `tests/docker-compose.yaml` means the verifier image already contains its
+tests, so the runner does not replace them with the host's build context. With
+neither file, it stages the host-owned `tests/` tree into `/tests` in the fresh
+verifier, as root, after restoring the declared artifacts. The agent's
+`environment/Dockerfile` does not control this decision. No additional dataset
+field or configuration flag is required. Tests are never injected into the
+agent's working directory. The test command still runs as `verifier.user`; when
+absent, the current image default is preserved. Images must support the requested
+identities and root setup operations.
 
 ### Task identities and root-default images
 
