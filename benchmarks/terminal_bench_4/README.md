@@ -4,9 +4,45 @@
 
 ## Profiles
 
+- `terminal_bench_4/miniswe_episode` and `terminal_bench_4/hermes_episode` run
+  through the shared single-agent environment server. Select either profile or
+  use `--agent` to substitute another agent that implements borrowed-sandbox
+  sessions. TB4 owns task provisioning, its pinned instruction, official grading,
+  expiry, and sandbox destruction; the harness owns model calls and its processes.
 - `terminal_bench_4/miniswe`: mini-SWE **2.4.6** `DefaultAgent`, with upstream
   `mini.yaml` prompts, native bash tool calls through Gym's Responses model
   adapter, and task-local MCP CLI.
+
+```sh
+gym env start --config benchmarks/terminal_bench_4/miniswe_episode.yaml \
+  --agent hermes_agent --model-type openai_model
+
+gym env start --config benchmarks/swebench/pro/hermes_episode.yaml \
+  --agent miniswe_sandboxed_agent --model-type openai_model
+```
+
+The episode profiles work with existing flat rows through `single_agent_legacy`
+and with materialized `nemo_gym.single_agent.v1` tasks. Seeding resolves TB4's
+instruction from the pinned package. Shared `AgentTaskContext` carries the task's
+execution user, time budget, skills, and sandbox-local MCP connections. Borrowers
+receive a named provider reference and serialized sandbox access. CPU/GPU split
+deployments use the matching named borrower providers in `episode.yaml`.
+
+To reproduce bounded integration checks with public models:
+
+```sh
+python benchmarks/terminal_bench_4/swapping_smoke.py --pair tb4-hermes \
+  --env-file /path/to/private.env --output results/tb4-hermes --steps 3
+
+python benchmarks/terminal_bench_4/swapping_smoke.py --pair swepro-miniswe \
+  --swe-row benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+  --env-file /path/to/private.env --output results/swepro-miniswe --steps 3
+```
+
+Both checks use the native environment HTTP endpoint and save the request,
+episode result, and model-call captures. A capped rollout may score zero; success
+requires completed official verification. Provide the OpenSandbox endpoint and
+key plus `OPENAI_API_KEY` in the environment or the specified environment file.
 
 ## Artificial Analysis comparison
 

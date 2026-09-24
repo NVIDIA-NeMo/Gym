@@ -49,7 +49,7 @@ LOGGER = logging.getLogger(__name__)
 
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
     num_workers: Literal[1] = 1
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     harness: MiniSWEConfig = Field(default_factory=MiniSWEConfig)
     artifacts_dir: Path = Path("results/miniswe_sandboxed_agent")
@@ -128,6 +128,10 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         raise NotImplementedError("This agent requires /run")
 
     async def run(self, request: Request, body: MiniSWERunRequest) -> MiniSWEVerifyResponse:
+        if self.config.resources_server is None:
+            raise HTTPException(
+                422, "Use an environment server and agent sessions, or configure resources_server for /run"
+            )
         if self._closing:
             raise HTTPException(503, "Agent server is shutting down")
         payload = body.model_dump(mode="json")
@@ -208,6 +212,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         capture_model_calls: bool,
         cookies: dict,
         artifact_directory: Path | None = None,
+        quiesce: bool = False,
     ) -> AgentExecutionResult:
         """Execute on a borrowed sandbox; the caller owns seeding and verification."""
         response = empty_response(params, self.config.model_server.name)
@@ -217,6 +222,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         extra, timings = {}, {}
         agent_started = False
         provider = None
+        sandbox = None
         with rollout_context(rollout_id if capture_model_calls else None):
             try:
                 if seed.termination is None:
@@ -233,7 +239,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                             rollout_id=rollout_id,
                             instruction=seed.instruction,
                             user=seed.user,
-                            workdir=cwd.stdout.strip(),
+                            workdir=seed.workdir or cwd.stdout.strip(),
                             setup_timeout_sec=self.config.setup_timeout_sec,
                             mcp_servers=seed.mcp_servers,
                             skills_dir=seed.skills_dir,
@@ -291,10 +297,21 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                     timing.setdefault("finished_at", now())
                 if provider is not None:
                     try:
+                        if quiesce and sandbox is not None:
+                            from nemo_gym.sandbox.processes import stop_process_groups
+
+                            await stop_process_groups(sandbox, session_id=seed.session_id, user=seed.user)
                         # Drop this process's transport; resources retains sandbox/Compose ownership.
-                        await provider.aclose()
                     except Exception:
-                        LOGGER.exception("Failed to close the mini-SWE sandbox transport")
+                        LOGGER.exception("Failed to stop mini-SWE processes")
+                        termination = HarnessOutcome(
+                            reason="infrastructure_error", detail="Agent process cleanup failed"
+                        )
+                    finally:
+                        try:
+                            await provider.aclose()
+                        except Exception:
+                            LOGGER.exception("Failed to close the mini-SWE sandbox transport")
         return AgentExecutionResult(
             responses_create_params=params,
             response=response,

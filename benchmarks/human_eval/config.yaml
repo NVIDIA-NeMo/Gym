@@ -20,3 +20,10 @@ human_eval_evalplus_simple_agent:
         prompt_config: benchmarks/prompts/generic/codegen.yaml
         prepare_script: benchmarks/human_eval/prepare.py
         license: MIT
+
+human_eval_evalplus_environment_server:
+  _inherit_from: evalplus_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: human_eval_evalplus_simple_agent

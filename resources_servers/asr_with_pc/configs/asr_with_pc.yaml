@@ -29,3 +29,11 @@ asr_with_pc_simple_agent:
         type: example
         jsonl_fpath: resources_servers/asr_with_pc/data/example.jsonl
         license: Creative Commons Attribution 4.0 International
+
+asr_with_pc_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: asr_with_pc_simple_agent

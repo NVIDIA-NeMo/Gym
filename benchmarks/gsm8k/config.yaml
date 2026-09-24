@@ -18,3 +18,10 @@ gsm8k_math_with_judge_simple_agent:
         jsonl_fpath: benchmarks/gsm8k/data/gsm8k_benchmark.jsonl
         prompt_config: benchmarks/prompts/generic/math.yaml
         prepare_script: benchmarks/gsm8k/prepare.py
+
+gsm8k_math_with_judge_environment_server:
+  _inherit_from: math_with_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: gsm8k_math_with_judge_simple_agent

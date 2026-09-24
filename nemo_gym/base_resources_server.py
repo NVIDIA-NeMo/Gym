@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     # module) and would pull the mcp SDK into agent/model processes that never need it.
     from nemo_gym.mcp_auto_exposure import MCPTool
 
+from nemo_gym.agent_context import AgentTaskContext
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import validate_failure_kind
@@ -199,6 +200,7 @@ class ResourcesSeedSessionResponse(BaseModel):
     resources_session_id: str
     resources_tools: MCPServerMetadata | None = None
     sandbox_access: SandboxAccess | None = None
+    agent_context: AgentTaskContext | None = None
 
 
 VerificationInputT = TypeVar("VerificationInputT")

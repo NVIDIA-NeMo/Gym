@@ -205,45 +205,9 @@ class MiniSWEHarness:
         self.system_info.update(
             zip(("system", "release", "version", "machine"), result.stdout.splitlines(), strict=True)
         )
-        if self.context.skills_dir:
-            self.extra_instruction += (
-                f"\nTask skills are in {self.context.skills_dir}. Read the relevant SKILL.md files.\n"
-            )
-        if self.context.mcp_servers:
-            (self.directory / "mcp.json").write_text(json.dumps(self.context.mcp_servers))
-            remote = f"/tmp/{self.context.session_id}-mcp"
-            command = f"python3 -m venv {remote} && {remote}/bin/pip -q install mcp==1.29.0 httpx-aiohttp==0.2.0"
-            result = await self.sandbox.exec(
-                command, user=self.context.user, cwd=self.context.workdir, timeout_s=self.context.setup_timeout_sec
-            )
-            if result.return_code:
-                raise RuntimeError(f"Task MCP client setup failed: {result.stderr}")
-            await self.sandbox.upload(Path(__file__).with_name("mcp_client.py"), remote + "/client.py")
-            await self.sandbox.upload(self.directory / "mcp.json", remote + "/servers.json")
-            cli = f"{remote}/bin/python {remote}/client.py"
-            daemon = f"echo $$ >> /tmp/{self.context.session_id}.pids; exec {cli} serve"
-            started = await self.sandbox.exec(
-                "bash -c "
-                + quote(
-                    f"setsid --fork bash -c {quote(daemon)} > {remote}/server.log 2>&1 < /dev/null; "
-                    f"for i in $(seq 1 60); do [ -S {remote}/server.sock ] && exit 0; sleep 1; done; "
-                    f"cat {remote}/server.log; exit 1"
-                ),
-                user=self.context.user,
-                cwd=self.context.workdir,
-                timeout_s=65,
-            )
-            if started.return_code:
-                raise RuntimeError(f"Task MCP session setup failed: {started.stdout}")
-            listed = await self.sandbox.exec(
-                cli + " list", user=self.context.user, cwd=self.context.workdir, timeout_s=60
-            )
-            if listed.return_code:
-                raise RuntimeError(f"Task MCP discovery failed: {listed.stderr}")
-            self.extra_instruction += (
-                f"\nTask MCP tools (JSON schemas): {listed.stdout}\n"
-                f"Call with: {cli} call SERVER TOOL 'JSON_ARGUMENTS'.\n"
-            )
+        from nemo_gym.sandbox.task_tools import prepare_task_tools
+
+        self.extra_instruction = await prepare_task_tools(self.sandbox, self.context, self.directory)
 
     async def execute(self, budget):
         bridge = WorkerBridge()

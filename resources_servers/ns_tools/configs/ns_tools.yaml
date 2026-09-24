@@ -62,3 +62,11 @@ ns_tools_simple_agent:
           type: example
           license: Apache 2.0
           jsonl_fpath: resources_servers/ns_tools/data/example.jsonl
+
+ns_tools_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: ns_tools_simple_agent

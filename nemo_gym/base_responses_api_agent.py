@@ -21,6 +21,7 @@ from warnings import warn
 from fastapi import Body, FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from nemo_gym.agent_context import AgentTaskContext
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -63,6 +64,7 @@ class AgentSeedSessionRequest(BaseModel):
     task_id: TaskId
     tool_accesses: list[ToolAccess] = Field(default_factory=list)
     sandbox_access: SandboxAccess | None = None
+    agent_context: AgentTaskContext | None = None
 
     @field_validator("tool_accesses")
     @classmethod

@@ -99,3 +99,11 @@ finance_agent_v2:
         jsonl_fpath: resources_servers/finance_agent_v2/data/example.jsonl
         # First 5 questions of the public 27Q set, from vals-ai/finance-agent-v2.
         license: MIT
+
+finance_agent_v2_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: finance_agent_v2

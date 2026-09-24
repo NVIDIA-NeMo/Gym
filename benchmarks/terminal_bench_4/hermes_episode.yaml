@@ -1,0 +1,13 @@
+config_paths:
+  - benchmarks/terminal_bench_4/episode.yaml
+  - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
+
+terminal_bench_4_agent:
+  _inherit_from: hermes_agent
+  responses_api_agents:
+    hermes_agent:
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_4
+      enabled_toolsets: [terminal]
+      max_turns: ${oc.select:tb4_max_steps,500}

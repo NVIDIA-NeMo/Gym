@@ -1,0 +1,66 @@
+config_paths:
+  - benchmarks/terminal_bench_4/resources.yaml
+  - environment_servers/single_agent_legacy/configs/single_agent_legacy.yaml
+
+environment_routing_mode: legacy
+environment_server_name: terminal_bench_4_environment
+tasksets:
+  "terminal_bench_4:benchmark":
+    task_input_contract: nemo_gym.single_agent.v1
+environment_server_routes:
+  "terminal_bench_4:benchmark": terminal_bench_4_environment
+
+tb4_episode_sandbox: ${terminal_bench_4.resources_servers.terminal_bench_4.environment.sandbox_provider}
+tb4_episode_sandbox_cpu:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN_CPU,${oc.env:OPENSANDBOX_DOMAIN,localhost}}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY_CPU,${oc.env:OPENSANDBOX_API_KEY,''}}
+      protocol: http
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    operations:
+      background_exec: true
+tb4_episode_sandbox_gpu:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN_GPU,${oc.env:OPENSANDBOX_DOMAIN,localhost}}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY_GPU,${oc.env:OPENSANDBOX_API_KEY,''}}
+      protocol: http
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    operations:
+      background_exec: true
+
+terminal_bench_4:
+  resources_servers:
+    terminal_bench_4:
+      entrypoint: episode.py
+      environment:
+        sandbox_provider:
+          opensandbox:
+            connection:
+              api_key: ${oc.env:OPENSANDBOX_API_KEY,''}
+      sandbox_provider_ref: tb4_episode_sandbox
+      sandbox_provider_ref_cpu: tb4_episode_sandbox_cpu
+      sandbox_provider_ref_gpu: tb4_episode_sandbox_gpu
+      datasets:
+        - name: terminal_bench_4
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_4/data/benchmark.jsonl
+          prepare_script: benchmarks/terminal_bench_4/prepare.py
+          num_repeats: 1
+
+terminal_bench_4_environment:
+  _inherit_from: single_agent_legacy_environment_server
+  environment_servers:
+    single_agent_legacy:
+      default_episode_timeout_seconds: 64800
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_4
+      agent_server:
+        type: responses_api_agents
+        name: terminal_bench_4_agent

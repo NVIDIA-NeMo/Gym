@@ -18,3 +18,10 @@ adme_tier5_direct_agent:
           prompt_config: null
           prepare_script: benchmarks/litmus-bench/prepare_adme_tier5.py
           num_repeats: 5
+
+adme_tier5_direct_environment_server:
+  _inherit_from: litmus_agent_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: adme_tier5_direct_agent

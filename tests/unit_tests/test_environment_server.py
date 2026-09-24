@@ -7,10 +7,12 @@ from unittest.mock import MagicMock
 
 import anyio
 import pytest
+from fastapi import Body
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from nemo_gym.base_environment_server import BaseEnvironmentServer, BaseEnvironmentServerConfig, CleanupContext
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
@@ -52,6 +54,9 @@ class _EnvironmentServer(BaseEnvironmentServer[_Request, _Response]):
             task_id=request.task.task_id,
             result=request.task.task_input.value,
         )
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        return AggregateMetrics()
 
 
 def _request() -> _Request:

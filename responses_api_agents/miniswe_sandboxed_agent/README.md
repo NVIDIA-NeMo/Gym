@@ -1,5 +1,22 @@
 # Sandboxed mini-SWE
 
+Use `benchmarks/swebench/pro/miniswe_episode.yaml` or
+`benchmarks/terminal_bench_4/miniswe_episode.yaml` to run mini-SWE with the shared
+environment server. The standalone agent config also works with `--agent
+miniswe_sandboxed_agent` on an episode profile. `episode.py` implements
+`/v1/agent_sessions`, `/v1/responses`, and `/v1/agent_sessions/close`; any resources
+server providing `SandboxAccess` and the single-agent verification contract can
+be paired with it. The environment server seeds, invokes, closes, verifies, and
+cleans up. The agent stops its own process groups and disconnects its transport
+while the resources server retains sandbox ownership.
+
+Native sessions preserve task/episode identity, reject changed activations,
+deduplicate retries, and return observations at close. They need no resource
+reference at runtime; the optional configuration binding supports CLI composition
+and the existing direct `/run` API. Shared task context supplies execution users,
+budgets, skills, and sandbox-local MCP services. Tasks without sandbox access or
+with unsupported required remote tool transports fail explicitly during seeding.
+
 Generic mini-SWE 2.4.6 `DefaultAgent` execution on a caller-owned `AsyncSandbox`.
 `harness.py` exposes `MiniSWEHarness`, `HarnessContext`, `MiniSWEConfig`, and
 `HarnessOutcome`. The caller supplies the sandbox, task instruction, execution
@@ -18,8 +35,8 @@ The resource server retains provisioning, sandbox renewal, grading, and cleanup.
 
 `MiniSWESandboxedAgent.execute()` consumes a seeded sandbox and returns agent
 output without seeding or verifying a task. `/run` wraps that execution with the
-legacy seed/verify lifecycle. This keeps execution separate from orchestration so
-it can later use Gym's shared agent/task session contracts.
+legacy seed/verify lifecycle. The native episode adapter uses the same executor
+with Gym's shared agent/task session contracts.
 
 `models.py` defines the agent's local view of the HTTP protocol; it imports no
 resources implementation. Seeding supplies `session_id`, `sandbox_descriptor`,
