@@ -15,7 +15,10 @@
 
 import asyncio
 import json
+import shutil
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -41,6 +44,18 @@ from responses_api_agents.pi_agent.app import (
     _read_pi_stdout,
     parse_pi_events,
 )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node is required for the Pi extension")
+@pytest.mark.parametrize("filename", ["test_gym_mcp.mjs", "test_remaining_context.mjs", "test_bash_timeout.mjs"])
+def test_gym_extensions(filename):
+    result = subprocess.run(
+        ["node", "--test", str(Path(__file__).with_name(filename))],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _config(**kwargs) -> PiAgentConfig:
@@ -161,6 +176,55 @@ class TestEnv:
         assert env["NVIDIA_API_KEY"] == "k"
         assert env["HOME"] == "/tmp/h"
         assert "EMPTY" not in env
+
+
+@pytest.mark.parametrize("with_mcp", [False, True])
+@pytest.mark.parametrize("remaining_context", [False, True])
+@pytest.mark.parametrize("bash_timeout", [None, 120])
+async def test_run_stages_private_mcp_config_and_cleans_workspace(tmp_path, with_mcp, remaining_context, bash_timeout):
+    servers = {"search": {"url": "https://tools.test/mcp", "headers": {"X-Session": "private-token"}}}
+    agent = _make_agent(
+        workspace_root=str(tmp_path),
+        mcp_servers=servers if with_mcp else {},
+        output_token_policy="remaining_context" if remaining_context else "fixed",
+        auto_compaction=not remaining_context,
+        bash_timeout=bash_timeout,
+    )
+    homes = []
+
+    async def launch(*cmd, **kwargs):
+        home = Path(kwargs["env"]["HOME"])
+        homes.append(home)
+        assert "private-token" not in " ".join(cmd)
+        assert json.loads((home / ".pi" / "agent" / "settings.json").read_text()) == {
+            "compaction": {"enabled": not remaining_context}
+        }
+        extensions = [Path(cmd[i + 1]).name for i, arg in enumerate(cmd) if arg == "--extension"]
+        assert ("remaining-context.mjs" in extensions) is remaining_context
+        assert ("bash-timeout.mjs" in extensions) is (bash_timeout is not None)
+        if bash_timeout is not None:
+            assert kwargs["env"]["NEMO_GYM_PI_BASH_TIMEOUT"] == str(bash_timeout)
+        if with_mcp:
+            path = Path(kwargs["env"]["NEMO_GYM_PI_MCP_CONFIG"])
+            assert path.stat().st_mode & 0o777 == 0o600
+            assert json.loads(path.read_text())["search"]["headers"] == servers["search"]["headers"]
+            assert Path(cmd[cmd.index("--extension") + 1]).is_file()
+        else:
+            assert "gym_mcp.mjs" not in extensions
+        stdout = asyncio.StreamReader()
+        stdout.feed_data((_msg_end("assistant", [{"type": "text", "text": "done"}]) + "\n").encode())
+        stdout.feed_eof()
+        return SimpleNamespace(
+            stdout=stdout,
+            stderr=SimpleNamespace(read=AsyncMock(return_value=b"")),
+            wait=AsyncMock(return_value=0),
+            returncode=0,
+        )
+
+    with patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", side_effect=launch):
+        items, _, _, _ = await agent._run_pi("task", None)
+    assert items[0].content[0].text == "done"
+    assert homes and all(not home.exists() for home in homes)
 
 
 class TestModelServer:
@@ -519,3 +583,38 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 8
         assert inner["command"] == "pi"
+
+
+@pytest.mark.parametrize(
+    "process_event,expected",
+    [
+        ({"type": "_ng_process_exit", "return_code": 1}, "failed"),
+        ({"type": "_ng_process_exit", "timed_out": True}, "incomplete"),
+    ],
+)
+def test_process_failure_overrides_partial_answer_status(process_event, expected):
+    events = [
+        (1.0, {"type": "agent_end", "messages": [{"role": "assistant", "stopReason": "stop"}]}),
+        (2.0, process_event),
+    ]
+    bundle = _build_pi_observations(events, "run-1", None, [])
+    invocations = _records(bundle, AgentInvocation)
+    assert invocations[0].status == expected
+
+
+@pytest.mark.parametrize("collect_observations", [False, True])
+async def test_mcp_setup_exit_is_request_failure_and_cleans_workspace(tmp_path, collect_observations):
+    agent = _make_agent(workspace_root=str(tmp_path), mcp_servers={"search": {"url": "http://tools.test/mcp"}})
+    stdout = asyncio.StreamReader()
+    stdout.feed_eof()
+    process = SimpleNamespace(
+        stdout=stdout,
+        stderr=SimpleNamespace(read=AsyncMock(return_value=b"setup failed")),
+        wait=AsyncMock(return_value=78),
+        communicate=AsyncMock(return_value=(b"", b"setup failed")),
+        returncode=78,
+    )
+    with patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
+        with pytest.raises(RuntimeError, match="Required Gym MCP"):
+            await agent._run_pi("task", None, collect_observations=collect_observations)
+    assert not list(tmp_path.iterdir())

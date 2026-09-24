@@ -15,18 +15,20 @@
 import json
 import re
 from asyncio import sleep
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import time
-from typing import Any, ClassVar, Dict, List, Optional
-from urllib.parse import urlparse
+from typing import Any, ClassVar, Dict, List, Literal, Optional
+from urllib.parse import unquote, urlparse, urlsplit, urlunsplit
 
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
 
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -36,13 +38,12 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import (
-    RATE_LIMIT_ERROR_CODES,
     RETRY_ERROR_CODES,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
+from nemo_gym.server_utils import SESSION_ID_KEY, request
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
@@ -54,6 +55,14 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
     debug: bool = False
     dump_session_id_to_metrics_on_exit: bool = False
+    max_results: int = Field(default=10, ge=1, le=20)
+    max_result_chars: int = Field(default=2000, ge=1)
+    search_depth: Literal["basic", "advanced"] = "advanced"
+    max_http_attempts: int = Field(default=3, ge=1)
+    http_timeout_s: float = Field(default=60, gt=0)
+    max_cached_pages: int = Field(default=128, ge=0)
+    max_cached_page_chars: Optional[int] = Field(default=None, ge=1)
+    max_scroll_words: Optional[int] = Field(default=None, ge=1)
 
 
 class TavilySearchRequest(BaseModel):
@@ -132,67 +141,94 @@ class TavilySearchAIOHTTPClientResponse(BaseModel):
 
 
 class TavilySearchAIOHTTPClient(BaseModel):
-    headers: Dict[str, str]
+    headers: Dict[str, str] = Field(repr=False)
     base_url: str
-
     debug: bool
+    retry_api_keys: List[str] = Field(default_factory=list, repr=False)
+    max_attempts: int = Field(default=3, ge=1)
+    timeout_s: float = Field(default=60, gt=0)
 
     async def post(self, endpoint: str, content: str, timeout: float) -> TavilySearchAIOHTTPClientResponse:
-        """
-        endpoint: str e.g. "/search" or "/extract"
-        timeout: float is not used
-        """
-        request_kwargs = {
-            "method": "POST",
-            "headers": self.headers,
-            "url": f"{self.base_url}{endpoint}",
-            "data": content,
-        }
-
-        MAX_NUM_TRIES = 3  # Hardcode for now
-        max_num_tries = MAX_NUM_TRIES
-        tries = 0
-        while tries < max_num_tries:
-            tries += 1
-            response = await request(**request_kwargs)
-
-            if response.status in RETRY_ERROR_CODES:
-                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
-                if response.status in RATE_LIMIT_ERROR_CODES:
-                    max_num_tries += 1
-
-                content = (await response.content.read()).decode()
-                print(
-                    f"Hit a {response.status} trying to query an Tavily endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
+        headers = {key.lower(): value for key, value in self.headers.items()}
+        for attempt in range(self.max_attempts):
+            # The SDK selects the first key per tool call. Rotate subsequent HTTP attempts too.
+            if attempt and self.retry_api_keys:
+                key = self.retry_api_keys[(attempt - 1) % len(self.retry_api_keys)]
+                headers["authorization"] = "Bearer " + key
+            response = None
+            try:
+                response = await request(
+                    "POST",
+                    headers=headers.copy(),
+                    url=f"{self.base_url}{endpoint}",
+                    data=content,
+                    timeout=ClientTimeout(total=min(timeout, self.timeout_s)),
+                    _max_connection_retries=0,
                 )
-                await sleep(0.5)
-                continue
-            else:
-                tavily_response = TavilySearchAIOHTTPClientResponse(
-                    status_code=response.status,
-                    data=await response.json(),
-                )
-                if self.debug:
-                    print(f"Received the following Tavily response: {tavily_response}")
-
-                return tavily_response
-
-        # We've exited the loop
-        await raise_for_status(response)
+                if response.status == 200:
+                    return TavilySearchAIOHTTPClientResponse(status_code=200, data=await response.json())
+                if response.status not in RETRY_ERROR_CODES or attempt + 1 == self.max_attempts:
+                    # Provider error bodies may contain credentials; never forward them to the agent.
+                    raise RuntimeError(f"Tavily HTTP {response.status} after {attempt + 1} attempts")
+            except (ClientConnectionError, ClientPayloadError, TimeoutError):
+                if attempt + 1 == self.max_attempts:
+                    raise RuntimeError(f"Tavily transport failure after {attempt + 1} attempts") from None
+            finally:
+                if response is not None:
+                    response.release()
+            await sleep(min(2**attempt, 8))
+        raise RuntimeError("Tavily retry budget exhausted")
 
     @classmethod
-    def from_httpx_AsyncClient(cls, client: AsyncClient, debug: bool) -> "TavilySearchAIOHTTPClient":
-        return cls(
-            headers=client.headers,
-            base_url=str(client.base_url),
-            debug=debug,
-        )
+    def from_httpx_AsyncClient(cls, client: AsyncClient, debug: bool, **kwargs) -> "TavilySearchAIOHTTPClient":
+        return cls(headers=client.headers, base_url=str(client.base_url), debug=debug, **kwargs)
+
+
+class URLExclusionPolicy:
+    """Domain and URL-pattern checks shared by search results and page extraction."""
+
+    def __init__(self, path: Path):
+        properties = [p for n in json.loads(path.read_text())["notices"] for p in n["properties"]]
+        self.domains = []
+        for prop in properties:
+            if prop["type"] == "domain":
+                try:
+                    self.domains.append(prop["value"].encode("idna").decode().lower().rstrip("."))
+                except UnicodeError as exc:
+                    raise ValueError(f"Invalid exclusion domain in {path}: {prop['value']!r}") from exc
+        self.substrings = [p["value"].lower() for p in properties if p["type"] == "url_substring"]
+        unknown = {p["type"] for p in properties} - {"domain", "url_substring", "author_name", "publisher_name"}
+        if unknown:
+            raise ValueError(f"Unsupported exclusion types: {sorted(unknown)}")
+
+    def blocked(self, url: str) -> bool:
+        for _ in range(4):
+            try:
+                parts = urlsplit(url)
+                if (
+                    parts.scheme.lower() not in {"https", "http"}
+                    or not parts.hostname
+                    or parts.username
+                    or parts.password
+                ):
+                    return True
+                host = parts.hostname.encode("idna").decode().lower().rstrip(".")
+                canonical = urlunsplit((parts.scheme.lower(), host, parts.path, parts.query, "")).lower()
+                if any(host == domain or host.endswith("." + domain) for domain in self.domains):
+                    return True
+                if any(pattern in canonical or pattern in url.lower() for pattern in self.substrings):
+                    return True
+                decoded = unquote(url)
+                if decoded == url:
+                    return False
+                url = decoded
+            except (ValueError, UnicodeError):
+                return True
+        return True
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
     config: TavilySearchResourcesServerConfig
-    MAX_RESULTS: int = 10
-    MAX_RESULT_CHARS: int = 2000
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
     _num_requests: int = 0
@@ -204,18 +240,25 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         tavily_api_keys = self.config.tavily_api_key
         if isinstance(tavily_api_keys, str):
             tavily_api_keys = [tavily_api_keys]
+        tavily_api_keys = [key.strip() for group in tavily_api_keys for key in group.split(",") if key.strip()]
+        if not tavily_api_keys:
+            raise ValueError("At least one Tavily API key is required")
 
         self._async_tavily_clients = [AsyncTavilyClient(api_key=k) for k in tavily_api_keys]
-        for async_tavily_client in self._async_tavily_clients:
+        for index, async_tavily_client in enumerate(self._async_tavily_clients):
             async_tavily_client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(
-                async_tavily_client._client, self.config.debug
+                async_tavily_client._client,
+                self.config.debug,
+                retry_api_keys=tavily_api_keys[index + 1 :] + tavily_api_keys[: index + 1],
+                max_attempts=self.config.max_http_attempts,
+                timeout_s=self.config.http_timeout_s,
             )
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
 
-        self._exclude_domains = self._parse_exclude_domains()
-        self._page_cache: dict[str, str] = {}
-        print(f"Excluded domains: {self._exclude_domains}")
+        self._url_policy = URLExclusionPolicy(_resolve_under_cwd_or_install(self.config.exclude_domains_file_path))
+        self._exclude_domains = self._url_policy.domains
+        self._page_cache: OrderedDict[str, str] = OrderedDict()
         if self.config.debug:
             print("Debug mode enabled")
 
@@ -245,6 +288,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         return app
 
+    def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> list[str]:
+        return ["web_search", "find_in_page", "scroll_page"]
+
     def _select_tavily_client(self) -> AsyncTavilyClient:
         client = self._async_tavily_clients[self._num_requests % len(self._async_tavily_clients)]
         self._num_requests += 1
@@ -265,9 +311,14 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         start_time = time()
         results = await async_tavily_client.search(
             body.query,
-            max_results=self.MAX_RESULTS,
+            max_results=self.config.max_results,
             exclude_domains=self._exclude_domains,
-            search_depth="advanced",
+            search_depth=self.config.search_depth,
+            # Tavily receives domain exclusions, but URL-pattern exclusions are applied locally.
+            # Its LLM-generated answer could summarize a page we later discard, so return
+            # source results only, including for domain-only policies for consistent behavior.
+            include_answer=False,
+            include_raw_content=False,
         )
         metrics.async_tavily_calls.append(
             TavilySearchSingleAsyncTavilyMetrics(
@@ -305,9 +356,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             )
         )
 
-        # Extract raw_content from the first successful result
-        if results.get("results"):
-            raw_content = results["results"][0].get("raw_content", "")
+        # Recheck provider-returned URLs, including any reported redirect destination.
+        allowed_results = self._allowed_results(results)
+        if allowed_results:
+            raw_content = allowed_results[0].get("raw_content", "")
         else:
             raw_content = ""
 
@@ -350,6 +402,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             if self.config.debug:
                 print(f"Cache hit for {body.url}")
             page_content = self._page_cache[body.url]
+            self._page_cache.move_to_end(body.url)
         else:
             if self.config.debug:
                 print(f"Cache miss for {body.url}, fetching with tavily extract")
@@ -365,17 +418,27 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 )
             )
 
-            if results.get("results"):
-                page_content = results["results"][0].get("raw_content", "")
+            allowed_results = self._allowed_results(results)
+            if allowed_results:
+                page_content = allowed_results[0].get("raw_content", "")
             else:
                 page_content = ""
 
-            # Store in cache
-            self._page_cache[body.url] = page_content
+            if self.config.max_cached_pages:
+                if self.config.max_cached_page_chars is not None:
+                    page_content = page_content[: self.config.max_cached_page_chars]
+                self._page_cache[body.url] = page_content
+                self._page_cache.move_to_end(body.url)
+                while len(self._page_cache) > self.config.max_cached_pages:
+                    self._page_cache.popitem(last=False)
 
         words = page_content.split()
         total_words = len(words)
-        sliced_words = words[body.start_index : body.start_index + body.n]
+        start_index = max(0, body.start_index)
+        n = max(0, body.n)
+        if self.config.max_scroll_words is not None:
+            n = min(n, self.config.max_scroll_words)
+        sliced_words = words[start_index : start_index + n]
         chunk_text = " ".join(sliced_words)
 
         # Format: header + clean + line numbers
@@ -383,11 +446,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         cleaned = self._clean_text(chunk_text)
         numbered = self._add_line_numbers(cleaned)
 
-        end_index = min(body.start_index + body.n, total_words)
+        end_index = min(start_index + n, total_words)
         header = (
             f"Page content from: {domain}\n"
             f"URL: {body.url}\n"
-            f"Showing words [{body.start_index}-{end_index}] of {total_words}\n"
+            f"Showing words [{start_index}-{end_index}] of {total_words}\n"
             f"========================================\n"
         )
 
@@ -421,9 +484,14 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     ###### UTILITY FUNCTIONS ######
 
     def _is_url_excluded(self, url: str) -> bool:
-        """Check if the URL's domain is in the excluded domains list."""
-        hostname = urlparse(url).hostname or ""
-        return any(hostname == domain or hostname.endswith("." + domain) for domain in self._exclude_domains)
+        return self._url_policy.blocked(url)
+
+    def _allowed_results(self, response: dict) -> list[dict]:
+        return [
+            result
+            for result in response.get("results", [])
+            if isinstance(result.get("url"), str) and not self._is_url_excluded(result["url"])
+        ]
 
     def _extract_domain(self, url: str) -> str:
         """Extract domain from URL."""
@@ -458,7 +526,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         Returns (truncated_text, was_truncated).
         """
         if max_chars is None:
-            max_chars = self.MAX_RESULT_CHARS
+            max_chars = self.config.max_result_chars
         if len(text) <= max_chars:
             return text, False
         # Find the last newline within max_chars
@@ -468,13 +536,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return text[:cut], True
 
     def _postprocess_search_results(self, results: dict) -> list[str]:
-        # If an answer is present, return ONLY the answer (no individual search results)
-        answer = results.get("answer")
-        if answer is not None:
-            return [f"Search Answer\n==============\n{answer}\n"]
-
+        # Ignore any aggregate answer even if returned despite include_answer=False:
+        # filtering source URLs cannot remove blocked content from a generated summary.
         formatted_results = ["Search Results\n==============\n"]
-        for i, result in enumerate(results["results"], 1):
+        for i, result in enumerate(self._allowed_results(results)[: self.config.max_results], 1):
             domain = self._extract_domain(result["url"])
             snippet = self._clean_text(result.get("content", ""))
             snippet, _ = self._truncate_text(snippet)
@@ -482,18 +547,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 f"[{i}] {result['title']} ({domain})\n    URL: {result['url']}\n    Summary: {snippet}\n\n"
             )
         return formatted_results
-
-    def _parse_exclude_domains(self) -> list[str]:
-        with open(self.config.exclude_domains_file_path, "r") as f:
-            exclude_config = json.load(f)
-        exclude_domains = []
-        # this is pretty hard-coded so we ensure the file structure is correct
-        notices = exclude_config["notices"]
-        for notice in notices:
-            for prop in notice["properties"]:
-                if prop.get("type") == "domain":
-                    exclude_domains.append(prop["value"])
-        return exclude_domains
 
     async def _verify_answer_with_judge(
         self, question: str, ground_truth: str, response: str

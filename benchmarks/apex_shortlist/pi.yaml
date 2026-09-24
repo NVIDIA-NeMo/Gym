@@ -1,0 +1,19 @@
+config_paths:
+- benchmarks/apex_shortlist/config.yaml
+- responses_api_agents/pi_sandboxed_agent/configs/benchmark.yaml
+apex_shortlist_pi_agent:
+  _inherit_from: pi_benchmark_agent
+  responses_api_agents:
+    pi_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: apex_shortlist_math_with_judge_resources_server
+      datasets:
+      - name: apex_shortlist
+        type: benchmark
+        jsonl_fpath: benchmarks/apex_shortlist/data/apex_shortlist_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic/math.yaml
+        prepare_script: benchmarks/apex_shortlist/prepare.py
+        num_repeats: 16
+math_with_judge_simple_agent: null
+apex_shortlist_math_with_judge_simple_agent: null

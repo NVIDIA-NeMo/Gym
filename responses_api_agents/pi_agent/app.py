@@ -24,11 +24,11 @@ from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path
 from time import time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import Request
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -63,6 +63,7 @@ from responses_api_agents.pi_agent.setup_pi import ensure_pi
 
 
 LOG = logging.getLogger(__name__)
+MCP_SETUP_ERROR_EXIT_CODE = 78  # Must match gym_mcp.mjs (EX_CONFIG).
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
@@ -73,7 +74,7 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
     input_tokens = 0
     output_tokens = 0
 
-    for line in stdout.splitlines():
+    for line in stdout.split("\n"):
         line = line.strip()
         if not line:
             continue
@@ -214,6 +215,13 @@ def _build_pi_observations(
                 if last_model_call is None:
                     gaps.append(gap("compaction_after_model_call_unavailable"))
             compactions_waiting_for_call.clear()
+        elif event_type == "_ng_process_exit":
+            # Appended by the adapter after draining stdout, so a partial
+            # assistant answer cannot hide a CLI failure or enclosing timeout.
+            if event.get("timed_out"):
+                invocation_status = "incomplete"
+            elif event.get("return_code") not in (0, None):
+                invocation_status = "failed"
         elif event_type == "agent_end":
             terminal_messages = event.get("messages")
             if isinstance(terminal_messages, list):
@@ -408,6 +416,15 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
+class PiMCPServerConfig(BaseModel):
+    """Gym's authenticated, stateless JSON MCP endpoint (timeout in milliseconds)."""
+
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+    timeout: int = Field(default=60000, gt=0)
+
+
 class PiAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: Optional[ModelServerRef] = None
@@ -419,11 +436,15 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     thinking: Optional[str] = None
     system_prompt: Optional[str] = None
     timeout: int = 900
+    bash_timeout: Optional[int] = Field(default=None, gt=0)
     extra_args: list[str] = []
     models_config: dict[str, Any] = Field(default_factory=dict)
     context_window: int = 262144
     max_output_tokens: int = 131072
+    output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
+    auto_compaction: bool = True
     pi_version: Optional[str] = None
+    mcp_servers: dict[str, PiMCPServerConfig] = Field(default_factory=dict)
 
     @property
     def command_parts(self) -> list[str]:
@@ -515,9 +536,23 @@ class PiAgent(SimpleResponsesAPIAgent):
         models_config = self._build_models_config(rollout_id)
         if models_config:
             (home / ".pi" / "agent" / "models.json").write_text(json.dumps(models_config, indent=2))
+        (home / ".pi" / "agent" / "settings.json").write_text(
+            json.dumps({"compaction": {"enabled": self.config.auto_compaction}})
+        )
         env = self._env(home)
 
         cmd = [*self.config.command_parts, "--print", "--mode", "json", "--no-session"]
+        if self.config.bash_timeout is not None:
+            env["NEMO_GYM_PI_BASH_TIMEOUT"] = str(self.config.bash_timeout)
+            cmd += ["--extension", str(Path(__file__).with_name("bash-timeout.mjs"))]
+        if self.config.output_token_policy == "remaining_context":
+            cmd += ["--extension", str(Path(__file__).with_name("remaining-context.mjs"))]
+        if self.config.mcp_servers:
+            mcp_path = home / "mcp-servers.json"
+            with open(mcp_path, "w", opener=lambda path, flags: os.open(path, flags, 0o600)) as stream:
+                json.dump({name: server.model_dump() for name, server in self.config.mcp_servers.items()}, stream)
+            env["NEMO_GYM_PI_MCP_CONFIG"] = str(mcp_path)
+            cmd += ["--extension", str(Path(__file__).with_name("gym_mcp.mjs"))]
         if provider:
             cmd += ["--provider", provider, "--model", model_id]
         else:
@@ -552,6 +587,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                     if proc.returncode is None:
                         proc.kill()
                     (_, events), _, _ = await output_task
+                    events.append((time(), {"type": "_ng_process_exit", "timed_out": True}))
                     LOG.warning("pi timed out after %ds", self.config.timeout)
                     return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
             else:
@@ -563,8 +599,11 @@ class PiAgent(SimpleResponsesAPIAgent):
                     LOG.warning("pi timed out after %ds", self.config.timeout)
                     return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
 
+            if proc.returncode == MCP_SETUP_ERROR_EXIT_CODE and self.config.mcp_servers:
+                raise RuntimeError("Required Gym MCP tools could not be initialized")
             if proc.returncode not in (0, None):
                 LOG.warning("pi exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
+                events.append((time(), {"type": "_ng_process_exit", "return_code": proc.returncode}))
             output_items, usage = parse_pi_events(stdout)
             return output_items, usage, self.config.model, events
         finally:

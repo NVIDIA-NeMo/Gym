@@ -37,12 +37,12 @@ import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, ClassVar, Iterable, Mapping, Optional
+from typing import Any, AsyncIterator, ClassVar, Iterable, Mapping, Optional
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
-from fastapi import Body, FastAPI, Request, Response
+from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -96,6 +96,9 @@ from nemo_gym.token_id_capture.store import make_token_store
 
 
 logger = logging.getLogger(__name__)
+
+_CHAT_KEEPALIVE_SECONDS = 15.0
+_SSE_KEEPALIVE = b": keep-alive\n\n"
 
 
 # Stateless; shared by every model server's default /v1/messages handler.
@@ -202,7 +205,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             # SSE generators serialize lazily. Finish that work before recording success.
             events = [event.encode("utf-8") if isinstance(event, str) else event for event in events]
             await self._finalize_served_response(response)
-        return StreamingResponse(iter(events), media_type="text/event-stream")
+        return StreamingResponse(
+            iter(events),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -310,8 +317,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         sanitized onto that same strict model (drop ``stream``/``stream_options``; see
         ``nemo_gym.chat_streaming``), validated identically, delegated to the same
         ``chat_completions()``, and the complete response is buffered and re-emitted as a
-        synthesized ``chat.completion.chunk`` SSE stream. This is buffer-then-replay, not
-        token-by-token streaming.
+        synthesized ``chat.completion.chunk`` SSE stream. Keepalive comments maintain the
+        connection while the backend computes; model output is still buffer-then-replay.
 
         Only a genuine boolean ``stream: true`` takes the streaming path; any other value
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
@@ -326,11 +333,64 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
-        completion = await self._invoke_chat_completions(request, params)
-        completion_json = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
-        return await self._stream_served_response(
-            completion_json,
-            synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
+
+        async def completed_stream(completion: Any) -> StreamingResponse:
+            completion_json = (
+                completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
+            )
+            return await self._stream_served_response(
+                completion_json,
+                synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
+            )
+
+        pending = asyncio.create_task(self._invoke_chat_completions(request, params))
+        try:
+            # StreamingResponse commits HTTP headers before iterating its body.
+            # Wait here so fast backend failures retain normal HTTP error handling.
+            done, _ = await asyncio.wait({pending}, timeout=_CHAT_KEEPALIVE_SECONDS)
+            if done:
+                return await completed_stream(await pending)
+        except BaseException:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            raise
+
+        async def events() -> AsyncIterator[str | bytes]:
+            try:
+                # A long silent request can outlive the network's idle timeout even
+                # when both the client and backend allow hours for generation.
+                yield _SSE_KEEPALIVE
+                while not pending.done():
+                    done, _ = await asyncio.wait({pending}, timeout=_CHAT_KEEPALIVE_SECONDS)
+                    if not done:
+                        yield _SSE_KEEPALIVE
+                try:
+                    completion = await pending
+                except Exception as exc:
+                    logger.exception("chat_completions() failed after streaming headers were sent")
+                    status = getattr(exc, "status_code", None) or getattr(exc, "status", None) or 500
+                    error = {
+                        "message": f"HTTP {status}: {exc.detail if isinstance(exc, HTTPException) else 'Model request failed'}",
+                        "type": "server_error" if status >= 500 else "invalid_request_error",
+                        "code": status,
+                    }
+                    yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
+                    return
+                # Capture finalization and serialization failures must propagate:
+                # treating them as backend SSE errors would hide an invalid capture.
+                response = await completed_stream(completion)
+                async for event in response.body_iterator:
+                    yield event
+            finally:
+                if not pending.done():
+                    pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     async def _invoke_chat_completions(
@@ -1507,7 +1567,7 @@ class _CaptureMiddleware:
                 state["streaming"] = content_type.startswith(b"text/event-stream")
             elif message_type == "http.response.body":
                 chunk = message.get("body", b"") or b""
-                if chunk and state["ttft_ms"] is None:
+                if chunk and chunk != _SSE_KEEPALIVE and state["ttft_ms"] is None:
                     state["ttft_ms"] = (time.perf_counter() - start) * 1000.0
                 state["body"].extend(chunk)  # buffered for both shapes; SSE is reassembled below
                 if state["streaming"] and chunk and not defer_response:

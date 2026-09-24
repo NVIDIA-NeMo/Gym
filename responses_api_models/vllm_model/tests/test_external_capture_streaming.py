@@ -223,6 +223,13 @@ async def test_external_capture_routes(make_harness, dialect, stream, evaluation
     h = make_harness(dialect, evaluation)
 
     async def check_send(message):
+        if (
+            dialect == "chat/completions"
+            and stream
+            and (message["type"] == "http.response.start" or message.get("body") == b": keep-alive\n\n")
+        ):
+            # Headers and liveness comments can precede capture; model output cannot.
+            return
         manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
         assert len(manifest.records) == 1 and not manifest.failures
         assert h.worker.context.committed
@@ -454,7 +461,7 @@ async def test_response_preparation_failure_does_not_commit(
 
     async def check_send(message):
         sent.append(message)
-        if b"event: response.failed" in message.get("body", b""):
+        if any(marker in message.get("body", b"") for marker in (b"event: response.failed", b"event: error")):
             manifest = await h.ledger.manifest("r1")
             assert not manifest["records"]
             assert any(row["reason"] == UNCOMMITTED_CALL_REASON for row in manifest["failures"])

@@ -16,18 +16,24 @@
 import json
 import sqlite3
 import sys
+from asyncio import Semaphore
+from copy import deepcopy
 from pathlib import Path
 from shlex import quote
 from time import time
 from traceback import format_exc
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import (
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
@@ -61,12 +67,16 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
+from nemo_gym.sandbox.agent_tools import (
+    restricted_network_policy,
+    sandbox_server_url,
+    seed_mcp_servers,
+    verify_agent_response,
+)
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
-    get_response_json,
-    get_server_url,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
@@ -397,6 +407,13 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
+    concurrency: int = Field(default=64, gt=0)
+    preinstalled_opencode: bool = False
+    execution_failure_reward_zero: bool = False
+    output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
+    network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
+    tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
+    artifacts_dir: Optional[str] = None
 
     # Sandbox config
     sandbox_provider: str
@@ -450,6 +467,9 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_run_stderr: str
     opencode_finished: bool
     opencode_export_found: bool
+    opencode_exit_code: Optional[int] = None
+    opencode_error_type: Optional[str] = None
+    opencode_failed: bool = False
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -462,6 +482,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
 
+        self._sem = Semaphore(self.config.concurrency)
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
@@ -473,6 +494,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
 
         if sandbox_id:
+            if self.config.network_access != "inherit":
+                raise ValueError("Cannot verify network policy on an externally supplied sandbox")
             sandbox = await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=resolved_sandbox_provider)
             return sandbox
 
@@ -486,26 +509,45 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         sandbox_spec = SandboxSpec(
-            image="swebench/sweb.eval.x86_64.astropy_1776_astropy-12907",  # This is just the first SWE Bench Verified image for now
+            image=self.config.sandbox_config.get("image", "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907"),
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
-            workdir=None,  # Default to container's WORKDIR
+            workdir=self.config.sandbox_config.get("workdir"),
             env=env,
-            files=dict(),
+            files=dict(self.config.sandbox_config.get("files", {})),
             metadata=provider_default_metadata
             | self.config.sandbox_config.get("metadata", {})
             | {
                 "nemo_gym_agent": self.config.name,
             },
             resources=resources,
-            entrypoint=None,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            entrypoint=self.config.sandbox_config.get("entrypoint"),
+            provider_options=deepcopy(self.config.sandbox_config.get("provider_options", {})),
         )
 
+        if self.config.network_access != "inherit":
+            urls = [sandbox_server_url(self.config.model_server.name, require_reachable=True)]
+            if self.config.network_access == "model_and_tools":
+                if not self.config.tool_servers:
+                    raise ValueError("model_and_tools requires tool_servers")
+                urls.extend(
+                    sandbox_server_url(server.name, require_reachable=True) for server in self.config.tool_servers
+                )
+            sandbox_spec.provider_options["network_policy"] = restricted_network_policy(
+                resolved_sandbox_provider.name, urls
+            )
         sandbox = AsyncSandbox(resolved_sandbox_provider)
         await sandbox.start(sandbox_spec)
 
         return sandbox
+
+    def _runtime_plugins(self) -> list[str]:
+        plugins = []
+        if self.config.output_token_policy == "remaining_context":
+            plugins.append("remaining-context.js")
+        if self.config.tool_servers:
+            plugins.append("required-mcp.js")
+        return plugins
 
     def _agent_sandbox_observation(
         self,
@@ -541,12 +583,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
         base_url = (
             self.base_url_for_run(
-                base_url=get_server_url(self.config.model_server.name),
+                base_url=sandbox_server_url(
+                    self.config.model_server.name, require_reachable=self.config.network_access != "inherit"
+                ),
                 body=await request.json(),
             )
             + "/v1"
         )
-        return {
+        config = {
             "model": "nemo_gym/dummy_model",
             "$schema": "https://opencode.ai/config.json",
             "provider": {
@@ -557,10 +601,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         "baseURL": base_url,
                         "apiKey": "dummy_key",  # pragma: allowlist secret
                         "timeout": False,
-                        "chunkTimeout": 600000,  # in milliseconds, 10 min
+                        "chunkTimeout": int(self.config.sandbox_timeout * 1000),
                     },
                     "models": {
                         "dummy_model": {
+                            "temperature": True,
                             "limit": {
                                 "context": self.config.opencode_max_context_window,
                                 "input": self.config.opencode_max_context_window,
@@ -571,8 +616,32 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     },
                 }
             },
-            **self.config.opencode_config,
         }
+
+        def merge(base, override):
+            for key, value in override.items():
+                if isinstance(value, dict) and isinstance(base.get(key), dict):
+                    merge(base[key], value)
+                else:
+                    base[key] = deepcopy(value)
+
+        merge(config, self.config.opencode_config)
+        config.setdefault("plugin", []).extend(f"file:///tmp/nemo-gym-{name}" for name in self._runtime_plugins())
+        rollout_mcp = getattr(request.state, "_ng_opencode_mcp", None)
+        if isinstance(rollout_mcp, dict):
+            config.setdefault("mcp", {}).update(rollout_mcp)
+        return config
+
+    async def _seed_tool_servers(self, request: Request, body: OpenCodeSandboxedAgentRunRequest) -> Dict[str, Any]:
+        entries = await seed_mcp_servers(
+            self.server_client,
+            self.config.tool_servers,
+            body,
+            request.cookies,
+            timeout_s=self.config.sandbox_timeout,
+            require_reachable=self.config.network_access != "inherit",
+        )
+        return {name: {"type": "remote", **entry} for name, entry in entries.items()}
 
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
         usages: List[NeMoGymResponseUsage] = []
@@ -657,6 +726,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        if self.config.tool_servers and not isinstance(getattr(request.state, "_ng_opencode_mcp", None), dict):
+            raise ValueError("Configured tool servers require a seeded /run request")
         sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
 
         query = None
@@ -678,7 +749,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         opencode_thinking_str = "--thinking"
 
-        if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
+        if self.config.preinstalled_opencode:
+            install_str = f'test "$(opencode --version)" = {quote(self.config.opencode_version)}'
+        elif self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
             if self.config.remote_opencode_musl_binary_path:
                 install_str = _build_remote_opencode_install_command(
                     install_script_path=self.config.remote_opencode_install_script_path,
@@ -699,15 +772,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Downloaded OpenCode installer to $installer" \
         && VERSION={self.config.opencode_version} bash "$installer\""""
 
-        opencode_config_content = json.dumps(await self._create_opencode_config(request))
+        effective_config = await self._create_opencode_config(request)
+        for name in self._runtime_plugins():
+            await sandbox.upload(Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}")
+        build_agent = effective_config.setdefault("agent", {}).setdefault("build", {})
+        for name in ("temperature", "top_p"):
+            value = getattr(body, name, None)
+            if value is not None:
+                build_agent[name] = value
+        opencode_config_content = json.dumps(effective_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
         collect_observations = observation_invocation_id is not None
-        trajectory = (
-            TrajectoryRecord(task_id="unscoped", rollout_id=observation_invocation_id)
-            if collect_observations
-            else None
-        )
         xdg_home_str = ""
         remote_data_home = None
         if collect_observations:
@@ -724,14 +800,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
-        && OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
+        && rm -f /tmp/nemo-gym-mcp-setup-error \
+        && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
 
         if self.config.debug:
-            print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
-            print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
+            print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
 
         run_error_type = None
         try:
@@ -748,6 +824,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
             print("OpenCode install and run stderr:\n", result.stderr, file=sys.stderr)
 
+        if self.config.tool_servers:
+            mcp_check = await sandbox.exec(command="test ! -f /tmp/nemo-gym-mcp-setup-error", timeout_s=30)
+            if mcp_check.return_code != 0 or mcp_check.error_type:
+                raise RuntimeError("Required Gym MCP tools could not be initialized")
+
         export_fname = "export.json"
         # Kept outside the sandbox workdir on purpose: SWE-bench-style environments set the workdir
         # to the git repo, and resources servers extract the model patch with `git add -N . && git
@@ -758,6 +839,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             session_list_result = await sandbox.exec(
                 command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
                 env=session_env,
+                timeout_s=self.config.sandbox_timeout,
             )
             if session_list_result.return_code != 0:
                 raise RuntimeError(f"Failed to list OpenCode sessions: {session_list_result}")
@@ -768,28 +850,29 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     f"&& opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
                 ),
                 env=session_env,
+                timeout_s=self.config.sandbox_timeout,
             )
         except Exception:
-            export_result = None
-            print("Failed to export results", format_exc(), file=sys.stderr)
+            raise RuntimeError("Failed to export OpenCode results") from None
+        if export_result.return_code != 0 or export_result.error_type:
+            raise RuntimeError("OpenCode export command failed")
         if self.config.debug and export_result:
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
-        results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
+        results_root = (
+            Path(self.config.artifacts_dir) if self.config.artifacts_dir else Path(__file__).parent / "results"
+        )
+        results_dir = results_root / request.session[SESSION_ID_KEY]
         results_dir.mkdir(parents=True, exist_ok=True)
         results_local_fpath = results_dir / export_fname
-        if export_result is not None and export_result.return_code == 0:
-            if self.config.debug:
-                print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
-            try:
-                await sandbox.download(export_remote_fpath, results_local_fpath)
-            except:
-                print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
-                print("Export stdout:\n", export_result.stdout, file=sys.stderr)
-                print("Export stderr:\n", export_result.stderr, file=sys.stderr)
+        results_local_fpath.unlink(missing_ok=True)
+        await sandbox.download(export_remote_fpath, results_local_fpath)
 
         observations = None
+        trajectory = (
+            TrajectoryRecord(task_id="", rollout_id=observation_invocation_id) if collect_observations else None
+        )
         if collect_observations:
             assert remote_data_home is not None
             observations_remote_fpath = f"{remote_data_home}/opencode/opencode.db"
@@ -807,7 +890,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     command=(
                         f"python3 -c {quote(snapshot_script)} "
                         f"{quote(observations_remote_fpath)} {quote(snapshot_remote_fpath)}"
-                    )
+                    ),
+                    timeout_s=self.config.sandbox_timeout,
                 )
                 if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
                     raise RuntimeError("OpenCode database snapshot failed")
@@ -816,8 +900,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     observations_local_fpath, observation_invocation_id, trajectory
                 )
             except Exception:
-                print("Failed to capture OpenCode observations", format_exc(), file=sys.stderr)
                 trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
+                print("Failed to capture OpenCode observations", format_exc(), file=sys.stderr)
                 observations = AgentObservationBundle(
                     source="opencode",
                     records=[AgentInvocation(invocation_id=observation_invocation_id)],
@@ -835,6 +919,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if results_local_fpath.exists():
             opencode_export = json.loads(results_local_fpath.read_text().strip() or "{}")
 
+        if not opencode_export:
+            raise RuntimeError("OpenCode export did not contain a transcript")
         output = []
         usage = None
         opencode_export_found = False
@@ -850,6 +936,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         std_out_split = result_stdout.rsplit("Shell: ", maxsplit=1)
         if len(std_out_split) > 1:
             opencode_finished = "OpenCode run finished" in std_out_split[1]
+
+        assistant_infos = [
+            message.get("info", {})
+            for message in opencode_export.get("messages", [])
+            if message.get("info", {}).get("role") == "assistant"
+        ]
+        terminal_error = assistant_infos[-1].get("error") if assistant_infos else None
+        if terminal_error and not run_error_type:
+            run_error_type = (
+                terminal_error.get("name", "OpenCodeError") if isinstance(terminal_error, dict) else "OpenCodeError"
+            )
 
         if collect_observations and observations is not None:
             agent_sandbox_observation = self._agent_sandbox_observation(
@@ -875,6 +972,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             observations.gaps.append(ObservationGap(code="sandbox_lifecycle_timing_unavailable"))
 
         run_result = {
+            "opencode_failed": bool(run_error_type or getattr(result, "error_type", None))
+            or getattr(result, "return_code", None) != 0
+            or not opencode_finished
+            or not opencode_export_found,
+            "opencode_exit_code": getattr(result, "return_code", None),
+            "opencode_error_type": run_error_type or getattr(result, "error_type", None),
             "opencode_results_fpath": str(results_local_fpath) if opencode_export_found else "",
             "opencode_run_stdout": result_stdout,
             "opencode_run_stderr": result_stderr,
@@ -886,7 +989,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             run_result["_ng_trajectory"] = trajectory
         self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = run_result
 
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=body.model or self.config.model_server.name,
@@ -897,8 +1000,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=usage,
         )
+        receipt = {
+            "response": response.model_dump(mode="json"),
+            "execution": {key: value for key, value in run_result.items() if not key.startswith("_ng_")},
+        }
+        pending = results_dir / "generation.json.partial"
+        pending.write_text(json.dumps(receipt))
+        pending.replace(results_dir / "generation.json")
+        return response
 
     async def run(
+        self, request: Request, body: OpenCodeSandboxedAgentRunRequest
+    ) -> OpenCodeSandboxedAgentVerifyResponse:
+        async with self._sem:
+            return await self._run(request, body)
+
+    async def _run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
     ) -> OpenCodeSandboxedAgentVerifyResponse:
         cookies = request.cookies
@@ -913,6 +1030,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(seed_session_response)
         cookies = cookies | seed_session_response.cookies
+
+        request.state._ng_opencode_mcp = await self._seed_tool_servers(request, body)
 
         # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
         # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
@@ -930,44 +1049,33 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         observations = None
         try:
             response = await self.responses(request, body.responses_create_params)
+            run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
+            observations = run_result.pop("_ng_agent_observations", None)
+            trajectory = run_result.pop("_ng_trajectory", None)
+            response_dict = await verify_agent_response(
+                self.server_client,
+                self.config.resources_server,
+                body,
+                response,
+                cookies,
+                force_zero_reward=self.config.execution_failure_reward_zero
+                and run_result.get("opencode_failed", False),
+            )
         finally:
             del request.state._ng_observation_invocation_id
-            run_result = self._sandbox_id_to_run_result.get(session_key, {})
-            observations = run_result.pop("_ng_agent_observations", None)
+            del request.state._ng_opencode_mcp
+            try:
+                await sandbox.stop()
+            except Exception:
+                print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+            finally:
+                self._sandbox_id_to_sandbox.pop(session_key, None)
+                self._sandbox_id_to_run_result.pop(session_key, None)
 
-        verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
-
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-
-        try:
-            await sandbox.stop()
-        except Exception:
-            print("Failed to stop sandbox", format_exc(), file=sys.stderr)
-
-        self._sandbox_id_to_sandbox.pop(session_key, None)
-
-        # @bxyu-nvidia: This is scraped from the raw create params. Later on we can dynamically set this if OpenCode exports this :rofl:
-        opencode_system_prompt = "You are opencode, an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.\n\nIMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.\n\nIf the user asks for help or wants to give feedback inform them of the following:\n- /help: Get help with using opencode\n- To give feedback, users should report the issue at https://github.com/anomalyco/opencode/issues\n\nWhen the user directly asks about opencode (eg 'can opencode do...', 'does opencode have...') or asks in second person (eg 'are you able...', 'can you do...'), first use the WebFetch tool to gather information to answer the question from opencode docs at https://opencode.ai\n\n# Tone and style\nYou should be concise, direct, and to the point. When you run a non-trivial bash command, you should explain what the command does and why you are running it, to make sure the user understands what you are doing (this is especially important when you are running a command that will make changes to the user's system).\nRemember that your output will be displayed on a command line interface. Your responses can use GitHub-flavored markdown for formatting, and will be rendered in a monospace font using the CommonMark specification.\nOutput text to communicate with the user; all text you output outside of tool use is displayed to the user. Only use tools to complete tasks. Never use tools like Bash or code comments as means to communicate with the user during the session.\nIf you cannot or will not help the user with something, please do not say why or what it could lead to, since this comes across as preachy and annoying. Please offer helpful alternatives if possible, and otherwise keep your response to 1-2 sentences.\nOnly use emojis if the user explicitly requests it. Avoid using emojis in all communication unless asked.\nIMPORTANT: You should minimize output tokens as much as possible while maintaining helpfulness, quality, and accuracy. Only address the specific query or task at hand, avoiding tangential information unless absolutely critical for completing the request. If you can answer in 1-3 sentences or a short paragraph, please do.\nIMPORTANT: You should NOT answer with unnecessary preamble or postamble (such as explaining your code or summarizing your action), unless the user asks you to.\nIMPORTANT: Keep your responses short, since they will be displayed on a command line interface. You MUST answer concisely with fewer than 4 lines (not including tool use or code generation), unless user asks for detail. Answer the user's question directly, without elaboration, explanation, or details. One word answers are best. Avoid introductions, conclusions, and explanations. You MUST avoid text before/after your response, such as \"The answer is <answer>.\", \"Here is the content of the file...\" or \"Based on the information provided, the answer is...\" or \"Here is what I will do next...\". Here are some examples to demonstrate appropriate verbosity:\n<example>\nuser: what is 2+2?\nassistant: 4\n</example>\n\n<example>\nuser: is 11 a prime number?\nassistant: Yes\n</example>\n\n<example>\nuser: what command should I run to list files in the current directory?\nassistant: ls\n</example>\n\n<example>\nuser: what command should I run to watch files in the current directory?\nassistant: [use the ls tool to list the files in the current directory, then read docs/commands in the relevant file to find out how to watch files]\nnpm run dev\n</example>\n\n<example>\nuser: what files are in the directory src/?\nassistant: [runs ls and sees foo.c, bar.c, baz.c]\nuser: which file contains the implementation of foo?\nassistant: src/foo.c\n</example>\n\n<example>\nuser: write tests for new feature\nassistant: [uses grep and glob search tools to find where similar tests are defined, uses concurrent read file tool use blocks in one tool call to read relevant files at the same time, uses edit file tool to write new tests]\n</example>\n\n# Proactiveness\nYou are allowed to be proactive, but only when the user asks you to do something. You should strive to strike a balance between:\n1. Doing the right thing when asked, including taking actions and follow-up actions\n2. Not surprising the user with actions you take without asking\nFor example, if the user asks you how to approach something, you should do your best to answer their question first, and not immediately jump into taking actions.\n3. Do not add additional code explanation summary unless requested by the user. After working on a file, just stop, rather than providing an explanation of what you did.\n\n# Following conventions\nWhen making changes to files, first understand the file's code conventions. Mimic code style, use existing libraries and utilities, and follow existing patterns.\n- NEVER assume that a given library is available, even if it is well known. Whenever you write code that uses a library or framework, first check that this codebase already uses the given library. For example, you might look at neighboring files, or check the package.json (or cargo.toml, and so on depending on the language).\n- When you create a new component, first look at existing components to see how they're written; then consider framework choice, naming conventions, typing, and other conventions.\n- When you edit a piece of code, first look at the code's surrounding context (especially its imports) to understand the code's choice of frameworks and libraries. Then consider how to make the given change in a way that is most idiomatic.\n- Always follow security best practices. Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository.\n\n# Code style\n- IMPORTANT: DO NOT ADD ***ANY*** COMMENTS unless asked\n\n# Doing tasks\nThe user will primarily request you perform software engineering tasks. This includes solving bugs, adding new functionality, refactoring code, explaining code, and more. For these tasks the following steps are recommended:\n- Use the available search tools to understand the codebase and the user's query. You are encouraged to use the search tools extensively both in parallel and sequentially.\n- Implement the solution using all tools available to you\n- Verify the solution if possible with tests. NEVER assume specific test framework or test script. Check the README or search codebase to determine the testing approach.\n- VERY IMPORTANT: When you have completed a task, you MUST run the lint and typecheck commands (e.g. npm run lint, npm run typecheck, ruff, etc.) with Bash if they were provided to you to ensure your code is correct. If you are unable to find the correct command, ask the user for the command to run and if they supply it, proactively suggest writing it to AGENTS.md so that you will know to run it next time.\nNEVER commit changes unless the user explicitly asks you to. It is VERY IMPORTANT to only commit when explicitly asked, otherwise the user will feel that you are being too proactive.\n\n- Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are NOT part of the user's provided input or the tool result.\n\n# Tool usage policy\n- When doing file search, prefer to use the Task tool in order to reduce context usage.\n- You have the capability to call multiple tools in a single response. When multiple independent pieces of information are requested, batch your tool calls together for optimal performance. When making multiple bash tool calls, you MUST send a single message with multiple tools calls to run the calls in parallel. For example, if you need to run \"git status\" and \"git diff\", send a single message with two tool calls to run the calls in parallel.\n\nYou MUST answer concisely with fewer than 4 lines of text (not including tool use or code generation), unless user asks for detail.\n\nIMPORTANT: Before you begin work, think about what the code you're editing is supposed to do based on the filenames directory structure.\n\n# Code References\n\nWhen referencing specific functions or pieces of code include the pattern `file_path:line_number` to allow the user to easily navigate to the source code location.\n\n<example>\nuser: Where are errors from the client handled?\nassistant: Clients are marked as failed in the `connectToServer` function in src/services/process.ts:712.\n</example>\n\nYou are powered by the model named dummy_model. The exact model ID is nemo_gym/dummy_model\nHere is some useful information about the environment you are running in:\n<env>\n  Working directory: /testbed\n  Workspace root folder: /testbed\n  Is directory a git repo: yes\n  Platform: linux\n  Today's date: Tue Aug 04 2026\n</env>\nSkills provide specialized instructions and workflows for specific tasks.\nUse the skill tool to load a skill when a task matches its description.\n<available_skills>\n  <skill>\n    <name>customize-opencode</name>\n    <description>Use ONLY when the user is editing or creating opencode's own configuration: opencode.json, opencode.jsonc, files under .opencode/, or files under ~/.config/opencode/. Also use when creating or fixing opencode agents, subagents, skills, plugins, MCP servers, or permission rules. Do not use for the user's own application code, or for any project that is not configuring opencode itself.</description>\n    <location>file:///testbed/%3Cbuilt-in%3E</location>\n  </skill>\n</available_skills>"
-
-        response_dict = await get_response_json(verify_response)
-        run_result = self._sandbox_id_to_run_result.pop(session_key)
-        trajectory = run_result.pop("_ng_trajectory", None)
-        if trajectory is not None and rollout_id is not None:
-            response_dict["ng_trajectory"] = scope_opencode_trajectory(trajectory, body, rollout_id).model_dump(
-                mode="json"
-            )
         response_dict |= run_result
+        if trajectory is not None:
+            response_dict["ng_trajectory"] = scope_opencode_trajectory(trajectory, body, rollout_id)
         raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)
-        response_dict["responses_create_params"]["input"].insert(
-            0, {"content": opencode_system_prompt, "role": "system"}
-        )
-
         if rollout_id is not None:
             if observations is None:
                 observations = AgentObservationBundle(
