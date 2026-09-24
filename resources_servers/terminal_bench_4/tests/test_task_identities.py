@@ -164,6 +164,6 @@ async def test_verifier_setup_root_but_test_execution_uses_task_user(tmp_path, m
     monkeypatch.setattr(verifier_module, "download_dir", AsyncMock())
     monkeypatch.setattr(verifier_module, "parse_reward", lambda _: {"reward": 1})
     await verifier_module.run_verifier(env, tmp_path, [])
-    staging.assert_awaited_once_with(box, env.task.path / "tests", "/tests")
+    staging.assert_awaited_once_with(box, env.task.path / "tests", "/tests", archive_workers=None)
     assert box.exec.await_args_list[0].kwargs["user"] == "root"
     assert box.exec.await_args_list[1].kwargs["user"] == execution_user(user)

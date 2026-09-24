@@ -56,6 +56,22 @@ set-ID/sticky bits are stripped. ACLs and extended attributes are not transferre
 The EFS snapshot path follows the same rules. Missing metadata or failed archive
 restore is an infrastructure error, not a metadata-losing file-copy fallback.
 
+Local transfer packing, extraction, hashing and metadata I/O run in a bounded
+thread pool shared by all sessions of this resources process. Configure
+`max_concurrent_archive_operations` (positive integer, default **2**), or the
+benchmark override `tb4_archive_concurrency`, independently of
+`max_concurrent_sessions` / `tb4_concurrency`. Additional archive jobs wait
+asynchronously, leaving sandbox requests and status checks responsive. This is
+a per-process limit on local transfer I/O, not a limit on remote sandboxes or
+their archive commands; multiple resources processes have separate pools.
+
+Cancellation stops queued work, but Python cannot interrupt a running worker
+thread. An in-flight operation is joined before its slot or temporary files are
+released; shutdown joins the pool after session cleanup. Consequently, cleanup
+can exceed the normal grace period while slow filesystem work finishes. Archive
+filters, metadata, task identities and grading semantics remain unchanged. This
+does not accelerate a slow filesystem or qualify higher sandbox concurrency.
+
 ## Optional local training packages and reference solutions
 
 The official public-package path remains the default. Set `local_task_packages:

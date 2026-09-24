@@ -28,8 +28,9 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
     rewrite_image,
 )
+from resources_servers.terminal_bench_4.archive_workers import ArchiveWorkers
 from resources_servers.terminal_bench_4.compose_config import MAIN_COMMAND, resolve_compose, resolve_image_startup
-from resources_servers.terminal_bench_4.task import Settings, resolve_env
+from resources_servers.terminal_bench_4.task import Settings, Task, resolve_env
 
 
 logger = logging.getLogger(__name__)
@@ -80,12 +81,21 @@ def execution_user(value: str | int | None) -> str | int | None:
 
 class Environment:
     def __init__(
-        self, task, config: EnvironmentConfig, session_id, directory, *, verifier=False, oracle: bool = False
-    ):
+        self,
+        task: Task,
+        config: EnvironmentConfig,
+        session_id: str,
+        directory: Path,
+        *,
+        verifier: bool = False,
+        oracle: bool = False,
+        archive_workers: ArchiveWorkers | None = None,
+    ) -> None:
         if verifier and oracle:
             raise ValueError("Oracle execution uses the agent role, not the verifier role")
         self.task = task
         self.config = config
+        self.archive_workers = archive_workers
         self.session_id = session_id
         self.directory = Path(directory)
         self.settings = task.config.verifier_environment if verifier else task.config.environment
@@ -365,7 +375,7 @@ class Environment:
             from resources_servers.terminal_bench_4.transfers import upload_dir
 
             cwd = self.settings.workdir or (await self.exec("pwd")).stdout.strip()
-            await upload_dir(self.main, self.environment_dir, cwd)
+            await upload_dir(self.main, self.environment_dir, cwd, archive_workers=self.archive_workers)
 
     def sandbox(self, service=None):
         if service not in (None, "main"):

@@ -8,12 +8,20 @@ import shlex
 from functools import partial
 from pathlib import Path
 
+from resources_servers.terminal_bench_4.archive_workers import ArchiveWorkers, run_local
+from resources_servers.terminal_bench_4.environment import Environment
 from resources_servers.terminal_bench_4.transfers import artifact_metadata_path, download_dir, download_file
 
 
-async def collect(environment, directory, diagnostics):
+async def collect(
+    environment: Environment,
+    directory: Path,
+    diagnostics: list[dict[str, object]],
+    *,
+    archive_workers: ArchiveWorkers | None = None,
+) -> list[dict[str, object]]:
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
+    await run_local(partial(directory.mkdir, parents=True, exist_ok=True), archive_workers)
     task = environment.task.config
     shared_logs = getattr(environment, "shared_logs", None)
     collected_artifacts = task.collected_artifacts
@@ -86,18 +94,27 @@ async def collect(environment, directory, diagnostics):
                             exec_command=partial(environment.exec, service=artifact.service),
                             shared_archive=shared_archive,
                             metadata_path=metadata_path,
+                            archive_workers=archive_workers,
                         )
                         if shared_archive:
                             shared_logs.retain_archive(digest)
                     else:
                         record["exclude"] = []
-                        await download_file(sandbox, artifact.source, target, metadata_path=metadata_path)
+                        await download_file(
+                            sandbox,
+                            artifact.source,
+                            target,
+                            metadata_path=metadata_path,
+                            archive_workers=archive_workers,
+                        )
                     record["status"] = "ok"
                 except Exception as exc:
                     record["status"] = "failed"
                     diagnostics.append({"operation": "collect_artifact", "source": artifact.source, "error": str(exc)})
             entries.append(record)
-            (directory / "manifest.json").write_text(json.dumps(entries, indent=2))
+            await run_local(
+                partial((directory / "manifest.json").write_text, json.dumps(entries, indent=2)), archive_workers
+            )
 
     await hooks(True)
     await artifacts(True)

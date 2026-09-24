@@ -412,7 +412,7 @@ async def test_environment_upload_without_build_spec(tmp_path, monkeypatch):
     upload = AsyncMock()
     monkeypatch.setattr(transfers, "upload_dir", upload)
     await env.start()
-    upload.assert_awaited_once_with(box, env.environment_dir, "/app")
+    upload.assert_awaited_once_with(box, env.environment_dir, "/app", archive_workers=None)
 
 
 @pytest.mark.parametrize("failure", ["logs", "workdir", "quiesce", "delete", "unavailable"])

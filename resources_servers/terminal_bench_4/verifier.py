@@ -7,8 +7,11 @@ import asyncio
 import json
 import math
 import shlex
+from functools import partial
 from pathlib import Path, PurePosixPath
 
+from resources_servers.terminal_bench_4.archive_workers import ArchiveWorkers, run_local
+from resources_servers.terminal_bench_4.environment import Environment
 from resources_servers.terminal_bench_4.task import resolve_env
 from resources_servers.terminal_bench_4.transfers import (
     artifact_metadata_path,
@@ -57,7 +60,9 @@ def parse_reward(directory):
         raise VerifierOutputParseError(f"Invalid official reward in {path}: {exc}") from exc
 
 
-async def restore(environment, artifacts_dir):
+async def restore(
+    environment: Environment, artifacts_dir: Path, *, archive_workers: ArchiveWorkers | None = None
+) -> None:
     await prepare_directory(environment, "/logs/verifier", empty=True)
     shared_logs = getattr(environment, "shared_logs", None)
     for artifact in environment.task.config.collected_artifacts:
@@ -81,22 +86,34 @@ async def restore(environment, artifacts_dir):
                 # Retain the normal transfer fallback if remote extraction is
                 # unavailable, clearing any partial extraction first.
                 await prepare_directory(environment, target, empty=True)
-            await upload_dir(environment.main, host, target, metadata_path=metadata_path)
+            await upload_dir(
+                environment.main, host, target, metadata_path=metadata_path, archive_workers=archive_workers
+            )
         else:
             parent = str(PurePosixPath(target).parent)
             if parent and parent != target:
                 await prepare_directory(environment, parent)
-            await upload_file(environment.main, host, target, metadata_path=metadata_path)
+            await upload_file(
+                environment.main, host, target, metadata_path=metadata_path, archive_workers=archive_workers
+            )
 
 
-async def run_verifier(environment, directory, diagnostics):
+async def run_verifier(
+    environment: Environment,
+    directory: Path,
+    diagnostics: list[dict[str, object]],
+    *,
+    archive_workers: ArchiveWorkers | None = None,
+) -> dict[str, dict[str, float]]:
     settings = environment.task.config.verifier
     logs = Path(directory) / "verifier"
-    logs.mkdir(parents=True, exist_ok=True)
+    await run_local(partial(logs.mkdir, parents=True, exist_ok=True), archive_workers)
 
     async def execute():
         if getattr(environment.task, "stage_tests", False):
-            await stage_trusted_directory(environment.main, environment.task.path / "tests", "/tests")
+            await stage_trusted_directory(
+                environment.main, environment.task.path / "tests", "/tests", archive_workers=archive_workers
+            )
         await environment.exec("chmod +x /tests/test.sh", user="root")
         result = await environment.exec(
             "/tests/test.sh > /logs/verifier/test-stdout.txt 2>&1",
@@ -104,8 +121,8 @@ async def run_verifier(environment, directory, diagnostics):
             user=settings.user,
         )
         diagnostics.append({"operation": "verifier_command", "return_code": result.return_code})
-        await download_dir(environment.main, "/logs/verifier", logs)
-        return {"rewards": parse_reward(logs)}
+        await download_dir(environment.main, "/logs/verifier", logs, archive_workers=archive_workers)
+        return {"rewards": await run_local(partial(parse_reward, logs), archive_workers)}
 
     try:
         return await asyncio.wait_for(execute(), timeout=settings.timeout_sec)
@@ -113,7 +130,7 @@ async def run_verifier(environment, directory, diagnostics):
         # Preserve diagnostics on timeout without turning partial reward files
         # into a completed evaluation (the reference aborts this verifier).
         try:
-            await download_dir(environment.main, "/logs/verifier", logs)
+            await download_dir(environment.main, "/logs/verifier", logs, archive_workers=archive_workers)
         except Exception as download_exc:
             diagnostics.append({"operation": "verifier_logs", "error": str(download_exc)})
         raise VerifierTimeoutError(f"Verifier execution timed out after {settings.timeout_sec} seconds") from exc

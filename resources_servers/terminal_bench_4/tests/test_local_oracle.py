@@ -151,7 +151,7 @@ async def test_oracle_staging_uses_the_fixed_trusted_destination(tmp_path, monke
     monkeypatch.setattr(oracle, "stage_trusted_directory", stage)
     sandbox = SimpleNamespace(exec=AsyncMock())
     await oracle.stage_solution(sandbox, source)
-    stage.assert_awaited_once_with(sandbox, source, "/solution")
+    stage.assert_awaited_once_with(sandbox, source, "/solution", archive_workers=None)
     sandbox.exec.assert_not_awaited()  # Staging must not execute the solution.
 
 
@@ -183,7 +183,7 @@ async def test_verifier_stages_only_required_packages_and_keeps_configured_user(
     )
     await verifier.run_verifier(environment, tmp_path, [])
     if stage_tests:
-        stage.assert_awaited_once_with(environment.main, tmp_path / "tests", "/tests")
+        stage.assert_awaited_once_with(environment.main, tmp_path / "tests", "/tests", archive_workers=None)
     else:
         stage.assert_not_awaited()
     assert environment.exec.await_args_list[0].kwargs["user"] == "root"

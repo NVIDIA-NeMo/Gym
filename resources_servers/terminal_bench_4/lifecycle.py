@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from resources_servers.terminal_bench_4.archive_workers import ArchiveWorkers
 from resources_servers.terminal_bench_4.collection import collect
 from resources_servers.terminal_bench_4.environment import Environment
 from resources_servers.terminal_bench_4.models import AgentTermination
@@ -53,6 +54,7 @@ class Session:
     recorded_resources: list = field(default_factory=list)
     owns_slot: bool = False
     slots: Any = None
+    archive_workers: ArchiveWorkers | None = None
     config: Any = None
     persist: Callable = field(default=lambda: None, repr=False)
 
@@ -119,6 +121,7 @@ async def prepare_session(session, loader):
         session.session_id,
         session.directory,
         oracle=session.config.execution_mode == "oracle",
+        archive_workers=session.archive_workers,
     )
     # Construct and validate the verifier configuration before allocating
     # either environment, but allocate its resources only after collection.
@@ -128,6 +131,7 @@ async def prepare_session(session, loader):
         session.session_id + "__verifier__trial",
         session.directory,
         verifier=True,
+        archive_workers=session.archive_workers,
     )
     if session.config.environment.efs_logs_host_path:
         session.shared_logs = SharedLogs(session.environment)
@@ -170,7 +174,9 @@ async def prepare_session(session, loader):
     if session.config.execution_mode == "oracle":
         # Only resources sees the trusted host package. The agent receives the
         # already-staged sandbox, never a caller-supplied solution path.
-        await stage_solution(session.environment.main, session.task.path / "solution")
+        await stage_solution(
+            session.environment.main, session.task.path / "solution", archive_workers=session.archive_workers
+        )
 
 
 async def finalize_session(session, *, grade):
@@ -190,10 +196,20 @@ async def finalize_session(session, *, grade):
         session.subphase = "collect"
         session.persist()
         try:
-            await download_dir(session.environment.main, "/logs/agent", session.directory / "agent")
+            await download_dir(
+                session.environment.main,
+                "/logs/agent",
+                session.directory / "agent",
+                archive_workers=session.archive_workers,
+            )
         except Exception as exc:
             session.diagnostics.append({"operation": "agent_logs", "error": str(exc)})
-        await collect(session.environment, session.directory / "artifacts", session.diagnostics)
+        await collect(
+            session.environment,
+            session.directory / "artifacts",
+            session.diagnostics,
+            archive_workers=session.archive_workers,
+        )
         try:
             await session.environment.stop()
         except Exception as exc:
@@ -227,13 +243,16 @@ async def finalize_session(session, *, grade):
                         "error": session.verifier_environment.efs_logs_fallback,
                     }
                 )
-            await restore(session.verifier_environment, session.directory / "artifacts")
+            await restore(
+                session.verifier_environment, session.directory / "artifacts", archive_workers=session.archive_workers
+            )
             session.subphase = "verifier_execution"
             session.persist()
             session.result["verifier_result"] = await run_verifier(
                 session.verifier_environment,
                 session.directory,
                 session.diagnostics,
+                archive_workers=session.archive_workers,
             )
         finally:
             session.result["verifier"]["finished_at"] = now()

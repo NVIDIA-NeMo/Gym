@@ -76,7 +76,8 @@ async def fixture(tmp_path, monkeypatch):
     server._loader.load = AsyncMock(return_value=task)
     envs, events, harnesses = [], [], []
 
-    def create(task, config, session_id, directory, verifier=False, oracle=False):
+    def create(task, config, session_id, directory, verifier=False, oracle=False, archive_workers=None):
+        assert archive_workers is server._archive_workers
         name = "verifier" if verifier else "agent"
         env = SimpleNamespace(
             task=task,
@@ -157,12 +158,13 @@ async def fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "Environment", create)
     monkeypatch.setattr(module, "MiniSWEHarness", harness)
     monkeypatch.setattr(lifecycle, "download_dir", AsyncMock())
-    monkeypatch.setattr(lifecycle, "collect", AsyncMock(side_effect=lambda *a: events.append("collect")))
-    monkeypatch.setattr(lifecycle, "restore", AsyncMock(side_effect=lambda *a: events.append("restore")))
-    staging = AsyncMock(side_effect=lambda *args: events.append("stage_solution"))
+    monkeypatch.setattr(lifecycle, "collect", AsyncMock(side_effect=lambda *a, **kw: events.append("collect")))
+    monkeypatch.setattr(lifecycle, "restore", AsyncMock(side_effect=lambda *a, **kw: events.append("restore")))
+    staging = AsyncMock(side_effect=lambda *args, **kw: events.append("stage_solution"))
     monkeypatch.setattr(lifecycle, "stage_solution", staging)
 
-    async def grade(*args):
+    async def grade(*args, **kwargs):
+        assert kwargs["archive_workers"] is server._archive_workers
         events.append("grade")
         return {"rewards": {"reward": 0.75}}
 
@@ -181,6 +183,7 @@ async def fixture(tmp_path, monkeypatch):
     )
     await agent.shutdown()
     await lifecycle.shutdown(list(server._sessions.values()), 0.01)
+    await server._archive_workers.aclose()
 
 
 @pytest.mark.parametrize("mode", ["miniswe", "oracle"])
@@ -209,7 +212,9 @@ async def test_seed_preserves_identity_and_selects_oracle_from_resource_config(f
     if mode == "oracle":
         assert result.oracle_exit_code == 0 and result.response.output == []
         assert not f.harnesses  # Mini-SWE/model execution was never constructed.
-        f.staging.assert_awaited_once_with(f.envs[0].main, task.path / "solution")
+        f.staging.assert_awaited_once_with(
+            f.envs[0].main, task.path / "solution", archive_workers=f.server._archive_workers
+        )
         solution = next(
             call for call in f.envs[0].main.exec.await_args_list if "exec bash /solution/solve.sh" in call.args[0]
         )
@@ -364,7 +369,7 @@ async def test_disconnected_http_caller_does_not_interrupt_episode(fixture, monk
     monkeypatch.setattr(module, "MiniSWEHarness", harness)
     if stage == "grade":
 
-        async def grade(*args):
+        async def grade(*args, **kwargs):
             await block()
             return {"rewards": {"reward": 0}}
 
@@ -438,7 +443,7 @@ async def test_shutdown_cancels_worker_before_collection_and_cleans_up(fixture, 
     f = fixture
     entered = asyncio.Event()
 
-    async def block(*args):
+    async def block(*args, **kwargs):
         entered.set()
         try:
             await asyncio.Event().wait()
@@ -814,7 +819,7 @@ async def test_verify_takes_over_before_seed_deadline(fixture):
     deadline = session.agent_deadline
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def grade(*args):
+    async def grade(*args, **kwargs):
         entered.set()
         await release.wait()
         return {"rewards": {"reward": 0.75}}
