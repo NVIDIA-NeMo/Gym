@@ -16,7 +16,7 @@ installed upstream package, so a pin bump that changes the harness fails here.
 | Tool | Description | Requires |
 |------|-------------|----------|
 | `web_search` | Tavily web search (`TavilyWebSearch`) | `tavily_api_key` |
-| `edgar_search` | sec-api.io full-text EDGAR search (`EDGARSearch`) | `sec_api_key` |
+| `edgar_search` | sec-api.io full-text EDGAR search (`EDGARSearch`), or a local index | `sec_api_key`, or `local_edgar_index_path` |
 | `price_history` | Tiingo daily OHLC for equity/etf/crypto/fx (`PriceHistory`) | `pricing_data_api_key` |
 | `parse_html_page` | Fetch + parse a page to text, store under a key (`ParseHtmlPage`) | — |
 | `retrieve_information` | LLM over stored docs via `{{key}}` prompts (`RetrieveInformation`) | `retrieval_model_server` |
@@ -24,9 +24,45 @@ installed upstream package, so a pin bump that changes the harness fails here.
 | `submit_final_result` | Submit the final answer; ends the loop (`SubmitFinalResult`) | — |
 
 `parse_html_page` and `retrieve_information` share a per-session data storage
-(`state`) dict, scoped by the HTTP session cookie. A tool whose required key or
-model is not configured is registered as unavailable and its endpoint returns a
-clear error, so the agent can route around it.
+(`state`) dict, scoped by the HTTP session cookie. `edgar_search` is the only
+way to find filing URLs, so its source must be configured or the server fails at
+startup. Any other tool whose required key or model is not configured is
+registered as unavailable and its endpoint returns a clear error, so the agent
+can route around it.
+
+### Where SEC data comes from
+
+`edgar_search_mode` (required) selects the source for `edgar_search`.
+
+| `edgar_search_mode` | `edgar_search` | SEC `parse_html_page` | Needs |
+|---|---|---|---|
+| `local` | Local SQLite index | Cache, then the filing corpus, then sec.gov | `local_edgar_index_path`; `sec_dump_path` for corpus reads |
+| `live` | sec-api.io | Cache, then sec.gov | `sec_api_key` |
+
+The benchmark config sets `live`. Asking for `local` without an index fails at
+startup. The
+mode in use, and in local mode the date range the index covers, is logged at
+startup; `NEMO_GYM_LOG_LEVEL=WARNING` silences that.
+
+Local mode subclasses the upstream tools rather than replacing them, so the
+name, description and parameter schema the model sees are unchanged and a
+sample written against the live benchmark runs either way. Only the fetch
+differs. Corpus reads need the index to map a filing URL to its file, which is
+why they are local-mode only. Parsed corpus text is written to the cache when
+`use_cache` is on, so each filing is parsed once. `parse_html_page` still
+resolves URLs the corpus does not hold, through the same cached fetch live mode
+uses, and logs its reads by source
+(`sec-corpus`, `cache`, `live`) so a corpus that is missing most of what is
+asked for is visible rather than just slow.
+
+A search whose date range falls outside the indexed span returns an error
+naming that span, rather than the empty result that would send the model
+looking for a better query. Live mode has no equivalent, since sec-api.io
+serves the whole of EDGAR.
+
+See [`resources_servers/sec_local_index/README.md`](../sec_local_index/README.md)
+for the shared library behind both modes and how it is kept aligned with
+upstream.
 
 ## Dependencies
 
@@ -56,8 +92,8 @@ Run this environment with **two configs**: this environment config
 `vllm_model.yaml` for a self-hosted endpoint).
 
 Set endpoints and credential references in the repo-root, gitignored `env.yaml`.
-Tool keys are optional at startup; missing keys make those tools unavailable.
-Live runs need policy/retrieval model access, and `/verify` needs judge-model access.
+`sec_api_key` is required when `edgar_search_mode` is `live`. The other tool keys
+are optional at startup; missing keys make those tools unavailable. Live runs need policy/retrieval model access, and `/verify` needs judge-model access.
 
 ```yaml
 # env.yaml
@@ -71,8 +107,12 @@ search_judge_model_base_url: https://api.openai.com/v1
 search_judge_model_api_key: ${oc.env:OPENAI_API_KEY}
 search_judge_model_name: gpt-5-mini
 
-# Optional for startup; all three are needed for full-tool benchmark coverage.
-sec_api_key: ${oc.env:SEC_API_KEY,null}                 # edgar_search (sec-api.io)
+# Required: live (sec-api.io) or local (see "Where SEC data comes from").
+edgar_search_mode: live
+
+sec_api_key: ${oc.env:SEC_API_KEY,null}                 # edgar_search (sec-api.io); required in live mode
+
+# Optional for startup; both are needed for full-tool benchmark coverage.
 tavily_api_key: ${oc.env:TAVILY_API_KEY,null}           # web_search (Tavily)
 pricing_data_api_key: ${oc.env:TIINGO_API_KEY,null}     # price_history (Tiingo)
 
