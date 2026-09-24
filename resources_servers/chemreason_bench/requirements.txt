@@ -1,0 +1,5 @@
+-e nemo-gym[dev] @ ../../
+# No further dependencies: the scorer is pure Python and standard library only.
+# Upstream's eval.py additionally imports bert-score, but that feeds only `bert_score_f1`,
+# a secondary rationalization metric outside primary_map, so it is not needed to
+# reproduce Primary-Overall.

@@ -1,0 +1,8 @@
+# The two messages ChemReason-Bench's reference harness sent for every instance.
+#   1. `system`: SYSTEM_PROMPT from predict/predict.py line 54, verbatim.
+#   2. `user`: `{question}`, the per-task template predict.py builds, rendered at prepare time.
+# The system prompt is short but load-bearing: it is what makes the reply a bare JSON object
+# rather than prose, and every task prompt ends with "Return JSON ONLY with EXACT keys".
+# Byte-exactness of `{question}` against predict.py is pinned in tests/test_prepare.py.
+system: "You are a careful chem lab assistant. Return JSON ONLY, matching the requested keys exactly. Do not include explanations or extra keys."
+user: "{question}"
