@@ -29,5 +29,13 @@ requires = ["setuptools>=61", "setuptools-scm"]
 where = [".."]
 include = ["vllm_model"]
 
+[tool.uv]
+# SQLAlchemy 2.1.0 publishes duplicate normalized extra names that uv rejects
+# while resolving this server's isolated environment. Keep the fresh resolution
+# on the last compatible release line until SQLAlchemy ships valid metadata.
+constraint-dependencies = [
+    "sqlalchemy<2.1",
+]
+
 [tool.uv.sources]
 nemo-gym = { path = "../..", editable = true }
