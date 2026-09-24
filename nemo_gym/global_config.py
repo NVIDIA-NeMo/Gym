@@ -17,6 +17,7 @@ import re
 import sys
 from argparse import ArgumentParser
 from collections import defaultdict
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
@@ -41,10 +42,12 @@ from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, legacy_config_path_al
 from nemo_gym.config_types import (
     AgentCompositionError,
     AlmostServerError,
+    BaseServerConfig,
     ConfigError,
     ConfigInterpolationError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
+    HeadServerConfigMalformedError,
     InheritPathNotFoundError,
     MalformedConfigPathsError,
     NoServerInstancesError,
@@ -1285,10 +1288,37 @@ Found global config dict yaml:
             # Do one pass through all the configs validate and populate various configs for our servers.
             default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
 
-        head_server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME, {})
-        head_server_port = head_server_config.get("port", DEFAULT_HEAD_SERVER_PORT)
+        with open_dict(global_config_dict):
+            # Head server defaults, filled per key so a config may pin just one.
+            head_server = global_config_dict.get(HEAD_SERVER_KEY_NAME) or {}
+            if not isinstance(head_server, Mapping):
+                raise HeadServerConfigMalformedError(
+                    f"""'{HEAD_SERVER_KEY_NAME}' must be a mapping of `host` and `port`. Got: {head_server!r}.
+Set the keys individually, in a config or as overrides, e.g.:
+  ++{HEAD_SERVER_KEY_NAME}.host=127.0.0.1 ++{HEAD_SERVER_KEY_NAME}.port={DEFAULT_HEAD_SERVER_PORT}"""
+                )
+            head_server.setdefault("host", default_host)
+            head_server.setdefault("port", DEFAULT_HEAD_SERVER_PORT)
+            global_config_dict[HEAD_SERVER_KEY_NAME] = head_server
 
-        initial_disallowed_ports = [head_server_port] if head_server_port is not None else []
+        # Validated at first read rather than where the block is next built into a BaseServerConfig
+        # (ServerClient.load_head_server_config, after Ray is up for `gym env start`): BaseServerConfig is not
+        # a CLI config, so its pydantic error would otherwise escape `main()` as a raw traceback (#2686).
+        # Validate-only: the block is left as written, so `gym env resolve` prints what the user configured.
+        try:
+            head_server_config = BaseServerConfig.model_validate(head_server)
+        except ValidationError as e:
+            problems = "; ".join(
+                f"{'.'.join([HEAD_SERVER_KEY_NAME, *map(str, error['loc'])])} ({error['msg']})" for error in e.errors()
+            )
+            raise HeadServerConfigMalformedError(
+                f"""'{HEAD_SERVER_KEY_NAME}' is invalid: {problems}.
+`{HEAD_SERVER_KEY_NAME}.host` must be a hostname or IP; `{HEAD_SERVER_KEY_NAME}.port` and, if set, `{HEAD_SERVER_KEY_NAME}.num_workers` must be integers. Set them in a config or as overrides, e.g.:
+  ++{HEAD_SERVER_KEY_NAME}.host=127.0.0.1 ++{HEAD_SERVER_KEY_NAME}.port={DEFAULT_HEAD_SERVER_PORT}"""
+            ) from e
+
+        # The validated (coerced) port, so a quoted `port: "11000"` still keeps it away from the allocator.
+        initial_disallowed_ports = [head_server_config.port]
 
         with open_dict(global_config_dict):
             port_range_low = global_config_dict.setdefault(PORT_RANGE_LOW_KEY_NAME, 10_001)
@@ -1306,12 +1336,6 @@ Found global config dict yaml:
         )
 
         with open_dict(global_config_dict):
-            # Head server defaults, filled per key so a config may pin just one.
-            head_server = global_config_dict.get(HEAD_SERVER_KEY_NAME) or {}
-            head_server.setdefault("host", default_host)
-            head_server.setdefault("port", DEFAULT_HEAD_SERVER_PORT)
-            global_config_dict[HEAD_SERVER_KEY_NAME] = head_server
-
             # Store final list of disallowed ports.
             global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
 
