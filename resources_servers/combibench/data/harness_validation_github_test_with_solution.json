@@ -1,0 +1,2647 @@
+{
+  "summary": {
+    "rows": 100,
+    "statement_status": {
+      "has_sorry": 100
+    },
+    "statement_failures": [],
+    "gold_answer_rows": 0,
+    "gold_answer_status": {},
+    "gold_answer_failures": [],
+    "controls": {
+      "empty": {
+        "denominator": 100,
+        "nonzero_reward": 0,
+        "status": {
+          "empty_output": 100
+        }
+      },
+      "echo_with_sorry": {
+        "denominator": 100,
+        "nonzero_reward": 0,
+        "status": {
+          "has_sorry": 100
+        }
+      },
+      "axiom": {
+        "denominator": 100,
+        "nonzero_reward": 0,
+        "status": {
+          "forbidden_keyword": 100
+        }
+      },
+      "weakened": {
+        "denominator": 100,
+        "nonzero_reward": 0,
+        "status": {
+          "statement_mismatch": 100
+        }
+      }
+    }
+  },
+  "rows": {
+    "hackmath_1": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.026443
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_3": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.058615
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_4": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.046306
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_2": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.045859
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_5": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.051781
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_8": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.06031
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_7": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.054629
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_9": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.041418
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_10": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.02696
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch1_16": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.085639
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch1_10": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.060235
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch2_6": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.030749
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch1_5": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.121592
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch2_36": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.047052
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch2_11": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.049125
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch3_4": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.044881
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch3_18": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.0366
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch3_27": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.060481
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch4_35": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.067164
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch4_59": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.054178
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch4_9": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.061655
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch5_9": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.033671
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch5_51": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.03445
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch6_21": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.019308
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch5_26": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.079092
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch6_11": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.046272
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "hackmath_6": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.623407
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch6_9": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.03568
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch7_7": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.066893
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch8_30": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.029654
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch8_6": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.079169
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch7_27": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.076721
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch7_15": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.140937
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch8_9": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.063489
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch9_13": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.07219
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch10_31": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.070035
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch10_34": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.116156
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch11_5": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.033391
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch10_60": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.100334
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch11_20": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.027663
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch11_59": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.05128
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch12_62": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.048096
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch12_34": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.020841
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch12_37": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.131764
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch13_6": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.165349
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch9_11": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.627934
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch9_8": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.667728
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch13_10": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.191568
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch14_45": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.022483
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch14_33": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.02348
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch13_9": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.207642
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "apmo_1991_p2": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.088072
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "brualdi_ch14_26": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.177111
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "apmo_2023_p1": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.139509
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "balticway_2015_p7": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.067783
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imosl_2011_c6": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.107068
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imosl_2015_c6": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.048632
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "egmo_2022_p5": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.154302
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imosl_2019_c2": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.059439
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "izho_2019_p1": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.052544
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "izho_2014_p3": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.10427
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "usamo_2000_p4": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.049836
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imosl_2021_c5": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.124876
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2009_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.061034
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2020_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.112393
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2024_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.056344
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2000_p4": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.048721
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2001_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.054934
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "bxmo_2017_p2": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.421942
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2003_p1": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.063491
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2001_p4": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.120105
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2002_p1": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.18171
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2005_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.102395
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2007_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.029322
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2008_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.225725
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2010_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.196768
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2006_p2": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.41416
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2022_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.872979
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2012_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.173686
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2011_p4": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.276247
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2013_p2": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.148729
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2011_p2": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.443286
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2014_p2": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.119093
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2015_p1": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.084203
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2014_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.12048
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2013_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.30243
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2015_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.181959
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2016_p2": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.210037
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2017_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.179372
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2017_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.128604
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2016_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.316644
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2019_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.13958
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2018_p4": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.133443
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2018_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.316258
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2020_p4": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.073899
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2021_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.195665
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2023_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.157784
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2022_p1": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.253514
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2024_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.209762
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    },
+    "imo_2019_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 6.751989
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_output"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "forbidden_keyword"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_mismatch"
+        }
+      }
+    }
+  },
+  "input": "benchmarks/combibench_with_solution/data/combibench_test_with_solution.jsonl",
+  "answer_check_ascription": true,
+  "lean_server_url": "http://127.0.0.1:12332"
+}

@@ -1,0 +1,37 @@
+name: combibench_with_solution
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: 'CombiBench "with solution" setting: the 100 Lean 4 combinatorics problems with the
+  published answers already substituted, so only the proof is missing. The model completes every sorry; a Lean 4.24 / Mathlib v4.24.0 Kimina server
+  compiles the result and the verifier reproduces upstream one-stage Fine-Eval: statement-tamper
+  check, no axiom/sorry, answers compared to ground truth by rfl/norm_num.'
+modality: text
+licensing: Apache-2.0
+authors:
+- rshahbazyan
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: combibench
+agent_server: simple_agent
+datasets:
+- name: combibench_with_solution
+  type: benchmark
+  jsonl_fpath: benchmarks/combibench_with_solution/data/combibench_test_with_solution.jsonl
+  prepare_script: benchmarks/combibench_with_solution/prepare.py
+  prompt_config: benchmarks/combibench/prompt.yaml
+  num_repeats: 16
+model_server: policy_model
+canonical_split: combibench_with_solution
+standard_prompt_config: benchmarks/combibench/prompt.yaml
+adopted_from:
+  source: https://github.com/MoonshotAI/CombiBench
+  ref: c67e4213597b1477351d9ef5ca37fb622084cc78  # pragma: allowlist secret
+  reconciled: 2026-09-16
+lifecycle: active

@@ -1,0 +1,26 @@
+config_paths:
+- resources_servers/combibench/configs/combibench.yaml
+
+# Isolated instances so a benchmark run never shares state with the generic config.
+combibench_resources_server:
+  _inherit_from: combibench
+  resources_servers:
+    combibench:
+      datasets:
+      # "without solution": the model must fill every `sorry`, answers included.
+      - name: combibench
+        type: benchmark
+        jsonl_fpath: benchmarks/combibench/data/combibench_test.jsonl
+        prepare_script: benchmarks/combibench/prepare.py
+        prompt_config: benchmarks/combibench/prompt.yaml
+        # The paper reports Pass@1/8/16 from 16 samples per problem.
+        num_repeats: 16
+        license: MIT
+
+combibench_agent:
+  _inherit_from: combibench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: combibench_resources_server
+      datasets: []
