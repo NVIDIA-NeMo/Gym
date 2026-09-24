@@ -27,6 +27,11 @@ MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
+ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-0}
+if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then
+    echo "ENABLE_MOONCAKE requires VLLM_MODE=pd" >&2
+    exit 1
+fi
 # Independent mode starts one complete TP model replica per node. Coupled mode
 # forms one multi-node DP/EP engine per tier for models that cannot fit per node.
 VLLM_PD_DEPLOYMENT_MODE="${VLLM_PD_DEPLOYMENT_MODE:-independent}"
@@ -192,6 +197,7 @@ export NCCL_CUMEM_ENABLE=1
 export NCCL_MNNVL_ENABLE=1
 export NCCL_NVLS_ENABLE=1
 
+export ENABLE_MOONCAKE=$ENABLE_MOONCAKE
 source "$VLLM_CONFIG"
 
 # Increase the number of file descriptors to 65k
@@ -201,6 +207,72 @@ fi
 
 this_node_hostname=\$(hostname)
 read -r -a nodes <<< "\$ALL_NODES"
+
+mooncake_pid=""
+cleanup_mooncake() {
+    if [[ -n "\$mooncake_pid" ]]; then
+        kill "\$mooncake_pid" 2>/dev/null || true
+        wait "\$mooncake_pid" 2>/dev/null || true
+    fi
+}
+
+if (( ENABLE_MOONCAKE )); then
+    # Cover setup failures before the serving-mode cleanup traps take over.
+    trap cleanup_mooncake EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    export MOONCAKE_CONFIG_PATH="\${MOONCAKE_CONFIG_PATH:-/tmp/mooncake-\$SLURM_JOB_ID/config.json}"
+    mkdir -p "\$(dirname "\$MOONCAKE_CONFIG_PATH")"
+    cat > "\$MOONCAKE_CONFIG_PATH" <<MOONCAKE_CONFIG
+{
+  "mode": "embedded",
+  "metadata_server": "P2PHANDSHAKE",
+  "master_server_address": "\${nodes[0]}:50051",
+  "global_segment_size": "100GB",
+  "local_buffer_size": "4GB",
+  "protocol": "rdma",
+  "device_name": "",
+  "enable_offload": false
+}
+MOONCAKE_CONFIG
+
+    uv pip install --system mooncake-transfer-engine-cuda13
+
+    # @bxyu-nvidia: Need these for mooncake connector on GB200 https://github.com/vllm-project/vllm/blob/main/docs/features/mooncake_connector_usage.md#environment-variables
+    export WITH_NVIDIA_PEERMEM=0
+
+    if (( SLURM_PROCID == 0 )); then
+        echo "Starting mooncake_master on \${nodes[0]}"
+        mooncake_master \
+            -rpc_port=50051 \
+            -rpc_thread_num=4 \
+            -metrics_port=9003 \
+            -default_kv_lease_ttl=30000 \
+            -eviction_high_watermark_ratio=0.95 \
+            -eviction_ratio=0.1 \
+            -minloglevel=1 \
+            -enable_metric_reporting=false \
+            -logtostderr &
+        mooncake_pid=\$!
+    fi
+
+    mooncake_health_url="http://\${nodes[0]}:9003/health"
+    mooncake_deadline=\$(( SECONDS + 120 ))
+    echo "Waiting for Mooncake master at \$mooncake_health_url"
+    until curl --fail --silent --noproxy '*' --connect-timeout 2 --max-time 5 \
+        --output /dev/null "\$mooncake_health_url"; do
+        if [[ -n "\$mooncake_pid" ]] && ! kill -0 "\$mooncake_pid" 2>/dev/null; then
+            echo "mooncake_master exited during startup" >&2
+            exit 1
+        fi
+        if (( SECONDS >= mooncake_deadline )); then
+            echo "Timed out waiting for Mooncake master at \$mooncake_health_url" >&2
+            exit 1
+        fi
+        sleep 1
+    done
+    echo "Mooncake master is ready"
+fi
 
 router_common_args=(--log-level error --prometheus-host 0.0.0.0 --prometheus-port $ROUTER_METRICS_PORT)
 read -r -a router_extra_args <<< $(printf '%q' "${ROUTER_ARGS:-}")
@@ -249,6 +321,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             # Signal both local services without delaying failure propagation;
             # the enclosing srun tears down the remaining distributed workers.
             kill "\${coupled_pids[@]}" 2>/dev/null || true
+            cleanup_mooncake
             exit "\$status"
         }
         trap cleanup_coupled_head EXIT
@@ -328,6 +401,7 @@ else
             kill "\$router_pid" 2>/dev/null || true
             wait "\$router_pid" 2>/dev/null || true
         fi
+        cleanup_mooncake
     }
     trap cleanup_vllm EXIT
     trap 'exit 130' INT
