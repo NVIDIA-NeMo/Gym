@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/mcqa/configs/mcqa.yaml
+
+indic_gpqa_diamond_resources_server:
+  _inherit_from: mcqa
+  resources_servers:
+    mcqa:
+      grading_mode: lenient_answer_colon_md
+
+indic_gpqa_diamond_agent:
+  _inherit_from: mcqa_simple_agent
+  responses_api_agents:
+    simple_agent:
+      max_steps: 1
+      resources_server:
+        name: indic_gpqa_diamond_resources_server
+      datasets:
+      - name: indic_gpqa_diamond
+        type: benchmark
+        jsonl_fpath: benchmarks/indic/gpqa_diamond/data/gpqa_diamond_benchmark.jsonl
+        prompt_config: benchmarks/prompts/eval/aai/mcq-4choices.yaml
+        prepare_script: benchmarks/indic/gpqa_diamond/prepare.py
+        num_repeats: 8
