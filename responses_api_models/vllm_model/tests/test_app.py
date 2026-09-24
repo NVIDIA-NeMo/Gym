@@ -6373,3 +6373,87 @@ class TestPreserveEnvelopeIdFollowsCaptureContext:
             assert model._preserve_envelope_id() is False
         finally:
             reset_token_sink(token)
+
+
+class TestAssistantTurnCap:
+    """max_assistant_turns ends a tool loop after N model calls without calling the model.
+
+    The cap is read from the request itself (assistant messages already in the history), so
+    it holds across server workers, and the empty reply is never captured, so a
+    token-captured rollout keeps one chain.
+    """
+
+    @staticmethod
+    def _server(max_assistant_turns: int | None) -> VLLMModel:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            max_assistant_turns=max_assistant_turns,
+        )
+        model = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        fake_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        fake_client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "dummy_model",
+                "choices": [
+                    {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "model reply"}}
+                ],
+            }
+        )
+        model._clients = [fake_client]
+        model._session_id_to_client = {}
+        return model
+
+    @staticmethod
+    def _history(assistant_turns: int) -> list[dict]:
+        messages: list[dict] = [{"role": "user", "content": "fix the bug"}]
+        for i in range(assistant_turns):
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": f"call_{i}", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+                    ],
+                }
+            )
+            messages.append({"role": "tool", "tool_call_id": f"call_{i}", "content": "ok"})
+        return messages
+
+    def _post(self, monkeypatch: MonkeyPatch, model: VLLMModel, assistant_turns: int) -> dict:
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+        resp = TestClient(model.setup_webserver()).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": self._history(assistant_turns)},
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    def test_below_the_cap_the_model_is_called(self, monkeypatch: MonkeyPatch) -> None:
+        model = self._server(max_assistant_turns=5)
+        data = self._post(monkeypatch, model, assistant_turns=4)
+        model._clients[0].create_chat_completion.assert_awaited_once()
+        assert data["choices"][0]["message"]["content"] == "model reply"
+
+    def test_at_the_cap_an_empty_stop_reply_ends_the_loop(self, monkeypatch: MonkeyPatch) -> None:
+        model = self._server(max_assistant_turns=5)
+        data = self._post(monkeypatch, model, assistant_turns=5)
+        model._clients[0].create_chat_completion.assert_not_awaited()
+        choice = data["choices"][0]
+        assert choice["finish_reason"] == "stop"
+        assert not choice["message"]["content"] and not choice["message"].get("tool_calls")
+
+    def test_unset_never_caps(self, monkeypatch: MonkeyPatch) -> None:
+        model = self._server(max_assistant_turns=None)
+        self._post(monkeypatch, model, assistant_turns=50)
+        model._clients[0].create_chat_completion.assert_awaited_once()

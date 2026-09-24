@@ -206,6 +206,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
 
+    # Cap on model calls per conversation. A chat request whose history already holds this many
+    # assistant messages is answered with an empty "stop" completion without calling the model,
+    # so a tool loop ends after that many calls. The reply is never captured, so a token-captured
+    # rollout keeps one unbroken chain; a harness-side step limit that rewrites the last request
+    # (OpenCode's agent.steps) breaks the chain instead. None disables the cap.
+    max_assistant_turns: Optional[int] = None
+
     # Opt in to supplying a verified parent's exact tokens to the engine.
     # Prefix supply requires generation-time prompt_token_ids as proof.
     # Stock vLLM does not support the required_prefix_token_ids extension.
@@ -903,6 +910,9 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
+        if self._assistant_turn_cap_reached(body):
+            return self._create_empty_chat_completion()
+
         if self.config.use_completions_api:
             return await self._chat_completions_via_completions_api(request, body)
 
@@ -1588,6 +1598,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             chat_completion_dict["usage"] = completion_dict["usage"]
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    def _assistant_turn_cap_reached(self, body: NeMoGymChatCompletionCreateParamsNonStreaming) -> bool:
+        if self.config.max_assistant_turns is None:
+            return False
+        messages = body.model_dump(exclude_unset=True).get("messages") or []
+        return sum(1 for message in messages if message.get("role") == "assistant") >= self.config.max_assistant_turns
 
     def _create_empty_chat_completion(self) -> NeMoGymChatCompletion:
         return NeMoGymChatCompletion(
