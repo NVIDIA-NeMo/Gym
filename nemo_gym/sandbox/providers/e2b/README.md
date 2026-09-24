@@ -13,7 +13,8 @@ export E2B_API_KEY=<your-api-key>
 ```
 
 For a package install, use `pip install "nemo-gym[sandbox]"`. The provider requires
-`e2b>=2.36.0,<3.0.0`.
+`e2b>=2.46.0,<3.0.0`. Gateway service-port routing requires the
+`ConnectionConfig.sandbox_headers` API available from E2B 2.46.
 
 The shipped config is `nemo_gym/sandbox/providers/e2b/configs/e2b.yaml`. It reads
 `E2B_API_KEY`, `E2B_API_URL`, and `E2B_SANDBOX_URL`; leave the URL variables unset for the
