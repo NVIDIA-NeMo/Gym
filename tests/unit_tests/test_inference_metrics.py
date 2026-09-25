@@ -331,6 +331,7 @@ async def test_aggregates_require_all_fresh_replica_samples(monkeypatch, missing
         return {
             f"vllm/{replica}/generation_tokens_per_second": 100 if replica == "a" else 200,
             f"vllm/{replica}/num_requests_running": 0 if replica == "a" else 4,
+            f"vllm/{replica}/num_requests_waiting": 8 if replica == "a" else 2,
             f"vllm/{replica}/spec_tokens_total/position/2": 10 if replica == "a" else 30,
             f"vllm/{replica}/kv_cache_usage_perc": 0.2 if replica == "a" else 0.6,
             f"vllm/{replica}/only_on_{replica}": 99,
@@ -352,8 +353,12 @@ async def test_aggregates_require_all_fresh_replica_samples(monkeypatch, missing
         assert payload["vllm/total/spec_tokens_total/position/2"] == 40
         assert payload["vllm/mean/spec_tokens_total/position/2"] == 20
         assert payload["vllm/mean/kv_cache_usage_perc"] == pytest.approx(0.4)
+        assert payload["vllm/max/kv_cache_usage_perc"] == 0.6
+        assert payload["vllm/total/num_requests_waiting"] == 10
+        assert payload["vllm/mean/num_requests_waiting"] == 5
+        assert payload["vllm/max/num_requests_waiting"] == 8
         assert not any("only_on_" in key for key in payload)
-        assert len(payload) == 8
+        assert len(payload) == 12
 
 
 async def test_histogram_only_scrapes_publish_replica_and_aggregate_samples(monkeypatch):
@@ -450,6 +455,7 @@ async def test_total_cache_hit_rate_is_query_weighted(monkeypatch):
     result = publish.call_args.args[0]
     assert result["vllm/total/prefix_cache_hit_rate"] == pytest.approx(100 * 100 / 120)
     assert result["vllm/mean/prefix_cache_hit_rate"] == 70
+    assert result["vllm/min/prefix_cache_hit_rate"] == 50
     assert result["vllm/total/prompt_tokens_by_source_per_second/source/local_compute"] == 10
     assert result["vllm/mean/prompt_tokens_by_source_per_second/source/local_compute"] == 5
 

@@ -184,10 +184,16 @@ class InferenceMetricsCollector:
             )
             aggregates = {}
             for metric in sorted(shared_metrics):
-                total = sum(metrics[metric] for metrics in replica_metrics)
-                if metric.split("/", 1)[0] != "prefix_cache_hit_rate":
+                values = [metrics[metric] for metrics in replica_metrics]
+                total = sum(values)
+                name = metric.split("/", 1)[0]
+                if name != "prefix_cache_hit_rate":
                     aggregates[f"vllm/total/{metric}"] = total
                 aggregates[f"vllm/mean/{metric}"] = total / len(replica_metrics)
+                if name in {"kv_cache_usage_perc", "num_requests_waiting"}:
+                    aggregates[f"vllm/max/{metric}"] = max(values)
+                elif name == "prefix_cache_hit_rate":
+                    aggregates[f"vllm/min/{metric}"] = min(values)
             self.add_derived_metrics(aggregates, "vllm/total/")
             if aggregates:
                 export_metrics(aggregates)
