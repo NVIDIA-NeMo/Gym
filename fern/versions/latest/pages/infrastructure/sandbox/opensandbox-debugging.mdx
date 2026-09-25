@@ -101,6 +101,28 @@ is the provider-neutral check if you do not want to import the provider's except
 notice surfaces on the PTY path as
 `SandboxPtyError("PTY attach takeover kept being refused: Sandbox was OOM-killed. ...")`.
 
+When the server can see the sandbox's death itself, it answers `410` with the code
+`SANDBOX::ENDED` instead, for every call against that sandbox: exec, background status and log
+polls, PTY, and endpoint lookups. The provider raises `SandboxEndedError` for it, with the
+server's own end reason (`OOMKilled`, `Evicted`, `Error`, ...) in `SandboxEndedError.reason` and
+in the message. The error is terminal: nothing is retried, no further command is submitted, and no
+status poll is needed because the server already said why. A create whose probe or reconnect hits
+a `410` ends that attempt immediately with `OpenSandboxCreateError` chained from
+`SandboxEndedError`, rather than polling the dead sandbox until its startup deadline, and then
+allocates a fresh sandbox within `create.retries`.
+
+```python
+from nemo_gym.sandbox.providers.opensandbox.provider import SandboxEndedError
+
+try:
+    result = await sandbox.exec(cmd, timeout_s=120)
+except SandboxEndedError as e:
+    if e.reason == "OOMKilled":
+        ...  # record as OOM; recreate the sandbox or fail the rollout
+    else:
+        ...  # ended for another reason (eviction, node loss, TTL)
+```
+
 <Note>
 Do not confuse OOM with a timeout. A command that exceeds its `timeout_s` raises `TimeoutError`; a
 wedged command raises `TimeoutError` mentioning the hard cap. Neither is an OOM — when in doubt,
@@ -111,9 +133,10 @@ read `memory.events` before deciding.
 
 Rollout records carry sandbox observations under `ng_agent_observations`: each record has
 `outcome` (`completed`, `failed`, `timeout`, `sandbox_error`), `exit_code`, and `error_type`.
-`outcome: sandbox_error` with `error_type: SandboxBackendUnreachableError`, or `exit_code: 137`, is
-your OOM census. Join it on the task id: OOMs clustered on a few tasks mean fan-out or runaway code
-in those repos; OOMs spread evenly mean the limit is genuinely too small.
+`outcome: sandbox_error` with `error_type: SandboxBackendUnreachableError` or
+`error_type: SandboxEndedError` (`reason: OOMKilled`), or `exit_code: 137`, is your OOM census.
+Join it on the task id: OOMs clustered on a few tasks mean fan-out or runaway code in those repos;
+OOMs spread evenly mean the limit is genuinely too small.
 
 ## Cluster-side checks
 

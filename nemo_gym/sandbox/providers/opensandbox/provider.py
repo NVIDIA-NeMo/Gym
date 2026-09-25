@@ -21,7 +21,7 @@ import logging
 import math
 import re
 import shlex
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
@@ -88,6 +88,29 @@ class SandboxBackendUnreachableError(RuntimeError):
     """
 
 
+class SandboxEndedError(RuntimeError):
+    """Raised when the server reports a sandbox as ended: HTTP 410 ``SANDBOX::ENDED``.
+
+    The server answers 410 for every call against a sandbox whose pod reached a
+    terminal phase - exec, background status and log polls, PTY, and endpoint
+    lookups alike. The sandbox cannot come back, so the error is terminal:
+    nothing is retried and no further command is submitted. ``reason`` carries
+    the server's own end reason (``OOMKilled``, ``Evicted``, ``Error``, ...)
+    when it reported one.
+
+    The same death used to surface as a retryable 404
+    ``KUBERNETES::POD_IP_NOT_AVAILABLE`` or as a 502, which the provider
+    retried for a long time before giving up.
+    """
+
+    status_code = 410
+
+    def __init__(self, message: str, *, sandbox_id: str | None = None, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.sandbox_id = sandbox_id
+        self.reason = reason
+
+
 RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 RETRYABLE_ERROR_MARKERS = (
     "all connection attempts failed",
@@ -126,6 +149,13 @@ RETRYABLE_ERROR_MARKERS = (
     "timed out",
     "timeout",
 )
+SANDBOX_ENDED_STATUS_CODE = 410
+SANDBOX_ENDED_ERROR_CODE = "SANDBOX::ENDED"
+# Sent with the 410 body, but only transports that keep the response on the
+# exception expose it, hence the message fallback in _sandbox_ended_reason.
+SANDBOX_ENDED_REASON_HEADER = "opensandbox-sandbox-ended-reason"
+# Server message shape: "Sandbox <id> has ended (<reason>): <controller message>".
+SANDBOX_ENDED_REASON_RE = re.compile(r"has ended \(([^)]+)\)")
 METADATA_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 # Kubernetes prefixed-key namespace for auto-injected attribution labels (team/user/workload/run).
 DEFAULT_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
@@ -190,6 +220,72 @@ def _exception_status_code(exception: BaseException) -> int | None:
     return int(match.group(1))
 
 
+def _exception_chain(exception: BaseException) -> Iterator[BaseException]:
+    """Yield an exception and its ``__cause__`` chain, stopping on a cycle."""
+    seen: set[int] = set()
+    current: BaseException | None = exception
+    while isinstance(current, BaseException) and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__
+
+
+def _reason_from_headers(source: Any) -> str | None:
+    headers = getattr(source, "headers", None)
+    items = getattr(headers, "items", None)
+    if not callable(items):
+        return None
+    for key, value in items():
+        if str(key).lower() == SANDBOX_ENDED_REASON_HEADER and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _sandbox_ended_reason(exception: BaseException) -> str | None:
+    """Return why the sandbox ended: the server's header, else its message, else None."""
+    for error in _exception_chain(exception):
+        if isinstance(error, SandboxEndedError) and error.reason:
+            return error.reason
+        for source in (error, getattr(error, "response", None)):
+            reason = _reason_from_headers(source)
+            if reason is not None:
+                return reason
+        sdk_error = getattr(error, "error", None)
+        for text in (getattr(sdk_error, "message", None), str(error)):
+            match = SANDBOX_ENDED_REASON_RE.search(str(text)) if text else None
+            if match is not None:
+                return match.group(1).strip()
+    return None
+
+
+def _is_sandbox_ended_error(exception: BaseException) -> bool:
+    """Return whether an error is the server's terminal ``410 SANDBOX::ENDED`` answer."""
+    for error in _exception_chain(exception):
+        if isinstance(error, SandboxEndedError):
+            return True
+        if _exception_status_code(error) == SANDBOX_ENDED_STATUS_CODE:
+            return True
+        code = getattr(getattr(error, "error", None), "code", None)
+        if isinstance(code, str) and code.upper() == SANDBOX_ENDED_ERROR_CODE:
+            return True
+        if SANDBOX_ENDED_ERROR_CODE in str(error):
+            return True
+    return False
+
+
+def _as_sandbox_ended_error(exception: BaseException, *, operation: str, sandbox_id: str) -> SandboxEndedError:
+    """Restate the server's 410 as the provider's terminal type, keeping the reason."""
+    if isinstance(exception, SandboxEndedError):
+        return exception
+    reason = _sandbox_ended_reason(exception)
+    return SandboxEndedError(
+        f"Sandbox ended ({reason or 'reason unreported'}) during OpenSandbox {operation}; it cannot be reached "
+        f"again, so the call is not retried; sandbox_id={sandbox_id!r}; server said: {str(exception)[:300]}",
+        sandbox_id=sandbox_id,
+        reason=reason,
+    )
+
+
 def _sdk_error_attributes(
     exception: BaseException,
     *,
@@ -219,7 +315,18 @@ def _sdk_error_attributes(
 
 
 def _is_retryable_create_error(exception: BaseException) -> bool:
-    """Return whether a sandbox create failure is likely transient."""
+    """Return whether a sandbox create failure is likely transient.
+
+    An ended sandbox is checked first because its message routinely quotes the
+    pod's ``PodFailed`` state, which the marker heuristic below would read as
+    retryable. Reaching one is never transient on its own: the server answers
+    410 for that sandbox forever. A create reporting one is the exception -
+    that sandbox is finished, but a fresh pod can still boot, so the create
+    retries with a new sandbox. An eviction or node loss at boot recovers that
+    way; an image whose startup is OOM-killed just exhausts ``create.retries``.
+    """
+    if _is_sandbox_ended_error(exception):
+        return isinstance(exception, SandboxCreateError)
     if isinstance(exception, SandboxCreateVerificationError):
         return True
     if isinstance(exception, SandboxCreateError):
@@ -264,6 +371,8 @@ def _is_retryable_create_error(exception: BaseException) -> bool:
 
 def _is_retryable_sdk_operation_error(exception: BaseException, seen: set[int] | None = None) -> bool:
     """Return whether an SDK operation can be retried."""
+    if _is_sandbox_ended_error(exception):
+        return False
     if isinstance(exception, TimeoutError):
         return False
     seen = set() if seen is None else seen
@@ -1246,14 +1355,21 @@ class OpenSandboxProvider:
             before_sleep=_before_sleep,
             reraise=True,
         )
-        async for attempt in retry_policy:
-            with attempt:
-                return await self._await_sdk_call(
-                    operation_factory(),
-                    operation=operation,
-                    sandbox_id=sandbox_id,
-                    timeout_s=timeout_s,
-                )
+        try:
+            async for attempt in retry_policy:
+                with attempt:
+                    return await self._await_sdk_call(
+                        operation_factory(),
+                        operation=operation,
+                        sandbox_id=sandbox_id,
+                        timeout_s=timeout_s,
+                    )
+        except SandboxEndedError:
+            raise
+        except Exception as e:
+            if not _is_sandbox_ended_error(e):
+                raise
+            raise _as_sandbox_ended_error(e, operation=operation, sandbox_id=sandbox_id) from e
 
         raise RuntimeError("OpenSandbox SDK operation retry loop did not run")
 
@@ -1272,6 +1388,9 @@ class OpenSandboxProvider:
         retrying under ``operations.retries`` cannot double-run it (unlike a real
         command failure). When that budget is exhausted the backend is dead, so
         raise a typed error and fail fast instead of retrying for hours.
+
+        A 410 ``SANDBOX::ENDED`` is the server stating the same conclusion up
+        front, so it short-circuits to ``SandboxEndedError`` on the first answer.
         """
         attempts = self._operations.retries + 1
         for attempt in range(1, attempts + 1):
@@ -1283,7 +1402,13 @@ class OpenSandboxProvider:
                     timeout_s=timeout_s,
                     retries=retries,
                 )
+            except SandboxEndedError:
+                raise
             except Exception as e:
+                if _is_sandbox_ended_error(e):
+                    # The sandbox is gone for good; another submission would only
+                    # collect the same 410.
+                    raise _as_sandbox_ended_error(e, operation=operation, sandbox_id=sandbox_id) from e
                 if _exception_status_code(e) != 502:
                     raise
                 if attempt == attempts:
@@ -1350,6 +1475,11 @@ class OpenSandboxProvider:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                if _is_sandbox_ended_error(e):
+                    raise OpenSandboxCreateError(
+                        "OpenSandbox sandbox ended during the create probe command; "
+                        f"sandbox_id={handle.sandbox_id!r}, command={self._probe.command!r}"
+                    ) from _as_sandbox_ended_error(e, operation="create probe", sandbox_id=handle.sandbox_id)
                 last_exception = e
                 successful_probes = 0
                 sleep_s = min(self._create.connect_poll_s, max(deadline - loop.time(), 0.0))
@@ -1425,6 +1555,11 @@ class OpenSandboxProvider:
                 raise
             except BaseException as e:
                 last_exception = e
+                if _is_sandbox_ended_error(e):
+                    raise OpenSandboxCreateError(
+                        "OpenSandbox sandbox ended before it could be connected after create; "
+                        f"sandbox_id={handle.sandbox_id!r}"
+                    ) from _as_sandbox_ended_error(e, operation="connect after create", sandbox_id=handle.sandbox_id)
                 if not _is_retryable_create_error(e):
                     raise
                 sleep_s = min(self._create.connect_poll_s, max(deadline - loop.time(), 0.0))
@@ -1734,6 +1869,10 @@ class OpenSandboxProvider:
                     f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command wedged "
                     f"(sandbox_id={handle.sandbox_id!r})"
                 ) from e
+        except SandboxEndedError:
+            # The server named the end reason itself, so there is nothing to
+            # diagnose: an ended sandbox is a finished run, not a transient.
+            raise
         except Exception as error:
             if not isinstance(error, SandboxBackendUnreachableError) and _exception_status_code(error) != 502:
                 raise
@@ -1824,6 +1963,8 @@ class OpenSandboxProvider:
             status_timeout_s = poll_timeout_s
 
         def _status_poll_is_retryable(exception: BaseException) -> bool:
+            if _is_sandbox_ended_error(exception):
+                return False
             # The short budget makes poll timeouts routine rather than fatal:
             # re-polling a status is an idempotent GET, so unlike a submit
             # (where a timeout stays terminal to avoid a double-run) a timed-out
