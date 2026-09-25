@@ -1,0 +1,28 @@
+train_jsonl_fpath: resources_servers/reasoning_gym/data/example.jsonl
+train_limit: 1
+
+rollout:
+  agent_name: reasoning_gym_simple_agent
+  head_server:
+    host: 127.0.0.1
+    port: 11000
+  num_repeats: 1
+  max_concurrency: 1
+
+target:
+  type: prompt_config.system
+  module_name: reasoning_prompt
+  prompt_config:
+    user: "{question}"
+    system: >-
+      Solve the reasoning problem carefully. Check every statement for
+      consistency, then return the answer in exactly the requested format.
+
+optimizer:
+  type: candidate_sweep
+  candidate_systems:
+    - >-
+      Solve the reasoning problem carefully. Identify every constraint, test
+      the proposed answer against each one, and return exactly the requested
+      answer format.
+  output_dir: outputs/agent_harness_optimization_example
