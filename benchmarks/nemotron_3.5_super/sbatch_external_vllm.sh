@@ -280,10 +280,14 @@ if (( ENABLE_MOONCAKE )); then
   "global_segment_size": "100GB",
   "local_buffer_size": "4GB",
   "protocol": "rdma",
-  "device_name": "",
+  "device_name": "device_name": "mlx5_0,mlx5_1,mlx5_3,mlx5_4",
   "enable_offload": false
 }
 MOONCAKE_CONFIG
+
+    # @bxyu-nvidia: Specific to OCI-HSG, as with the device_names above. Otherwise we get errors like:
+    # W0924 18:25:48.906106 1830563 worker_pool.cpp:477] Worker: Cannot make connection for endpoint: 10.109.24.46:15741@mlx5_2, pausing peer rail and retrying through an alternate peer RNIC
+    export MC_TE_FILTERS=mlx5_0,mlx5_1,mlx5_3,mlx5_4
 
     uv pip install --system mooncake-transfer-engine-cuda13
 
