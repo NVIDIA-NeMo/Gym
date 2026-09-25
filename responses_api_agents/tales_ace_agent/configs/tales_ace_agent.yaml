@@ -1,0 +1,30 @@
+tales:
+  resources_servers:
+    tales:
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: TALES text-adventure games (alfworld) with admissible commands exposed for ACE agent.
+      value: Multi-turn reasoning with DSPy+Haystack memory and cross-episode ACE playbook evolution.
+      expose_admissible_commands: true
+      framework: alfworld
+      task_no: 0
+      seed: 0
+      split: train
+      max_episode_steps: 50
+
+tales_ace_agent:
+  responses_api_agents:
+    tales_ace_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: tales
+      max_steps: 50
+      trace_dir: traces
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: responses_api_agents/tales_ace_agent/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
