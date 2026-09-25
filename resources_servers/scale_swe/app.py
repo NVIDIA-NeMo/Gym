@@ -118,6 +118,7 @@ class ScaleSWEVerifyResponse(BaseVerifyResponse):
     error: str | None
     eval_sandbox_start_time_taken: float
     patch_verification_time_taken: float
+    test_patch_failed: bool = False
 
 
 class ScaleSWEResourcesServer(SimpleResourcesServer):
@@ -135,7 +136,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
             workdir=body.workdir,
             patch=patch,
             pre_commands=body.pre_commands,
-            f2p_patch=body.f2p_patch,
+            f2p_patch="" if self.config.is_verifying_golden_patch else body.f2p_patch,
             f2p_script=body.f2p_script,
             fail_to_pass=as_id_list(body.FAIL_TO_PASS),
             pass_to_pass=as_id_list(body.PASS_TO_PASS),
@@ -354,6 +355,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                 "error": extraction_error or result.error,
                 "eval_sandbox_start_time_taken": start_time_taken,
                 "patch_verification_time_taken": verification_time_taken,
+                "test_patch_failed": result.test_patch_failed,
             }
         )
 
