@@ -95,10 +95,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         model_calls: list[ModelCallRef] = []
         turns: list[TrajectoryTurn] = []
         trajectory_gaps: list[ObservationGap] = []
-        body = body.model_copy(deep=True)
-
-        if isinstance(body.input, str):
-            body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
+        # Caller-owned messages, tools, and other nested fields remain read-only.
+        # Normalize strings locally and create a fresh input list for each step.
+        # Outputs and usage are owned by the separately decoded model responses.
+        input_messages = body.input
+        if isinstance(input_messages, str):
+            input_messages = [NeMoGymEasyInputMessage(role="user", content=input_messages)]
 
         new_outputs = []
         usage = None
@@ -108,7 +110,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         while True:
             step += 1
-            new_body = body.model_copy(update={"input": body.input + new_outputs})
+            new_body = body.model_copy(update={"input": input_messages + new_outputs})
             if collect_trajectory:
                 turn_timestamp = time()
 
@@ -265,7 +267,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 invocation_id=invocation_id,
                 status=invocation_status,
                 model_calls=model_calls,
-                conversation=[*body.input, *new_outputs],
+                conversation=[*input_messages, *new_outputs],
             )
             trajectory = TrajectoryRecord(
                 task_id=task_id,
