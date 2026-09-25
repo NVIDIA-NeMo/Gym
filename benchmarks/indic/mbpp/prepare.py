@@ -18,7 +18,6 @@ from nemo_gym.global_config import HF_TOKEN_KEY_NAME, maybe_get_global_config_di
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "mbpp_benchmark.jsonl"
 SOURCE_ID = "ai4bharat/indic-mbpp"
-SOURCE_REVISION = "64e7f7cecd2a6b66a0bcbc8c4c02200d40ae520c"
 EXPECTED_ROWS = 500
 LANGUAGE_NAMES = {
     "as": "Assamese",
@@ -119,7 +118,7 @@ def build_rows(
                     "question": question,
                     "verifier_metadata": metadata[identity],
                     "language": language,
-                    "uuid": f"{SOURCE_ID}/{SOURCE_REVISION}/{language}/{identity}",
+                    "uuid": f"{SOURCE_ID}/{language}/{identity}",
                 }
             )
     return rows
@@ -131,14 +130,13 @@ def prepare(
     task_ids: Sequence[int] | None = None,
     output_fpath: str | None = None,
 ) -> Path:
-    """Download the pinned translations and write native Gym tasks."""
+    """Download the translations and write native Gym tasks."""
     config = maybe_get_global_config_dict()
     token = config.get(HF_TOKEN_KEY_NAME) if config is not None else None
     source = hf_hub_download(
         repo_id=SOURCE_ID,
         filename="test.parquet",
         repo_type="dataset",
-        revision=SOURCE_REVISION,
         token=token or get_token(),
     )
     records = load_dataset("parquet", data_files={"test": source}, split="test").to_list()
