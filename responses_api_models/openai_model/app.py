@@ -33,6 +33,15 @@ from nemo_gym.openai_utils import (
 )
 
 
+def _normalize_response_metadata(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop unsupported reasoning-off response metadata without changing the request."""
+    reasoning = response.get("reasoning")
+    if isinstance(reasoning, dict) and reasoning.get("effort") == "none":
+        response = response.copy()
+        response.pop("reasoning")
+    return response
+
+
 class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_base_url: str
     openai_api_key: str
@@ -91,7 +100,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 ]
         async with self._semaphore:
             openai_response_dict = await self._client.create_response(**body_dict)
-        return NeMoGymResponse.model_validate(openai_response_dict)
+        return NeMoGymResponse.model_validate(_normalize_response_metadata(openai_response_dict))
 
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()

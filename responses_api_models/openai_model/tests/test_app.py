@@ -32,6 +32,7 @@ from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
     SimpleModelServer,
     SimpleModelServerConfig,
+    _normalize_response_metadata,
 )
 
 
@@ -60,6 +61,21 @@ def _response_data() -> dict:
         "tool_choice": "auto",
         "tools": [],
     }
+
+
+def test_normalizes_reasoning_off_response_metadata() -> None:
+    response = {"id": "resp_1", "reasoning": {"effort": "none", "summary": None}}
+
+    normalized = _normalize_response_metadata(response)
+
+    assert "reasoning" not in normalized
+    assert response["reasoning"] == {"effort": "none", "summary": None}
+
+
+def test_preserves_supported_reasoning_response_metadata() -> None:
+    response = {"id": "resp_1", "reasoning": {"effort": "high", "summary": None}}
+
+    assert _normalize_response_metadata(response) is response
 
 
 class TestApp:
@@ -199,6 +215,18 @@ class TestApp:
         assert calls[0].model_ref.name == "test_model_server"
         assert calls[0].request == {"input": "hello"}
         assert aggregate_model_call_metrics(CaptureStore(tmp_path), "openai-test")["num_calls"] == 1
+
+    async def test_responses_accepts_reasoning_off_metadata(self) -> None:
+        server = self._setup_server()
+        response_data = _response_data()
+        response_data["reasoning"] = {"effort": "none", "summary": None}
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(return_value=response_data)
+
+        response = TestClient(server.setup_webserver()).post("/v1/responses", json={"input": "hello"})
+
+        assert response.status_code == 200
+        assert response.json()["reasoning"] is None
 
     def test_streaming_messages_capture(self, tmp_path) -> None:
         server = self._setup_server()
