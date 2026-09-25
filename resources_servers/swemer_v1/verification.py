@@ -151,6 +151,11 @@ def drop_patch_sections(patch: str, paths: Iterable[str]) -> str:
     return "".join(kept)
 
 
+def drop_test_patch_files(patch: str, test_patch: str) -> str:
+    sections = re.split(r"(?=^diff --git )", test_patch, flags=re.MULTILINE)
+    return drop_patch_sections(patch, {patch_section_path(section) for section in sections if section.strip()})
+
+
 def _result_file_read_command(result_file: str) -> str:
     """Shell snippet printing a result file's content, or concatenated matches for a
     ``find:<base>:<path_glob>:<file_glob>`` pattern (junit/maven's surefire-reports layout).
@@ -356,10 +361,11 @@ async def run_verification(
     report = grade(statuses or {}, inputs.fail_to_pass, inputs.pass_to_pass, inputs.test_framework)
     test_patch_failed = TEST_PATCH_FAILED in output
     return VerificationResult(
-        completed=True,
+        completed=not test_patch_failed,
         resolved=bool(report["resolved"]) and not test_patch_failed,
         patch_applied=True,
         test_results=report,
         test_output=output,
+        error="held-out test patch did not apply" if test_patch_failed else None,
         test_patch_failed=test_patch_failed,
     )
