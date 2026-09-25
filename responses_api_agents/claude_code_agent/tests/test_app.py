@@ -16,6 +16,7 @@
 import asyncio
 import json
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -482,6 +483,51 @@ class TestRunClaudeCode:
         leaked = home / ".claude_code_agent"
         assert not leaked.exists() or not any(leaked.iterdir())
 
+    def test_invocation_context_prepares_and_detaches_around_native_process(self, tmp_path: Path) -> None:
+        agent = _make_agent(anthropic_base_url="http://localhost:8000")
+        state: list[str] = []
+        home: Path | None = None
+
+        @asynccontextmanager
+        async def context(_agent, native):
+            nonlocal home
+            home = native.home
+            assert native.argv[0] == "claude"
+            assert native.argv[-1] == "hello"
+            assert native.cwd == Path.cwd()
+            assert native.model_url == "http://localhost:8000"
+            assert native.rollout_id == "rollout-1"
+            assert native.environment["CLAUDE_CONFIG_DIR"] == str(native.home)
+            state.append("prepare")
+            try:
+                yield {**native.environment, "GYM_TEST_CONTEXT": "ready"}
+            finally:
+                assert native.home.exists()
+                state.append("detach")
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                state.append("communicate")
+                return b'{"type":"result","subtype":"success","is_error":false,"usage":{}}\n', b""
+
+        async def fake_exec(*cmd, **kwargs):
+            assert kwargs["env"]["GYM_TEST_CONTEXT"] == "ready"
+            assert cmd[0] == "claude"
+            state.append("spawn")
+            return FakeProc()
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch.object(ClaudeCodeAgent, "invocation_context", context),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            asyncio.run(agent._run_claude_code("hello", rollout_id="rollout-1"))
+
+        assert state == ["prepare", "spawn", "communicate", "detach"]
+        assert home is not None and not home.exists()
+
     def test_timeout_returns_empty(self, tmp_path: Path) -> None:
         agent = _make_agent(timeout=1)
         state = {"killed": False, "communicate_calls": 0}
@@ -527,6 +573,13 @@ class TestRunClaudeCode:
         agent = _make_agent()
         state: list[str] = []
 
+        @asynccontextmanager
+        async def context(_agent, native):
+            try:
+                yield native.environment
+            finally:
+                state.append("detach")
+
         async def run() -> None:
             communicating = asyncio.Event()
             stopped = asyncio.Event()
@@ -560,6 +613,7 @@ class TestRunClaudeCode:
                     "responses_api_agents.claude_code_agent.app.kill_process_tree",
                     side_effect=lambda proc: proc.kill(),
                 ),
+                patch.object(ClaudeCodeAgent, "invocation_context", context),
             ):
                 task = asyncio.create_task(agent._run_claude_code("hello", observation_collector=collect))
                 await communicating.wait()
@@ -569,7 +623,7 @@ class TestRunClaudeCode:
 
         asyncio.run(run())
 
-        assert state == ["communicate", "kill", "stopped", "collect"]
+        assert state == ["communicate", "kill", "stopped", "detach", "collect"]
 
     def test_collects_observations_before_cleanup(self, tmp_path: Path) -> None:
         agent = _make_agent()

@@ -31,7 +31,12 @@ from fastapi import Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import (
+    BaseResponsesAPIAgentConfig,
+    Body,
+    NativeInvocationContext,
+    SimpleResponsesAPIAgent,
+)
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
@@ -46,7 +51,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.process_utils import kill_process_tree
+from nemo_gym.process_utils import await_cleanup, kill_process_tree
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
@@ -475,50 +480,53 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 skills_active=bool(skills_path),
             )
 
-            process_started_at = monotonic()
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                start_new_session=True,
-            )
-            communication = asyncio.create_task(proc.communicate())
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    asyncio.shield(communication),
-                    timeout=self.config.timeout,
+            context = NativeInvocationContext(env, tuple(cmd), claude_config_dir, Path.cwd(), base_url, rollout_id)
+            async with self.invocation_context(context) as child_env:
+                process_started_at = monotonic()
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=child_env,
+                    start_new_session=True,
                 )
-            except asyncio.TimeoutError:
-                if proc.returncode is None:
+                communication = asyncio.create_task(proc.communicate())
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        asyncio.shield(communication),
+                        timeout=self.config.timeout,
+                    )
+                except asyncio.TimeoutError:
                     kill_process_tree(proc)
-                stdout, _ = await communication
-                LOG.warning("claude-code timed out after %ds", self.config.timeout)
-                _, run_metadata = parse_stream_json(stdout.decode(errors="replace"))
-                run_metadata.update(
-                    status="incomplete",
-                    error_type="timeout",
-                    duration_ms=(monotonic() - process_started_at) * 1000,
-                )
-                return [], model, run_metadata
-            except asyncio.CancelledError:
-                if proc.returncode is None:
+                    stdout, _ = await await_cleanup(communication)
+                    LOG.warning("claude-code timed out after %ds", self.config.timeout)
+                    _, run_metadata = parse_stream_json(stdout.decode(errors="replace"))
+                    run_metadata.update(
+                        status="incomplete",
+                        error_type="timeout",
+                        duration_ms=(monotonic() - process_started_at) * 1000,
+                    )
+                    return [], model, run_metadata
+                except asyncio.CancelledError:
                     kill_process_tree(proc)
-                await asyncio.gather(communication, return_exceptions=True)
-                raise
+                    try:
+                        await await_cleanup(communication)
+                    except (Exception, asyncio.CancelledError):
+                        pass
+                    raise
 
-            if proc.returncode not in (0, None):
-                LOG.warning("claude-code exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
+                if proc.returncode not in (0, None):
+                    LOG.warning("claude-code exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
-            stdout_text = stdout.decode(errors="replace")
-            LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout_text[:2000])
-            output_items, run_metadata = parse_stream_json(stdout_text)
-            run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
-            status, error_type = _invocation_outcome(run_metadata, proc.returncode)
-            run_metadata["status"] = status
-            if error_type is not None:
-                run_metadata["error_type"] = error_type
-            return output_items, model, run_metadata
+                stdout_text = stdout.decode(errors="replace")
+                LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout_text[:2000])
+                output_items, run_metadata = parse_stream_json(stdout_text)
+                run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
+                status, error_type = _invocation_outcome(run_metadata, proc.returncode)
+                run_metadata["status"] = status
+                if error_type is not None:
+                    run_metadata["error_type"] = error_type
+                return output_items, model, run_metadata
         finally:
             if claude_config_dir is not None:
                 try:

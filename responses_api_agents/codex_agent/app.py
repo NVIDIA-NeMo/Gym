@@ -32,7 +32,12 @@ from fastapi import Request
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import (
+    BaseResponsesAPIAgentConfig,
+    Body,
+    NativeInvocationContext,
+    SimpleResponsesAPIAgent,
+)
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
@@ -47,7 +52,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.process_utils import kill_process_tree
+from nemo_gym.process_utils import await_cleanup, kill_process_tree
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
@@ -483,36 +488,40 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 "OPENAI_API_KEY": self.config.openai_api_key or "local",  # pragma: allowlist secret
             }
 
-            proc = await asyncio.create_subprocess_exec(
-                *self._build_command(instruction, cwd),
-                stdin=asyncio.subprocess.DEVNULL,  # codex appends piped stdin to the prompt and blocks on it
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                # Own process group: `codex` on PATH is an npm shim whose child (the vendored
-                # binary) must die with it, or it keeps the stdout pipe open past the kill below.
-                start_new_session=True,
-            )
-            communication = asyncio.create_task(proc.communicate())
-            try:
-                stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=self.config.timeout)
-            except asyncio.TimeoutError:
-                if proc.returncode is None:
+            cmd = self._build_command(instruction, cwd)
+            context = NativeInvocationContext(env, tuple(cmd), codex_home, Path(cwd), base_url, rollout_id)
+            async with self.invocation_context(context) as child_env:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.DEVNULL,  # codex appends piped stdin to the prompt and blocks on it
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=child_env,
+                    # Own process group: `codex` on PATH is an npm shim whose child (the vendored
+                    # binary) must die with it, or it keeps the stdout pipe open past the kill below.
+                    start_new_session=True,
+                )
+                communication = asyncio.create_task(proc.communicate())
+                try:
+                    stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=self.config.timeout)
+                except asyncio.TimeoutError:
                     kill_process_tree(proc)
-                await communication
-                LOG.warning("codex timed out after %ds", self.config.timeout)
-                return "", model
-            except asyncio.CancelledError:
-                if proc.returncode is None:
+                    await await_cleanup(communication)
+                    LOG.warning("codex timed out after %ds", self.config.timeout)
+                    return "", model
+                except asyncio.CancelledError:
                     kill_process_tree(proc)
-                await asyncio.gather(communication, return_exceptions=True)
-                raise
+                    try:
+                        await await_cleanup(communication)
+                    except (Exception, asyncio.CancelledError):
+                        pass
+                    raise
 
-            if proc.returncode not in (0, None):
-                LOG.warning("codex exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
+                if proc.returncode not in (0, None):
+                    LOG.warning("codex exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
-            LOG.debug("codex stdout (%d chars): %s", len(stdout), stdout[:2000].decode(errors="replace"))
-            return stdout.decode(errors="replace"), model
+                LOG.debug("codex stdout (%d chars): %s", len(stdout), stdout[:2000].decode(errors="replace"))
+                return stdout.decode(errors="replace"), model
         finally:
             if codex_home is not None:
                 shutil.rmtree(codex_home, ignore_errors=True)

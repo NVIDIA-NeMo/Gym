@@ -17,8 +17,27 @@ import asyncio
 import os
 import signal
 from contextlib import suppress
+from typing import TypeVar
 
 import psutil
+
+
+T = TypeVar("T")
+
+
+async def await_cleanup(task: asyncio.Task[T]) -> T:
+    """Finish child reaping despite repeated caller cancellation, then propagate it."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    if cancelled:
+        if not task.cancelled():
+            task.exception()
+        raise asyncio.CancelledError
+    return task.result()
 
 
 def kill_process_tree(proc: asyncio.subprocess.Process) -> None:

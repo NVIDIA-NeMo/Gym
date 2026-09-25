@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from functools import wraps
+from pathlib import Path
 from typing import Any, Optional
 from warnings import warn
 
@@ -124,8 +127,25 @@ class BaseResponsesAPIAgent(BaseServer):
     config: BaseResponsesAPIAgentConfig
 
 
+@dataclass(frozen=True)
+class NativeInvocationContext:
+    """Final native launch inputs, available before spawn and until its child is reaped."""
+
+    environment: dict[str, str]
+    argv: tuple[str, ...]
+    home: Path
+    cwd: Path
+    model_url: str
+    rollout_id: str | None
+
+
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
+
+    @asynccontextmanager
+    async def invocation_context(self, context: NativeInvocationContext) -> AsyncIterator[dict[str, str]]:
+        """Allow native agents to prepare an invocation and remain attached through execution."""
+        yield context.environment
 
     def effective_tool_accesses(self, request: AgentSeedSessionRequest) -> list[ToolAccess]:
         """Overlay episode-scoped tool access onto configured declarations by name."""

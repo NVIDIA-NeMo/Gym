@@ -24,7 +24,30 @@ from unittest.mock import MagicMock, patch
 import psutil
 import pytest
 
-from nemo_gym.process_utils import kill_process_tree
+from nemo_gym.process_utils import await_cleanup, kill_process_tree
+
+
+def test_await_cleanup_finishes_after_repeated_cancellation() -> None:
+    async def run() -> None:
+        release = asyncio.Event()
+
+        async def child() -> str:
+            await release.wait()
+            return "reaped"
+
+        communication = asyncio.create_task(child())
+        cleanup = asyncio.create_task(await_cleanup(communication))
+        await asyncio.sleep(0)
+        cleanup.cancel()
+        await asyncio.sleep(0)
+        cleanup.cancel()
+        assert not cleanup.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup
+        assert communication.result() == "reaped"
+
+    asyncio.run(run())
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process group lifecycle")

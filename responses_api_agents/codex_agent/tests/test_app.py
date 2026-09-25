@@ -16,6 +16,7 @@
 import asyncio
 import json
 import tomllib
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -407,6 +408,69 @@ class TestRunCodex:
         assert captured["cwd"] == str(workdir)
         assert workdir.is_dir()  # a user-provided cwd is never removed
 
+    def test_invocation_context_prepares_and_detaches_around_native_process(self, tmp_path: Path) -> None:
+        agent = _make_agent(openai_base_url="http://localhost:8000/v1")
+        state: list[str] = []
+        home: Path | None = None
+
+        @asynccontextmanager
+        async def context(_agent, native):
+            nonlocal home
+            home = native.home
+            assert native.argv[0] == "codex"
+            assert native.argv[-1] == "hello"
+            assert native.cwd.is_dir()
+            assert native.model_url == "http://localhost:8000/v1"
+            assert native.rollout_id == "rollout-1"
+            assert native.environment["CODEX_HOME"] == str(native.home)
+            state.append("prepare")
+            try:
+                yield {**native.environment, "GYM_TEST_CONTEXT": "ready"}
+            finally:
+                assert native.home.exists()
+                state.append("detach")
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                state.append("communicate")
+                return b"", b""
+
+        async def fake_exec(*cmd, **kwargs):
+            assert kwargs["env"]["GYM_TEST_CONTEXT"] == "ready"
+            assert cmd[0] == "codex"
+            state.append("spawn")
+            return FakeProc()
+
+        with (
+            patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
+            patch.object(CodexAgent, "invocation_context", context),
+            patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            asyncio.run(agent._run_codex("hello", rollout_id="rollout-1"))
+
+        assert state == ["prepare", "spawn", "communicate", "detach"]
+        assert home is not None and not home.exists()
+
+    def test_invocation_preparation_failure_prevents_native_spawn(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+
+        @asynccontextmanager
+        async def fail_preparation(_agent, native):
+            raise RuntimeError("preparation failed")
+            yield native.environment
+
+        with (
+            patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
+            patch.object(CodexAgent, "invocation_context", fail_preparation),
+            patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec") as spawn,
+        ):
+            with pytest.raises(RuntimeError, match="preparation failed"):
+                asyncio.run(agent._run_codex("hello"))
+        spawn.assert_not_called()
+        assert not any((tmp_path / ".codex_agent").iterdir())
+
     def test_bad_skills_path_does_not_leak_codex_home(self, tmp_path: Path) -> None:
         # stage_skills raises for a missing skills dir; the partially-created home must
         # still be cleaned up (setup happens inside the try whose finally rmtree's it).
@@ -457,6 +521,13 @@ class TestRunCodex:
         agent = _make_agent()
         state = []
 
+        @asynccontextmanager
+        async def context(_agent, native):
+            try:
+                yield native.environment
+            finally:
+                state.append("detach")
+
         async def run() -> None:
             communicating = asyncio.Event()
             stopped = asyncio.Event()
@@ -483,6 +554,7 @@ class TestRunCodex:
                     AsyncMock(return_value=SlowProc()),
                 ),
                 patch("responses_api_agents.codex_agent.app.kill_process_tree", side_effect=lambda proc: proc.kill()),
+                patch.object(CodexAgent, "invocation_context", context),
                 patch(
                     "responses_api_agents.codex_agent.app.shutil.rmtree",
                     side_effect=lambda *args, **kwargs: state.append("cleanup"),
@@ -495,7 +567,7 @@ class TestRunCodex:
                     await task
 
         asyncio.run(run())
-        assert state == ["communicate", "kill", "stopped", "cleanup", "cleanup"]
+        assert state == ["communicate", "kill", "stopped", "detach", "cleanup", "cleanup"]
 
 
 class TestRolloutMCPServers:
