@@ -35,10 +35,11 @@ from __future__ import annotations
 import logging
 import unicodedata
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import ray
 from fastapi import FastAPI
+from in22_metrics import clean_in22_response, compute_in22_metrics, sentence_metrics
 from language_consistency import LanguageConsistencyBackend, get_language_consistency_backend
 from pydantic import Field, PrivateAttr
 from sacrebleu import corpus_bleu as corpus_spbleu
@@ -131,8 +132,9 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
             warning for each source-target pair whose mean language-consistency
             score is below this 0-100 threshold.
         strip_reasoning: When True, drop a ``<think>...</think>`` preamble
-            before scoring. Required for reasoning models; safe to leave on
-            for instruction-tuned models that don't emit reasoning traces.
+            before default-profile scoring.
+        metric_profile: Select the default WMT metrics or the IN22 reference
+            normalization, cleanup, and corpus metrics.
     """
 
     compute_comet: bool = True
@@ -143,6 +145,7 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
     language_consistency_backend: Optional[str] = None
     language_consistency_warning_threshold: float = Field(default=50.0, ge=0.0, le=100.0)
     strip_reasoning: bool = True
+    metric_profile: Literal["default", "in22"] = "default"
 
 
 class WmtTranslationRunRequest(BaseRunRequest):
@@ -164,7 +167,10 @@ class WmtTranslationVerifyResponse(WmtTranslationVerifyRequest, BaseVerifyRespon
     # Per-sample sentence-chrF, useful as a dense RL reward.
     sentence_chrf: float
     # Per-sample sentence-spBLEU, reported alongside chrF for comparison.
-    sentence_spbleu: float
+    sentence_spbleu: Optional[float] = None
+    # IN22-only dense diagnostics; official reporting uses corpus metrics.
+    sentence_chrfpp: Optional[float] = None
+    sentence_bleu: Optional[float] = None
     # Per-rollout xCOMET-XXL score (0–1). verify() leaves this unset;
     # compute_metrics() fills it in bulk for non-empty generations.
     comet_score: Optional[float] = None
@@ -324,7 +330,8 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
     _language_consistency_backend: Optional[LanguageConsistencyBackend] = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
-        LOG.warning(BLEU_MIGRATION_WARNING)
+        if self.config.metric_profile == "default":
+            LOG.warning(BLEU_MIGRATION_WARNING)
         return super().setup_webserver()
 
     def _ensure_comet_actors(self) -> None:
@@ -394,34 +401,48 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         return self._language_consistency_backend
 
     async def verify(self, body: WmtTranslationVerifyRequest) -> WmtTranslationVerifyResponse:
-        """Return sentence spBLEU/chrF, with chrF as reward. Defer COMET to compute_metrics()."""
+        """Clean and score one translation using the configured metric profile."""
         language_consistency_backend = self._get_language_consistency_backend()
         raw = body.response.output_text or ""
-        # Drop the reasoning preamble before scoring the actual translation.
-        if self.config.strip_reasoning:
-            raw = _strip_reasoning_preamble(raw)
-        generation = raw.strip()
+        if self.config.metric_profile == "in22":
+            generation = clean_in22_response(raw)
+        else:
+            # Drop the reasoning preamble before scoring the actual translation.
+            if self.config.strip_reasoning:
+                raw = _strip_reasoning_preamble(raw)
+            generation = raw.strip()
         if not generation:
             return WmtTranslationVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
                 generation="",
                 sentence_chrf=0.0,
-                sentence_spbleu=0.0,
+                sentence_spbleu=(0.0 if self.config.metric_profile == "default" else None),
+                sentence_chrfpp=(0.0 if self.config.metric_profile == "in22" else None),
+                sentence_bleu=(0.0 if self.config.metric_profile == "in22" else None),
                 # Empty output is genuinely 0% target language.
                 language_consistency_score=(0.0 if language_consistency_backend is not None else None),
             )
 
-        normalized_generation = _normalize_for_scoring(generation)
-        normalized_reference = _normalize_for_scoring(body.translation)
-
-        # sentence_chrf returns a CHRFScore; .score is 0-100.
-        sentence_chrf_score = sentence_chrf(normalized_generation, [normalized_reference]).score
-        # Sentence spBLEU uses the FLORES-200 SentencePiece tokenizer.
-        sentence_spbleu_score = self._score_sentence_spbleu(
-            normalized_generation,
-            normalized_reference,
-        )
+        sentence_chrfpp_score = None
+        sentence_bleu_score = None
+        sentence_spbleu_score = None
+        if self.config.metric_profile == "in22":
+            sentence_chrf_score, sentence_chrfpp_score, sentence_bleu_score = sentence_metrics(
+                body.translation,
+                generation,
+                body.target_language,
+            )
+        else:
+            normalized_generation = _normalize_for_scoring(generation)
+            normalized_reference = _normalize_for_scoring(body.translation)
+            # sentence_chrf returns a CHRFScore; .score is 0-100.
+            sentence_chrf_score = sentence_chrf(normalized_generation, [normalized_reference]).score
+            # Sentence spBLEU uses the FLORES-200 SentencePiece tokenizer.
+            sentence_spbleu_score = self._score_sentence_spbleu(
+                normalized_generation,
+                normalized_reference,
+            )
         # Normalize to [0, 1] so the "reward" field stays conventional.
         reward = sentence_chrf_score / 100.0
 
@@ -438,6 +459,8 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
             generation=generation,
             sentence_chrf=sentence_chrf_score,
             sentence_spbleu=sentence_spbleu_score,
+            sentence_chrfpp=sentence_chrfpp_score,
+            sentence_bleu=sentence_bleu_score,
             comet_score=None,
             language_consistency_score=language_consistency_score,
         )
@@ -584,7 +607,10 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
             )
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Compute corpus spBLEU and chrF plus optional auxiliary metrics.
+        """Compute corpus metrics and cross-language aggregates.
+
+        The default profile emits these keys; the IN22 profile emits the
+        corresponding lowercase ``chrf``, ``chrf++``, and ``bleu`` keys.
 
         Output keys:
 
@@ -601,6 +627,8 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         """
         if not tasks:
             return {}
+        if self.config.metric_profile == "in22":
+            return compute_in22_metrics(tasks)
 
         if self.config.compute_comet:
             self._score_missing_comet(tasks)
@@ -873,6 +901,15 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
             "eng_Latn->xx/spBLEU",
             "eng_Latn->xx/comet",
             "eng_Latn->xx/language_consistency",
+            "xx->xx/chrf",
+            "xx->xx/chrf++",
+            "xx->xx/bleu",
+            "en->xx/chrf",
+            "en->xx/chrf++",
+            "en->xx/bleu",
+            "xx->en/chrf",
+            "xx->en/chrf++",
+            "xx->en/bleu",
         )
         return {k: agent_metrics[k] for k in keys_of_interest if k in agent_metrics}
 
