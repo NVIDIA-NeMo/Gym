@@ -1,0 +1,114 @@
+---
+title: "Prepare Harbor datasets"
+description: "Resolve Harbor datasets into Gym inputs and inspect task compatibility."
+---
+
+# Prepare Harbor datasets
+
+The `harbor_agent_general` adapter runs Harbor tasks and converts their ATIF
+trajectories into Gym rollout outputs. Its preparation module resolves datasets
+through Harbor, copies complete task directories into local snapshots, and writes
+a Gym configuration, input JSONL, and compatibility manifest. It requires Harbor
+0.23 or newer.
+
+From the Gym repository root:
+
+```bash
+uv sync --project responses_api_agents/harbor_agent_general
+uv run --project responses_api_agents/harbor_agent_general \
+  python -m responses_api_agents.harbor_agent_general.prepare \
+  --dataset terminal-bench@2.0 \
+  --agent opencode --model provider/model \
+  --environment docker \
+  --output-dir /absolute/path/to/prepared-benchmark
+```
+
+Replace the model with an identifier supported by the selected Harbor agent.
+Use `--path /path/to/dataset` for a local directory of tasks. Repeat `--task`
+to select task names or quoted glob patterns. The output directory must not
+already exist; preparation never overwrites an earlier snapshot.
+
+For more configuration, use `--job-config job.yaml`. This accepts Harbor's
+`datasets`, `tasks`, `agents`, `environment`, and `verifier` sections, with exactly
+one agent. Registry settings, Git repository dataset sources, agent MCP settings,
+and environment kwargs can be supplied in those sections. Paths are relative to
+the working directory, matching Harbor. Other top-level job settings are rejected
+instead of being silently discarded. Gym controls repeats, concurrency and retries.
+
+## Inspect and run
+
+Read `manifest.json` before running. It records task sources, Harbor's download
+metadata, snapshot content hashes, detected steps/MCP servers/Compose files, and
+compatibility findings. If any task is incompatible, preparation exits nonzero
+and writes the manifest without emitting runnable inputs. Tasks are never
+silently dropped to obtain a passing compatibility report.
+
+Successful preparation produces `gym.yaml` and `input.jsonl`:
+
+```bash
+gym eval run \
+  --config /absolute/path/to/prepared-benchmark/gym.yaml \
+  --agent harbor_agent_general \
+  --input /absolute/path/to/prepared-benchmark/input.jsonl \
+  --output /absolute/path/to/prepared-benchmark/rollouts.jsonl
+```
+
+Each row includes an explicit `harbor_task` pointing to its snapshot. Registry
+resolution is not repeated when executing those rows. Every rollout worker must
+have access to the same absolute snapshot paths. Treat snapshots as immutable;
+the manifest records their preparation-time hashes but does not enforce them at
+execution time.
+
+<Note>
+Static inspection does not verify credentials, model access, MCP tool use,
+service readiness, or verifier behavior. Run representative smoke rollouts with
+the selected agent and backend before a full evaluation. Preserve credential
+references in configuration rather than embedding secret values in generated files.
+</Note>
+
+## Compose, sidecars, and multi-step tasks
+
+Preparation preserves the complete task directory, including Compose services,
+MCP server code, step instructions and tests. Harbor owns environment startup,
+service networking, task sequencing and verification. Inspection checks the
+selected Harbor environment's Compose capability and the agent's ATIF and
+session-resume capabilities. MCP connectivity and separate verifier environments
+still require runtime validation.
+
+For multi-step tasks, Gym stores each step's name, input, output, reward map and
+source trajectory path in `harbor_steps`. The standard `response` and input fields
+contain the **final executed step**; token usage covers the entire trial. The
+conversion diagnostics mark this projection as lossy. Use `harbor_steps` and the
+original ATIF files when analyzing the complete task or separate agent sessions.
+
+This changes the previous adapter behavior, which exposed the first step's
+trajectory with the last step's reward. Gym now takes the trial-level reward map
+from Harbor, respecting Harbor's multi-step aggregation strategy.
+
+## Structured rewards
+
+Harbor rewards are a flat mapping of names to numeric scores. Gym preserves them
+in `reward_components` and in `harbor_rewards` (which remains null when no verifier
+result exists). Each component is also exposed as `harbor_reward/<name>` so Gym's
+default profiling computes per-component statistics without flattening unrelated
+metadata. Per-step reward maps remain in `harbor_steps`.
+
+Gym still requires one scalar `reward`. Select its objective with
+`--reward-key correctness` during preparation, or `harbor_reward_key` in the agent
+configuration. The default is `reward`. If a verifier returns a reward map without
+the configured key, the adapter reports a rollout failure with the available keys;
+it does not choose an arbitrary component or invent a weighted sum.
+
+```json
+{
+  "reward": 0.75,
+  "reward_components": {"correctness": 0.75, "format": 1.0},
+  "harbor_reward/correctness": 0.75,
+  "harbor_reward/format": 1.0
+}
+```
+
+Dataset-level custom metrics are not imported into Gym's aggregation by this
+command. Arbitrary nested reward JSON is outside Harbor's numeric reward-map
+contract. Failed executions have an empty component map rather than fabricated
+zero values for objectives that were never measured.
