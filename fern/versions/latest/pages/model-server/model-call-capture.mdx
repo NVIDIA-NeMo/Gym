@@ -55,6 +55,39 @@ The rollout record is the usual starting point for analysis. Use its `ng_model_c
 for normalized calls and aggregate metrics; use the matching file in `CaptureStore` when you need the
 original request and response payloads.
 
+## Compress captured model calls
+
+Add `--observability-compress` to `gym eval run` (or set `observability_compress: true`
+in the run config) to retain captures as `<rollout_id>.capture.jsonl.zst`. The default
+is `false`. Capture must also be enabled with `observability_enabled: true`.
+
+The collector compresses each capture after reading its rollout's evidence. Active
+captures remain appendable JSONL, and a late model call appends a complete Zstandard
+frame to the compressed file. Per-rollout locks coordinate writers and compression.
+Compression verifies the original bytes before removing the plain file. If compression
+fails, collection logs a warning and keeps the captured evidence.
+
+`CaptureStore` discovers and reads either format automatically, independent of the
+write flag. JSON records and normalized `ModelCallRecord` values are unchanged.
+External scripts that use `*.capture.jsonl` globs or ordinary `open()` must accept
+`.capture.jsonl.zst` and decompress it. For example:
+
+```python
+import json
+from nemo_gym.jsonl_io import open_jsonl
+
+with open_jsonl("results/model-calls/0-0.capture.jsonl.zst") as records:
+    for line in records:
+        exchange = json.loads(line)
+```
+
+Reading streams the decompressed bytes; it does not create an uncompressed temporary
+file. Compression affects raw model-call captures only. The rollout file and health
+checks keep their existing format and behavior. Training token and lineage files are
+also independent. This reduces retained capture storage; an active rollout can still
+have a large uncompressed capture. Late calls remain in the capture but are not added
+retroactively to the already-saved rollout snapshot.
+
 ## What capture contains
 
 ### Buffered SSE with external token staging
@@ -205,6 +238,7 @@ The CLI workflow above sets these top-level global-config fields:
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
+| `observability_compress` | `bool` | `false` | Compresses raw captures after the collector reads each rollout. |
 | `model_call_capture_dir` | `str` | required when enabled | Absolute shared capture directory used by model servers and rollout collection. |
 
 You can put the same settings in a YAML config instead:

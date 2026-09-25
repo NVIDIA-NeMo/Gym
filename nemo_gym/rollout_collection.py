@@ -1462,6 +1462,7 @@ class RolloutCollectionHelper(BaseModel):
                     result,
                     capture_dirs,
                     include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
+                    compress=global_config.get("observability_compress", False),
                 )
 
             if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:

@@ -35,7 +35,7 @@ import os
 import re
 import time
 from abc import abstractmethod
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, ClassVar, Iterable, Mapping, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -50,6 +50,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
+from nemo_gym.jsonl_io import compress_jsonl, open_jsonl, same_jsonl_bytes, zstd
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -437,6 +438,7 @@ class ModelCallCaptureConfig(BaseModel):
     """Run-wide model-call capture settings from Gym's global config."""
 
     observability_enabled: bool = False
+    observability_compress: bool = False
     model_call_capture_dir: Optional[Path] = None
 
     @model_validator(mode="after")
@@ -479,69 +481,144 @@ class CaptureStore:
     def is_incomplete(self, rollout_id: str) -> bool:
         return self.incomplete_path_for(rollout_id).exists()
 
-    def record(self, rollout_id: str, exchange: dict[str, Any]) -> None:
-        """Append one exchange and fsync (durable across a killed box).
+    def compressed_path_for(self, rollout_id: str) -> Path:
+        return Path(str(self.path_for(rollout_id)) + ".zst")
 
-        ``flock`` serializes appends to the same rollout across worker processes and threads while
-        allowing independent rollouts to write concurrently. This does blocking file IO + fsync,
-        so callers run it off the event loop (the capture middleware uses ``asyncio.to_thread``).
+    @contextmanager
+    def _lock(self, rollout_id: str, *, exclusive: bool):
+        # A stable inode is required: compression replaces the data file. Never unlink
+        # this lock, including cleanup, while another process may be waiting on it.
+        lock_path = self._root / f"{_validate_rollout_id(rollout_id)}.capture.lock"
+        try:
+            handle = lock_path.open("ab" if exclusive else "rb")
+        except FileNotFoundError:
+            # Imported/older captures may have no stable lock. Readers remain usable
+            # on read-only archives; their data-file flock still protects live IO.
+            if exclusive:
+                raise
+            yield
+            return
+        with handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _existing_path(self, rollout_id: str) -> Path:
+        plain = self.path_for(rollout_id)
+        compressed = self.compressed_path_for(rollout_id)
+        if compressed.exists():
+            # A crash between publish and unlink leaves identical files. Refuse an
+            # ambiguous pair rather than silently dropping exchanges from either.
+            if plain.exists() and not same_jsonl_bytes(plain, compressed):
+                raise ValueError(f"Conflicting model-call captures: {plain}, {compressed}")
+            return compressed
+        return plain
+
+    def compress(self, rollout_id: str) -> None:
+        """Compact existing calls after collection; later calls append complete frames.
+
+        Readers and writers share the same stable lock, so even a model call finishing
+        after the rollout snapshot remains durable and discoverable. Compression is an
+        explicit operation: merely reading a capture never changes its encoding.
+        """
+        with self._lock(rollout_id, exclusive=True):
+            plain = self.path_for(rollout_id)
+            if plain.exists():
+                with plain.open("rb") as handle:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                    compress_jsonl(plain)
+
+    def clear(self, rollout_id: str) -> None:
+        with self._lock(rollout_id, exclusive=True):
+            self.path_for(rollout_id).unlink(missing_ok=True)
+            self.compressed_path_for(rollout_id).unlink(missing_ok=True)
+            self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+
+    def record(self, rollout_id: str, exchange: dict[str, Any]) -> None:
+        """Append one exchange and fsync, preserving late calls after compression.
+
+        Live captures retain ordinary append-only JSONL until explicitly compressed.
+        A late call appends an independently compressed frame. All path selection and
+        publication happen under the stable per-rollout lock, across processes/threads.
         """
         line = orjson.dumps(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE)
-        path = self.path_for(rollout_id)
-        with path.open("ab") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                handle.write(line)
-                handle.flush()
-                os.fsync(handle.fileno())
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with self._lock(rollout_id, exclusive=True):
+            path = self._existing_path(rollout_id)
+            if path.suffix == ".zst":
+                # Refuse to append behind a truncated frame: later frames would be
+                # unreachable. Completed preceding calls remain readable as evidence.
+                try:
+                    with open_jsonl(path, "rb") as existing:
+                        while existing.read(1024 * 1024):
+                            pass
+                except (EOFError, zstd.ZstdError):
+                    self.mark_incomplete(rollout_id)
+                    raise
+                # Reconcile an interrupted publication before appending new evidence.
+                self.path_for(rollout_id).unlink(missing_ok=True)
+                line = zstd.compress(
+                    line,
+                    options={
+                        zstd.CompressionParameter.compression_level: 3,
+                        zstd.CompressionParameter.checksum_flag: 1,
+                    },
+                )
+            with path.open("ab") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                offset = handle.tell()
+                try:
+                    handle.write(line)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                except BaseException:
+                    # Best effort rollback for IO errors; a killed process may leave
+                    # a partial final record/frame, which read_available reports.
+                    handle.truncate(offset)
+                    raise
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def read(self, rollout_id: str) -> list[dict[str, Any]]:
-        path = self.path_for(rollout_id)
-        if not path.exists():
-            return []
-        exchanges: list[dict[str, Any]] = []
-        # Stream line-by-line; a capture can be large (token-ids / logprobs).
-        with path.open("rb") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-            try:
-                for line in handle:
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    exchanges.append(orjson.loads(stripped))
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return exchanges
+        with self._lock(rollout_id, exclusive=False):
+            path = self._existing_path(rollout_id)
+            if not path.exists():
+                return []
+            # Stream line-by-line; a capture can be large (token-ids / logprobs).
+            with path.open("rb") as lock_handle:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_SH)
+                with open_jsonl(path, "rb") as handle:
+                    return [orjson.loads(line) for line in handle if line.strip()]
 
     def read_available(self, rollout_id: str) -> tuple[list[tuple[int, dict[str, Any]]], int]:
-        """Read valid exchanges without letting one damaged line hide the rest."""
-        path = self.path_for(rollout_id)
-        if not path.exists():
-            return [], 0
+        """Read valid exchanges and report damaged JSON lines or compressed tails."""
         exchanges: list[tuple[int, dict[str, Any]]] = []
         invalid_count = 0
         capture_index = 0
-        with path.open("rb") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-            try:
-                for line in handle:
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        exchange = orjson.loads(stripped)
-                    except orjson.JSONDecodeError:
-                        invalid_count += 1
-                    else:
-                        if isinstance(exchange, dict):
-                            exchanges.append((capture_index, exchange))
-                        else:
-                            invalid_count += 1
-                    capture_index += 1
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with self._lock(rollout_id, exclusive=False):
+            path = self._existing_path(rollout_id)
+            if not path.exists():
+                return [], 0
+            with path.open("rb") as lock_handle:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_SH)
+                try:
+                    with open_jsonl(path, "rb") as handle:
+                        for line in handle:
+                            if not line.strip():
+                                continue
+                            try:
+                                exchange = orjson.loads(line)
+                            except orjson.JSONDecodeError:
+                                invalid_count += 1
+                            else:
+                                if isinstance(exchange, dict):
+                                    exchanges.append((capture_index, exchange))
+                                else:
+                                    invalid_count += 1
+                            capture_index += 1
+                except (EOFError, zstd.ZstdError):
+                    invalid_count += 1
         return exchanges, invalid_count
 
 
@@ -1752,7 +1829,11 @@ def observability_enabled_from_config(global_config_dict: Any) -> bool:
 def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureStore]:
     for directory in capture_dirs:
         store = CaptureStore(directory)
-        if store.path_for(rollout_id).exists() or store.is_incomplete(rollout_id):
+        if (
+            store.path_for(rollout_id).exists()
+            or store.compressed_path_for(rollout_id).exists()
+            or store.is_incomplete(rollout_id)
+        ):
             return store
     return None
 
@@ -1771,12 +1852,11 @@ def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: lis
         for record in records:
             rollout_id = maybe_rollout_id_from_run_body(record)
             if rollout_id:
-                store.path_for(rollout_id).unlink(missing_ok=True)
-                store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+                store.clear(rollout_id)
 
 
 def merge_model_call_capture_into_record(
-    record: dict[str, Any], capture_dirs: list[Path], *, include_payloads: bool = False
+    record: dict[str, Any], capture_dirs: list[Path], *, include_payloads: bool = False, compress: bool = False
 ) -> dict[str, Any]:
     """Attach captured model-call observability data to a rollout record in place.
 
@@ -1815,6 +1895,12 @@ def merge_model_call_capture_into_record(
             logger.warning("Could not read model-call capture for rollout %s.", rollout_id, exc_info=True)
             calls = []
             gaps.append(ObservationGap(code="model_call_capture_unreadable"))
+    if compress and store is not None:
+        try:
+            store.compress(rollout_id)
+        except Exception:
+            # Storage optimization must not discard already-read model evidence.
+            logger.warning("Could not compress model-call capture for rollout %s.", rollout_id, exc_info=True)
     observations = record.get("ng_agent_observations")
     if observations is not None:
         try:

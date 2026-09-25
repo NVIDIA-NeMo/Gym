@@ -1038,6 +1038,11 @@ COMMANDS = {
                 "disable_aggregation",
                 "Skip post-run aggregate-metrics computation. Use with gym eval aggregate for sharded jobs.",
             ),
+            _bool_flag(
+                "observability-compress",
+                "observability_compress",
+                "Compress model-call captures with Zstandard after collecting each rollout (capture must be enabled).",
+            ),
             _bool_flag("no-health-check", "disable_health_check", "Skip post-run rollout health checks."),
             _value_flag("health-check-workers", "health_check_workers", "Number of rollout-health worker processes."),
             _csv_list_flag(

@@ -711,6 +711,7 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--top-p` | Nucleus sampling top-p. |
 | `--max-output-tokens` | Maximum output tokens. |
 | `--disable-aggregation` | Skip aggregate metrics and the automatic health check. Use for shards that will be combined with `gym eval aggregate`. |
+| `--observability-compress` | Compress model-call capture files after rollout readback. Capture must already be enabled. Defaults to off; see [Model-call capture](/model-server/model-call-capture). |
 | `--no-health-check` | Skip the automatic post-run health check. |
 | `--health-check-workers` | Number of rollout-health worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--health-check-ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |

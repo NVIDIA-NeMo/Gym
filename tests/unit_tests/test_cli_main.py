@@ -163,6 +163,7 @@ class TestEvalRunFlags:
             (["--max-output-tokens", "4096"], "+responses_create_params.max_output_tokens=4096"),
             (["--resume"], "+resume_from_cache=true"),
             (["--no-health-check"], "+disable_health_check=true"),
+            (["--observability-compress"], "+observability_compress=true"),
             (["--health-check-workers", "4"], "+health_check_workers=4"),
             (
                 ["--health-check-ignore", "model_call_missing_token_counts,model_call_zero_completion_tokens"],
