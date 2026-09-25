@@ -228,6 +228,7 @@ if config["kv_connector"] != "MultiConnector":
         "kv_role": "kv_both",
         "kv_connector_extra_config": {"connectors": [config]},
     }
+config["kv_load_failure_policy"] = "recompute"
 connectors = config["kv_connector_extra_config"]["connectors"]
 if not any(connector["kv_connector"] == "MooncakeStoreConnector" for connector in connectors):
     connectors.append({
