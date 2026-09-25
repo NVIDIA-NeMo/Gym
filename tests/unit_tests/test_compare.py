@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 import orjson
 import pytest
+from omegaconf import OmegaConf
 
 from nemo_gym.comparison.diff import build_flip_summary, build_metric_rows, compare_runs, is_comparable_metric
 from nemo_gym.comparison.loading import (
@@ -27,7 +28,7 @@ from nemo_gym.comparison.loading import (
     resolve_agent_selections,
 )
 from nemo_gym.comparison.report import render_markdown, summary_lines, write_reports
-from nemo_gym.comparison.runner import build_comparison_result, resolve_output_dir
+from nemo_gym.comparison.runner import build_comparison_result, run_comparison
 from nemo_gym.comparison.schema import ComparisonConfig
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.path_utils import aggregate_metrics_path_for
@@ -739,14 +740,6 @@ class TestEndToEnd:
         assert key_row.candidates[0].delta == pytest.approx(-50.0)
         assert comparison.flips[0].pass_to_fail_count == 1
 
-    def test_output_dir_defaults_to_the_candidate_directory(self, tmp_path):
-        config, _ = self._result(tmp_path)
-        assert resolve_output_dir(config) == tmp_path / "run_b"
-
-    def test_output_dir_flag_wins(self, tmp_path):
-        config, _ = self._result(tmp_path, output_dirpath=str(tmp_path / "elsewhere"))
-        assert resolve_output_dir(config) == tmp_path / "elsewhere"
-
     @pytest.mark.parametrize(
         "report_format, expected",
         [
@@ -1027,3 +1020,180 @@ class TestReportEdgeCases:
         markdown = render_markdown(result)
         assert "## Warnings" in markdown
         assert "extra" in markdown
+
+
+class TestStatsWiring:
+    """`gym eval compare`'s default statistics step, now run from `run_comparison`.
+
+    A side effect layered on top of `compare`, not a change to it: `compare_report.*` -- same
+    schema, same bytes -- is asserted unaffected. The statistics themselves are
+    `nemo_gym.statistical_tests`'s own responsibility and are tested there; this only checks the
+    wiring (where the extra artifacts land, and that nothing about `compare`'s own output moved).
+
+    `run_comparison` re-reads the raw config for the stats flags, so every test here sets `sys.argv`
+    to the overrides it wants the step to see.
+    """
+
+    def _stats_flags(self, monkeypatch, **flags) -> None:
+        """Seed the cached global config the stats step consults for the flags compare drops."""
+        import nemo_gym.global_config as gc
+
+        monkeypatch.setattr(gc, "_GLOBAL_CONFIG_DICT", OmegaConf.create(flags) if flags else None)
+
+    def _config(self, tmp_path: Path, **overrides) -> ComparisonConfig:
+        baseline = _write_run(
+            tmp_path,
+            "run_a",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.75},
+                    key_metrics={"mean/reward": 0.75},
+                    groups=[_group(i, [1.0, 1.0] if i % 2 == 0 else [0.0, 1.0]) for i in range(6)],
+                )
+            ],
+        )
+        candidate = _write_run(
+            tmp_path,
+            "run_b",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.5},
+                    key_metrics={"mean/reward": 0.5},
+                    groups=[_group(i, [1.0, 0.0] if i % 2 == 0 else [0.0, 0.0]) for i in range(6)],
+                )
+            ],
+        )
+        return ComparisonConfig.model_validate(
+            {
+                "baseline_rollouts_jsonl_fpath": str(baseline),
+                "candidate_rollouts_jsonl_fpaths": [str(candidate)],
+                **overrides,
+            }
+        )
+
+    def test_compare_report_is_byte_identical_with_or_without_the_stats_step(self, tmp_path, monkeypatch):
+        self._stats_flags(monkeypatch)
+        config = self._config(tmp_path)
+        _, written = run_comparison(ComparisonConfig.model_validate({**config.model_dump(), "no_stats": True}), "c")
+        (compare_json,) = [p for p in written if p.name == "compare_report.json"]
+        before = orjson.loads(compare_json.read_bytes())
+
+        run_comparison(config, "c")
+
+        payload = orjson.loads(compare_json.read_bytes())
+        payload.pop("generated_at"), before.pop("generated_at")
+        assert payload == before
+        # And the schema itself never gained a statistics field.
+        assert set(payload.keys()) == {
+            "schema_version",
+            "nemo_gym_version",
+            "command",
+            "baseline",
+            "candidates",
+            "comparisons",
+            "skipped_agents",
+            "warnings",
+        }
+        assert "statistical_tests" not in payload["comparisons"][0]
+
+    def test_stats_step_writes_its_own_subdirectory_next_to_compare_report(self, tmp_path, monkeypatch):
+        from nemo_gym.statistical_tests.schema import STATS_SUBDIR_NAME
+
+        self._stats_flags(monkeypatch)
+        run_comparison(self._config(tmp_path), "gym eval compare ...")
+
+        run_b_dir = tmp_path / "run_b"
+        assert {"compare_report.md", "compare_report.json", STATS_SUBDIR_NAME}.issubset(
+            {p.name for p in run_b_dir.iterdir()}
+        )
+        assert list((run_b_dir / STATS_SUBDIR_NAME).iterdir()), "expected at least one statistical_tests/ artifact"
+
+    def test_the_statistical_test_is_appended_to_the_compare_markdown(self, tmp_path, monkeypatch):
+        """The test's own report is also carried into `compare_report.md`, under its own heading."""
+        self._stats_flags(monkeypatch, metric=["reward"])
+        _, written = run_comparison(self._config(tmp_path), "gym eval compare ...")
+
+        (markdown,) = [path for path in written if path.suffix == ".md"]
+        text = markdown.read_text()
+        assert "reward (paired t-test): n=6" in text
+        # Appended as markdown rather than fenced, so it renders in place: the report's own `#` title
+        # is demoted to a `##` section of this report, and its `##` headings to `###`.
+        assert "\n## Statistical tests results\n" in text
+        assert "\n### Input data\n" in text and "\n### Reproduction\n" in text
+        assert "```" not in text.split("## Statistical tests results")[1]
+        (standalone,) = (tmp_path / "run_b" / "statistical_tests").glob("*.md")
+        assert standalone.read_text().strip().replace("\n#", "\n##").lstrip("#").strip() in text
+
+    def test_no_stats_skips_the_step_entirely(self, tmp_path, monkeypatch):
+        self._stats_flags(monkeypatch)
+        _, written = run_comparison(self._config(tmp_path, no_stats=True), "gym eval compare ...")
+        assert not (tmp_path / "run_b" / "statistical_tests").exists()
+        assert "Statistical tests results" not in [p for p in written if p.suffix == ".md"][0].read_text()
+
+    def test_a_json_only_run_still_writes_the_statistical_test_artifacts(self, tmp_path, monkeypatch):
+        """Nothing to append to without a markdown report, but the test itself still runs."""
+        self._stats_flags(monkeypatch)
+        _, written = run_comparison(self._config(tmp_path, report_format="json"), "gym eval compare ...")
+
+        assert [path.suffix for path in written] == [".json"]
+        assert list((tmp_path / "run_b" / "statistical_tests").iterdir())
+
+    def test_output_dir_is_shared_and_the_stats_step_nests_inside_it(self, tmp_path, monkeypatch):
+        """One --output-dir now: compare_report.* in it, the statistics under statistical_tests/."""
+        from nemo_gym.statistical_tests.schema import STATS_SUBDIR_NAME
+
+        # Relative on purpose: an absolute --output-dir would still land correctly even if it were
+        # passed into `resolve_run_output_dir`'s `subdir` parameter by mistake.
+        monkeypatch.chdir(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        self._stats_flags(monkeypatch)
+        run_comparison(self._config(tmp_path, output_dirpath="elsewhere"), "gym eval compare ...")
+
+        assert (elsewhere / "compare_report.json").exists()
+        assert list((elsewhere / STATS_SUBDIR_NAME).iterdir())
+        assert not (tmp_path / "run_b" / "elsewhere").exists()
+
+    def test_metric_margin_and_alpha_overrides_flow_through(self, tmp_path, monkeypatch):
+        from nemo_gym.statistical_tests.schema import STATS_SUBDIR_NAME
+
+        self._stats_flags(monkeypatch, metric=["reward"], margin=[0.5], alpha=0.2, alternative="candidate-lower")
+        run_comparison(self._config(tmp_path), "gym eval compare ...")
+
+        (stats_json,) = (tmp_path / "run_b" / STATS_SUBDIR_NAME).glob("*.json")
+        payload = orjson.loads(stats_json.read_bytes())
+        assert payload["results"][0]["metric"] == "reward"
+        assert payload["results"][0]["margin"] == 0.5
+        assert payload["results"][0]["alpha"] == 0.2
+        assert payload["results"][0]["alternative"] == "candidate-lower"
+
+    def _config_without_pairing_data(self, tmp_path: Path) -> ComparisonConfig:
+        """A run pair `compare` handles fine but the stats step cannot test: no per-task groups."""
+        baseline = _write_run(
+            tmp_path, "run_a", [_entry(agent_metrics={"mean/reward": 0.75}, key_metrics={"mean/reward": 0.75})]
+        )
+        candidate = _write_run(
+            tmp_path, "run_b", [_entry(agent_metrics={"mean/reward": 0.5}, key_metrics={"mean/reward": 0.5})]
+        )
+        return ComparisonConfig.model_validate(
+            {
+                "baseline_rollouts_jsonl_fpath": str(baseline),
+                "candidate_rollouts_jsonl_fpaths": [str(candidate)],
+            }
+        )
+
+    def test_a_stats_step_that_cannot_run_is_reported_and_skipped_not_fatal(self, tmp_path, monkeypatch, capsys):
+        """The stats step is a side effect of a comparison that already succeeded and was written.
+
+        It must never turn a good `gym eval compare` into a failure.
+        """
+        self._stats_flags(monkeypatch)
+        run_comparison(self._config_without_pairing_data(tmp_path), "gym eval compare ...")
+
+        assert "Skipped the statistical test" in capsys.readouterr().out
+        assert not (tmp_path / "run_b" / "statistical_tests").exists()
+
+    def test_an_invalid_stats_flag_is_reported_and_skipped_not_a_traceback(self, tmp_path, monkeypatch, capsys):
+        self._stats_flags(monkeypatch, alpha=5.0)
+        run_comparison(self._config(tmp_path), "gym eval compare ...")
+
+        assert "Skipped the statistical test" in capsys.readouterr().out
