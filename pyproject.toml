@@ -268,12 +268,12 @@ all = [
 
 vllm = [
     # Pin to the same version used by local_vllm_model / genrm_model server venvs.
-    # Updated: Mon Aug 24, 2026 with vllm==0.25.1
-    "vllm==0.25.1",
-    # Pin flashinfer to the exact version vllm 0.25.1 specifies, ensuring pre-compiled
+    # Updated: Thu Sep 17, 2026 with vllm==0.29.0
+    "vllm==0.29.0",
+    # Pin flashinfer to the exact version vllm 0.29.0 specifies, ensuring pre-compiled
     # CUDA kernels are used (avoids JIT compilation on first generation == slow step time).
     # flashinfer>=0.2 bundles compiled kernels in the python package directly.
-    "flashinfer-python==0.6.13",
+    "flashinfer-python==0.6.18",
 ]
 
 sandbox = [
@@ -444,7 +444,12 @@ override-dependencies = [
     "torchcodec; sys_platform == 'never'",
     "torchvision; sys_platform == 'never'",
     "torchaudio; sys_platform == 'never'",
-    "pycountry; sys_platform == 'never'",
+    # pycountry (LGPL-2.1) used to be dropped here as well. vLLM 0.29's engine core
+    # imports vllm.v1.structured_output -> backend_guidance ->
+    # transformers.MistralCommonBackend -> mistral_common ->
+    # pydantic_extra_types.language_code, which raises without pycountry, so `vllm serve`
+    # and local_vllm_model cannot even import without it. NeMo RL's container already
+    # ships it (pydantic-extra-types[pycountry] via mistral_common).
 ]
 # NOTE: server venvs install nemo-gym editably and inherit this list, so anything
 # here is also silently dropped from them (uv >=0.11.24). Servers that need a
