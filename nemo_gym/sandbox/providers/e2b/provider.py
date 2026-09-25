@@ -39,6 +39,8 @@ import asyncio
 import logging
 import math
 import re
+import shlex
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -51,6 +53,12 @@ from nemo_gym.sandbox.providers.base import (
     SandboxHandle,
     SandboxSpec,
     SandboxStatus,
+)
+from nemo_gym.sandbox.providers.e2b._network import (
+    E2BComposeSupport,
+    E2BEndpointConfig,
+    E2BNetworkingConfig,
+    E2BRuntimeRequirementsConfig,
 )
 from nemo_gym.sandbox.providers.e2b._sdk import require_e2b_sdk
 
@@ -193,6 +201,7 @@ class E2BExecConfig:
     # sandbox facade passes its own 180-second default unless callers override it.
     default_timeout_s: float | None = 180.0
     user: str | None = None
+    shell: str | None = None
     request_timeout_s: float | None = None
     # Start commands detached and reattach by pid if the output stream drops.
     # The command keeps running inside the sandbox when the stream dies, so its
@@ -208,6 +217,8 @@ class E2BExecConfig:
     reconnect_attempts: int = 2
 
     def __post_init__(self) -> None:
+        if self.shell is not None and (not isinstance(self.shell, str) or not self.shell.startswith("/")):
+            raise ValueError("exec.shell must be an absolute executable path")
         _validate_optional_number("exec.default_timeout_s", self.default_timeout_s, positive=False)
         _validate_optional_number("exec.request_timeout_s", self.request_timeout_s, positive=False)
         _validate_nonnegative_int("exec.reconnect_attempts", self.reconnect_attempts)
@@ -218,16 +229,21 @@ class E2BOperationConfig:
     """Retry policy for transient SDK/transport failures."""
 
     retries: int = 2
+    upload_chunk_size_bytes: int | None = None
     retry_delay_s: float = 0.5
     retry_max_delay_s: float = 8.0
 
     def __post_init__(self) -> None:
+        if self.upload_chunk_size_bytes is not None:
+            _validate_nonnegative_int("operations.upload_chunk_size_bytes", self.upload_chunk_size_bytes)
+            if self.upload_chunk_size_bytes == 0:
+                raise ValueError("operations.upload_chunk_size_bytes must be positive")
         _validate_nonnegative_int("operations.retries", self.retries)
         _validate_nonnegative_number("operations.retry_delay_s", self.retry_delay_s)
         _validate_nonnegative_number("operations.retry_max_delay_s", self.retry_max_delay_s)
 
 
-class E2BProvider:
+class E2BProvider(E2BComposeSupport):
     """Provider backed by the E2B Python SDK."""
 
     name = "e2b"
@@ -239,11 +255,20 @@ class E2BProvider:
         create: E2BCreateConfig | Mapping[str, Any] | None = None,
         exec: E2BExecConfig | Mapping[str, Any] | None = None,
         operations: E2BOperationConfig | Mapping[str, Any] | None = None,
+        endpoints: E2BEndpointConfig | Mapping[str, Any] | None = None,
+        networking: E2BNetworkingConfig | Mapping[str, Any] | None = None,
+        runtime_requirements: E2BRuntimeRequirementsConfig | Mapping[str, Any] | None = None,
     ) -> None:
         self._connection = _config_from_mapping(E2BConnectionConfig, connection)
         self._create = _config_from_mapping(E2BCreateConfig, create)
         self._exec = _config_from_mapping(E2BExecConfig, exec)
         self._operations = _config_from_mapping(E2BOperationConfig, operations)
+        self._endpoints = _config_from_mapping(E2BEndpointConfig, endpoints)
+        self._networking = _config_from_mapping(E2BNetworkingConfig, networking)
+        self._runtime_requirements = _config_from_mapping(E2BRuntimeRequirementsConfig, runtime_requirements)
+        self._network_members = {}
+        self._network_tasks = {}
+        self._network_index = 0
         self._warned_resource_specs: set[str] = set()
 
     # ---------------------------------------------------------------- helpers
@@ -396,11 +421,8 @@ class E2BProvider:
     # ------------------------------------------------------------- lifecycle
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        if spec.entrypoint:
-            raise E2BCreateError(
-                "SandboxSpec.entrypoint is not supported by the e2b provider; "
-                "the E2B template defines the sandbox entrypoint"
-            )
+        if self._networking.enabled and self._networking.tunnel_port in spec.ports:
+            raise E2BCreateError("The configured tunnel port conflicts with a declared service port")
         template = self._resolve_template(spec)
 
         timeout_s = spec.ttl_s if spec.ttl_s is not None else self._create.timeout_s
@@ -436,7 +458,23 @@ class E2BProvider:
         except Exception as exc:
             raise E2BCreateError(f"Failed to create e2b sandbox from template {template!r}: {exc}") from exc
 
-        return SandboxHandle(sandbox_id=sandbox.sandbox_id, provider_name=self.name, raw=sandbox)
+        handle = SandboxHandle(sandbox_id=sandbox.sandbox_id, provider_name=self.name, raw=sandbox)
+        try:
+            self._configure_shell(sandbox)
+            if spec.entrypoint:
+                await sandbox.commands.run(
+                    cmd=shlex.join(spec.entrypoint),
+                    background=True,
+                    timeout=0,
+                    user=self._exec.user,
+                    request_timeout=self._exec_request_timeout(),
+                )
+            if self._networking.enabled:
+                self._register_network(handle, spec)
+        except BaseException:
+            await self.close(handle)
+            raise
+        return handle
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Return a descriptor for attaching to this sandbox from another process."""
@@ -454,7 +492,28 @@ class E2BProvider:
             lambda: e2b.AsyncSandbox.connect(sandbox_id, **self._api_params()),
             operation="connect",
         )
+        self._configure_shell(sandbox)
         return SandboxHandle(sandbox_id=str(sandbox.sandbox_id), provider_name=self.name, raw=sandbox)
+
+    def _configure_shell(self, sandbox):
+        if self._exec.shell is None:
+            return
+        # E2B's public commands API hardcodes Bash. Adapt only this sandbox's
+        # process-start request so minimal images can select their installed shell.
+        original = sandbox.commands._rpc
+        shell = self._exec.shell
+
+        class ShellRPC:
+            def __getattr__(self, name):
+                return getattr(original, name)
+
+            def start(self, request, *args, **kwargs):
+                request.process.cmd = shell
+                if request.process.args[:1] == ["-l"]:
+                    request.process.args = request.process.args[1:]
+                return original.start(request, *args, **kwargs)
+
+        sandbox.commands._rpc = ShellRPC()
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         e2b = _require_e2b_sdk()
@@ -494,11 +553,13 @@ class E2BProvider:
         else:
             if killed is False:
                 LOGGER.debug("e2b sandbox %s already gone on close", handle.sandbox_id)
+        await self._close_network(handle.sandbox_id)
         handle.raw = None
 
     async def aclose(self) -> None:
-        """No provider-scoped client to close; sandboxes own their connections."""
-        return None
+        """Release local relay tasks; sandbox termination remains explicit."""
+        for sandbox_id in list(self._network_tasks):
+            await self._close_network(sandbox_id)
 
     # -------------------------------------------------------------- commands
 
@@ -673,7 +734,28 @@ class E2BProvider:
         source = Path(source_path)
         if not source.is_file():
             raise FileNotFoundError(f"Source file not found: {source}")
-        await self.write_file(handle, target_path, source.read_bytes())
+        chunk_size = self._operations.upload_chunk_size_bytes
+        if chunk_size is None or source.stat().st_size <= chunk_size:
+            await self.write_file(handle, target_path, source.read_bytes())
+            return
+        directory = "/tmp/gym-upload-" + uuid.uuid4().hex
+        result = await self.exec(handle, f"mkdir -m 700 {directory}")
+        if result.return_code:
+            raise RuntimeError(f"Cannot create E2B upload directory: {result.stderr}")
+        try:
+            with source.open("rb") as stream:
+                index = 0
+                while chunk := stream.read(chunk_size):
+                    await self.write_file(handle, f"{directory}/part-{index:08d}", chunk)
+                    index += 1
+            result = await self.exec(
+                handle,
+                f"cat {directory}/part-* > {directory}/result && mv {directory}/result {shlex.quote(target_path)}",
+            )
+            if result.return_code:
+                raise RuntimeError(f"Cannot assemble E2B upload: {result.stderr}")
+        finally:
+            await self.exec(handle, f"rm -rf {directory}")
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
         target = Path(target_path)

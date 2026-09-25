@@ -134,7 +134,7 @@ builds to finish; pass `--continue-on-error` to keep building the remaining imag
 | `files` | Uploaded after creation and before `start()` returns. |
 | `metadata` | Passed to E2B as string metadata. |
 | `resources` | Fixed by the template rather than applied per sandbox. Requests warn, or raise when `create.strict_resources` is true. |
-| `entrypoint` | Unsupported and rejected before allocation; define it in the E2B template. |
+| `entrypoint` | Started as a detached command after template creation. Prepare templates without a conflicting startup service. |
 | `provider_options` | Supports only `template`; unknown or invalid values are rejected before allocation. |
 
 The bundled builder controls template CPU count and memory. Disk and GPU requirements need a
@@ -198,3 +198,99 @@ E2B's set-once integration hook. Because E2B 2.x does not expose transport injec
 APIs, NeMo Gym replaces its module-level HTTP transport factories with an aiohttp adapter backed
 by Gym's shared client session. The adapter accepts HTTP and HTTPS proxies; SOCKS proxies are
 rejected explicitly. E2B's ConnectRPC command streams keep their SDK-owned pyqwest transport.
+
+## Docker Compose
+
+Use `AsyncSandboxCompose` with upstream-resolved YAML as described in the
+[Compose adapter guide](/infrastructure/sandbox/compose). Build each service image
+with the template builder above and provide the resulting `create.template_map`.
+Startup does not build templates or inspect registries.
+
+E2B microVMs do not share a network namespace. The optional client-side relay
+carries TCP over the deployment's WebSocket service ingress. Each sandbox receives
+guest-local, non-loopback IP addresses on its loopback interface so services retain
+their declared names and TCP ports. Peer names resolve outside `127.0.0.0/8`;
+`network_mode: service:<name>` also forwards the target's declared ports on localhost.
+This requires no gateway or cluster changes.
+
+The relay requires Python 3.9+, `aiohttp`, and `pyroute2` inside each service template. Prepare
+these in the template, or supply an explicit setup command suitable for its OS:
+
+```python
+import os
+
+from nemo_gym.sandbox import AsyncSandboxCompose
+
+provider = {
+    "e2b": {
+        "connection": {"api_key": os.environ["E2B_API_KEY"]},
+        "create": {"template_map": image_to_template},
+        "networking": {
+            "enabled": True,
+            "python_executable": "/opt/gym-network/bin/python",
+            "setup_command": (
+                "python3 -m venv /opt/gym-network && "
+                "/opt/gym-network/bin/pip install aiohttp pyroute2"
+            ),
+        },
+    }
+}
+
+async with AsyncSandboxCompose(provider, "compose.yaml") as collection:
+    result = await collection.services["main"].exec("curl http://api:8000/health")
+```
+
+The setup example assumes the template already includes Python's `venv` support
+and permits package downloads. The relay requires Linux guests with root and
+`NET_ADMIN` to assign guest-local addresses, install service aliases, and bind low
+ports. `networking.address_cidr` defaults to `198.18.0.0/15`; choose an unused range
+if it conflicts with the workload. The relay authenticates peer connections with
+per-sandbox random tokens and accepts only declared target ports. API credentials
+are not copied to relay configuration. TCP half-close is preserved; UDP, shared writable volumes,
+and general network-namespace sharing are unsupported and rejected. Declared TCP
+ports must be distinct across services: a wildcard service bind would otherwise
+conflict with a local peer listener. Use one provider instance per collection.
+
+For a compatible gateway with header-based routing, configure endpoints explicitly:
+
+```python
+provider["e2b"]["connection"].update(
+    api_url=os.environ["E2B_API_URL"],
+    sandbox_url=os.environ["E2B_SANDBOX_URL"],
+)
+provider["e2b"]["endpoints"] = {
+    "url_template": os.environ["E2B_SANDBOX_URL"],
+    "headers": {
+        "x-agentenv-sandbox-id": "{sandbox_id}",
+        "x-agentenv-target-port": "{port}",
+    },
+}
+```
+
+`url_template` and header values expand `{sandbox_id}` and `{port}`. Without an
+override, endpoints use the E2B SDK's `get_host(port)` with HTTPS. The relay uses
+WebSocket ingress at `networking.tunnel_port` (default 49152); this port must not
+conflict with a service port. `networking.startup_timeout_s` bounds helper setup
+and readiness. The controller needs only Gym's existing optional E2B dependencies;
+no Docker or Compose executable is used.
+
+Capabilities and shared-memory resizing require explicit deployment configuration:
+`runtime_requirements.capability_probes` maps each requested capability to a shell
+probe, and `runtime_requirements.resize_shared_memory` permits resizing `/dev/shm`.
+A failed probe or resize fails startup and triggers cleanup.
+
+The creating collection owns relay tasks. Keep it alive while another server uses
+its serialized descriptor, and stop it after consumers finish. Reconnected services
+retain endpoint access through the receiving server's configured provider.
+
+For minimal images without Bash, set `exec.shell: /bin/sh`. This optional override
+replaces the SDK's Bash login-shell process request on each sandbox connection;
+other SDK operations remain unchanged. Resolve service commands, users, and
+required environment variables upstream. The adapter does not read image metadata.
+For gateways with upload request limits, set
+`operations.upload_chunk_size_bytes` (for example, `8388608`) to upload large files
+in bounded requests and assemble them inside the sandbox.
+
+Configure template resources, service users, startup commands, and environment
+variables for the workload upstream. Size templates to accommodate both the
+workload and relay; the provider does not infer these settings from images.

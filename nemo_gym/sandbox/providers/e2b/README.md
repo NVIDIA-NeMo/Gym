@@ -104,7 +104,7 @@ command timeout. `exec.default_timeout_s` is only the fallback when the provider
 | `files` | Uploaded by the NeMo Gym facade after creation and before `start()` returns. |
 | `metadata` | Passed to E2B as string metadata. |
 | `resources` | Fixed by the E2B template, not applied per sandbox. Requests warn, or raise when `create.strict_resources` is true. |
-| `entrypoint` | Unsupported and rejected before creating a billable sandbox; define it in the E2B template. |
+| `entrypoint` | Started as a detached command after template creation; prepare templates without a conflicting startup service. |
 | `provider_options` | Supports only `template`; unknown or invalid values are rejected before allocation. |
 
 The bundled template builder can set CPU count and memory. Disk and GPU requirements need a
@@ -154,3 +154,24 @@ E2B's set-once integration hook. Because E2B 2.x does not expose transport injec
 APIs, NeMo Gym replaces its module-level HTTP transport factories with an aiohttp adapter backed
 by Gym's shared client session. The adapter accepts HTTP and HTTPS proxies; SOCKS proxies are
 rejected explicitly. E2B's ConnectRPC command streams keep their SDK-owned pyqwest transport.
+
+
+## Docker Compose
+
+The provider supports the Compose adapter with opt-in `networking.enabled`.
+It runs authenticated TCP-over-WebSocket relays inside service sandboxes, preserving
+service names, declared TCP ports, and localhost forwarding. Templates need Python
+3.9+, aiohttp, pyroute2, and guest root/NET_ADMIN; configure `networking.python_executable` and, when needed, an explicit
+`networking.setup_command`. Builds remain an explicit step using the helper above.
+
+`endpoints.url_template` and `endpoints.headers` support gateway routing, with
+`{sandbox_id}` and `{port}` placeholders. Without overrides, endpoints use the SDK's
+hosted service URLs. Runtime capability probes and shared-memory resizing are opt-in
+under `runtime_requirements`. UDP and shared writable volumes are unsupported.
+
+See the [E2B Compose guide](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/e2b#docker-compose)
+for configuration, requirements, and lifecycle ownership.
+
+Minimal images can select `exec.shell: /bin/sh`. Gateways with request-size limits
+can set `operations.upload_chunk_size_bytes` for chunked file uploads. No new
+controller dependencies, Docker daemon, or infrastructure changes are required.
