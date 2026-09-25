@@ -46,3 +46,11 @@ sandbox:
       timeout_s: 30
       deadline_s: 60
       stable_count: 1
+
+    # Optional Compose support. The default bridge already supports peer IPs.
+    # networking:
+    #   loopback_forwarding: true
+    #   python_executable: python3
+    #   setup_command: null
+    # shared_storage:
+    #   host_path: /srv/gym-compose  # absolute path on the Docker daemon host
