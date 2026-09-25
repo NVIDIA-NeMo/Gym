@@ -99,6 +99,7 @@ class SwemerV2SeedSessionRequest(SwemerV2InstanceRequest, BaseSeedSessionRequest
 
 class SwemerV2SeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str
+    workdir: str
 
 
 class SwemerV2VerifyRequest(SwemerV2InstanceRequest, BaseVerifyRequest):
@@ -249,7 +250,7 @@ class SwemerV2ResourcesServer(SimpleResourcesServer):
             sandbox, body.workdir
         )
         self._session_id_to_sandbox[session_id] = sandbox
-        return SwemerV2SeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
+        return SwemerV2SeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id), workdir=body.workdir)
 
     async def verify(self, request: Request, body: SwemerV2VerifyRequest) -> SwemerV2VerifyResponse:
         session_id = request.session[SESSION_ID_KEY]

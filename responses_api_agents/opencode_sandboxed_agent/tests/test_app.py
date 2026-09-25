@@ -115,6 +115,22 @@ class TestOpenCodeSandboxedAgent:
         assert spec.env["OMP_NUM_THREADS"] == "4"
         assert all(spec.env[name] == "2" for name in CPU_CAP_ENV_VARS if name != "OMP_NUM_THREADS")
 
+    async def test_start_sandbox_connects_in_the_seeded_workdir(self, monkeypatch: MonkeyPatch) -> None:
+        async_sandbox = MagicMock()
+        async_sandbox.connect = AsyncMock(return_value=MagicMock())
+        monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app_module, "create_provider", lambda *_: MagicMock())
+        monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+        monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+        monkeypatch.setattr(app_module, "AsyncSandbox", async_sandbox)
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+
+        await server._start_sandbox(sandbox_id="sb-1", workdir="/workspace/repo")
+        assert async_sandbox.connect.await_args.args[0] == {"sandbox_id": "sb-1", "workdir": "/workspace/repo"}
+
+        await server._start_sandbox(sandbox_id="sb-2")
+        assert async_sandbox.connect.await_args.args[0] == {"sandbox_id": "sb-2", "workdir": None}
+
     @fixture
     def opencode_export_test_data(self) -> Dict[str, Any]:
         test_data_path = Path(__file__).parent / "opencode_export_test_data.json"

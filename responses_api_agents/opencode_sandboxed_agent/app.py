@@ -459,7 +459,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
-    async def _start_sandbox(self, sandbox_id: Optional[str] = None) -> AsyncSandbox:
+    async def _start_sandbox(self, sandbox_id: Optional[str] = None, workdir: Optional[str] = None) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = create_provider(
             resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -467,7 +467,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
 
         if sandbox_id:
-            sandbox = await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=resolved_sandbox_provider)
+            sandbox = await AsyncSandbox.connect(
+                {"sandbox_id": sandbox_id, "workdir": workdir}, provider=resolved_sandbox_provider
+            )
             return sandbox
 
         if self.config.debug:
@@ -904,6 +906,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         seed_session_result = await seed_session_response.json()
         sandbox = await self._start_sandbox(
             sandbox_id=seed_session_result.get("sandbox_handle"),
+            workdir=seed_session_result.get("workdir"),
         )
         self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
 
