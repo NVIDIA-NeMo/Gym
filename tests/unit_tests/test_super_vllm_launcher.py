@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import yaml
+
 
 SCRIPT = Path(__file__).resolve().parents[2] / "benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh"
 
@@ -95,6 +97,27 @@ getent() { printf '10.0.0.1 node0\n'; }
 
     def settings(self, args, key):
         return [arg for arg in args if arg.lstrip("+").startswith(key + "=")]
+
+    def test_mooncake_metrics_endpoint_uses_only_master_node(self) -> None:
+        for mode in ("independent", "coupled"):
+            for enabled in ("0", "1"):
+                with self.subTest(mode=mode, enabled=enabled), TemporaryDirectory() as temporary_dir:
+                    command, _ = self.generate_commands(
+                        env={"VLLM_PD_DEPLOYMENT_MODE": mode, "ENABLE_MOONCAKE": enabled}
+                    )
+                    start = 'read -r -a nodes <<< "$ALL_NODES"'
+                    setup = start + command.split(start, 1)[1].split("gym_config_args+=(--config", 1)[0]
+                    config_path = Path(temporary_dir) / "metrics.yaml"
+                    status, _, stderr = self.run_shell(
+                        setup, env={"inference_metrics_config": str(config_path), "ROUTER_NODE": "separate-router"}
+                    )
+                    self.assertEqual(status, 0, stderr)
+                    metrics = yaml.safe_load(config_path.read_text())["inference_metrics"]
+                    self.assertEqual(len(metrics["endpoints"]), 8 if mode == "independent" else 2)
+                    if enabled == "1":
+                        self.assertEqual(metrics["mooncake_endpoint"], "http://node0:9003/metrics")
+                    else:
+                        self.assertNotIn("mooncake_endpoint", metrics)
 
     def model_arguments(self, *, config_path: Path, enable_mooncake: bool) -> list[list[str]]:
         _, command = self.generate_commands(

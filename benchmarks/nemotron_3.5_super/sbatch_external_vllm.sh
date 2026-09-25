@@ -124,6 +124,9 @@ read -r -a nodes <<< "\$ALL_NODES"
             "\$node_index" "\${nodes[node_index]}"
     done
     printf '  router_endpoints:\n    main: "http://%s:$ROUTER_METRICS_PORT/metrics"\n' "\$ROUTER_NODE"
+    if (( $ENABLE_MOONCAKE )); then
+        printf '  mooncake_endpoint: "http://%s:9003/metrics"\n' "\${nodes[0]}"
+    fi
 } > "\$inference_metrics_config"
 gym_config_args+=(--config "\$inference_metrics_config")
 

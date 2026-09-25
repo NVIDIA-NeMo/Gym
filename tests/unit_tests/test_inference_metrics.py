@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import math
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -33,6 +34,15 @@ vllm:num_requests_running{model_name="test",engine="0"} 3
 vllm:num_requests_running{model_name="test",engine="1"} 4
 # TYPE unrelated gauge
 unrelated 99
+"""
+MOONCAKE_GAUGES = """# TYPE master_allocated_bytes gauge
+master_allocated_bytes 75
+# TYPE master_total_capacity_bytes gauge
+master_total_capacity_bytes 100
+# TYPE segment_allocated_bytes gauge
+segment_allocated_bytes{segment="worker0"} 75
+# TYPE segment_total_capacity_bytes gauge
+segment_total_capacity_bytes{segment="worker0"} 100
 """
 
 
@@ -62,6 +72,81 @@ def test_labels_replicas_and_allowlist():
         "vllm/replica0/num_requests_running": 7,
     }
     assert set(values).isdisjoint(collector.parse("replica1", GAUGES, 10))
+
+
+def test_mooncake_storage_usage_and_allowlist():
+    collector = InferenceMetricsCollector(config(mooncake_endpoint="http://localhost:9003/metrics"))
+    assert collector.parse("mooncake", MOONCAKE_GAUGES, 10) == {
+        "mooncake/total/allocated_bytes": 75,
+        "mooncake/total/total_capacity_bytes": 100,
+        "mooncake/total/kv_cache_usage_perc": 0.75,
+    }
+    assert collector.parse("replica0", MOONCAKE_GAUGES, 10) == {}
+    restricted = InferenceMetricsCollector(config(metrics=["master_allocated_bytes"]))
+    assert restricted.parse("mooncake", MOONCAKE_GAUGES, 10) == {"mooncake/total/allocated_bytes": 75}
+    # Derivation must use this scrape's values, not the previous capacity.
+    partial = "# TYPE master_allocated_bytes gauge\nmaster_allocated_bytes 50\n"
+    assert collector.parse("mooncake", partial, 12) == {"mooncake/total/allocated_bytes": 50}
+
+
+@pytest.mark.parametrize("allocated,capacity", [(0, 0), (10, -1), (-1, 100), (10, "NaN"), ("+Inf", 100)])
+def test_mooncake_usage_omitted_for_invalid_or_zero_capacity(allocated, capacity):
+    collector = InferenceMetricsCollector(config())
+    payload = MOONCAKE_GAUGES.replace(" 75", f" {allocated}").replace(" 100", f" {capacity}")
+    result = collector.parse("mooncake", payload, 10)
+    assert "mooncake/total/kv_cache_usage_perc" not in result
+    assert all(math.isfinite(value) for value in result.values())
+
+
+def test_mooncake_only_config_and_reserved_endpoint_name():
+    cfg = InferenceMetricsConfig(enabled=True, mooncake_endpoint="http://localhost:9003/metrics")
+    assert cfg.enabled
+    for field in ["endpoints", "router_endpoints"]:
+        with pytest.raises(ValidationError, match="reserved"):
+            InferenceMetricsConfig(
+                mooncake_endpoint="http://localhost:9003/metrics", **{field: {"mooncake": "http://localhost/metrics"}}
+            )
+    with pytest.raises(ValidationError):
+        InferenceMetricsConfig(mooncake_endpoint="file:///tmp/metrics")
+
+
+@pytest.mark.parametrize("only_mooncake", [False, True])
+@pytest.mark.parametrize("master_fails", [False, True])
+async def test_mooncake_scraped_once_and_does_not_change_vllm_aggregates(monkeypatch, only_mooncake, master_fails):
+    cfg = InferenceMetricsConfig(
+        enabled=True,
+        mooncake_endpoint="http://localhost:9003/metrics",
+        endpoints={}
+        if only_mooncake
+        else {"a": "http://localhost:8001/metrics", "b": "http://localhost:8002/metrics"},
+    )
+    stop = asyncio.Event()
+    published = []
+
+    async def fetch(method, url, **kwargs):
+        is_master = ":9003/" in url
+        if is_master:
+            stop.set()
+            if master_fails:
+                raise OSError("master unavailable")
+        response = MagicMock()
+        response.__aenter__ = AsyncMock(return_value=response)
+        response.__aexit__ = AsyncMock(return_value=False)
+        response.text = AsyncMock(return_value=MOONCAKE_GAUGES if is_master else GAUGES)
+        return response
+
+    fetch_mock = AsyncMock(side_effect=fetch)
+    monkeypatch.setattr(metrics_module, "request", fetch_mock)
+    monkeypatch.setattr(metrics_module, "export_metrics", published.append)
+    await InferenceMetricsCollector(cfg).run(stop)
+    assert sum(":9003/" in call.args[1] for call in fetch_mock.call_args_list) == 1
+    mooncake_rows = [row for row in published if "mooncake/total/kv_cache_usage_perc" in row]
+    assert len(mooncake_rows) == (0 if master_fails else 1)
+    if mooncake_rows:
+        assert mooncake_rows[0]["mooncake/total/kv_cache_usage_perc"] == 0.75
+    if not only_mooncake:
+        assert published[-1] == {"vllm/total/num_requests_running": 14, "vllm/mean/num_requests_running": 7}
+    assert not any(key.startswith(("vllm/total/allocated", "mooncake/mean/")) for row in published for key in row)
 
 
 def test_counter_rates_reset_and_nonfinite():
