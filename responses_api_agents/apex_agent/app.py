@@ -615,7 +615,17 @@ class ApexAgent(SimpleResponsesAPIAgent):
             try:
                 policy_model = self._policy_model()
                 prebuilt_world = body.runtime_mode == "prebuilt_world"
-                selected_image = self._prebuilt_image(body) if prebuilt_world else None
+                selected_image = None
+                if prebuilt_world:
+                    try:
+                        selected_image = self._prebuilt_image(body)
+                    except (ValueError, FileNotFoundError) as exc:
+                        return self._failure(
+                            body,
+                            str(exc),
+                            failure_class="prebuilt_world_config_error",
+                            failure_terminal=True,
+                        )
                 stirrup_archive = await self._ensure_runtime_setup()
                 cookies = request.cookies
                 with tempfile.TemporaryDirectory(prefix=f"apex-{_safe_id(body.task_id)}-") as scratch:

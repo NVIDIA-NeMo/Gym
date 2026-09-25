@@ -65,7 +65,7 @@ def _agent(
         image_build={
             "enabled": auto_build,
             "source_repo": "https://github.com/Mercor-Intelligence/archipelago.git",
-            "source_revision": "0cb5c476c219a9df637e0bd37fb86b2361f4ab89",
+            "source_revision": "0cb5c476c219a9df637e0bd37fb86b2361f4ab89",  # pragma: allowlist secret
             "source_root": None,
             "source_github_token": None,
             "dockerfile": "environment/Dockerfile",
@@ -273,6 +273,7 @@ def test_prebuilt_world_selects_only_manifest_image(tmp_path: Path) -> None:
 
     assert spec.image == str(image)
     assert runner["task_slug"] == "accounting-example-b1-01234567"
+    assert runner["startup_timeout_seconds"] == 1800
     assert spec.files["/app/apex-gym/sandbox_entrypoint.py"] == load_prebuilt_runner_source()
     assert "secret rubric" not in json.dumps(runner)
 
@@ -295,6 +296,30 @@ def test_prebuilt_world_rejects_missing_slug_and_unknown_world(tmp_path: Path) -
         assert "trusted prebuilt-world manifest" in str(exc)
     else:
         raise AssertionError("unknown world was accepted")
+
+
+async def test_prebuilt_world_config_errors_are_terminal(tmp_path: Path) -> None:
+    agent, image = _prebuilt_agent(tmp_path)
+    agent._ensure_runtime_setup = AsyncMock()
+    request = MagicMock(cookies={})
+    missing_slug = _prebuilt_body().model_copy(update={"task_slug": None})
+    unknown_world = _prebuilt_body("world_ffffffffffffffffffffffffffffffff")
+
+    for body, expected_error in (
+        (missing_slug, "missing task_slug"),
+        (unknown_world, "absent from the trusted prebuilt-world manifest"),
+    ):
+        payload = (await agent.run(request, body)).model_dump()
+        assert payload[NG_FAILURE_CLASS_KEY] == "prebuilt_world_config_error"
+        assert payload[NG_FAILURE_TERMINAL_KEY] is True
+        assert expected_error in payload["apex_error"]
+
+    image.unlink()
+    payload = (await agent.run(request, _prebuilt_body())).model_dump()
+    assert payload[NG_FAILURE_CLASS_KEY] == "prebuilt_world_config_error"
+    assert payload[NG_FAILURE_TERMINAL_KEY] is True
+    assert "prebuilt-world image is missing" in payload["apex_error"]
+    agent._ensure_runtime_setup.assert_not_awaited()
 
 
 def test_prebuilt_manifest_rejects_image_outside_cache(tmp_path: Path) -> None:
