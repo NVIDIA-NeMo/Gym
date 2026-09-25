@@ -202,8 +202,10 @@ source "$VLLM_CONFIG"
 
 if (( ENABLE_MOONCAKE )); then
     kv_load_failure_policy=fail
+    mooncake_kv_role=kv_consumer
     if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
         kv_load_failure_policy=recompute
+        mooncake_kv_role=kv_both
     fi
     # Preserve each model's connector settings while adding the shared KV store.
     add_mooncake_to_args() {
@@ -221,7 +223,7 @@ if (( ENABLE_MOONCAKE )); then
                 mooncake_args+=("\$arg")
                 continue
             fi
-            config=\$(python3 - "\$config" "\$kv_load_failure_policy" <<'MOONCAKE_CONNECTOR'
+            config=\$(python3 - "\$config" "\$kv_load_failure_policy" "\$mooncake_kv_role" <<'MOONCAKE_CONNECTOR'
 import json
 import sys
 
@@ -240,6 +242,11 @@ if not any(connector["kv_connector"] == "MooncakeStoreConnector" for connector i
         "kv_role": "kv_both",
         "kv_connector_extra_config": {"load_async": True, "lookup_async": True},
     })
+for connector in connectors:
+    if connector["kv_connector"] == "MooncakeStoreConnector":
+        connector["kv_role"] = sys.argv[3]
+        if sys.argv[3] == "kv_consumer":
+            connector.setdefault("kv_connector_extra_config", {})["save_decode_cache"] = False
 print(json.dumps(config))
 MOONCAKE_CONNECTOR
 )
@@ -305,7 +312,6 @@ MOONCAKE_CONFIG
             -rpc_port=50051 \
             -rpc_thread_num=4 \
             -metrics_port=9003 \
-            -default_kv_lease_ttl=30000 \
             -eviction_high_watermark_ratio=0.95 \
             -eviction_ratio=0.1 \
             -minloglevel=1 \
