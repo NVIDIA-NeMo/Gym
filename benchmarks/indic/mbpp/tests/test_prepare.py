@@ -169,11 +169,11 @@ def test_setup_runs_after_candidate_classes(records, tmp_path):
     assert run_native(meta, records[0]["code"], tmp_path)["status"] == "pass"
 
 
-def test_prepare_pins_source_and_preserves_output_on_failure(records, monkeypatch, tmp_path):
+def test_prepare_downloads_source_and_preserves_output_on_failure(records, monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(module, "maybe_get_global_config_dict", lambda: None)
     monkeypatch.setattr(module, "get_token", lambda: "test-token")
-    monkeypatch.setattr(module, "hf_hub_download", lambda **kwargs: calls.append(kwargs) or "pinned.parquet")
+    monkeypatch.setattr(module, "hf_hub_download", lambda **kwargs: calls.append(kwargs) or "source.parquet")
     monkeypatch.setattr(module, "load_dataset", lambda *args, **kwargs: Dataset.from_list(records))
     output = tmp_path / "tasks.jsonl"
     assert module.prepare(languages=["hi"], output_fpath=str(output)) == output
@@ -181,7 +181,6 @@ def test_prepare_pins_source_and_preserves_output_on_failure(records, monkeypatc
         "repo_id": module.SOURCE_ID,
         "filename": "test.parquet",
         "repo_type": "dataset",
-        "revision": module.SOURCE_REVISION,
         "token": "test-token",
     }
     original = output.read_bytes()

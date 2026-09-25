@@ -48,9 +48,9 @@ gym eval prepare --benchmark indic/mbpp \
   +use_cached_prepared_benchmarks=false
 ```
 
-Use `task_ids` in `prepare_script_args` to select smoke-test tasks. Data is pinned
-to revision `64e7f7cecd2a6b66a0bcbc8c4c02200d40ae520c`. Missing translations are
-rejected and generated data remains local.
+Use `task_ids` in `prepare_script_args` to select smoke-test tasks. Data is downloaded
+from the dataset's default revision. Missing translations are rejected and generated
+data remains local.
 
 ## Collect rollouts
 
