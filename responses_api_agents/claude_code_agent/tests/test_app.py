@@ -402,14 +402,18 @@ class TestRunClaudeCode:
         captured: dict = {}
 
         class FakeProc:
+            pid = 987654321
             returncode = 0
 
-            async def communicate(self):
-                return (
+            def __init__(self, stdout):
+                self.stdout = stdout
+
+            async def wait(self):
+                self.stdout.write(
                     b'{"type":"result","subtype":"success","is_error":false,'
-                    b'"usage":{"input_tokens":3,"output_tokens":4}}\n',
-                    b"",
+                    b'"usage":{"input_tokens":3,"output_tokens":4}}\n'
                 )
+                return 0
 
         async def fake_exec(*cmd, **kwargs):
             env = kwargs["env"]
@@ -420,7 +424,7 @@ class TestRunClaudeCode:
             captured["dir_exists_during_run"] = (Path(config_dir) / "settings.json").is_file()
             captured["sandbox"] = env.get("IS_SANDBOX")
             captured["start_new_session"] = kwargs.get("start_new_session")
-            return FakeProc()
+            return FakeProc(kwargs["stdout"])
 
         with (
             patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
@@ -448,16 +452,21 @@ class TestRunClaudeCode:
         captured: dict = {}
 
         class FakeProc:
+            pid = 987654321
             returncode = 0
 
-            async def communicate(self):
-                return b'{"type":"result","usage":{"input_tokens":1,"output_tokens":1}}\n', b""
+            def __init__(self, stdout):
+                self.stdout = stdout
+
+            async def wait(self):
+                self.stdout.write(b'{"type":"result","usage":{"input_tokens":1,"output_tokens":1}}\n')
+                return 0
 
         async def fake_exec(*cmd, **kwargs):
             config_dir = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"])
             captured["cmd"] = list(cmd)
             captured["skill_staged"] = (config_dir / "skills" / "cot_enhanced" / "SKILL.md").is_file()
-            return FakeProc()
+            return FakeProc(kwargs["stdout"])
 
         with (
             patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=home),
@@ -506,17 +515,22 @@ class TestRunClaudeCode:
                 state.append("detach")
 
         class FakeProc:
+            pid = 987654321
             returncode = 0
 
-            async def communicate(self):
-                state.append("communicate")
-                return b'{"type":"result","subtype":"success","is_error":false,"usage":{}}\n', b""
+            def __init__(self, stdout):
+                self.stdout = stdout
+
+            async def wait(self):
+                state.append("wait")
+                self.stdout.write(b'{"type":"result","subtype":"success","is_error":false,"usage":{}}\n')
+                return 0
 
         async def fake_exec(*cmd, **kwargs):
             assert kwargs["env"]["GYM_TEST_CONTEXT"] == "ready"
             assert cmd[0] == "claude"
             state.append("spawn")
-            return FakeProc()
+            return FakeProc(kwargs["stdout"])
 
         with (
             patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
@@ -525,28 +539,35 @@ class TestRunClaudeCode:
         ):
             asyncio.run(agent._run_claude_code("hello", rollout_id="rollout-1"))
 
-        assert state == ["prepare", "spawn", "communicate", "detach"]
+        assert state == ["prepare", "spawn", "wait", "detach"]
         assert home is not None and not home.exists()
 
     def test_timeout_returns_empty(self, tmp_path: Path) -> None:
         agent = _make_agent(timeout=1)
-        state = {"killed": False, "communicate_calls": 0}
+        state = {"killed": False, "wait_calls": 0}
+        stopped = asyncio.Event()
 
         class SlowProc:
             returncode = None
 
+            def __init__(self, stdout):
+                self.stdout = stdout
+
             def kill(self):
                 state["killed"] = True
+                self.returncode = -9
+                stopped.set()
 
-            async def communicate(self):
-                state["communicate_calls"] += 1
-                return (
-                    _event("system", subtype="status", status="compacting", session_id="session-1").encode(),
-                    b"",
+            async def wait(self):
+                state["wait_calls"] += 1
+                self.stdout.write(
+                    _event("system", subtype="status", status="compacting", session_id="session-1").encode()
                 )
+                await stopped.wait()
+                return self.returncode
 
         async def fake_exec(*cmd, **kwargs):
-            return SlowProc()
+            return SlowProc(kwargs["stdout"])
 
         async def fake_wait_for(coro, timeout):
             raise asyncio.TimeoutError
@@ -554,15 +575,13 @@ class TestRunClaudeCode:
         with (
             patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
             patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
-            patch(
-                "responses_api_agents.claude_code_agent.app.kill_process_tree", side_effect=lambda proc: proc.kill()
-            ),
+            patch("nemo_gym.process_utils.kill_process_tree", side_effect=lambda proc: proc.kill()),
             patch("responses_api_agents.claude_code_agent.app.asyncio.wait_for", fake_wait_for),
         ):
             output_items, model, metadata = asyncio.run(agent._run_claude_code("hello"))
 
         assert output_items == []
-        assert state == {"killed": True, "communicate_calls": 1}
+        assert state == {"killed": True, "wait_calls": 1}
         assert model == "claude-sonnet-4-6"
         assert metadata["status"] == "incomplete"
         assert metadata["error_type"] == "timeout"
@@ -581,7 +600,7 @@ class TestRunClaudeCode:
                 state.append("detach")
 
         async def run() -> None:
-            communicating = asyncio.Event()
+            waiting = asyncio.Event()
             stopped = asyncio.Event()
 
             class SlowProc:
@@ -592,12 +611,12 @@ class TestRunClaudeCode:
                     self.returncode = -9
                     stopped.set()
 
-                async def communicate(self):
-                    state.append("communicate")
-                    communicating.set()
+                async def wait(self):
+                    state.append("wait")
+                    waiting.set()
                     await stopped.wait()
                     state.append("stopped")
-                    return b"", b""
+                    return self.returncode
 
             async def fake_exec(*cmd, **kwargs):
                 return SlowProc()
@@ -610,20 +629,20 @@ class TestRunClaudeCode:
                 patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
                 patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
                 patch(
-                    "responses_api_agents.claude_code_agent.app.kill_process_tree",
+                    "nemo_gym.process_utils.kill_process_tree",
                     side_effect=lambda proc: proc.kill(),
                 ),
                 patch.object(ClaudeCodeAgent, "invocation_context", context),
             ):
                 task = asyncio.create_task(agent._run_claude_code("hello", observation_collector=collect))
-                await communicating.wait()
+                await waiting.wait()
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
 
         asyncio.run(run())
 
-        assert state == ["communicate", "kill", "stopped", "detach", "collect"]
+        assert state == ["wait", "kill", "stopped", "detach", "collect"]
 
     def test_collects_observations_before_cleanup(self, tmp_path: Path) -> None:
         agent = _make_agent()
@@ -631,10 +650,15 @@ class TestRunClaudeCode:
         event_loop_thread = threading.get_ident()
 
         class FakeProc:
+            pid = 987654321
             returncode = 0
 
-            async def communicate(self):
-                return b'{"type":"result","subtype":"success","is_error":false,"usage":{}}\n', b""
+            def __init__(self, stdout):
+                self.stdout = stdout
+
+            async def wait(self):
+                self.stdout.write(b'{"type":"result","subtype":"success","is_error":false,"usage":{}}\n')
+                return 0
 
         async def fake_exec(*cmd, **kwargs):
             config_dir = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"])
@@ -656,7 +680,7 @@ class TestRunClaudeCode:
                 )
             )
             captured["config_dir"] = config_dir
-            return FakeProc()
+            return FakeProc(kwargs["stdout"])
 
         def collect(config_dir: Path, run_metadata: dict) -> None:
             captured["collector_thread"] = threading.get_ident()
@@ -873,12 +897,14 @@ class TestRolloutMCPConfig:
 class TestRolloutCorrelation:
     """The CLI streams /v1/messages, so correlation rides on the ANTHROPIC_BASE_URL path prefix."""
 
-    def _fake_proc(self):
+    def _fake_proc(self, stdout):
         class FakeProc:
+            pid = 987654321
             returncode = 0
 
-            async def communicate(self):
-                return b'{"type":"result","usage":{"input_tokens":1,"output_tokens":1}}\n', b""
+            async def wait(self):
+                stdout.write(b'{"type":"result","usage":{"input_tokens":1,"output_tokens":1}}\n')
+                return 0
 
         return FakeProc()
 
@@ -887,7 +913,7 @@ class TestRolloutCorrelation:
 
         async def fake_exec(*cmd, **kwargs):
             captured["base_url"] = kwargs["env"].get("ANTHROPIC_BASE_URL")
-            return self._fake_proc()
+            return self._fake_proc(kwargs["stdout"])
 
         with (
             patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),

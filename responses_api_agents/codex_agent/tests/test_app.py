@@ -34,6 +34,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.process_utils import NativeCapture
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.codex_agent.app import (
     CodexAgent,
@@ -335,18 +336,32 @@ class TestRunForwardsSkillsPath:
 
 
 class TestRunCodex:
+    def test_killed_native_does_not_become_empty_completed_response(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        with (
+            patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
+            patch(
+                "responses_api_agents.codex_agent.app.capture_native_subprocess",
+                new=AsyncMock(return_value=NativeCapture(b"", b"", -9, False)),
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="codex exited -9"):
+                asyncio.run(agent._run_codex("hello"))
+
     def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
         agent = _make_agent(openai_api_key="sk-test", system_prompt=None)  # pragma: allowlist secret
         captured: dict = {}
 
         class FakeProc:
+            pid = 987654321
             returncode = 0
 
-            async def communicate(self):
-                return (
-                    b'{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":4}}\n',
-                    b"",
-                )
+            def __init__(self, stdout):
+                self.stdout = stdout
+
+            async def wait(self):
+                self.stdout.write(b'{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":4}}\n')
+                return 0
 
         async def fake_exec(*cmd, **kwargs):
             env = kwargs["env"]
@@ -360,7 +375,7 @@ class TestRunCodex:
             captured["config_during_run"] = tomllib.loads((Path(codex_home) / "config.toml").read_text())
             captured["cwd_exists_during_run"] = Path(cmd[cmd.index("--cd") + 1]).is_dir()
             captured["scratch_cwd"] = cmd[cmd.index("--cd") + 1]
-            return FakeProc()
+            return FakeProc(kwargs["stdout"])
 
         with (
             patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
@@ -388,10 +403,11 @@ class TestRunCodex:
         agent = _make_agent(cwd=str(workdir))
 
         class FakeProc:
+            pid = 987654321
             returncode = 0
 
-            async def communicate(self):
-                return b"", b""
+            async def wait(self):
+                return 0
 
         captured: dict = {}
 
@@ -431,11 +447,12 @@ class TestRunCodex:
                 state.append("detach")
 
         class FakeProc:
+            pid = 987654321
             returncode = 0
 
-            async def communicate(self):
-                state.append("communicate")
-                return b"", b""
+            async def wait(self):
+                state.append("wait")
+                return 0
 
         async def fake_exec(*cmd, **kwargs):
             assert kwargs["env"]["GYM_TEST_CONTEXT"] == "ready"
@@ -450,7 +467,7 @@ class TestRunCodex:
         ):
             asyncio.run(agent._run_codex("hello", rollout_id="rollout-1"))
 
-        assert state == ["prepare", "spawn", "communicate", "detach"]
+        assert state == ["prepare", "spawn", "wait", "detach"]
         assert home is not None and not home.exists()
 
     def test_invocation_preparation_failure_prevents_native_spawn(self, tmp_path: Path) -> None:
@@ -485,18 +502,22 @@ class TestRunCodex:
         leaked = home / ".codex_agent"
         assert not leaked.exists() or not any(leaked.iterdir())
 
-    def test_timeout_returns_empty(self, tmp_path: Path) -> None:
+    def test_timeout_fails_rollout(self, tmp_path: Path) -> None:
         agent = _make_agent(timeout=1)
         killed = {"called": False}
+        stopped = asyncio.Event()
 
         class SlowProc:
             returncode = None
 
             def kill(self):
                 killed["called"] = True
+                self.returncode = -9
+                stopped.set()
 
-            async def communicate(self):
-                return b"", b""
+            async def wait(self):
+                await stopped.wait()
+                return self.returncode
 
         async def fake_exec(*cmd, **kwargs):
             return SlowProc()
@@ -509,13 +530,12 @@ class TestRunCodex:
             patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
             patch("responses_api_agents.codex_agent.app.asyncio.wait_for", fake_wait_for),
-            patch("responses_api_agents.codex_agent.app.kill_process_tree", side_effect=lambda proc: proc.kill()),
+            patch("nemo_gym.process_utils.kill_process_tree", side_effect=lambda proc: proc.kill()),
         ):
-            stdout, model = asyncio.run(agent._run_codex("hello"))
+            with pytest.raises(TimeoutError, match="codex timed out"):
+                asyncio.run(agent._run_codex("hello"))
 
-        assert stdout == ""
         assert killed["called"] is True
-        assert model == "codex-default"
 
     def test_cancellation_stops_process_before_cleanup(self, tmp_path: Path) -> None:
         agent = _make_agent()
@@ -529,7 +549,7 @@ class TestRunCodex:
                 state.append("detach")
 
         async def run() -> None:
-            communicating = asyncio.Event()
+            waiting = asyncio.Event()
             stopped = asyncio.Event()
 
             class SlowProc:
@@ -540,12 +560,12 @@ class TestRunCodex:
                     self.returncode = -9
                     stopped.set()
 
-                async def communicate(self):
-                    state.append("communicate")
-                    communicating.set()
+                async def wait(self):
+                    state.append("wait")
+                    waiting.set()
                     await stopped.wait()
                     state.append("stopped")
-                    return b"", b""
+                    return self.returncode
 
             with (
                 patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
@@ -553,7 +573,7 @@ class TestRunCodex:
                     "responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec",
                     AsyncMock(return_value=SlowProc()),
                 ),
-                patch("responses_api_agents.codex_agent.app.kill_process_tree", side_effect=lambda proc: proc.kill()),
+                patch("nemo_gym.process_utils.kill_process_tree", side_effect=lambda proc: proc.kill()),
                 patch.object(CodexAgent, "invocation_context", context),
                 patch(
                     "responses_api_agents.codex_agent.app.shutil.rmtree",
@@ -561,13 +581,13 @@ class TestRunCodex:
                 ),
             ):
                 task = asyncio.create_task(agent._run_codex("hello"))
-                await communicating.wait()
+                await waiting.wait()
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
 
         asyncio.run(run())
-        assert state == ["communicate", "kill", "stopped", "detach", "cleanup", "cleanup"]
+        assert state == ["wait", "kill", "stopped", "detach", "cleanup", "cleanup"]
 
 
 class TestRolloutMCPServers:
@@ -702,12 +722,14 @@ class TestRolloutMCPServers:
 class TestRolloutCorrelation:
     """The CLI streams /v1/responses, so correlation rides on the provider base_url path prefix."""
 
-    def _fake_proc(self):
+    def _fake_proc(self, stdout):
         class FakeProc:
+            pid = 987654321
             returncode = 0
 
-            async def communicate(self):
-                return b'{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n', b""
+            async def wait(self):
+                stdout.write(b'{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n')
+                return 0
 
         return FakeProc()
 
@@ -717,7 +739,7 @@ class TestRolloutCorrelation:
         async def fake_exec(*cmd, **kwargs):
             config = tomllib.loads((Path(kwargs["env"]["CODEX_HOME"]) / "config.toml").read_text())
             captured["base_url"] = config["model_providers"]["gym"]["base_url"]
-            return self._fake_proc()
+            return self._fake_proc(kwargs["stdout"])
 
         def fake_resolve(name, rollout_id=None):
             prefix = f"/ng-rollout/{rollout_id}" if rollout_id else ""

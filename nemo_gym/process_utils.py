@@ -16,13 +16,23 @@
 import asyncio
 import os
 import signal
+import tempfile
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import psutil
 
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class NativeCapture:
+    stdout: bytes
+    stderr: bytes
+    returncode: int
+    timed_out: bool
 
 
 async def await_cleanup(task: asyncio.Task[T]) -> T:
@@ -62,6 +72,37 @@ async def create_native_subprocess(*argv: str, **kwargs: Any) -> asyncio.subproc
             except (Exception, asyncio.CancelledError):
                 pass
         raise
+
+
+async def capture_native_subprocess(*argv: str, timeout: float, **kwargs: Any) -> NativeCapture:
+    """Capture a native CLI without making pipe EOF a condition of child exit.
+
+    A descendant may inherit stdout or stderr after the direct child dies. File
+    output lets us reap that child and preserve the bytes it wrote without
+    waiting for an escaped descendant to close an inherited pipe.
+    """
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        proc = await create_native_subprocess(*argv, stdout=stdout, stderr=stderr, **kwargs)
+        waiter = asyncio.create_task(proc.wait())
+        timed_out = False
+        try:
+            await asyncio.wait_for(asyncio.shield(waiter), timeout)
+        except asyncio.TimeoutError:
+            timed_out = True
+            kill_process_tree(proc)
+            await await_cleanup(waiter)
+        except asyncio.CancelledError:
+            kill_process_tree(proc)
+            try:
+                await await_cleanup(waiter)
+            except asyncio.CancelledError:
+                pass
+            raise
+        # The direct CLI may exit normally while leaving same-group children.
+        kill_process_tree(proc)
+        stdout.seek(0)
+        stderr.seek(0)
+        return NativeCapture(stdout.read(), stderr.read(), proc.returncode, timed_out)
 
 
 def kill_process_tree(proc: asyncio.subprocess.Process) -> None:

@@ -24,7 +24,12 @@ from unittest.mock import MagicMock, patch
 import psutil
 import pytest
 
-from nemo_gym.process_utils import await_cleanup, create_native_subprocess, kill_process_tree
+from nemo_gym.process_utils import (
+    await_cleanup,
+    capture_native_subprocess,
+    create_native_subprocess,
+    kill_process_tree,
+)
 
 
 def test_await_cleanup_finishes_after_repeated_cancellation() -> None:
@@ -87,6 +92,83 @@ def test_cancellation_during_spawn_reaps_child_before_return() -> None:
                 if process is not None and process.returncode is None:
                     process.kill()
                     await process.wait()
+
+    asyncio.run(run())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process group lifecycle")
+def test_capture_reaps_killed_native_with_detached_output_holder(tmp_path: Path) -> None:
+    native_pid = tmp_path / "native.pid"
+    descendant_pid = tmp_path / "descendant.pid"
+    launcher = (
+        "import os,subprocess,sys,time; from pathlib import Path; "
+        "print('started', flush=True); "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'], "
+        "start_new_session=True, close_fds=False); "
+        f"Path({str(native_pid)!r}).write_text(str(os.getpid())); "
+        f"Path({str(descendant_pid)!r}).write_text(str(child.pid)); "
+        "time.sleep(30)"
+    )
+
+    async def run() -> None:
+        capture = asyncio.create_task(
+            capture_native_subprocess(sys.executable, "-c", launcher, timeout=5, start_new_session=True)
+        )
+        try:
+            async with asyncio.timeout(5):
+                while not descendant_pid.exists():
+                    await asyncio.sleep(0.01)
+            os.kill(int(native_pid.read_text()), signal.SIGKILL)
+            result = await asyncio.wait_for(capture, timeout=5)
+            assert result.returncode == -signal.SIGKILL
+            assert result.stdout == b"started\n"
+            assert not result.timed_out
+        finally:
+            if native_pid.exists():
+                with suppress(ProcessLookupError):
+                    os.kill(int(native_pid.read_text()), signal.SIGKILL)
+            if descendant_pid.exists():
+                with suppress(ProcessLookupError):
+                    os.kill(int(descendant_pid.read_text()), signal.SIGKILL)
+            if not capture.done():
+                capture.cancel()
+            with suppress(asyncio.CancelledError):
+                await capture
+
+    asyncio.run(run())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process group lifecycle")
+def test_capture_stops_same_group_child_after_normal_exit(tmp_path: Path) -> None:
+    child_pid = tmp_path / "child.pid"
+    launcher = (
+        "import subprocess,sys; from pathlib import Path; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+        f"Path({str(child_pid)!r}).write_text(str(child.pid)); "
+        "print('done', flush=True)"
+    )
+
+    async def run() -> None:
+        try:
+            result = await asyncio.wait_for(
+                capture_native_subprocess(sys.executable, "-c", launcher, timeout=5, start_new_session=True),
+                timeout=5,
+            )
+            assert result.returncode == 0
+            assert result.stdout == b"done\n"
+            assert child_pid.exists()
+            async with asyncio.timeout(5):
+                while True:
+                    try:
+                        if psutil.Process(int(child_pid.read_text())).status() == psutil.STATUS_ZOMBIE:
+                            break
+                    except psutil.NoSuchProcess:
+                        break
+                    await asyncio.sleep(0.01)
+        finally:
+            if child_pid.exists():
+                with suppress(ProcessLookupError):
+                    os.kill(int(child_pid.read_text()), signal.SIGKILL)
 
     asyncio.run(run())
 
