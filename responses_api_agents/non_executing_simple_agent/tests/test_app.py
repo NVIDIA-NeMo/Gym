@@ -105,6 +105,7 @@ class TestApp:
             json=NeMoGymResponseCreateParamsNonStreaming(
                 input=[NeMoGymEasyInputMessage(content="hello", role="user", type="message")]
             ),
+            cookies={"session_cookie": "1"},
         )
 
     async def test_run_seeds_and_verifies_model_response_without_tool_execution(self) -> None:
