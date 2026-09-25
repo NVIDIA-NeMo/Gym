@@ -1250,10 +1250,23 @@ repr(e): {repr(e)}"""
             timeout_worker_healthcheck=global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
             # Ensure server keepalive > client keepalive
             timeout_keep_alive=30,
-            # Parse HTTP with httptools instead of pure-Python h11.
-            # Explicit selection prevents Uvicorn from silently falling back to h11.
-            # A missing or incompatible httptools wheel now fails during startup.
-            http="httptools",
+            # Parse HTTP with pure-Python h11 rather than httptools.
+            #
+            # Explicit selection is still worth keeping: it stops Uvicorn from
+            # silently picking a different parser depending on whether an
+            # httptools wheel happens to be installed.
+            #
+            # httptools was selected here for parsing speed, but large /run
+            # response bodies are truncated at exactly 127,744 bytes under it:
+            # the headers still advertise the full Content-Length, so the
+            # rollout client raises ClientPayloadError/ContentLengthError while
+            # reading the body and the whole collection dies. Every observed
+            # failure stopped at that same byte count across 22 different
+            # declared body sizes, and the last release before httptools was
+            # introduced streamed a 1.4 MB record on the same workload without
+            # error. Rollouts are dominated by model-call latency, so parser
+            # overhead is negligible here.
+            http="h11",
             access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
             # Internal-only by default. Enabling this requires an explicit trusted-proxy allowlist,
             # so forwarded headers are never honored from an arbitrary peer.
