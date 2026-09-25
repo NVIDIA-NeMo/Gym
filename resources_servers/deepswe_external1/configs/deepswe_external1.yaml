@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Resources server for prepared DeepSWE task packages.
+# This base config also supports golden- and null-patch validation without an agent.
+deepswe_external1_resources_server:
+  resources_servers:
+    deepswe_external1:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      tasks_dir: resources_servers/deepswe_external1/data/cache/tasks
+      expected_task_count: 5
+      is_verifying_golden_patch: false
+      is_verifying_null_patch: false
+      task_cpu_multiplier: 2.0
+      task_memory_multiplier: 4.0
+
+      sandbox_provider: sandbox
+      enforce_agent_no_network: true
+      enforce_verifier_no_network: false
+      sandbox_model_server: null
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        provider_options:
+          resource_requests:
+            cpu: 0.5
+            memory_mib: 512
+            disk_gib: 20
+        metadata:
+          environment: deepswe-external1
+          istio.io/dataplane-mode: none
+
+      logs_dir: resources_servers/deepswe_external1/logs
+      clear_verifier_logs: false
+      include_model_patch_in_response: true
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/deepswe_external1/data/example.jsonl
+          num_repeats: 1
+          license: Apache 2.0
