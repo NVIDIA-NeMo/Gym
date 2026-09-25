@@ -19,7 +19,6 @@ from nemo_gym.global_config import HF_TOKEN_KEY_NAME, maybe_get_global_config_di
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "math_500_benchmark.jsonl"
 SOURCE_ID = "ai4bharat/indic-math-500"
-SOURCE_REVISION = "29557d8eaa22621b82f3af5557ab60babcf3feb5"
 EXPECTED_ROWS = 500
 LANGUAGE_NAMES = {
     "as": "Assamese",
@@ -37,19 +36,16 @@ LANGUAGE_NAMES = {
     "te": "Telugu",
     "ur": "Urdu",
 }
-DEFAULT_LANGUAGES = tuple(LANGUAGE_NAMES)
+DEFAULT_LANGUAGES = tuple(code for code in LANGUAGE_NAMES if code not in {"as", "sa"})
+SUPPORTED_LANGUAGES = (*LANGUAGE_NAMES, "en")
 
 
 def build_rows(
     records: Sequence[Mapping[str, Any]], *, languages: Sequence[str] = DEFAULT_LANGUAGES
 ) -> list[dict[str, Any]]:
     """Select translated problems while preserving the original answers and task IDs."""
-    if (
-        isinstance(languages, str)
-        or not languages
-        or any(code not in (*DEFAULT_LANGUAGES, "en") for code in languages)
-    ):
-        raise ValueError(f"languages must be a nonempty sequence from {(*DEFAULT_LANGUAGES, 'en')}")
+    if isinstance(languages, str) or not languages or any(code not in SUPPORTED_LANGUAGES for code in languages):
+        raise ValueError(f"languages must be a nonempty sequence from {SUPPORTED_LANGUAGES}")
     if len(set(languages)) != len(languages):
         raise ValueError("languages must be unique")
     if len(records) != EXPECTED_ROWS:
@@ -81,21 +77,20 @@ def build_rows(
                     "subject": record["subject"],
                     "level": record["level"],
                     "language": language,
-                    "uuid": f"{SOURCE_ID}/{SOURCE_REVISION}/{language}/{record['unique_id']}",
+                    "uuid": f"{SOURCE_ID}/{language}/{record['unique_id']}",
                 }
             )
     return rows
 
 
 def prepare(*, languages: Sequence[str] = DEFAULT_LANGUAGES, output_fpath: str | None = None) -> Path:
-    """Download the pinned test split and write native Gym tasks."""
+    """Download the test split and write native Gym tasks."""
     config = maybe_get_global_config_dict()
     token = config.get(HF_TOKEN_KEY_NAME) if config is not None else None
     source = hf_hub_download(
         repo_id=SOURCE_ID,
         filename="test.parquet",
         repo_type="dataset",
-        revision=SOURCE_REVISION,
         token=token or get_token(),
     )
     records = load_dataset("parquet", data_files={"test": source}, split="test").to_list()

@@ -69,13 +69,21 @@ def test_english_pipeline_parity_and_no_solution_in_prompt(records, monkeypatch,
     assert hindi["expected_answer"] not in messages[0]["content"]
 
 
-def test_all_languages_distinct_stable_ids_and_filtering(records):
+def test_default_languages_have_distinct_stable_ids_and_filtering(records):
     rows = module.build_rows(records)
-    assert len(rows) == 28
-    assert len({row["uuid"] for row in rows}) == 28
+    assert len(rows) == 24
+    assert len({row["uuid"] for row in rows}) == 24
     assert {row["language"] for row in rows} == set(module.DEFAULT_LANGUAGES)
+    assert "as" not in module.DEFAULT_LANGUAGES
+    assert "sa" not in module.DEFAULT_LANGUAGES
     assert module.build_rows(records, languages=["hi"]) == [row for row in rows if row["language"] == "hi"]
     assert module.build_rows(records) == rows
+
+
+def test_assamese_and_sanskrit_remain_available_by_explicit_selection(records):
+    rows = module.build_rows(records, languages=["as", "sa"])
+    assert len(rows) == 4
+    assert {row["language"] for row in rows} == {"as", "sa"}
 
 
 @pytest.mark.parametrize("value", [None, "", " "])
@@ -116,11 +124,11 @@ def test_invalid_verification_metadata(records, field, value):
         module.build_rows(records)
 
 
-def test_prepare_pins_data_and_preserves_output_on_validation_failure(records, monkeypatch, tmp_path):
+def test_prepare_downloads_data_and_preserves_output_on_validation_failure(records, monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(module, "maybe_get_global_config_dict", lambda: None)
     monkeypatch.setattr(module, "get_token", lambda: "test-token")
-    monkeypatch.setattr(module, "hf_hub_download", lambda **kwargs: calls.append(kwargs) or "pinned.parquet")
+    monkeypatch.setattr(module, "hf_hub_download", lambda **kwargs: calls.append(kwargs) or "source.parquet")
     monkeypatch.setattr(module, "load_dataset", lambda *args, **kwargs: Dataset.from_list(records))
     output = tmp_path / "tasks.jsonl"
     assert module.prepare(languages=["hi"], output_fpath=str(output)) == output
@@ -128,7 +136,6 @@ def test_prepare_pins_data_and_preserves_output_on_validation_failure(records, m
         "repo_id": module.SOURCE_ID,
         "filename": "test.parquet",
         "repo_type": "dataset",
-        "revision": module.SOURCE_REVISION,
         "token": "test-token",
     }
     original = output.read_bytes()
