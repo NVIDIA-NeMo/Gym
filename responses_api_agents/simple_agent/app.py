@@ -326,6 +326,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         trajectory = None
         expected_rollout_id = self.rollout_id_from_run(body)
+        if expected_rollout_id is not None and _INTERNAL_TRAJECTORY_KEY in model_response_json:
+            model_response_json = model_response_json.copy()
         raw_trajectory = (
             model_response_json.pop(_INTERNAL_TRAJECTORY_KEY, None) if expected_rollout_id is not None else None
         )
@@ -359,13 +361,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 "verification_skipped": True,
             }
         else:
-            verify_request = SimpleAgentVerifyRequest.model_validate(
-                body.model_dump() | {"response": model_response_json}
-            )
+            # Both inputs have already crossed their typed HTTP boundaries. Build the
+            # wire payload once; the resources server validates its own verify schema.
+            verify_request = body.model_dump()
+            verify_request["response"] = model_response_json
             verify_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=verify_request.model_dump(),
+                json=verify_request,
                 cookies=cookies,
             )
             await raise_for_status(verify_response)
