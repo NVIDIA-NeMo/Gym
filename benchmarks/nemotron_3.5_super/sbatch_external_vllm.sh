@@ -310,6 +310,7 @@ MOONCAKE_CONFIG
             -eviction_ratio=0.1 \
             -minloglevel=1 \
             -enable_metric_reporting=false \
+            -default_kv_lease_ttl=120000 \
             -logtostderr &
         mooncake_pid=\$!
     fi
