@@ -22,6 +22,8 @@ Unattributed rollouts keep the strict single-chain policy bit-for-bit.
 
 import asyncio
 
+import pytest
+
 from nemo_gym.token_id_capture import (
     ParentResolutionStatus,
     TokenCaptureStore,
@@ -35,6 +37,7 @@ from nemo_gym.token_id_capture.delivery import (
     TERMINAL_CALL_KEY,
     TERMINAL_RESPONSE_ID_KEY,
     TOKEN_CAPTURE_KEY,
+    capture_build_can_retire,
     finalize_rollout_token_capture,
 )
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
@@ -401,11 +404,11 @@ def test_assemble_broken_terminal_chain_masks():
 # --- delivery end to end -------------------------------------------------------
 
 
-def _delivery_case(tmp_path, result: dict) -> dict:
+def _delivery_case(tmp_path, result: dict, *, with_aux: bool = True) -> dict:
     store = TokenCaptureStore(tmp_path)
 
     async def go() -> dict:
-        for entry in _aux_entries():
+        for entry in _aux_entries() if with_aux else _chain_entries():
             await store.put(entry.model_copy(update={"rollout_id": "t0-r0"}))
         return await finalize_rollout_token_capture(result, store)
 
@@ -457,7 +460,8 @@ def test_finalize_honors_a_declared_terminal_response_id(tmp_path):
     assert attribution["call_id"] == "call2"
 
 
-def test_finalize_masks_when_the_declared_response_id_was_not_captured(tmp_path):
+@pytest.mark.parametrize("with_aux", [False, True])
+def test_finalize_masks_when_the_declared_response_id_was_not_captured(tmp_path, with_aux):
     result = {
         "_ng_rollout_id": "t0-r0",
         "response": _response(
@@ -467,10 +471,12 @@ def test_finalize_masks_when_the_declared_response_id_was_not_captured(tmp_path)
         TERMINAL_RESPONSE_ID_KEY: "resp_unknown",
         "reward": 1.0,
     }
-    built = _delivery_case(tmp_path, result)
+    built = _delivery_case(tmp_path, result, with_aux=with_aux)
     # A declaration the records cannot confirm never falls back to weaker witnesses.
     assert built[MASK_SAMPLE_KEY] is True
     assert result[MASK_SAMPLE_KEY] is True
+    assert not capture_build_can_retire(built)
+    assert result["reward"] == 1.0
     attribution = result[TOKEN_CAPTURE_KEY]["terminal_attribution"]
     assert attribution["method"] == "none"
     assert "declared_terminal_not_captured" in attribution["reason"]
