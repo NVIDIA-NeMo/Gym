@@ -32,6 +32,7 @@ SERVER_TESTS = REPO_ROOT / "scripts" / "ci" / "server_tests.sh"
 SETUP_DEV = REPO_ROOT / "scripts" / "ci" / "setup_dev.sh"
 TEST_TEMPLATE_ACTION = REPO_ROOT / ".github" / "actions" / "test-template" / "action.yml"
 UNIT_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
+VLLM_MODEL_PROJECT = REPO_ROOT / "responses_api_models" / "vllm_model" / "pyproject.toml"
 QWEN_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 BEHAVIOR_CHANGING_ENV = {
@@ -209,6 +210,14 @@ def test_coverage_gate_compares_fractional_percentages() -> None:
 
     assert coverage_report["precision"] == 2
     assert coverage_report["fail_under"] == 95.0
+
+
+def test_vllm_model_constrains_sqlalchemy_to_valid_metadata() -> None:
+    import tomllib
+
+    uv_config = tomllib.loads(VLLM_MODEL_PROJECT.read_text())["tool"]["uv"]
+
+    assert "sqlalchemy<2.1" in uv_config["constraint-dependencies"]
 
 
 def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
