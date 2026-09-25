@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, OpenAI
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse, SimpleResourcesServer
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
@@ -163,12 +163,28 @@ class _BinaryJudgeHttpClient(DefaultAsyncHttpxClient):
             )
 
 
+class AABriefcaseReference(BaseModel):
+    """One pairwise opponent.
+
+    Leave ``deliverables_dir`` unset for a reference shipped with the dataset. Set it to a local
+    run's ``deliverables_cache`` to use that run's ``task_<id>/repeat_<repeat>/`` output instead.
+    ``exclude_judges`` lists panel judges, by name, that must not score this reference, such as
+    a judge from the same model family.
+    """
+
+    deliverables_dir: Optional[str] = None
+    repeat: int = Field(default=0, ge=0)
+    exclude_judges: List[str] = Field(default_factory=list)
+
+
 class AABriefcaseLiteResourcesServerConfig(GDPValResourcesServerConfig):
     """Public Lite grading configuration layered on GDPval judge support."""
 
     name: str = "aa_briefcase_lite"
     reward_mode: Literal["binary", "pairwise", "all"] = "binary"
     dataset_dir: str
+    # One entry per opponent; when empty, pairwise_reference_ids is used.
+    pairwise_references: Dict[str, AABriefcaseReference] = Field(default_factory=dict)
     pairwise_reference_ids: List[str] = ["gpt-5-5"]
     pairwise_num_trials: int = Field(default=2, ge=1)
     binary_formatting_retries: int = Field(default=2, ge=0, le=3)
@@ -254,6 +270,21 @@ def _stage_submission(source_dir: Optional[str], filenames: list[str], stack: Ex
             continue
         (stage / name).symlink_to(candidate.resolve())
     return stage, missing
+
+
+def _judges_for_reference(reference: AABriefcaseReference, judges: list[ResolvedJudge]) -> list[ResolvedJudge]:
+    """The panel for one matchup, without the reference's excluded judges; may be empty."""
+    excluded = set(reference.exclude_judges)
+    return [judge for judge in judges if judge.name not in excluded]
+
+
+def _skipped_reference(reference_id: str, reference: AABriefcaseReference, reason: str) -> dict[str, Any]:
+    """A result for a reference that was not judged; it has no vote counts, so it is never a tie."""
+    return {
+        "reference_id": reference_id,
+        "skipped_reason": reason,
+        "excluded_judges": sorted(reference.exclude_judges),
+    }
 
 
 def _pairwise_task_prompt(task_markdown: str, check: dict[str, Any]) -> str:
@@ -520,15 +551,18 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         filenames = _requested_filenames(checks)
         results: list[dict[str, Any]] = []
         wins = losses = ties = invalid = 0
-        for reference_id in self.config.pairwise_reference_ids:
-            ref_source = self._aa_dataset_root / "submissions" / reference_id / body.task_id / "submission"
+        for reference_id, reference in self._resolved_references().items():
+            ref_source = self._reference_source(reference_id, reference, body.task_id)
             if not ref_source.is_dir():
-                raise FileNotFoundError(
-                    f"public AA pairwise reference {reference_id!r} has no submission for {body.task_id}: {ref_source}"
-                )
+                # Not every shipped reference covers every task (o3 has no w1_t1).
+                results.append(_skipped_reference(reference_id, reference, "no_submission_for_task"))
+                continue
             ref_stage, ref_missing = _stage_submission(str(ref_source), filenames, stack)
             await self._preconvert(ref_stage)
-            matchup_judges = list(resolved_judges)
+            matchup_judges = _judges_for_reference(reference, resolved_judges)
+            if not matchup_judges:
+                results.append(_skipped_reference(reference_id, reference, "exclusion_empties_panel"))
+                continue
             modalities = dir_media_modalities(eval_stage) | dir_media_modalities(ref_stage)
             if modalities:
                 matchup_judges, _audio, _video = self._route_media_judges(
@@ -587,6 +621,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                         "check_id": check["check_id"],
                         "check_type": check["check_type"],
                         "reference_id": reference_id,
+                        "excluded_judges": sorted(reference.exclude_judges),
                         **result,
                     }
                 )
@@ -624,8 +659,8 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                         modalities=modalities,
                         label="submitted artifact",
                     )
-                if not self.config.pairwise_reference_ids:
-                    raise ValueError("pairwise mode requires at least one pairwise_reference_id")
+                if not self._resolved_references():
+                    raise ValueError("pairwise mode requires at least one pairwise reference")
                 pairwise_reward, pairwise_results, wins, losses, ties, pairwise_invalid = await self._verify_pairwise(
                     body,
                     task_markdown,
@@ -669,6 +704,18 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             pairwise_losses=losses,
             pairwise_ties=ties,
         )
+
+    def _resolved_references(self) -> Dict[str, AABriefcaseReference]:
+        """``pairwise_references`` when set, else one default entry per ``pairwise_reference_ids``."""
+        if self.config.pairwise_references:
+            return dict(self.config.pairwise_references)
+        return {reference_id: AABriefcaseReference() for reference_id in self.config.pairwise_reference_ids}
+
+    def _reference_source(self, reference_id: str, reference: AABriefcaseReference, task_id: str) -> Path:
+        """This reference's submission directory for one task."""
+        if reference.deliverables_dir:
+            return Path(reference.deliverables_dir) / f"task_{task_id}" / f"repeat_{reference.repeat}"
+        return self._aa_dataset_root / "submissions" / reference_id / task_id / "submission"
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         valid = [row for row in body.verify_responses if not row.get("invalid_judge_response")]
