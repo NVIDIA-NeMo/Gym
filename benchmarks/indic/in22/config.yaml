@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - benchmarks/indic/in22/config_base.yaml
+
+prepare_script_args:
+  subset: gen
+
+in22_gen_agent:
+  _inherit_from: wmt_translation_simple_agent
+  responses_api_agents:
+    simple_agent:
+      max_steps: 1
+      resources_server:
+        name: in22_wmt_translation_resources_server
+      datasets:
+        - name: in22_gen
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/in22/data/in22_gen_benchmark.jsonl
+          prepare_script: benchmarks/indic/in22/prepare.py
+          prompt_config: benchmarks/indic/in22/prompts/default.yaml
+          num_repeats: 1
+          license: CC-BY-4.0

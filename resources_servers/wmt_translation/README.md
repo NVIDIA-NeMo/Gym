@@ -8,6 +8,14 @@ neural QE scores, served by a persistent Ray actor pool that loads the
 checkpoint once per actor and stays resident for the whole run, plus optional
 language-consistency scoring through a configured backend.
 
+The opt-in `in22` metric profile preserves the supplied IN22 reference:
+IndicNLP normalization and tokenization for Indic targets, SacreBLEU `13a`
+tokenization for English targets, and corpus chrF, chrF++, and BLEU. It also
+removes completed `<think>` blocks and optional Markdown fences before scoring.
+With this profile, `verify()` reports sentence chrF, chrF++, and BLEU, and
+`compute_metrics()` emits lowercase `/chrf`, `/chrf++`, and `/bleu` corpus
+keys. Sentence chrF remains the normalized reward.
+
 > **Warning:** We switched from the default SacreBLEU tokenizer to the
 > FLORES-200 SentencePiece tokenizer for computing BLEU. The new BLEU scores
 > are reported as **spBLEU**—do **NOT** compare these spBLEU scores to prior
@@ -144,10 +152,11 @@ COMET actor pool) and launches Gym in one shot, see the
 | `language_consistency_backend` | `null`        | Optional per-rollout language-consistency backend |
 | `language_consistency_warning_threshold` | `50.0` | Warn for source-target pairs below this mean 0–100 language-consistency score |
 | `strip_reasoning`   | `true`                | Drop a `<think>...</think>` preamble before scoring             |
+| `metric_profile`    | `default`             | Select `default` WMT scoring or reference-compatible `in22` scoring |
 
 ## Licensing
 
 - Code: Apache 2.0
 - `Unbabel/XCOMET-XXL`: check model card (CC-BY-NC 4.0 at time of writing)
 - Dependencies: `sacrebleu` (Apache 2.0), `sentencepiece` (Apache 2.0),
-  `unbabel-comet` (Apache 2.0)
+  `indic-nlp-library` (MIT), `unbabel-comet` (Apache 2.0)
