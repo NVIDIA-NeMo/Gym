@@ -57,6 +57,8 @@ apex_agent:
       # Optional trusted world_id -> SIF manifest for prebuilt world deliveries.
       # Ordinary Hugging Face APEX rows continue to use the shared image above.
       prebuilt_world_manifest: ${oc.select:apex_prebuilt_world_manifest,null}
+      # Overall deadline for a prebuilt world's gateway and MCP startup.
+      prebuilt_startup_timeout_seconds: ${oc.select:apex_prebuilt_startup_timeout_seconds,1800}
       # Relay policy traffic through a unix socket bound into the sandbox:
       # auto | always | never. "auto" turns it on when
       # apex_agent_apptainer_extra_start_args contains --net or a --network

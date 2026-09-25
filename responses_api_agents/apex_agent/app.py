@@ -89,6 +89,7 @@ class ApexAgentConfig(BaseResponsesAPIAgentConfig):
     max_world_bytes: Optional[int] = Field(default=None, gt=0)
     artifact_output_dir: Optional[str] = None
     prebuilt_world_manifest: Optional[str] = None
+    prebuilt_startup_timeout_seconds: int = Field(default=1800, gt=0)
     # Relay policy traffic through a unix socket bound into the sandbox. "auto"
     # enables it when the apptainer sandbox runs in its own network namespace
     # (extra_start_args contain --net or a --network option).
@@ -465,6 +466,8 @@ class ApexAgent(SimpleResponsesAPIAgent):
             "edgar_user_agent": self.config.edgar_user_agent,
             "task_slug": body.task_slug,
         }
+        if prebuilt_world:
+            runner_config["startup_timeout_seconds"] = self.config.prebuilt_startup_timeout_seconds
         if relay is not None:
             runner_config["model_egress_socket"] = f"{_EGRESS_MOUNT}/{relay.socket_name}"
         files = {

@@ -27,6 +27,7 @@ ROOT = Path("/app/apex-gym")
 OUTPUT = ROOT / "output"
 PARTIAL_RESULT_PATH = Path("/sandbox/partial_result.json")
 GATEWAY_URL = "http://127.0.0.1:8000"
+WORLD_BUNDLE_LOG = Path("/app/logs/world_bundle.txt")
 
 
 def snapshot_tar_to_zip(source: Path, destination: Path) -> list[str]:
@@ -65,19 +66,54 @@ def capture_snapshot(destination: Path) -> list[str]:
             pass
 
 
-async def wait_for_startup(process: asyncio.subprocess.Process, log_path: Path, timeout_seconds: float = 600) -> None:
+def startup_log_tail(log_path: Path) -> str:
+    """Keep both startup logs within the host's 4000-character error limit."""
+    tails = []
+    for label, path, limit in (
+        ("environment.log", log_path, 1400),
+        ("world_bundle.txt", WORLD_BUNDLE_LOG, 2000),
+    ):
+        try:
+            with path.open("rb") as stream:
+                stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, stream.tell() - limit))
+                tail = stream.read().decode("utf-8", errors="replace")
+        except OSError as exc:
+            tail = f"<unavailable: {exc}>"
+        tails.append(f"{label} tail:\n{tail}")
+    return "\n".join(tails)
+
+
+async def wait_for_startup(process: asyncio.subprocess.Process, log_path: Path, timeout_seconds: float = 1800) -> None:
     """Wait until the prebuilt environment has configured all MCP services."""
-    await wait_for_gateway(GATEWAY_URL, timeout_seconds=timeout_seconds)
-    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    gateway_task = asyncio.create_task(wait_for_gateway(GATEWAY_URL, timeout_seconds=timeout_seconds))
+    try:
+        while not gateway_task.done():
+            if process.returncode is not None:
+                raise RuntimeError(f"prebuilt world exited during gateway startup: {startup_log_tail(log_path)}")
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError(f"prebuilt world gateway did not become healthy: {startup_log_tail(log_path)}")
+            await asyncio.wait({gateway_task}, timeout=min(1, remaining))
+        try:
+            await gateway_task
+        except TimeoutError as exc:
+            raise TimeoutError(f"prebuilt world gateway did not become healthy: {startup_log_tail(log_path)}") from exc
+    finally:
+        if not gateway_task.done():
+            gateway_task.cancel()
+            await asyncio.gather(gateway_task, return_exceptions=True)
     while True:
         text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+        if loop.time() >= deadline:
+            raise TimeoutError(f"prebuilt world did not finish MCP startup: {startup_log_tail(log_path)}")
         if "Startup complete!" in text:
             return
         if process.returncode is not None:
-            raise RuntimeError(f"prebuilt world exited during startup: {text[-4000:]}")
-        if asyncio.get_running_loop().time() >= deadline:
-            raise TimeoutError(f"prebuilt world did not finish MCP startup: {text[-4000:]}")
-        await asyncio.sleep(1)
+            raise RuntimeError(f"prebuilt world exited during startup: {startup_log_tail(log_path)}")
+        await asyncio.sleep(min(1, deadline - loop.time()))
 
 
 async def stop_process(process: asyncio.subprocess.Process) -> None:
@@ -113,7 +149,9 @@ async def main() -> None:
         start_new_session=True,
     )
     try:
-        await wait_for_startup(environment, log_path)
+        await wait_for_startup(
+            environment, log_path, timeout_seconds=float(config.get("startup_timeout_seconds", 1800))
+        )
         initial_manifest = await asyncio.to_thread(capture_snapshot, OUTPUT / "initial.zip")
         result = await run_stirrup_rollout(
             config,
