@@ -285,7 +285,7 @@ if (( ENABLE_MOONCAKE )); then
   "global_segment_size": "100GB",
   "local_buffer_size": "4GB",
   "protocol": "rdma",
-  "device_name": "device_name": "mlx5_0,mlx5_1,mlx5_3,mlx5_4",
+  "device_name": "mlx5_0,mlx5_1,mlx5_3,mlx5_4",
   "enable_offload": false
 }
 MOONCAKE_CONFIG
