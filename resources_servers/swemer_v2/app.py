@@ -57,6 +57,7 @@ from resources_servers.swemer_v2.verification import (
     VerificationInputs,
     VerificationResult,
     drop_patch_sections,
+    drop_test_patch_files,
     run_verification,
     verification_files,
 )
@@ -132,7 +133,7 @@ class SwemerV2ResourcesServer(SimpleResourcesServer):
         return VerificationInputs(
             instance_id=body.instance_id,
             workdir=body.workdir,
-            patch=patch,
+            patch=drop_test_patch_files(patch, body.test_patch),
             test_patch=body.test_patch,
             test_framework=body.test_framework,
             test_command=body.test_command,

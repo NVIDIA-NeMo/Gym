@@ -57,6 +57,7 @@ from resources_servers.scale_swe.verification import (
     as_id_list,
     clean_commands,
     drop_patch_sections,
+    drop_test_patch_files,
     run_verification,
     verification_files,
 )
@@ -134,9 +135,9 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         return VerificationInputs(
             instance_id=body.instance_id,
             workdir=body.workdir,
-            patch=patch,
+            patch=drop_test_patch_files(patch, body.f2p_patch),
             pre_commands=body.pre_commands,
-            f2p_patch="" if self.config.is_verifying_golden_patch else body.f2p_patch,
+            f2p_patch=body.f2p_patch,
             f2p_script=body.f2p_script,
             fail_to_pass=as_id_list(body.FAIL_TO_PASS),
             pass_to_pass=as_id_list(body.PASS_TO_PASS),

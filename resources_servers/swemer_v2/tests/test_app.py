@@ -39,6 +39,7 @@ from resources_servers.swemer_v2.verification import (
     VerificationInputs,
     _slice,
     build_eval_script,
+    drop_test_patch_files,
     grade,
     run_verification,
     verification_files,
@@ -114,6 +115,32 @@ class TestVerificationFiles:
         assert "/tmp/nemo_gym_patch.diff" not in files
 
 
+class TestDropTestPatchFiles:
+    def test_drops_the_model_sections_for_files_the_test_patch_touches(self) -> None:
+        patch = (
+            "diff --git a/src/calc.py b/src/calc.py\n--- a/src/calc.py\n+++ b/src/calc.py\n@@ -1 +1 @@\n-a\n+b\n"
+            "diff --git a/tests/test_calc.py b/tests/test_calc.py\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n"
+            "@@ -1 +1 @@\n-x\n+mine\n"
+            "diff --git a/tests/test_new.py b/tests/test_new.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_new.py\n"
+            "@@ -0,0 +1 @@\n+mine\n"
+            "diff --git a/tests/test_mine.py b/tests/test_mine.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_mine.py\n"
+            "@@ -0,0 +1 @@\n+mine\n"
+        )
+        test_patch = (
+            "diff --git a/tests/test_calc.py b/tests/test_calc.py\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n"
+            "@@ -1 +1 @@\n-x\n+hidden\n"
+            "diff --git a/tests/test_new.py b/tests/test_new.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_new.py\n"
+            "@@ -0,0 +1 @@\n+hidden\n"
+        )
+        kept = drop_test_patch_files(patch, test_patch)
+        assert "a/src/calc.py" in kept and "b/tests/test_mine.py" in kept
+        assert "tests/test_calc.py" not in kept and "tests/test_new.py" not in kept
+
+    def test_keeps_the_patch_when_there_is_no_test_patch(self) -> None:
+        patch = "diff --git a/tests/test_calc.py b/tests/test_calc.py\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n"
+        assert drop_test_patch_files(patch, "") == patch
+
+
 class _FakeSandbox:
     def __init__(self, stdout: str) -> None:
         self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=0)
@@ -124,7 +151,7 @@ class _FakeSandbox:
 
 class TestRunVerification:
     @pytest.mark.asyncio
-    async def test_a_failed_test_patch_scores_zero(self) -> None:
+    async def test_a_test_patch_that_does_not_apply_is_incomplete(self) -> None:
         result = await run_verification(
             sandbox=_FakeSandbox(
                 f"{TEST_PATCH_FAILED}\n"
@@ -141,7 +168,7 @@ class TestRunVerification:
                 pass_to_pass=[],
             ),
         )
-        assert result.completed is True
+        assert result.completed is False
         assert result.resolved is False
         assert result.test_patch_failed is True
 
