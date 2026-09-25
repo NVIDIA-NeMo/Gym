@@ -22,8 +22,8 @@ Code extraction and subprocess execution tested independently.
 import asyncio
 import json
 import os
-import re
 import sys
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -31,90 +31,16 @@ import pytest
 _app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _app_dir)
 
-from problem import Board, ColorPalette
+import app as nvarc_app
+from app import (
+    NVARCResourcesServer,
+    NVARCResourcesServerConfig,
+    _execute_python,
+    _extract_python_code,
+    _parse_grid,
+)
 
-
-# ============================================================================
-# Thin wrappers matching app.py logic (no nemo_gym import needed)
-# ============================================================================
-
-
-def _strip_thinking(text: str) -> str:
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-
-
-def _parse_grid(text: str):
-    """Same logic as app.py — Board.from_text() only."""
-    text = _strip_thinking(text)
-    try:
-        board = Board.from_text(text, color_palette=ColorPalette.integers())
-        if board.is_valid:
-            return board.board
-    except (ValueError, AttributeError, IndexError):
-        pass
-    return None
-
-
-def _extract_python_code(text: str):
-    """Same logic as app.py."""
-    text = _strip_thinking(text)
-    blocks = re.findall(r"```python\s*\n(.*?)```", text, re.DOTALL)
-    if blocks:
-        return blocks[-1].strip()
-    blocks = re.findall(r"```\s*\n(.*?)```", text, re.DOTALL)
-    if blocks:
-        return blocks[-1].strip()
-    if "def transform" in text:
-        return text.strip()
-    return None
-
-
-# Read SUBPROCESS_TEMPLATE from app.py
-import ast as _ast
-
-
-with open(os.path.join(_app_dir, "app.py")) as _f:
-    _tree = _ast.parse(_f.read())
-SUBPROCESS_TEMPLATE = None
-for _node in _ast.walk(_tree):
-    if isinstance(_node, _ast.Assign):
-        for _t in _node.targets:
-            if isinstance(_t, _ast.Name) and _t.id == "SUBPROCESS_TEMPLATE":
-                SUBPROCESS_TEMPLATE = _ast.literal_eval(_node.value)
-
-
-async def _execute_python(code, input_grid, timeout_seconds=30):
-    """Same logic as app.py — subprocess + Board validation."""
-    script = SUBPROCESS_TEMPLATE.format(
-        timeout_seconds=timeout_seconds,
-        content_repr=repr(code),
-        input_json=json.dumps(input_grid),
-    )
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-c",
-        script,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds + 5)
-    except asyncio.TimeoutError:
-        return None
-    if proc.returncode != 0:
-        return None
-    output = stdout.decode("utf-8", errors="replace").strip()
-    if not output:
-        return None
-    try:
-        result = json.loads(output)
-        if result.get("success") and result.get("result") is not None:
-            board = Board(board=result["result"])
-            if board.is_valid:
-                return board.board
-    except (json.JSONDecodeError, Exception):
-        pass
-    return None
+from nemo_gym.server_utils import ServerClient
 
 
 # ============================================================================
@@ -202,6 +128,161 @@ class TestExecutePython:
     def test_runtime_error_returns_none(self):
         result = asyncio.run(_execute_python("def transform(g):\n    return g[999]", [[0]], timeout_seconds=10))
         assert result is None
+
+    async def test_spawn_failure_returns_none(self, monkeypatch):
+        monkeypatch.setattr(
+            nvarc_app.asyncio,
+            "create_subprocess_exec",
+            AsyncMock(side_effect=OSError("process limit reached")),
+        )
+
+        assert await _execute_python("def transform(g):\n    return g", [[0]], timeout_seconds=1) is None
+
+    async def test_timeout_terminates_and_reaps_child(self, monkeypatch):
+        process = _FakeProcess(terminate_exits=True)
+        monkeypatch.setattr(nvarc_app, "_PROCESS_TIMEOUT_GRACE_SECONDS", 0.01)
+        monkeypatch.setattr(nvarc_app.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+
+        assert await _execute_python("def transform(g):\n    return g", [[0]], timeout_seconds=0) is None
+        assert process.terminate_calls == 1
+        assert process.kill_calls == 0
+        assert process.returncode == -15
+
+    async def test_timeout_kills_child_that_ignores_terminate(self, monkeypatch):
+        process = _FakeProcess(terminate_exits=False)
+        monkeypatch.setattr(nvarc_app, "_PROCESS_TIMEOUT_GRACE_SECONDS", 0.01)
+        monkeypatch.setattr(nvarc_app, "_PROCESS_TERMINATION_GRACE_SECONDS", 0.01)
+        monkeypatch.setattr(nvarc_app.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+
+        assert await _execute_python("def transform(g):\n    return g", [[0]], timeout_seconds=0) is None
+        assert process.terminate_calls == 1
+        assert process.kill_calls == 1
+        assert process.returncode == -9
+
+    async def test_cancellation_reaps_child_before_propagating(self, monkeypatch):
+        process = _FakeProcess(terminate_exits=True)
+        monkeypatch.setattr(nvarc_app, "_PROCESS_TIMEOUT_GRACE_SECONDS", 60.0)
+        monkeypatch.setattr(nvarc_app.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+        task = asyncio.create_task(_execute_python("def transform(g):\n    return g", [[0]], timeout_seconds=30))
+        await process.communicate_started.wait()
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert process.terminate_calls == 1
+        assert process.returncode == -15
+
+    @pytest.mark.parametrize(
+        ("returncode", "stdout", "expected"),
+        [
+            (0, b'{"success": true, "result": [[1]]}', [[1]]),
+            (1, b"", None),
+            (0, b"", None),
+            (0, b"not json", None),
+            (0, b'{"success": true, "result": [[1], [2, 3]]}', None),
+        ],
+        ids=["success", "nonzero-exit", "empty-output", "invalid-json", "invalid-board"],
+    )
+    async def test_completed_child_paths_are_reaped(self, monkeypatch, returncode, stdout, expected):
+        process = _CompletedProcess(returncode=returncode, stdout=stdout)
+        monkeypatch.setattr(nvarc_app.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+
+        assert await _execute_python("def transform(g):\n    return g", [[0]], timeout_seconds=1) == expected
+        assert process.communicate_calls == 1
+
+
+class _FakeProcess:
+    def __init__(self, *, terminate_exits):
+        self.returncode = None
+        self.communicate_started = asyncio.Event()
+        self._exited = asyncio.Event()
+        self._terminate_exits = terminate_exits
+        self.terminate_calls = 0
+        self.kill_calls = 0
+
+    async def communicate(self):
+        self.communicate_started.set()
+        await asyncio.Future()
+
+    async def wait(self):
+        await self._exited.wait()
+        return self.returncode
+
+    def terminate(self):
+        self.terminate_calls += 1
+        if self._terminate_exits:
+            self.returncode = -15
+            self._exited.set()
+
+    def kill(self):
+        self.kill_calls += 1
+        self.returncode = -9
+        self._exited.set()
+
+
+class _CompletedProcess:
+    def __init__(self, *, returncode, stdout):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.communicate_calls = 0
+
+    async def communicate(self):
+        self.communicate_calls += 1
+        return self.stdout, b""
+
+
+async def test_inductive_execution_respects_per_worker_concurrency(monkeypatch):
+    config = NVARCResourcesServerConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="app.py",
+        name="nvarc",
+        python_max_concurrency=2,
+    )
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = {}
+    server = NVARCResourcesServer(config=config, server_client=server_client)
+    active = 0
+    max_active = 0
+
+    async def execute(code, input_grid, timeout_seconds):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return input_grid
+
+    monkeypatch.setattr(nvarc_app, "_execute_python", execute)
+
+    results = await asyncio.gather(
+        *(server._verify_inductive("def transform(g):\n    return g", [[index]]) for index in range(8))
+    )
+
+    assert max_active == 2
+    assert results == [[[index]] for index in range(8)]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux procfs")
+async def test_repeated_failures_leave_no_children_or_file_descriptors():
+    children_path = f"/proc/{os.getpid()}/task/{os.getpid()}/children"
+
+    def child_pids():
+        with open(children_path) as stream:
+            return set(stream.read().split())
+
+    baseline_children = child_pids()
+    baseline_fd_count = len(os.listdir("/proc/self/fd"))
+
+    results = await asyncio.gather(
+        *(_execute_python("def transform(g):\n    return g +", [[index]], timeout_seconds=1) for index in range(32))
+    )
+    await asyncio.sleep(0.05)
+
+    assert all(result is None for result in results)
+    assert child_pids() == baseline_children
+    assert len(os.listdir("/proc/self/fd")) <= baseline_fd_count
 
 
 # ============================================================================
