@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 # Pre-import packages that nltk pulls in during its init so they are already in
 # sys.modules before nltk's inisec.py finder is installed. nltk>=3.9 blocks any
@@ -31,10 +31,16 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.instruction_following.indicifeval import (
+    IndicIFEvalMetadata,
+    IndicIFEvalScores,
+    aggregate_scores,
+    score_response,
+)
 
 
 class InstructionFollowingResourcesServerConfig(BaseResourcesServerConfig):
-    pass
+    instruction_backend: Literal["english", "indicifeval_trans"] = "english"
 
 
 class InstructionFollowingRunRequest(BaseRunRequest):
@@ -80,12 +86,20 @@ class InstructionFollowingVerifyResponse(BaseVerifyResponse):
     verifier_metadata: Dict[str, Any]
 
 
+class IndicIFEvalVerifyResponse(InstructionFollowingVerifyResponse, IndicIFEvalScores):
+    """English IFEval's wire format plus the four upstream IndicIFEval metrics."""
+
+
 class InstructionFollowingResourcesServer(SimpleResourcesServer):
     config: InstructionFollowingResourcesServerConfig
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._ensure_nltk_data()
+        if self.config.instruction_backend == "indicifeval_trans":
+            from resources_servers.instruction_following.setup_indicifeval import load_harness
+
+            load_harness()
 
     def _ensure_nltk_data(self):
         """Ensure required NLTK data is available at startup.
@@ -112,7 +126,28 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
 
         return app
 
-    async def verify(self, body: InstructionFollowingVerifyRequest) -> InstructionFollowingVerifyResponse:
+    async def verify(
+        self, body: InstructionFollowingVerifyRequest
+    ) -> IndicIFEvalVerifyResponse | InstructionFollowingVerifyResponse:
+        if self.config.instruction_backend == "indicifeval_trans":
+            metadata = IndicIFEvalMetadata.model_validate(body.verifier_metadata)
+            text = ""
+            for item in reversed(body.response.output or []):
+                if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant":
+                    text = "".join(part.text for part in item.content if getattr(part, "type", None) == "output_text")
+                    break
+            scores = score_response(metadata, text)
+            reward = float(scores.prompt_level_strict_acc)
+            if metadata.grading_mode == "fraction":
+                reward = sum(scores.inst_level_strict_acc) / len(scores.inst_level_strict_acc)
+            return IndicIFEvalVerifyResponse(
+                **body.model_dump(),
+                **scores.model_dump(),
+                reward=reward,
+                follow_all_instructions=scores.prompt_level_strict_acc,
+                follow_instruction_list=scores.inst_level_strict_acc,
+            )
+
         # Get the final text response from the last output item
         final_response_text = ""
         if body.response.output:
@@ -168,6 +203,11 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
             follow_all_instructions=all(is_following_list),
             follow_instruction_list=is_following_list,
         )
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        if self.config.instruction_backend == "indicifeval_trans":
+            return aggregate_scores(tasks)
+        return super().compute_metrics(tasks)
 
 
 if __name__ == "__main__":
