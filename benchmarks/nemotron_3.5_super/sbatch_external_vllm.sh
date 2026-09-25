@@ -655,6 +655,10 @@ else
     cleanup_connection=(--connection-config "$submit_dir/env.yaml")
 fi
 cleanup_user=${NEMO_GYM_USER:-$USER}
+mooncake_memory_arg=""
+if (( ENABLE_MOONCAKE )); then
+    mooncake_memory_arg="--mem=0"
+fi
 main_job_id=$(
     NEMO_GYM_USER="$cleanup_user" \
     vllm_command="$vllm_command" \
@@ -669,6 +673,7 @@ main_job_id=$(
         --ntasks-per-node=1 \
         --comment="$SLURM_COMMENT" \
         --exclusive \
+        ${mooncake_memory_arg:+"$mooncake_memory_arg"} \
         --segment=$SEGMENT \
         ${NODELIST:+--nodelist="$NODELIST"} \
         --wrap 'exec bash -c "$batch_command"'
