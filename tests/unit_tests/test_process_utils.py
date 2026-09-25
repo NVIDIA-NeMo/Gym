@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 import psutil
 import pytest
 
-from nemo_gym.process_utils import await_cleanup, kill_process_tree
+from nemo_gym.process_utils import await_cleanup, create_native_subprocess, kill_process_tree
 
 
 def test_await_cleanup_finishes_after_repeated_cancellation() -> None:
@@ -46,6 +46,47 @@ def test_await_cleanup_finishes_after_repeated_cancellation() -> None:
         with pytest.raises(asyncio.CancelledError):
             await cleanup
         assert communication.result() == "reaped"
+
+    asyncio.run(run())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process group lifecycle")
+def test_cancellation_during_spawn_reaps_child_before_return() -> None:
+    async def run() -> None:
+        spawned = asyncio.Event()
+        release = asyncio.Event()
+        process: asyncio.subprocess.Process | None = None
+        real_spawn = asyncio.create_subprocess_exec
+
+        async def delayed_return(*args, **kwargs):
+            nonlocal process
+            process = await real_spawn(
+                sys.executable,
+                "-c",
+                "import time; time.sleep(30)",
+                stdout=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            spawned.set()
+            await release.wait()
+            return process
+
+        with patch("nemo_gym.process_utils.asyncio.create_subprocess_exec", delayed_return):
+            task = asyncio.create_task(create_native_subprocess("native"))
+            try:
+                await asyncio.wait_for(spawned.wait(), timeout=5)
+                task.cancel()
+                await asyncio.sleep(0)
+                task.cancel()
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=5)
+                assert process is not None and process.returncode == -signal.SIGKILL
+            finally:
+                release.set()
+                if process is not None and process.returncode is None:
+                    process.kill()
+                    await process.wait()
 
     asyncio.run(run())
 

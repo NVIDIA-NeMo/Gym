@@ -51,7 +51,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.process_utils import await_cleanup, kill_process_tree
+from nemo_gym.process_utils import await_cleanup, create_native_subprocess, kill_process_tree
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
@@ -483,7 +483,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             context = NativeInvocationContext(env, tuple(cmd), claude_config_dir, Path.cwd(), base_url, rollout_id)
             async with self.invocation_context(context) as child_env:
                 process_started_at = monotonic()
-                proc = await asyncio.create_subprocess_exec(
+                proc = await create_native_subprocess(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,

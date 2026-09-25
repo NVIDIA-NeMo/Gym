@@ -17,7 +17,7 @@ import asyncio
 import os
 import signal
 from contextlib import suppress
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import psutil
 
@@ -38,6 +38,30 @@ async def await_cleanup(task: asyncio.Task[T]) -> T:
             task.exception()
         raise asyncio.CancelledError
     return task.result()
+
+
+async def create_native_subprocess(*argv: str, **kwargs: Any) -> asyncio.subprocess.Process:
+    """Keep the spawn handle through cancellation so the child can be killed and reaped."""
+    creation = asyncio.create_task(asyncio.create_subprocess_exec(*argv, **kwargs))
+    try:
+        return await asyncio.shield(creation)
+    except asyncio.CancelledError:
+        try:
+            await await_cleanup(creation)
+        except (Exception, asyncio.CancelledError):
+            pass
+        if creation.done() and not creation.cancelled():
+            try:
+                process = creation.result()
+            except Exception:
+                raise asyncio.CancelledError from None
+            kill_process_tree(process)
+            communication = asyncio.create_task(process.communicate())
+            try:
+                await await_cleanup(communication)
+            except (Exception, asyncio.CancelledError):
+                pass
+        raise
 
 
 def kill_process_tree(proc: asyncio.subprocess.Process) -> None:
