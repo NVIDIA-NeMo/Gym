@@ -124,6 +124,25 @@ _PROVIDER_TOOL_CALL_KEYS = frozenset({"id", "type", "function"})
 _PROVIDER_TOOL_MESSAGE_KEYS = frozenset({"role", "content", "tool_call_id"})
 
 
+UNPARSED_ARGUMENTS_KEY = "__unparsed_arguments__"
+
+
+def provider_safe_arguments(arguments: str) -> str:
+    """Return ``arguments`` if it is valid JSON, else a JSON object holding the raw text.
+
+    Servers decode ``function.arguments`` with ``json.loads`` before rendering the chat
+    template, so one unparseable call in the history would fail every later request.
+    Empty arguments are left as they are.
+    """
+    if not arguments.strip():
+        return arguments
+    try:
+        json.loads(arguments)
+    except json.JSONDecodeError:
+        return json.dumps({UNPARSED_ARGUMENTS_KEY: arguments})
+    return arguments
+
+
 def _canonical_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
     function = tool_call.get("function") or {}
     # The flat duplicates come from the same ToolCall object as the canonical
@@ -136,7 +155,10 @@ def _canonical_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
     ):
         if alias is not None and canonical is not None and alias != canonical:
             raise ValueError(f"tool call alias disagrees with its canonical field: {alias!r} != {canonical!r}")
-    return {key: value for key, value in tool_call.items() if key in _PROVIDER_TOOL_CALL_KEYS}
+    canonical_call = {key: value for key, value in tool_call.items() if key in _PROVIDER_TOOL_CALL_KEYS}
+    if isinstance(function.get("arguments"), str):
+        canonical_call["function"] = {**function, "arguments": provider_safe_arguments(function["arguments"])}
+    return canonical_call
 
 
 def _canonical_provider_message(message: dict[str, Any]) -> dict[str, Any]:
