@@ -292,7 +292,7 @@ if (( ENABLE_MOONCAKE )); then
   "mode": "embedded",
   "metadata_server": "P2PHANDSHAKE",
   "master_server_address": "\${nodes[0]}:50051",
-  "global_segment_size": "200GB",
+  "global_segment_size": "150GB",
   "local_buffer_size": "4GB",
   "protocol": "rdma",
   "device_name": "mlx5_0,mlx5_1,mlx5_3,mlx5_4",
