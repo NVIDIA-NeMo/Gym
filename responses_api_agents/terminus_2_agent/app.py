@@ -381,7 +381,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         instruction: str,
         api_base: str,
-    ) -> tuple[dict[str, Any], AgentContext, dict[str, bool], bool, bool]:
+    ) -> tuple[dict[str, Any], AgentContext, dict[str, bool], bool, bool, str | None]:
         logs_dir = self._logs_dir()
         temporary_workspace: Optional[Path] = None
         try:
@@ -409,7 +409,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             trajectory_path = logs_dir / "trajectory.json"
             trajectory = json.loads(trajectory_path.read_text()) if trajectory_path.exists() else {"steps": []}
             flags = {"context_length_exceeded": agent.context_length_exceeded}
-            return trajectory, context, flags, timed_out, agent.finished_naturally
+            llm = getattr(agent, "_llm", None)
+            terminal_response_id = llm.last_response_id if isinstance(llm, NemoGymLLM) else None
+            return trajectory, context, flags, timed_out, agent.finished_naturally, terminal_response_id
         finally:
             if not self.config.keep_logs:
                 shutil.rmtree(logs_dir, ignore_errors=True)
@@ -436,7 +438,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             self._rollout_id(request),
         )
         async with self.sem:
-            trajectory, context, flags, timed_out, finished_naturally = await self._run_terminus(
+            trajectory, context, flags, timed_out, finished_naturally, terminal_response_id = await self._run_terminus(
                 body, instruction, api_base
             )
         output_items = trajectory_to_responses(trajectory)
@@ -461,7 +463,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             cached_tokens = context.n_cache_tokens or 0
 
         return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
+            id=terminal_response_id or f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=self._model_name(body),
             object="response",
