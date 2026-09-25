@@ -43,7 +43,10 @@ class InferenceMetricsConfig(BaseModel, extra="forbid"):
     timeout_s: float = Field(default=2.0, gt=0, allow_inf_nan=False)
     metrics: list[str] | None = Field(
         default=None,
-        description="Optional exact sample allowlist; by default export all vLLM and router gauges and counters.",
+        description=(
+            "Optional exact sample allowlist; by default export all vLLM and router gauges, counters, "
+            "and histogram samples, excluding creation timestamps."
+        ),
     )
 
     @model_validator(mode="after")
@@ -69,16 +72,18 @@ class InferenceMetricsCollector:
         self.failed: set[str] = set()
 
     def parse(self, replica: str, payload: str, sampled_at: float) -> dict[str, float]:
-        """Aggregate labeled series per replica and derive reset-aware counter rates."""
+        """Aggregate labeled series and derive reset-aware counter and histogram rates."""
         result = {}
         gauge_counts = {}
         incomplete_rates = set()
         for family in text_string_to_metric_families(payload):
-            if family.type not in {"gauge", "counter"}:
+            if family.type not in {"gauge", "counter", "histogram"}:
                 continue
             for sample in family.samples:
                 if (
                     not sample.name.startswith(("vllm:", "vllm_router_"))
+                    # Prometheus exposes creation timestamps as separate gauges.
+                    or sample.name.endswith("_created")
                     or (self.config.metrics is not None and sample.name not in self.config.metrics)
                     or not math.isfinite(sample.value)
                 ):
@@ -96,7 +101,7 @@ class InferenceMetricsCollector:
                 result[key] = result.get(key, 0.0) + sample.value
                 if family.type == "gauge" and name == "kv_cache_usage_perc":
                     gauge_counts[key] = gauge_counts.get(key, 0) + 1
-                if family.type == "counter":
+                if family.type in {"counter", "histogram"}:
                     previous = self.previous.get(series_key)
                     self.previous[series_key] = (sampled_at, sample.value)
                     rate_key = f"{namespace}/{replica}/{name.removesuffix('_total')}_per_second{suffix}"
@@ -143,7 +148,7 @@ class InferenceMetricsCollector:
             sampled_at = monotonic()
             metrics = self.parse(replica, payload, sampled_at)
             if not metrics:
-                raise ValueError("No matching gauge/counter samples in metrics response")
+                raise ValueError("No matching gauge/counter/histogram samples in metrics response")
             export_metrics(metrics)
             if replica in self.failed:
                 logger.info("Inference metrics scraping recovered for replica %s", replica)

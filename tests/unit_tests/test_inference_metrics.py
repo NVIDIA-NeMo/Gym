@@ -19,6 +19,7 @@ import pytest
 from aiohttp import ClientSession, web
 from aiohttp.test_utils import TestServer
 from omegaconf import DictConfig
+from prometheus_client import CollectorRegistry, Counter, Histogram, generate_latest
 from pydantic import ValidationError
 
 import nemo_gym.inference_metrics as metrics_module
@@ -77,6 +78,48 @@ def test_counter_rates_reset_and_nonfinite():
     assert rate not in sample(5, 14)
     assert sample(25, 16)[rate] == 10
     assert sample("NaN", 17) == {}
+
+
+@pytest.mark.parametrize("metric_prefix,namespace", [("vllm:", "vllm"), ("vllm_router_", "router")])
+def test_histogram_samples_rates_resets_and_allowlist(metric_prefix, namespace):
+    collector = InferenceMetricsCollector(config())
+    metric_name = metric_prefix + "iteration_tokens_total"
+    prefix = f"{namespace}/replica0/iteration_tokens_total"
+
+    def payload(observations):
+        registry = CollectorRegistry()
+        histogram = Histogram(metric_name, "Tokens per step", ["engine"], buckets=[32], registry=registry)
+        for value in observations:
+            histogram.labels(engine="0").observe(value)
+        histogram.labels(engine="1").observe(64)
+        Counter(metric_prefix + "requests_total", "Requests", registry=registry).inc()
+        return generate_latest(registry).decode()
+
+    first_payload = payload([8, 32])
+    first = collector.parse("replica0", first_payload, 10)
+    assert first == {
+        prefix + "_sum": 104,
+        prefix + "_count": 3,
+        prefix + "_bucket/le/32.0": 2,
+        prefix + "_bucket/le/+Inf": 3,
+        f"{namespace}/replica0/requests_total": 1,
+    }
+    second = collector.parse("replica0", payload([8, 32, 16, 64]), 12)
+    assert second[prefix + "_sum"] == 184
+    assert second[prefix + "_count"] == 5
+    assert second[prefix + "_sum_per_second"] == 40
+    assert second[prefix + "_count_per_second"] == 1
+    assert second[prefix + "_bucket_per_second/le/32.0"] == 0.5
+    assert second[prefix + "_bucket_per_second/le/+Inf"] == 1
+    reset = collector.parse("replica0", payload([1]), 14)
+    assert reset[prefix + "_sum"] == 65
+    assert not any("iteration_tokens_total" in key and "per_second" in key for key in reset)
+    recovered = collector.parse("replica0", payload([1, 8]), 16)
+    assert recovered[prefix + "_sum_per_second"] == 4
+    assert recovered[prefix + "_count_per_second"] == 0.5
+
+    restricted = InferenceMetricsCollector(config(metrics=[metric_name + "_sum", metric_name + "_created"]))
+    assert restricted.parse("replica0", first_payload, 10) == {prefix + "_sum": 104}
 
 
 async def test_real_http_scrape_publishes(monkeypatch):
@@ -257,6 +300,9 @@ vllm:latency_count 4
     assert first == {
         "vllm/replica0/spec_tokens_total/position/2": 30,
         "vllm/replica0/kv_cache_usage_perc": pytest.approx(0.3),
+        "vllm/replica0/latency_bucket/le/1": 4,
+        "vllm/replica0/latency_sum": 4,
+        "vllm/replica0/latency_count": 4,
     }
     second = collector.parse("replica0", payload.replace("} 10", "} 14").replace("} 20", "} 26"), 12)
     assert second["vllm/replica0/spec_tokens_per_second/position/2"] == 5
@@ -308,6 +354,44 @@ async def test_aggregates_require_all_fresh_replica_samples(monkeypatch, missing
         assert payload["vllm/mean/kv_cache_usage_perc"] == pytest.approx(0.4)
         assert not any("only_on_" in key for key in payload)
         assert len(payload) == 8
+
+
+async def test_histogram_only_scrapes_publish_replica_and_aggregate_samples(monkeypatch):
+    cfg = InferenceMetricsConfig(
+        enabled=True,
+        endpoints={"a": "http://localhost:8000/metrics", "b": "http://localhost:8001/metrics"},
+    )
+    stop = asyncio.Event()
+    published = {}
+
+    async def fetch(method, url, **kwargs):
+        registry = CollectorRegistry()
+        histogram = Histogram("vllm:iteration_tokens_total", "Tokens per step", buckets=[32], registry=registry)
+        for value in [8, 32] if ":8000/" in url else [64]:
+            histogram.observe(value)
+        response = MagicMock()
+        response.__aenter__ = AsyncMock(return_value=response)
+        response.__aexit__ = AsyncMock(return_value=False)
+        response.text = AsyncMock(return_value=generate_latest(registry).decode())
+        return response
+
+    def publish(metrics):
+        published.update(metrics)
+        stop.set()
+
+    monkeypatch.setattr(metrics_module, "request", fetch)
+    monkeypatch.setattr(metrics_module, "export_metrics", publish)
+    collector = InferenceMetricsCollector(cfg)
+    await collector.run(stop)
+    assert not collector.failed
+    for replica, expected in {"a": (40, 2, 2), "b": (64, 1, 0), "total": (104, 3, 2), "mean": (52, 1.5, 1)}.items():
+        total, count, bucket = expected
+        prefix = f"vllm/{replica}/iteration_tokens_total"
+        assert published[prefix + "_sum"] == total
+        assert published[prefix + "_count"] == count
+        assert published[prefix + "_bucket/le/32.0"] == bucket
+        assert published[prefix + "_bucket/le/+Inf"] == count
+    assert not any("_created" in key for key in published)
 
 
 def test_derived_cache_and_source_prompt_metrics():
@@ -376,9 +460,9 @@ def test_router_counters_labels_and_reset():
     def sample(value, now):
         return collector.parse(
             "main",
-            '# TYPE vllm_router_processed_requests_total counter\n'
+            "# TYPE vllm_router_processed_requests_total counter\n"
             f'vllm_router_processed_requests_total{{worker="http://worker:8001"}} {value}\n'
-            '# TYPE vllm_router_worker_load gauge\n'
+            "# TYPE vllm_router_worker_load gauge\n"
             'vllm_router_worker_load{worker="http://worker:8001"} 12\n',
             now,
         )
@@ -425,8 +509,7 @@ def test_router_only_and_endpoint_validation():
 def test_router_routes_are_readable_metric_paths():
     collector = InferenceMetricsCollector(config())
     payload = (
-        '# TYPE vllm_router_requests_total counter\n'
-        'vllm_router_requests_total{route="/v1/chat/completions"} 10\n'
+        '# TYPE vllm_router_requests_total counter\nvllm_router_requests_total{route="/v1/chat/completions"} 10\n'
     )
     first = collector.parse("main", payload, 10)
     assert first == {"router/main/requests_total/route/v1/chat/completions": 10}
