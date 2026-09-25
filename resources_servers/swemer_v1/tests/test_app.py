@@ -39,6 +39,7 @@ from resources_servers.swemer_v1.verification import (
     SUPPORTED_FRAMEWORKS,
     TEST_OUTPUT_BEGIN,
     TEST_OUTPUT_END,
+    TEST_PATCH_FAILED,
     VerificationInputs,
     _slice,
     build_eval_script,
@@ -116,6 +117,10 @@ class TestBuildEvalScript:
     def test_omits_test_patch_apply_when_empty(self) -> None:
         script = build_eval_script(_inputs(test_patch=""))
         assert "nemo_gym_test_patch.diff" not in script
+
+    def test_flags_a_test_patch_that_fails_to_apply(self) -> None:
+        script = build_eval_script(_inputs())
+        assert f"grep -q '^error: ' /tmp/nemo_gym_test_patch.log && echo {TEST_PATCH_FAILED}" in script
 
     def test_markers_bracket_the_test_command(self) -> None:
         script = build_eval_script(_inputs(test_command="pytest tests/test_a.py -v"))
@@ -299,6 +304,28 @@ class TestRunVerification:
         result = await run_verification(sandbox=sandbox, inputs=inputs)
         assert result.completed and result.resolved
         assert sandbox.commands == ["bash /tmp/nemo_gym_eval.sh"]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_test_patch_scores_zero(self) -> None:
+        result = await run_verification(
+            sandbox=_FakeSandbox(
+                f"{TEST_PATCH_FAILED}\n"
+                + (
+                    f"{TEST_OUTPUT_BEGIN}\n"
+                    '{"Action": "pass", "Test": "TestOne", "Package": "example.com/pkg"}\n'
+                    f"{TEST_OUTPUT_END}\n{RESULT_FILE_BEGIN}\n{RESULT_FILE_END}\n"
+                )
+            ),
+            inputs=_inputs(
+                test_framework="go",
+                test_command="go test ./...",
+                fail_to_pass=["example.com/pkg::TestOne"],
+                pass_to_pass=[],
+            ),
+        )
+        assert result.completed is True
+        assert result.resolved is False
+        assert result.test_patch_failed is True
 
     @pytest.mark.asyncio
     async def test_missing_workdir_is_incomplete_not_a_zero(self) -> None:

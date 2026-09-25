@@ -32,6 +32,7 @@ from resources_servers.scale_swe.verification import (
     F2P_SCRIPT_NAME,
     TEST_OUTPUT_BEGIN,
     TEST_OUTPUT_END,
+    TEST_PATCH_FAILED,
     VerificationInputs,
     as_id_list,
     build_eval_script,
@@ -216,6 +217,10 @@ class TestBuildEvalScript:
         script = build_eval_script(_inputs(f2p_patch="diff --git a/t b/t\n"))
         assert "nemo_gym_f2p.diff" in script
 
+    def test_flags_a_test_patch_that_fails_to_apply(self) -> None:
+        script = build_eval_script(_inputs(f2p_patch="diff --git a/t b/t\n"))
+        assert f"grep -q '^error: ' /tmp/nemo_gym_f2p.log && echo {TEST_PATCH_FAILED}" in script
+
     def test_targets_only_the_files_named_by_fail_to_pass_and_pass_to_pass(self) -> None:
         script = build_eval_script(_inputs(fail_to_pass=["a/test_x.py::t1"], pass_to_pass=["b/test_y.py::t2"]))
         assert "a/test_x.py" in script
@@ -266,6 +271,19 @@ class TestRunVerification:
         result = await run_verification(sandbox=sandbox, inputs=_inputs(pass_to_pass=[]))
         assert result.completed and result.resolved
         assert sandbox.commands == ["bash /tmp/nemo_gym_eval.sh"]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_test_patch_scores_zero(self) -> None:
+        result = await run_verification(
+            sandbox=_FakeSandbox(
+                f"{TEST_PATCH_FAILED}\n"
+                + f"{TEST_OUTPUT_BEGIN}\nPASSED {F2P_SCRIPT_NAME}::test_thing\n{TEST_OUTPUT_END}"
+            ),
+            inputs=_inputs(pass_to_pass=[]),
+        )
+        assert result.completed is True
+        assert result.resolved is False
+        assert result.test_patch_failed is True
 
     @pytest.mark.asyncio
     async def test_missing_workdir_is_incomplete_not_a_zero(self) -> None:

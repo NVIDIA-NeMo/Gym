@@ -121,6 +121,7 @@ class SwemerV1VerifyResponse(BaseVerifyResponse):
     error: str | None
     eval_sandbox_start_time_taken: float
     patch_verification_time_taken: float
+    test_patch_failed: bool = False
 
 
 class SwemerV1ResourcesServer(SimpleResourcesServer):
@@ -347,6 +348,7 @@ class SwemerV1ResourcesServer(SimpleResourcesServer):
                 "error": extraction_error or result.error,
                 "eval_sandbox_start_time_taken": start_time_taken,
                 "patch_verification_time_taken": verification_time_taken,
+                "test_patch_failed": result.test_patch_failed,
             }
         )
 

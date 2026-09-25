@@ -50,6 +50,7 @@ from responses_api_agents.swe_agents.swe_bench_ext.parsing import normalize_test
 
 TEST_OUTPUT_BEGIN = "___NEMO_GYM_SWEMER_V2_TEST_BEGIN___"
 TEST_OUTPUT_END = "___NEMO_GYM_SWEMER_V2_TEST_END___"
+TEST_PATCH_FAILED = "___NEMO_GYM_SWEMER_V2_TEST_PATCH_FAILED___"
 RESULT_FILE_BEGIN = "___NEMO_GYM_SWEMER_V2_RESULT_FILE_BEGIN___"
 RESULT_FILE_END = "___NEMO_GYM_SWEMER_V2_RESULT_FILE_END___"
 
@@ -78,6 +79,7 @@ class VerificationResult:
     test_results: dict[str, Any] | None
     test_output: str
     error: str | None = None
+    test_patch_failed: bool = False
 
 
 def patch_section_path(section: str) -> str | None:
@@ -152,7 +154,9 @@ def build_eval_script(inputs: VerificationInputs) -> str:
         else ""
     )
     apply_test_patch = (
-        "git apply --reject --recount --ignore-space-change --whitespace=nowarn /tmp/nemo_gym_test_patch.diff || true"
+        "git apply --reject --recount --ignore-space-change --whitespace=nowarn "
+        "/tmp/nemo_gym_test_patch.diff 2>&1 | tee /tmp/nemo_gym_test_patch.log\n"
+        f"grep -q '^error: ' /tmp/nemo_gym_test_patch.log && echo {TEST_PATCH_FAILED}"
         if inputs.test_patch.strip()
         else ""
     )
@@ -297,10 +301,12 @@ async def run_verification(
             error=f"parse failure ({inputs.test_framework}): {exc}",
         )
     report = grade(statuses or {}, inputs.fail_to_pass, inputs.pass_to_pass, inputs.test_framework)
+    test_patch_failed = TEST_PATCH_FAILED in output
     return VerificationResult(
         completed=True,
-        resolved=bool(report["resolved"]),
+        resolved=bool(report["resolved"]) and not test_patch_failed,
         patch_applied=True,
         test_results=report,
         test_output=output,
+        test_patch_failed=test_patch_failed,
     )

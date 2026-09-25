@@ -28,6 +28,7 @@ failed once real traffic hit them, so the same tests are written here from the s
 """
 
 import json
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -344,6 +345,54 @@ class TestAntiCheating:
 
         config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swe_next.yaml").read_text())
         assert config["swe_next_resources_server"]["resources_servers"]["swe_next"]["apply_anti_cheating"] is True
+
+
+class _ShellSandbox:
+    async def exec(self, command: str, timeout_s=None):
+        proc = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+        return SimpleNamespace(stdout=proc.stdout, stderr=proc.stderr, return_code=proc.returncode)
+
+
+class TestHidesGradingArtifacts:
+    @pytest.mark.asyncio
+    async def test_deletes_every_grading_artifact_through_the_testbed_symlink(self, tmp_path) -> None:
+        from resources_servers.swe_next.app import hide_grading_artifacts
+
+        workspace = tmp_path / "workspace"
+        (workspace / "r2e_tests").mkdir(parents=True)
+        (workspace / "r2e_tests" / "test_1.py").write_text("def test_one():\n    assert True\n")
+        for name in (
+            "parsed_commit.json",
+            "modified_files.json",
+            "modified_entities.json",
+            "syn_issue.json",
+            "expected_test_output.json",
+            "execution_result.json",
+        ):
+            (workspace / name).write_text("{}")
+        (workspace / "run_tests.sh").write_text(".venv/bin/python -W ignore -m pytest -rA r2e_tests\n")
+        (workspace / "install.sh").write_text("pip install -e .\n")
+        (workspace / "setup.py").write_text("")
+        testbed = tmp_path / "testbed"
+        testbed.symlink_to(workspace)
+
+        await hide_grading_artifacts(_ShellSandbox(), str(testbed))
+
+        assert sorted(path.name for path in workspace.iterdir()) == ["install.sh", "setup.py"]
+
+    @pytest.mark.asyncio
+    async def test_keeps_a_repo_owned_run_tests_sh(self, tmp_path) -> None:
+        from resources_servers.swe_next.app import hide_grading_artifacts
+
+        (tmp_path / "run_tests.sh").write_text("pytest tests/\n")
+
+        await hide_grading_artifacts(_ShellSandbox(), str(tmp_path))
+
+        assert (tmp_path / "run_tests.sh").read_text() == "pytest tests/\n"
+
+    def test_seed_session_hides_them_before_the_git_snapshot(self) -> None:
+        source = TestAntiCheating._source()
+        assert source.index("await hide_grading_artifacts(") < source.index("await self._init_git_repo(")
 
 
 class TestMultiWorkerEntrypoint:

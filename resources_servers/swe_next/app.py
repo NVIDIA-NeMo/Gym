@@ -62,6 +62,27 @@ from resources_servers.swe_next.verification import (
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 
 
+GRADING_ARTIFACTS = (
+    "r2e_tests",
+    "parsed_commit.json",
+    "modified_files.json",
+    "modified_entities.json",
+    "syn_issue.json",
+    "expected_test_output.json",
+    "execution_result.json",
+)
+
+
+async def hide_grading_artifacts(sandbox: AsyncSandbox, workdir: str) -> None:
+    targets = " ".join(shlex.quote(name) for name in GRADING_ARTIFACTS)
+    result = await sandbox.exec(
+        f"cd {shlex.quote(workdir)} && rm -rf {targets} "
+        "&& if grep -qs r2e_tests run_tests.sh; then rm -f run_tests.sh; fi"
+    )
+    if result.return_code != 0:
+        print(f"Failed to hide grading artifacts in {workdir}: {result.stdout}\n{result.stderr}", file=sys.stderr)
+
+
 class SWENextResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     evaluation_timeout: int | None = 1200
@@ -233,6 +254,7 @@ class SWENextResourcesServer(SimpleResourcesServer):
         self._session_id_to_base_commit.pop(session_id, None)
 
         sandbox = await self._create_sandbox(body)
+        await hide_grading_artifacts(sandbox, body.workdir)
         await self._init_git_repo(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
             await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swe_next")
