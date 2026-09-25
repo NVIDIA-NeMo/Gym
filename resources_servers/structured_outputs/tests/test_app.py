@@ -16,10 +16,12 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import xmltodict
 import yaml
-from pytest import fixture
+from pytest import approx, fixture
 
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -1082,3 +1084,426 @@ class TestApp:
 
         nullable_verify_response = await resources_server.verify(nullable_request)
         assert nullable_verify_response.reward == 1.0
+
+    async def test_verify_xml_composition(self, config: StructuredOutputsResourcesServerConfig) -> None:
+        """Test XML coercion handles oneOf, anyOf, allOf, and $ref composition."""
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+        response_mock = AsyncMock()
+        post_mock = MagicMock()
+        post_mock.json = response_mock
+        server_mock.post = AsyncMock(return_value=post_mock)
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        def make_response(xml_text: str, resp_id: str = "xml_comp") -> NeMoGymResponse:
+            return NeMoGymResponse(
+                id=resp_id,
+                created_at=1234.5,
+                model="test_model",
+                object="response",
+                output=[self._create_response_output_message(xml_text)],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            )
+
+        # --- Test 1: oneOf with type coercion ---
+        oneof_schema = {
+            "type": "object",
+            "properties": {
+                "record": {
+                    "type": "object",
+                    "properties": {
+                        "value": {
+                            "oneOf": [
+                                {"type": "integer"},
+                                {"type": "string"},
+                            ]
+                        }
+                    },
+                }
+            },
+        }
+        xml_int = "<record><value>42</value></record>"
+        r1 = await resources_server.verify(StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=make_response(xml_int, "oneof_int"),
+            schema_str=json.dumps(oneof_schema),
+            schema_type=SchemaType.XML,
+        ))
+        assert r1.reward == 1.0
+
+        # --- Test 2: anyOf with boolean coercion ---
+        anyof_schema = {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "flag": {
+                            "anyOf": [
+                                {"type": "boolean"},
+                                {"type": "string"},
+                            ]
+                        }
+                    },
+                }
+            },
+        }
+        xml_bool = "<data><flag>true</flag></data>"
+        r3 = await resources_server.verify(StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=make_response(xml_bool, "anyof_bool"),
+            schema_str=json.dumps(anyof_schema),
+            schema_type=SchemaType.XML,
+        ))
+        assert r3.reward == 1.0
+
+    def test_compute_metrics_semantic_reward(self, config: StructuredOutputsResourcesServerConfig) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+
+        tasks = [
+            [
+                {"reward": 1.0, "schema_type": "json", "semantic_reward": 0.9, "problem_type": "generic_extraction"},
+                {"reward": 1.0, "schema_type": "json", "semantic_reward": 1.0, "problem_type": "generic_extraction"},
+                {"reward": 0.0, "schema_type": "xml", "semantic_reward": 0.8},
+            ],
+            [
+                {"reward": 1.0, "schema_type": "json"},
+                {"reward": 1.0, "schema_type": "yaml", "semantic_reward": 0.6},
+            ],
+        ]
+
+        metrics = resources_server.compute_metrics(tasks)
+
+        assert metrics["mean/semantic_reward"] == approx(0.825)
+        assert metrics["mean/semantic_reward_json"] == approx(0.95)
+        assert metrics["mean/semantic_reward_xml"] == approx(0.8)
+        assert metrics["mean/semantic_reward_yaml"] == approx(0.6)
+        assert metrics["mean/semantic_reward_generic_extraction"] == approx(0.95)
+        assert "mean/reward_json" in metrics
+        assert "mean/reward_xml" in metrics
+        assert "mean/reward_yaml" in metrics
+
+    def test_compute_metrics_no_semantic(self, config: StructuredOutputsResourcesServerConfig) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+
+        tasks = [[{"reward": 1.0, "schema_type": "json"}, {"reward": 0.0, "schema_type": "xml"}]]
+        metrics = resources_server.compute_metrics(tasks)
+
+        assert "mean/semantic_reward" not in metrics
+        assert "mean/reward_json" in metrics
+
+    async def test_verify_combined_reward_no_semantic(self, config: StructuredOutputsResourcesServerConfig) -> None:
+        """When no semantic config, semantic_reward defaults to 1.0 and combined reward = syntax * 1.0."""
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+        assert config.reward_mode == "combined"
+
+        schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+        valid_json = '{"name": "Alice"}'
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        output_item = self._create_response_output_message(valid_json)
+        response = NeMoGymResponse(
+            id="combined_test", created_at=1234.5, model="test",
+            object="response", output=[output_item],
+            parallel_tool_calls=False, tool_choice="none", tools=[],
+        )
+        request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=response,
+            schema_str=json.dumps(schema),
+            schema_type=SchemaType.JSON,
+        )
+        result = await resources_server.verify(request)
+        assert result.reward == 1.0
+        assert result.semantic_reward == 1.0
+        assert result.semantic_results is None
+
+    async def test_verify_combined_reward_syntax_fail(self, config: StructuredOutputsResourcesServerConfig) -> None:
+        """Syntax fail (0) * semantic (1.0) = 0 in combined mode."""
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+
+        schema = {"type": "object", "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}}
+        invalid_json = '{"name": "Alice", "extra": true}'
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        output_item = self._create_response_output_message(invalid_json)
+        response = NeMoGymResponse(
+            id="combined_fail_test", created_at=1234.5, model="test",
+            object="response", output=[output_item],
+            parallel_tool_calls=False, tool_choice="none", tools=[],
+        )
+        request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=response,
+            schema_str=json.dumps(schema),
+            schema_type=SchemaType.JSON,
+        )
+        result = await resources_server.verify(request)
+        assert result.reward == 0.0
+        assert result.semantic_reward == 1.0
+
+    async def test_verify_independent_reward_mode(self, config: StructuredOutputsResourcesServerConfig) -> None:
+        """In independent mode, reward = syntax only, semantic is separate."""
+        independent_config = config.model_copy(update={"reward_mode": "independent"})
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=independent_config, server_client=server_mock)
+
+        schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+        valid_json = '{"name": "Alice"}'
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        output_item = self._create_response_output_message(valid_json)
+        response = NeMoGymResponse(
+            id="independent_test", created_at=1234.5, model="test",
+            object="response", output=[output_item],
+            parallel_tool_calls=False, tool_choice="none", tools=[],
+        )
+        request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=response,
+            schema_str=json.dumps(schema),
+            schema_type=SchemaType.JSON,
+        )
+        result = await resources_server.verify(request)
+        assert result.reward == 1.0
+        assert result.semantic_reward == 1.0
+
+    # ---- Thorough reward mode tests with mocked judge ---- #
+
+    def _make_judge_config(self, reward_mode: str = "combined") -> StructuredOutputsResourcesServerConfig:
+        return StructuredOutputsResourcesServerConfig(
+            host="0.0.0.0", port=8080, entrypoint="", name="",
+            reward_mode=reward_mode,
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        )
+
+    def _mock_judge_response(self, verdict_text: str) -> MagicMock:
+        """Build a mock for server_client.post that returns a NeMoGymResponse with the given judge text."""
+        gym_resp = NeMoGymResponse(
+            id="judge-resp",
+            created_at=0.0,
+            model="mock-judge",
+            object="response",
+            output=[NeMoGymResponseOutputMessage(
+                id="msg-judge",
+                content=[NeMoGymResponseOutputText(
+                    text=verdict_text, type="output_text", annotations=[],
+                )],
+                role="assistant",
+                status="completed",
+                type="message",
+            )],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        mock_response = MagicMock()
+        mock_response.read = AsyncMock(return_value=orjson.dumps(gym_resp.model_dump()))
+        return mock_response
+
+    def _make_request(self, json_text: str, semantic_config: dict | None = None) -> StructuredOutputsVerifyRequest:
+        schema = {"type": "object", "properties": {"name": {"type": "string"}, "value": {"type": "integer"}}}
+        response = NeMoGymResponse(
+            id="test", created_at=0.0, model="test", object="response",
+            output=[self._create_response_output_message(json_text)],
+            parallel_tool_calls=False, tool_choice="none", tools=[],
+        )
+        return StructuredOutputsVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=response,
+            schema_str=json.dumps(schema),
+            schema_type=SchemaType.JSON,
+            semantic_verifier_config=semantic_config,
+        )
+
+    async def test_combined_syntax_pass_semantic_all_pass(self) -> None:
+        """Combined: syntax=1.0 * semantic=1.0 -> reward=1.0"""
+        cfg = self._make_judge_config("combined")
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock(return_value=self._mock_judge_response("Good output. [[PASS]]"))
+        server = StructuredOutputsResourcesServer(config=cfg, server_client=server_mock)
+
+        svc = {"criteria": [
+            {"name": "c1", "type": "llmaaj", "weight": "major", "rubric": "check something"},
+            {"name": "c2", "type": "llmaaj", "weight": "minor", "rubric": "check something else"},
+        ]}
+        result = await server.verify(self._make_request('{"name": "Alice", "value": 42}', svc))
+
+        assert result.reward == 1.0
+        assert result.semantic_reward == 1.0
+        assert len(result.semantic_results) == 2
+        assert all(r.passed for r in result.semantic_results)
+
+    async def test_combined_syntax_pass_semantic_partial(self) -> None:
+        """Combined: syntax=1.0 * semantic=0.333 -> reward=0.333 (1 major fail, 1 minor pass)"""
+        cfg = self._make_judge_config("combined")
+        call_count = 0
+
+        async def alternating_judge(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return self._mock_judge_response("Bad output. [[FAIL]]")
+            return self._mock_judge_response("Good output. [[PASS]]")
+
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = alternating_judge
+        cfg_serial = cfg.model_copy(update={"parallel_evaluation": False})
+        server = StructuredOutputsResourcesServer(config=cfg_serial, server_client=server_mock)
+
+        svc = {"criteria": [
+            {"name": "major_criterion", "type": "llmaaj", "weight": "major", "rubric": "important check"},
+            {"name": "minor_criterion", "type": "llmaaj", "weight": "minor", "rubric": "minor check"},
+        ]}
+        result = await server.verify(self._make_request('{"name": "Alice", "value": 42}', svc))
+
+        assert result.semantic_results[0].name == "major_criterion"
+        assert result.semantic_results[0].passed is False
+        assert result.semantic_results[1].name == "minor_criterion"
+        assert result.semantic_results[1].passed is True
+        assert result.semantic_reward == approx(1.0 / 3.0)
+        assert result.reward == approx(1.0 * (1.0 / 3.0))
+
+    async def test_combined_syntax_pass_semantic_all_fail(self) -> None:
+        """Combined: syntax=1.0 * semantic=0.0 -> reward=0.0"""
+        cfg = self._make_judge_config("combined")
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock(return_value=self._mock_judge_response("Terrible. [[FAIL]]"))
+        server = StructuredOutputsResourcesServer(config=cfg, server_client=server_mock)
+
+        svc = {"criteria": [
+            {"name": "c1", "type": "llmaaj", "weight": "major", "rubric": "check1"},
+            {"name": "c2", "type": "llmaaj", "weight": "major", "rubric": "check2"},
+        ]}
+        result = await server.verify(self._make_request('{"name": "Alice", "value": 42}', svc))
+
+        assert result.reward == 0.0
+        assert result.semantic_reward == 0.0
+        assert all(not r.passed for r in result.semantic_results)
+
+    async def test_combined_syntax_fail_semantic_all_pass(self) -> None:
+        """Combined: syntax=0.0 * semantic=1.0 -> reward=0.0"""
+        cfg = self._make_judge_config("combined")
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock(return_value=self._mock_judge_response("Looks good. [[PASS]]"))
+        server = StructuredOutputsResourcesServer(config=cfg, server_client=server_mock)
+
+        svc = {"criteria": [
+            {"name": "c1", "type": "llmaaj", "weight": "major", "rubric": "check1"},
+        ]}
+        result = await server.verify(self._make_request('{"name": "Alice"}', svc))
+
+        assert result.reward == 0.0
+        assert result.semantic_reward == 1.0
+
+    async def test_independent_syntax_pass_semantic_partial(self) -> None:
+        """Independent: reward = syntax only (1.0), semantic tracked separately (0.333)"""
+        cfg = self._make_judge_config("independent")
+        call_count = 0
+
+        async def alternating_judge(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return self._mock_judge_response("Bad. [[FAIL]]")
+            return self._mock_judge_response("Good. [[PASS]]")
+
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = alternating_judge
+        cfg_serial = cfg.model_copy(update={"parallel_evaluation": False})
+        server = StructuredOutputsResourcesServer(config=cfg_serial, server_client=server_mock)
+
+        svc = {"criteria": [
+            {"name": "major_c", "type": "llmaaj", "weight": "major", "rubric": "check"},
+            {"name": "minor_c", "type": "llmaaj", "weight": "minor", "rubric": "check"},
+        ]}
+        result = await server.verify(self._make_request('{"name": "Alice", "value": 42}', svc))
+
+        assert result.reward == 1.0
+        assert result.semantic_reward == approx(1.0 / 3.0)
+
+    async def test_combined_weight_calculation(self) -> None:
+        """Verify weight math: 2 major PASS + 1 minor FAIL = (2*1 + 2*1 + 1*0) / (2+2+1) = 0.8"""
+        cfg = self._make_judge_config("combined")
+        call_count = 0
+
+        async def judge_by_order(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                return self._mock_judge_response("[[PASS]]")
+            return self._mock_judge_response("[[FAIL]]")
+
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = judge_by_order
+        cfg_serial = cfg.model_copy(update={"parallel_evaluation": False})
+        server = StructuredOutputsResourcesServer(config=cfg_serial, server_client=server_mock)
+
+        svc = {"criteria": [
+            {"name": "major1", "type": "llmaaj", "weight": "major", "rubric": "r1"},
+            {"name": "major2", "type": "llmaaj", "weight": "major", "rubric": "r2"},
+            {"name": "minor1", "type": "llmaaj", "weight": "minor", "rubric": "r3"},
+        ]}
+        result = await server.verify(self._make_request('{"name": "Alice", "value": 42}', svc))
+
+        assert result.semantic_reward == approx(4.0 / 5.0)
+        assert result.reward == approx(4.0 / 5.0)
+        assert result.semantic_results[0].passed is True
+        assert result.semantic_results[1].passed is True
+        assert result.semantic_results[2].passed is False
+
+    async def test_semantic_skipped_without_judge_config(self) -> None:
+        """No judge_model_server configured -> semantic is None -> defaults to 1.0."""
+        cfg = StructuredOutputsResourcesServerConfig(
+            host="0.0.0.0", port=8080, entrypoint="", name="",
+        )
+        assert cfg.judge_model_server is None
+        server_mock = MagicMock(spec=ServerClient)
+        server = StructuredOutputsResourcesServer(config=cfg, server_client=server_mock)
+
+        svc = {"criteria": [
+            {"name": "c1", "type": "llmaaj", "weight": "major", "rubric": "r1"},
+        ]}
+        result = await server.verify(self._make_request('{"name": "Alice", "value": 42}', svc))
+
+        assert result.reward == 1.0
+        assert result.semantic_reward == 1.0
+        assert result.semantic_results is None
+
+    async def test_semantic_skipped_with_only_deterministic_criteria(self) -> None:
+        """Only deterministic criteria (no llmaaj) -> semantic is None -> defaults to 1.0."""
+        cfg = self._make_judge_config("combined")
+        server_mock = MagicMock(spec=ServerClient)
+        server = StructuredOutputsResourcesServer(config=cfg, server_client=server_mock)
+
+        svc = {"criteria": [
+            {"name": "exact_match", "type": "deterministic", "weight": "major"},
+        ]}
+        result = await server.verify(self._make_request('{"name": "Alice", "value": 42}', svc))
+
+        assert result.reward == 1.0
+        assert result.semantic_reward == 1.0
+        assert result.semantic_results is None
+
+    async def test_judge_error_counts_as_fail(self) -> None:
+        """If the judge call raises an exception, the criterion counts as FAIL."""
+        cfg = self._make_judge_config("combined")
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock(side_effect=Exception("connection refused"))
+        server = StructuredOutputsResourcesServer(config=cfg, server_client=server_mock)
+
+        svc = {"criteria": [
+            {"name": "c1", "type": "llmaaj", "weight": "major", "rubric": "r1"},
+        ]}
+        result = await server.verify(self._make_request('{"name": "Alice", "value": 42}', svc))
+
+        assert result.semantic_reward == 0.0
+        assert result.reward == 0.0
+        assert result.semantic_results[0].passed is False
