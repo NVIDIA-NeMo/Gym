@@ -103,6 +103,7 @@ async def verify(
 - **`body` in `seed_session()`** contains fields used to initialize an episode. Define a `BaseSeedSessionRequest` subclass for fields such as an initial board, task ID, or sandbox image. The default implementation is a no-op.
 - **`body.responses_create_params` in `verify()`** is the original model request.
 - **`body.response` in `verify()`** is the completed `NeMoGymResponse`, including the trajectory assembled by the Agent Server.
+- **The `verify()` result must preserve `body.response` unchanged.** Re-verification and terminal model-call attribution rely on the returned response being the same response that the verifier scored.
 - **Custom task metadata** requires a `BaseVerifyRequest` subclass. Declare fields such as `answer` or `expected_state`; undeclared fields are not retained by the base Pydantic model.
 - **`request: Request`**, when added to either method signature, provides access to the per-rollout session ID.
 

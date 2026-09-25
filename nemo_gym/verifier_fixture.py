@@ -10,6 +10,7 @@ import math
 import os
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -21,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 _CaseKind = Literal["full_reward", "zero_reward", "malformed", "determinism"]
 _FixtureInvocation = Callable[[object, BaseModel], object | Awaitable[object]]
 _FiniteReward = Annotated[float, Field(strict=True, allow_inf_nan=False)]
+_MISSING = object()
 
 
 class VerifierFixtureError(ValueError):
@@ -99,6 +101,37 @@ def _reward_from(result: object, case: VerifierFixtureCase) -> float:
     return float(reward)
 
 
+def _plain_value(value: object) -> object:
+    return value.model_dump(mode="python") if isinstance(value, BaseModel) else value
+
+
+def _response_snapshot(request: BaseModel) -> object:
+    response = getattr(request, "response", _MISSING)
+    return _MISSING if response is _MISSING else deepcopy(_plain_value(response))
+
+
+def _assert_response_preserved(
+    request: BaseModel,
+    result: object,
+    snapshot: object,
+    case: VerifierFixtureCase,
+) -> None:
+    if snapshot is _MISSING:
+        return
+
+    request_response = _plain_value(getattr(request, "response", _MISSING))
+    if request_response != snapshot:
+        raise VerifierFixtureError(f"Case '{case.name}' mutated request.response during verification")
+
+    result_response = (
+        result.get("response", _MISSING) if isinstance(result, Mapping) else getattr(result, "response", _MISSING)
+    )
+    if result_response is _MISSING:
+        raise VerifierFixtureError(f"Case '{case.name}' returned no response")
+    if _plain_value(result_response) != snapshot:
+        raise VerifierFixtureError(f"Case '{case.name}' returned a response that differs from request.response")
+
+
 async def _observe(
     fixture: VerifierFixture,
     case: VerifierFixtureCase,
@@ -118,6 +151,7 @@ async def _observe(
             seeded = fixture.reseed(server, request)
             if inspect.isawaitable(seeded):
                 await seeded
+        response_snapshot = _response_snapshot(request)
         if fixture.invoke is None:
             verify = getattr(server, "verify", None)
             if not callable(verify):
@@ -131,6 +165,7 @@ async def _observe(
         if expect_error:
             raise
         raise VerifierFixtureError(f"Case '{case.name}' failed: {error}") from error
+    _assert_response_preserved(request, result, response_snapshot, case)
     return _reward_from(result, case)
 
 
