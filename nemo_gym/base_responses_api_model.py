@@ -45,7 +45,7 @@ import orjson
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
@@ -96,6 +96,29 @@ from nemo_gym.token_id_capture.store import make_token_store
 
 
 logger = logging.getLogger(__name__)
+
+_SSE_HEARTBEAT = b": keepalive\n\n"
+
+
+class ModelServerSSEHeartbeatConfig(BaseModel):
+    # Streaming requests are served buffer-then-replay, so nothing is written until generation
+    # finishes. A connection that stays silent for minutes can have its flow evicted by a stateful
+    # network hop, and the reply is then silently dropped. Once a call outlives the grace period,
+    # commit the SSE stream and write comment heartbeats (ignored by SSE parsers) until the buffered
+    # events are ready.
+    model_server_sse_heartbeat_grace_seconds: float = Field(
+        default=30.0,
+        description="Seconds a streaming model call may run before its SSE stream is committed and heartbeats start.",
+    )
+    model_server_sse_heartbeat_interval_seconds: float = Field(
+        default=20.0,
+        description="Seconds between SSE comment heartbeats while a committed streaming model call is running.",
+    )
+
+
+def _chat_stream_error_events(exc: BaseException) -> Iterable[str]:
+    payload = {"error": {"message": str(exc) or type(exc).__name__, "type": "server_error", "code": 500}}
+    yield f"data: {json.dumps(payload)}\n\n"
 
 
 # Stateless; shared by every model server's default /v1/messages handler.
@@ -191,6 +214,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     # Subclasses can declare successful metadata or health routes here.
     # Unknown successful routes fail closed during training-token capture.
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
+    _sse_heartbeat: ModelServerSSEHeartbeatConfig = PrivateAttr(default_factory=ModelServerSSEHeartbeatConfig)
 
     async def _finalize_served_response(self, response: Any) -> None:
         """Finalize capture after conversion to the response returned to the client."""
@@ -204,10 +228,44 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await self._finalize_served_response(response)
         return StreamingResponse(iter(events), media_type="text/event-stream")
 
+    async def _stream_with_heartbeat(self, work, on_error) -> Any:
+        """Serve ``work`` (a coroutine returning the SSE response), heartbeating while it runs.
+
+        Calls that finish within the grace period are returned untouched, so errors still surface
+        with their normal HTTP status. Longer calls commit a 200 SSE stream right away and write a
+        heartbeat comment every interval; a failure after that point is sent as a terminal event.
+        """
+        heartbeat = self._sse_heartbeat
+        task = asyncio.ensure_future(work)
+        done, _ = await asyncio.wait({task}, timeout=heartbeat.model_server_sse_heartbeat_grace_seconds)
+        if done:
+            return task.result()
+        # The client may go away mid-call; retrieve the outcome so it is never reported as lost.
+        task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
+
+        async def body():
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=heartbeat.model_server_sse_heartbeat_interval_seconds)
+                if done:
+                    break
+                yield _SSE_HEARTBEAT
+            try:
+                inner = task.result()
+            except Exception as exc:
+                logger.exception("model call failed after its SSE stream was committed")
+                for event in on_error(exc):
+                    yield event
+                return
+            async for chunk in inner.body_iterator:
+                yield chunk
+
+        return StreamingResponse(body(), media_type="text/event-stream")
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        self._sse_heartbeat = ModelServerSSEHeartbeatConfig.model_validate(self.server_client.global_config_dict)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
         install_model_call_capture(
             app,
@@ -279,7 +337,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         except ValidationError as exc:
             raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
 
-        return await self._stream_responses(request, params, ns_map)
+        return await self._stream_with_heartbeat(
+            self._stream_responses(request, params, ns_map),
+            lambda exc: synthesize_responses_failure_sse(str(exc)),
+        )
 
     async def _stream_responses(
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, ns_map: NamespaceMap
@@ -326,12 +387,18 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
-        completion = await self._invoke_chat_completions(request, params)
-        completion_json = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
-        return await self._stream_served_response(
-            completion_json,
-            synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
-        )
+
+        async def serve() -> StreamingResponse:
+            completion = await self._invoke_chat_completions(request, params)
+            completion_json = (
+                completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
+            )
+            return await self._stream_served_response(
+                completion_json,
+                synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
+            )
+
+        return await self._stream_with_heartbeat(serve(), _chat_stream_error_events)
 
     async def _invoke_chat_completions(
         self, request: Request, params: NeMoGymChatCompletionCreateParamsNonStreaming

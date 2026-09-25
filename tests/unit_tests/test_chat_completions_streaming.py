@@ -21,6 +21,7 @@ response is re-emitted as a synthesized ``chat.completion.chunk`` SSE stream. No
 requests keep the historical strict-validation behavior.
 """
 
+import asyncio
 import json
 from time import time
 from unittest.mock import MagicMock
@@ -30,6 +31,7 @@ import pytest
 from fastapi import Body, FastAPI, Request
 from fastapi.testclient import TestClient
 
+from nemo_gym import base_responses_api_model
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     SimpleResponsesAPIModel,
@@ -447,3 +449,75 @@ class TestSynthesizeSystemFingerprint:
         events = _events("".join(synthesize_chat_completion_sse(completion)))
         assert events
         assert all(event.get("system_fingerprint") == "fp_abc123" for event in events)
+
+
+class _SlowEchoChatModel(_EchoChatModel):
+    """Echo model whose chat_completions() takes ``delay_s`` and optionally fails afterwards."""
+
+    delay_s: float = 0.0
+    fail: bool = False
+
+    async def chat_completions(
+        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        await asyncio.sleep(self.delay_s)
+        if self.fail:
+            raise RuntimeError("upstream exploded")
+        return await super().chat_completions(body)
+
+
+_FAST_HEARTBEAT = {
+    "model_server_sse_heartbeat_grace_seconds": 0.05,
+    "model_server_sse_heartbeat_interval_seconds": 0.05,
+}
+
+
+def _slow_client(delay_s: float, fail: bool = False) -> TestClient:
+    server = _SlowEchoChatModel(
+        config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
+        server_client=MagicMock(spec=ServerClient, global_config_dict=_FAST_HEARTBEAT),
+    )
+    object.__setattr__(server, "delay_s", delay_s)
+    object.__setattr__(server, "fail", fail)
+    return TestClient(server.setup_webserver())
+
+
+class TestStreamingHeartbeat:
+    """Long buffered generations keep the connection busy with SSE comment heartbeats."""
+
+    def test_heartbeat_defaults(self) -> None:
+        cfg = base_responses_api_model.ModelServerSSEHeartbeatConfig()
+        assert (cfg.model_server_sse_heartbeat_grace_seconds, cfg.model_server_sse_heartbeat_interval_seconds) == (
+            30.0,
+            20.0,
+        )
+
+    def _post(self, client: TestClient):
+        return client.post(
+            "/v1/chat/completions", json={"stream": True, "messages": [{"role": "user", "content": "hello"}]}
+        )
+
+    def test_fast_call_has_no_heartbeat(self) -> None:
+        resp = self._post(_slow_client(0.0))
+        assert resp.status_code == 200
+        assert ": keepalive" not in resp.text
+        assert resp.text.endswith("data: [DONE]\n\n")
+
+    def test_slow_call_heartbeats_then_replays_completion(self) -> None:
+        resp = self._post(_slow_client(0.3))
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert resp.text.startswith(": keepalive\n\n")
+        assert resp.text.endswith("data: [DONE]\n\n")
+        rebuilt = _reconstruct_chat_sse(_parse_sse_events(resp.text.encode()))
+        assert rebuilt["choices"][0]["message"]["content"] == "hello"
+
+    def test_slow_failure_becomes_terminal_error_event(self) -> None:
+        resp = self._post(_slow_client(0.3, fail=True))
+        assert resp.status_code == 200
+        assert resp.text.startswith(": keepalive\n\n")
+        assert _events(resp.text)[-1]["error"]["message"] == "upstream exploded"
+
+    def test_fast_failure_still_raises(self) -> None:
+        with pytest.raises(RuntimeError, match="upstream exploded"):
+            self._post(_slow_client(0.0, fail=True))
