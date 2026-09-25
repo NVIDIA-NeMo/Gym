@@ -64,3 +64,4 @@ def test_runtime_bootstrap_uses_generic_versioned_python_fallback(tmp_path: Path
     cfg = (runtime / "pyvenv.cfg").read_text()
     assert f"home = {candidate_dir}" in cfg
     assert f"executable = {candidate_python}" in cfg
+    assert not (runtime / "pyvenv.cfg.bak").exists()

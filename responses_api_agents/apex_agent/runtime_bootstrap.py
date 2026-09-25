@@ -60,7 +60,8 @@ upsert_cfg() {{
     key="$1"
     value="$2"
     if [ -f "${{stirrup_root}}/pyvenv.cfg" ] && grep -q "^[[:space:]]*${{key}}[[:space:]]*=" "${{stirrup_root}}/pyvenv.cfg"; then
-        sed -i "s|^[[:space:]]*${{key}}[[:space:]]*=.*|${{key}} = ${{value}}|" "${{stirrup_root}}/pyvenv.cfg"
+        sed -i.bak "s|^[[:space:]]*${{key}}[[:space:]]*=.*|${{key}} = ${{value}}|" "${{stirrup_root}}/pyvenv.cfg" &&
+            rm -f "${{stirrup_root}}/pyvenv.cfg.bak"
     else
         printf '%s = %s\\n' "${{key}}" "${{value}}" >> "${{stirrup_root}}/pyvenv.cfg"
     fi
