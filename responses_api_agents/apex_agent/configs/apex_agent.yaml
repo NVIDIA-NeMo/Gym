@@ -18,14 +18,10 @@ apex_agent:
         type: responses_api_models
         name: policy_model
       concurrency: ${oc.select:apex_agent_concurrency,4}
-      # Match GDPVal's 3h30m per-task budget while leaving 30 minutes of a
-      # four-hour Slurm allocation for startup and teardown.
       timeout: ${oc.select:apex_agent_timeout,12600}
-      # Existing SIF, OCI reference, or the target for a one-time automatic
-      # build from Archipelago's pinned upstream Dockerfile.
+      # Existing SIF, OCI reference, or the target for a one-time automatic build from Archipelago's pinned upstream Dockerfile.
       image: ${oc.select:apex_agents_image,responses_api_agents/apex_agent/images/archipelago.sif}
-      # Used only when `image` is a local path that does not exist. Existing
-      # SIFs and OCI/registry references skip this build entirely.
+      # Used only when `image` is a local path that does not exist. Existing SIFs and OCI/registry references skip this build entirely.
       image_build:
         enabled: ${oc.select:apex_agents_auto_build,true}
         source_repo: ${oc.select:apex_archipelago_repo,https://github.com/Mercor-Intelligence/archipelago.git}
@@ -40,9 +36,6 @@ apex_agent:
       sandbox_provider: ${oc.select:apex_agent_sandbox_provider,apex_agent_apptainer_sandbox}
       sandbox_spec:
         resources: ${oc.select:apex_agent_sandbox_resources,{}}
-      # Archipelago's public Apex example uses
-      # "Mercor APEX-Agents apex@mercor.com". Keep it overridable, but do not
-      # replace it with a Gym/NVIDIA identity.
       edgar_user_agent: ${oc.select:apex_edgar_user_agent,"Mercor APEX-Agents apex@mercor.com"}
       max_turns: ${oc.select:apex_agent_max_turns,200}
       max_output_tokens: ${oc.select:apex_agent_max_output_tokens,32768}
@@ -54,6 +47,17 @@ apex_agent:
       # Shares the verifier's output root. Incomplete/max-turn runs are saved
       # here without being sent to the grader.
       artifact_output_dir: ${oc.select:apex_artifact_output_dir,results/apex_agents_artifacts}
+      # Optional trusted world_id -> SIF manifest for prebuilt world deliveries.
+      # Ordinary Hugging Face APEX rows continue to use the shared image above.
+      prebuilt_world_manifest: ${oc.select:apex_prebuilt_world_manifest,null}
+      # Overall deadline for a prebuilt world's gateway and MCP startup.
+      prebuilt_startup_timeout_seconds: ${oc.select:apex_prebuilt_startup_timeout_seconds,1800}
+      # Relay policy traffic through a unix socket bound into the sandbox:
+      # auto | always | never. "auto" turns it on when
+      # apex_agent_apptainer_extra_start_args contains --net or a --network
+      # option, i.e. the sandbox has its own network namespace, which lets
+      # worlds with fixed service ports run several rollouts per node.
+      policy_egress_relay: ${oc.select:apex_agent_policy_egress_relay,auto}
       datasets:
       - name: example
         type: example

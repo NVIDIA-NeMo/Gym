@@ -202,6 +202,26 @@ def test_ref_free_schema_is_structurally_equal() -> None:
     assert stirrup_runtime.annotate_schema_ref_types(schema) == schema
 
 
+def test_json_schema_to_pydantic_patch_allows_bare_array_items() -> None:
+    j2p = pytest.importorskip("json_schema_to_pydantic")
+    schema = {
+        "type": "object",
+        "properties": {
+            "attachments": {"type": "array"},
+            "maybe_attachments": {"type": ["array", "null"], "default": None},
+        },
+    }
+
+    stirrup_runtime.install_json_schema_to_pydantic_array_items_patch()
+    model = j2p.create_model(schema)
+
+    model.model_validate({"attachments": [1, "two", {"three": True}], "maybe_attachments": None})
+    assert getattr(j2p.create_model, "_apex_array_items_patch", False)
+
+    mcp = pytest.importorskip("stirrup.tools.mcp")
+    assert getattr(mcp.create_model, "_apex_array_items_patch", False)
+
+
 def test_input_is_never_mutated_and_output_shares_no_mutable_state() -> None:
     snapshot = copy.deepcopy(ARCHIPELAGO_SCHEMA)
 
