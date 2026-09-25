@@ -12,6 +12,14 @@ from identical connection configs share one gRPC channel and one pool, so per-sa
 instances (the `AsyncSandbox` pattern) do not multiply threads or channels. Sandboxes live in
 the gateway workspace set by `connection.workspace` (`default` unless overridden).
 
+OpenShell is an alpha API. Keep the CLI, Python SDK, and gateway protocol on the
+same release. Gym supports both the legacy v0.0.36 lifecycle API and the
+workspace-aware API introduced in v0.0.92, but an SDK cannot decode responses
+from a gateway running an incompatible protocol version. Check the CLI with
+`openshell --version`, the Python SDK with
+`python -c 'import openshell; print(openshell.__version__)'`, and the gateway's
+deployment metadata before running Gym.
+
 ## Local quickstart (Docker compute driver)
 
 Run a local gateway with OpenShell's compose setup, which uses prebuilt GHCR images and a

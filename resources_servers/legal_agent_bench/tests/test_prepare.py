@@ -6,7 +6,12 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import shutil
+import subprocess
 import tarfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -90,7 +95,12 @@ def test_generated_task_cache_is_deterministic_and_credential_free(monkeypatch, 
         "legal_agent_bench::area__task-group__scenario-01",
         "legal_agent_bench::area__task-one",
     ]
-    assert all(row["agent_ref"]["name"] == "legal_agent_bench_harbor_agent" for row in rows)
+    assert all("agent_ref" not in row for row in rows)
+    dockerfile = (first / "area__task-one" / "environment" / "Dockerfile").read_text(encoding="utf-8")
+    assert "iproute2" in dockerfile
+    assert "groupadd --gid 1000660000 sandbox" in dockerfile
+    assert "useradd -K UID_MAX=1000660000" in dockerfile
+    assert "install -d -o sandbox -g sandbox /workspace/output" in dockerfile
     for toml in first.glob("*/task.toml"):
         text = toml.read_text(encoding="utf-8")
         assert "[verifier.env]" not in text
@@ -110,6 +120,319 @@ def test_existing_valid_caches_skip_network(monkeypatch, tmp_path) -> None:
 
     assert result == {"tasks": tasks, "skills": skills}
     assert (tmp_path / "all.jsonl").read_bytes() == (tasks / prepare.INDEX_FILENAME).read_bytes()
+
+
+def test_subset_selection_reuses_full_cache_without_download_or_replacement(monkeypatch, tmp_path) -> None:
+    _source, tasks, skills = _build_caches(monkeypatch, tmp_path)
+    before = _tree_hashes(tasks)
+    inode = (tasks / "area__task-one" / "task.json").stat().st_ino
+    monkeypatch.setattr(prepare, "_download_source_archive", lambda *a, **kw: pytest.fail("cache already complete"))
+    monkeypatch.setattr(prepare, "_download_selected_source", lambda *a, **kw: pytest.fail("tasks already cached"))
+    monkeypatch.setattr(prepare, "_replace_directory", lambda *a, **kw: pytest.fail("must preserve existing cache"))
+    for source_id in TASK_IDS:
+        prepare.prepare_assets(tasks_dir=tasks, skills_dir=skills, task_ids=(prepare.flatten_task_id(source_id),))
+    # Switching back to the full set also reuses that same cache.
+    prepare.prepare_assets(tasks_dir=tasks, skills_dir=skills)
+    assert _tree_hashes(tasks) == before
+    assert (tasks / "area__task-one" / "task.json").stat().st_ino == inode
+
+
+@pytest.mark.parametrize("expand_to_full", [False, True])
+def test_changed_selection_downloads_only_missing_tasks_and_retains_cache(
+    monkeypatch, tmp_path, local_git_source, expand_to_full
+) -> None:
+    downloads = []
+    original_download = prepare._download_selected_source
+
+    def download_selected(*args, **kwargs):
+        downloaded = original_download(*args, **kwargs)
+        downloads.append(downloaded)
+        assert (
+            tuple(sorted(prepare.flatten_task_id(name) for name, _ in prepare._source_task_entries(args[0])))
+            == downloaded
+        )
+        return downloaded
+
+    monkeypatch.setattr(prepare, "_download_selected_source", download_selected)
+    monkeypatch.setattr(
+        prepare, "_download_source_archive", lambda *a, **kw: pytest.fail("must fetch only missing tasks")
+    )
+    tasks, skills = tmp_path / "tasks", tmp_path / "skills"
+    first, second = map(prepare.flatten_task_id, TASK_IDS)
+    prepare.prepare_assets(tasks_dir=tasks, skills_dir=skills, task_ids=(first,))
+    before = _tree_hashes(tasks / first)
+    inode = (tasks / first / "task.json").stat().st_ino
+    prepare.prepare_assets(tasks_dir=tasks, skills_dir=skills, task_ids=None if expand_to_full else (second,))
+    assert _tree_hashes(tasks / first) == before
+    assert (tasks / first / "task.json").stat().st_ino == inode
+    # Once both tasks are cached, selecting either a subset or all tasks is offline.
+    prepare.prepare_assets(tasks_dir=tasks, skills_dir=skills, task_ids=(second,))
+    prepare.prepare_assets(tasks_dir=tasks, skills_dir=skills)
+    prepare.ensure_assets(tasks_dir=tasks, skills_dir=skills, allow_download=False)
+    assert downloads == [(first,), (second,)]
+    assert sorted(p.name for p in tasks.iterdir() if p.is_dir()) == sorted([first, second])
+
+
+@pytest.mark.parametrize("subset", [False, True])
+@pytest.mark.parametrize("bad_marker", ["{broken", "[]", '{"selected_task_ids": ["../invalid"]}'])
+def test_startup_repairs_invalid_marker_and_preserves_cached_selection(
+    monkeypatch, tmp_path, subset, bad_marker
+) -> None:
+    _configure_small_snapshot(monkeypatch, tmp_path)
+    source = _write_source(tmp_path / "source", task_ids=TASK_IDS[:1] if subset else TASK_IDS)
+    task_ids = (prepare.flatten_task_id(TASK_IDS[0]),) if subset else None
+    tasks, skills = tmp_path / "tasks", tmp_path / "skills"
+    prepare._build_task_cache(source, tasks, task_ids=task_ids)
+    prepare._build_skills_cache(source, skills)
+    (tasks / prepare.CACHE_MARKER).write_text(bad_marker)
+    before = _tree_hashes(tasks)
+    downloads = []
+
+    def download_selected(output, selected, *, include_skills, cached_task_ids):
+        assert selected == task_ids
+        assert not include_skills
+        assert not cached_task_ids
+        downloads.append("subset")
+        shutil.copytree(source, output)
+        return selected
+
+    archive = tmp_path / "source.tar.gz"
+    _archive_source(source, archive)
+
+    def download_full(output):
+        assert not subset, "repair must not expand a subset to the full benchmark"
+        downloads.append("full")
+        output.write_bytes(archive.read_bytes())
+
+    monkeypatch.setattr(prepare, "_download_selected_source", download_selected)
+    monkeypatch.setattr(prepare, "_download_source_archive", download_full)
+    with pytest.raises(ValueError):
+        prepare.ensure_assets(tasks_dir=tasks, skills_dir=skills, allow_download=False)
+    assert not downloads
+    assert _tree_hashes(tasks) == before
+    prepare.ensure_assets(tasks_dir=tasks, skills_dir=skills)
+    prepare.validate_harbor_tasks(tasks)
+    assert prepare._cached_task_ids(tasks) == task_ids
+    assert downloads == ["subset" if subset else "full"]
+
+
+def test_selection_reads_only_unique_instance_ids_without_modifying_input(tmp_path) -> None:
+    source = tmp_path / "selection.jsonl"
+    rows = [
+        {"instance_id": "legal_agent_bench::area__task-one", "responses_create_params": {"top_p": None}},
+        {"instance_id": "legal_agent_bench::area__task-group__scenario-01"},
+        {"instance_id": "legal_agent_bench::area__task-one"},
+    ]
+    original = "\n" + "\n".join(json.dumps(row) for row in rows) + "\n"
+    source.write_text(original)
+
+    assert prepare.read_task_selection(source) == ("area__task-group__scenario-01", "area__task-one")
+    assert source.read_text() == original
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "",
+        "\n",
+        "not json",
+        "[]",
+        "{}",
+        '{"instance_id": 123}',
+        '{"instance_id": "other::area__task"}',
+        '{"instance_id": "legal_agent_bench::../../escape"}',
+    ],
+)
+def test_invalid_selection_is_rejected(tmp_path, content) -> None:
+    source = tmp_path / "selection.jsonl"
+    source.write_text(content)
+    with pytest.raises(ValueError, match="LAB"):
+        prepare.read_task_selection(source)
+
+
+def test_subset_preparation_startup_and_hydration_preserve_selection(monkeypatch, tmp_path) -> None:
+    _configure_small_snapshot(monkeypatch, tmp_path)
+    source = _write_source(tmp_path / "source", task_ids=(TASK_IDS[0],))
+    selected = (prepare.flatten_task_id(TASK_IDS[0]),)
+    calls = []
+
+    def download_subset(output, task_ids, *, include_skills, cached_task_ids):
+        assert not cached_task_ids
+        calls.append((task_ids, include_skills))
+        shutil.copytree(source, output)
+        return task_ids
+
+    monkeypatch.setattr(prepare, "_download_selected_source", download_subset)
+    monkeypatch.setattr(prepare, "_download_source_archive", lambda _: pytest.fail("must not fetch full archive"))
+    tasks, skills, runtime = (tmp_path / name for name in ("tasks", "skills", "runtime"))
+    published = tmp_path / "all.jsonl"
+    published.write_text("existing full dataset\n")
+
+    prepare.prepare_assets(tasks_dir=tasks, skills_dir=skills, task_ids=selected)
+    prepare.ensure_assets(tasks_dir=tasks, skills_dir=skills, allow_download=False)
+    prepare.hydrate_runtime_tasks(tasks, runtime, verifier_env={"EXAMPLE": "value"}, reward_mode="full_task")
+
+    assert calls == [(selected, True)]
+    assert published.read_text() == "existing full dataset\n"
+    assert [p.name for p in runtime.iterdir() if p.is_dir()] == list(selected)
+    prepare.validate_harbor_tasks(runtime, pristine=False)
+    prepare.validate_harbor_tasks(tasks)
+    assert 'EXAMPLE = "value"' in (runtime / selected[0] / "task.toml").read_text()
+    assert "EXAMPLE" not in (tasks / selected[0] / "task.toml").read_text()
+
+    # A full prepare must never mistake a valid subset cache for a full cache.
+    with pytest.raises(ValueError, match="selection differs"):
+        prepare.prepare_assets(tasks_dir=tasks, skills_dir=skills, allow_download=False)
+    # Nor may a same-sized, different selection reuse the wrong tasks.
+    with pytest.raises(ValueError, match="selection differs"):
+        prepare.prepare_assets(
+            tasks_dir=tasks, skills_dir=skills, task_ids=(prepare.flatten_task_id(TASK_IDS[1]),), allow_download=False
+        )
+    (tasks / selected[0]).rename(tasks / "area__wrong-task")
+    with pytest.raises(ValueError, match="contents differ"):
+        prepare.validate_harbor_tasks(tasks)
+
+
+@pytest.fixture
+def local_git_source(monkeypatch, tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("selective download test requires git")
+    _configure_small_snapshot(monkeypatch, tmp_path)
+    source = _write_source(tmp_path / "upstream")
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(source), *args], text=True, errors="replace").strip()
+
+    git("init", "--quiet")
+    git("config", "uploadpack.allowFilter", "true")
+    git("add", ".")
+    git(
+        "-c",
+        "user.name=LAB test",
+        "-c",
+        "user.email=lab@example.test",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-qm",
+        "fixture",
+    )
+    monkeypatch.setattr(prepare, "LAB_SOURCE_REPOSITORY", source.as_uri())
+    monkeypatch.setattr(prepare, "LAB_SOURCE_REVISION", git("rev-parse", "HEAD"))
+    return source
+
+
+@pytest.mark.parametrize("include_skills", [True, False])
+def test_selective_git_download_does_not_fetch_unselected_task_blobs(
+    tmp_path, local_git_source, include_skills
+) -> None:
+    destination = tmp_path / "download" / prepare.LAB_SOURCE_ARCHIVE_ROOT
+    selected = (prepare.flatten_task_id(TASK_IDS[0]),)
+    prepare._download_selected_source(destination, selected, include_skills=include_skills)
+
+    prepare._validate_source_tree(destination, task_ids=selected, require_skills=include_skills)
+    assert not (destination / "tasks" / TASK_IDS[1]).exists()
+    assert (destination / "harness" / "skills" / "docx" / "SKILL.md").exists() == include_skills
+    assert (destination / "tasks" / TASK_IDS[0] / "documents" / "input.txt").read_bytes() == (
+        local_git_source / "tasks" / TASK_IDS[0] / "documents" / "input.txt"
+    ).read_bytes()
+    unselected_sha = subprocess.check_output(
+        ["git", "hash-object", str(local_git_source / "tasks" / TASK_IDS[1] / "documents" / "input.txt")], text=True
+    ).strip()
+    packed_objects = "".join(
+        subprocess.check_output(["git", "verify-pack", "-v", str(index)], text=True)
+        for index in (destination / ".git" / "objects" / "pack").glob("*.idx")
+    )
+    assert unselected_sha not in packed_objects
+
+
+def test_unknown_task_fails_before_checkout(tmp_path, local_git_source) -> None:
+    destination = tmp_path / "download"
+    with pytest.raises(ValueError, match="Unknown LAB task IDs"):
+        prepare._download_selected_source(destination, ("area__unknown",), include_skills=False)
+    assert not (destination / "tasks").exists()
+
+
+def test_missing_skills_do_not_redownload_cached_tasks(monkeypatch, tmp_path, local_git_source) -> None:
+    tasks, skills = tmp_path / "tasks", tmp_path / "skills"
+    selected = (prepare.flatten_task_id(TASK_IDS[0]),)
+    prepare.prepare_assets(tasks_dir=tasks, skills_dir=skills, task_ids=selected)
+    before = _tree_hashes(tasks)
+    shutil.rmtree(skills)
+    original_download = prepare._download_selected_source
+    downloads = []
+
+    def download_selected(*args, **kwargs):
+        downloaded = original_download(*args, **kwargs)
+        downloads.append(downloaded)
+        assert not (args[0] / "tasks").exists()
+        return downloaded
+
+    monkeypatch.setattr(prepare, "_download_selected_source", download_selected)
+    prepare.ensure_assets(tasks_dir=tasks, skills_dir=skills)
+    assert downloads == [()]
+    assert _tree_hashes(tasks) == before
+    prepare.validate_harness_skills(skills)
+
+
+def test_changed_completion_params_preserve_evaluation_rows_and_reuse_assets(
+    monkeypatch, tmp_path, local_git_source
+) -> None:
+    from benchmarks.legal_agent_bench import prepare as benchmark_prepare
+
+    tasks, skills = tmp_path / "tasks", tmp_path / "skills"
+    monkeypatch.setenv("LEGAL_AGENT_BENCH_TASK_CACHE_DIR", str(tasks))
+    monkeypatch.setenv("LEGAL_AGENT_BENCH_SKILLS_DIR", str(skills))
+    full_index = tmp_path / "full.jsonl"
+    full_index.write_text("existing full benchmark\n")
+    monkeypatch.setattr(benchmark_prepare, "OUTPUT_FPATH", full_index)
+    selection = tmp_path / "selection.jsonl"
+    row = {
+        "instance_id": f"legal_agent_bench::{prepare.flatten_task_id(TASK_IDS[0])}",
+        "responses_create_params": {"input": [], "temperature": 1.0, "top_p": 0.95, "max_output_tokens": 32768},
+        "verifier_metadata": {"example": "original"},
+    }
+    selection.write_text(json.dumps(row) + "\n")
+    assert benchmark_prepare.prepare(input=selection) == selection
+    before = _tree_hashes(tasks)
+    monkeypatch.setattr(prepare, "_download_source_archive", lambda *a, **kw: pytest.fail("only parameters changed"))
+    monkeypatch.setattr(prepare, "_download_selected_source", lambda *a, **kw: pytest.fail("only parameters changed"))
+    monkeypatch.setattr(prepare, "_replace_directory", lambda *a, **kw: pytest.fail("task assets must be reused"))
+
+    row["responses_create_params"].update(temperature=0.2, top_p=None, max_output_tokens=4096)
+    row["verifier_metadata"] = {"example": "updated"}
+    updated_rows = json.dumps(row) + "\n"
+    selection.write_text(updated_rows)
+    output = benchmark_prepare.prepare(input=selection)
+
+    assert output.read_text() == updated_rows
+    assert _tree_hashes(tasks) == before
+    assert full_index.read_text() == "existing full benchmark\n"
+
+
+def test_legacy_harbor_index_migrates_without_network(monkeypatch, tmp_path) -> None:
+    _source, tasks, _skills = _build_caches(monkeypatch, tmp_path)
+    index_path = tasks / prepare.INDEX_FILENAME
+    legacy_rows = []
+    for line in index_path.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        row["agent_ref"] = {
+            "name": "legal_agent_bench_harbor_agent",
+            "type": "responses_api_agents",
+        }
+        legacy_rows.append(json.dumps(row, sort_keys=True) + "\n")
+    index_path.write_text("".join(legacy_rows), encoding="utf-8")
+    monkeypatch.setattr(
+        prepare,
+        "_download_source_archive",
+        lambda _path: pytest.fail("the exact legacy index must migrate without a source download"),
+    )
+
+    result = prepare.prepare_assets("tasks", tasks_dir=tasks)
+
+    assert result == {"tasks": tasks}
+    assert all("agent_ref" not in json.loads(line) for line in index_path.read_text().splitlines())
+    prepare.validate_harbor_tasks(tasks)
 
 
 def test_missing_assets_download_extract_and_install(monkeypatch, tmp_path) -> None:
@@ -234,6 +557,66 @@ def test_runtime_hydration_can_reuse_a_validated_cache(monkeypatch, tmp_path) ->
     )
 
     assert (runtime / "area__task-one" / "task.toml").is_file()
+
+
+def test_directory_replacement_is_serialized_across_concurrent_publishers(monkeypatch, tmp_path) -> None:
+    target = tmp_path / "runtime"
+    target.mkdir()
+    (target / "value").write_text("old")
+    sources = []
+    for value in ("first", "second"):
+        source = tmp_path / value
+        source.mkdir()
+        (source / "value").write_text(value)
+        sources.append(source)
+
+    original_rename = Path.rename
+    active_renames = 0
+    maximum_active_renames = 0
+    counter_lock = threading.Lock()
+
+    def slow_rename(path: Path, destination: Path) -> Path:
+        nonlocal active_renames, maximum_active_renames
+        with counter_lock:
+            active_renames += 1
+            maximum_active_renames = max(maximum_active_renames, active_renames)
+        try:
+            time.sleep(0.02)
+            return original_rename(path, destination)
+        finally:
+            with counter_lock:
+                active_renames -= 1
+
+    monkeypatch.setattr(Path, "rename", slow_rename)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(lambda source: prepare._replace_directory(source, target), sources))
+
+    assert maximum_active_renames == 1
+    assert (target / "value").read_text() in {"first", "second"}
+    assert not target.with_name(".runtime.backup").exists()
+
+
+def test_directory_replacement_restores_stale_backup_before_failed_publish(monkeypatch, tmp_path) -> None:
+    target = tmp_path / "runtime"
+    backup = tmp_path / ".runtime.backup"
+    source = tmp_path / "new"
+    backup.mkdir()
+    source.mkdir()
+    (backup / "value").write_text("preserved")
+
+    original_rename = Path.rename
+
+    def fail_new_publish(path: Path, destination: Path) -> Path:
+        if path == source:
+            raise OSError("publish failed")
+        return original_rename(path, destination)
+
+    monkeypatch.setattr(Path, "rename", fail_new_publish)
+    with pytest.raises(OSError, match="publish failed"):
+        prepare._replace_directory(source, target)
+
+    assert (target / "value").read_text() == "preserved"
+    assert not backup.exists()
 
 
 def test_missing_public_skill_fails_clearly(monkeypatch, tmp_path) -> None:

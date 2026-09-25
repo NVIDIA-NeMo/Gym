@@ -14,6 +14,8 @@
 # limitations under the License.
 import json
 from asyncio import sleep
+from copy import deepcopy
+from hashlib import sha256
 from typing import (
     Annotated,
     Any,
@@ -742,15 +744,39 @@ _register_item_tags(NeMoGymResponseInputItem, _RESPONSE_INPUT_ITEM_TAG_BY_CLASS)
 NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 
 
-def _normalize_output_item_for_replay(item: Any) -> Any:
-    """Convert a provider output item for request replay."""
+def _synthetic_replay_item_id(item: dict[str, Any], prefix: str, item_index: int) -> str:
+    """Return a stable ID that distinguishes identical replay items by input position."""
+    payload = json.dumps([item_index, item], sort_keys=True, separators=(",", ":"), default=str).encode()
+    return f"{prefix}_{sha256(payload).hexdigest()[:24]}"
+
+
+def _normalize_output_item_for_replay(item: Any, item_index: int) -> Any:
+    """Convert a provider output item for request replay without mutating the caller's input.
+
+    Replayed output may omit server-generated IDs and output-text annotations.
+    Fill those transport defaults because Gym's shared input/output models require them.
+    """
     if isinstance(item, BaseModel):
         item = item.model_dump(exclude_unset=True)
     if not isinstance(item, dict):
         return item
 
     item_type = item.get("type")
-    if item_type == "additional_tools" and item.get("role") != "developer":
+    if item_type == "reasoning" and not item.get("id"):
+        item = item.copy()
+        item["id"] = _synthetic_replay_item_id(item, "rs", item_index)
+    elif (
+        item_type == "message"
+        and item.get("role") == "assistant"
+        and _discriminate_message_item(item) == "output_message"
+    ):
+        item = deepcopy(item)
+        if not item.get("id"):
+            item["id"] = _synthetic_replay_item_id(item, "msg", item_index)
+        for part in item.get("content") or []:
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                part.setdefault("annotations", [])
+    elif item_type == "additional_tools" and item.get("role") != "developer":
         item = item.copy()
         item["role"] = "developer"
     elif item_type == "computer_call_output" and item.get("status") == "failed":
@@ -791,7 +817,9 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
             return value
         value = value.copy()
         if isinstance(value.get("input"), list):
-            value["input"] = [_normalize_output_item_for_replay(item) for item in value["input"]]
+            value["input"] = [
+                _normalize_output_item_for_replay(item, item_index) for item_index, item in enumerate(value["input"])
+            ]
         if isinstance(value.get("tools"), list):
             value["tools"] = [_normalize_tool_for_replay(tool) for tool in value["tools"]]
         return value
