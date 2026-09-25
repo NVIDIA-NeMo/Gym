@@ -322,6 +322,43 @@ async def test_prebuilt_world_config_errors_are_terminal(tmp_path: Path) -> None
     agent._ensure_runtime_setup.assert_not_awaited()
 
 
+async def test_prebuilt_world_adds_localhost_before_startup(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    agent, _ = _prebuilt_agent(tmp_path)
+    agent._ensure_runtime_setup = AsyncMock(return_value=tmp_path / "stirrup-runtime.tar.gz")
+    commands: list[str] = []
+    specs = []
+
+    class FakeSandbox:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def start(self) -> None:
+            return None
+
+        async def upload(self, *_args) -> None:
+            return None
+
+        async def exec(self, command: str, **_kwargs):
+            commands.append(command)
+            if len(commands) == 3:
+                return MagicMock(return_code=1, stderr="hosts file is read-only")
+            return MagicMock(return_code=0)
+
+    def fake_sandbox(_provider, spec):
+        specs.append(spec)
+        return FakeSandbox()
+
+    monkeypatch.setattr("responses_api_agents.apex_agent.app.AsyncSandbox", fake_sandbox)
+    payload = (await agent.run(MagicMock(cookies={}), _prebuilt_body())).model_dump()
+
+    assert commands[2] == "printf '%s\\n' '127.0.0.1 localhost' >> /etc/hosts"
+    assert "could not configure sandbox localhost" in payload["apex_error"]
+    assert "sandbox_local_dns.py" not in str(specs[0].files)
+
+
 def test_prebuilt_manifest_rejects_image_outside_cache(tmp_path: Path) -> None:
     cache_root = tmp_path / "images"
     cache_root.mkdir()

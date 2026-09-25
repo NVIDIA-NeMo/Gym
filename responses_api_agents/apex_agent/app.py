@@ -53,7 +53,6 @@ from responses_api_agents.apex_agent.stirrup_runtime import RelayServer, serve_u
 LOG = logging.getLogger(__name__)
 _RUNNER_PATH = Path(__file__).with_name("sandbox_entrypoint.py")
 _PREBUILT_RUNNER_PATH = Path(__file__).with_name("prebuilt_world_entrypoint.py")
-_SANDBOX_LOCAL_DNS_PATH = Path(__file__).with_name("sandbox_local_dns.py")
 _EGRESS_MOUNT = "/egress"
 _EGRESS_SOCKET_NAME = "policy.sock"
 _STIRRUP_RUNTIME_PATH = Path(__file__).with_name("stirrup_runtime.py")
@@ -94,10 +93,6 @@ class ApexAgentConfig(BaseResponsesAPIAgentConfig):
     # enables it when the apptainer sandbox runs in its own network namespace
     # (extra_start_args contain --net or a --network option).
     policy_egress_relay: Literal["auto", "always", "never"] = "auto"
-    # Run a sandbox-local catch-all DNS resolver for prebuilt worlds in private
-    # network namespaces. It maps in-world app hostnames to loopback without
-    # needing to enumerate names like erpnext.io, wikijs.local, etc.
-    local_dns: Literal["auto", "always", "never"] = "auto"
 
 
 class ApexAgentRunRequest(BaseRunRequest):
@@ -124,10 +119,6 @@ def load_prebuilt_runner_source() -> str:
     return _PREBUILT_RUNNER_PATH.read_text(encoding="utf-8")
 
 
-def load_sandbox_local_dns_source() -> str:
-    return _SANDBOX_LOCAL_DNS_PATH.read_text(encoding="utf-8")
-
-
 def instruction_from_input(params: NeMoGymResponseCreateParamsNonStreaming) -> str:
     if isinstance(params.input, str):
         return params.input
@@ -150,33 +141,6 @@ def instruction_from_input(params: NeMoGymResponseCreateParamsNonStreaming) -> s
 def _safe_id(value: str) -> str:
     cleaned = "".join(char if char.isalnum() or char in "-_" else "_" for char in value)
     return cleaned[:128] or "unknown"
-
-
-def prebuilt_local_dns_command() -> str:
-    python = shlex.quote(f"{_STIRRUP_ROOT}/bin/python")
-    dns_path = shlex.quote(f"{_GUEST_ROOT}/sandbox_local_dns.py")
-    log_path = shlex.quote(f"{_GUEST_ROOT}/output/local_dns.log")
-    pid_path = shlex.quote(f"{_GUEST_ROOT}/output/local_dns.pid")
-    resolv_conf = "nameserver 127.0.0.1\noptions ndots:0 timeout:1 attempts:1\n"
-    test_resolver = (
-        "import socket,sys; "
-        "infos=socket.getaddrinfo('nemo-gym-local-dns.invalid',80,type=socket.SOCK_STREAM); "
-        "sys.exit(0 if any(info[4][0] in {'127.0.0.1','::1'} for info in infos) else 1)"
-    )
-    return (
-        "set -e; "
-        f"printf %s {shlex.quote(resolv_conf)} > /etc/resolv.conf; "
-        f"nohup {python} {dns_path} --host 127.0.0.1 --port 53 > {log_path} 2>&1 & "
-        "dns_pid=$!; "
-        f"printf '%s\\n' \"$dns_pid\" > {pid_path}; "
-        "for _ in $(seq 1 50); do "
-        f'kill -0 "$dns_pid" 2>/dev/null || {{ cat {log_path} 2>/dev/null || true; exit 1; }}; '
-        f"{python} -c {shlex.quote(test_resolver)} >/dev/null 2>&1 && exit 0; "
-        "sleep 0.1; "
-        "done; "
-        f"cat {log_path} 2>/dev/null || true; "
-        "exit 1"
-    )
 
 
 class PolicyEgressRelay:
@@ -302,11 +266,6 @@ class ApexAgent(SimpleResponsesAPIAgent):
         if self.config.policy_egress_relay == "auto":
             return self._sandbox_has_private_network()
         return self.config.policy_egress_relay == "always"
-
-    def _local_dns_enabled(self) -> bool:
-        if self.config.local_dns == "auto":
-            return self._sandbox_has_private_network()
-        return self.config.local_dns == "always"
 
     @asynccontextmanager
     async def _policy_egress(self, body: ApexAgentRunRequest) -> AsyncIterator[PolicyEgressRelay | None]:
@@ -477,8 +436,6 @@ class ApexAgent(SimpleResponsesAPIAgent):
             f"{_GUEST_ROOT}/stirrup_runtime.py": _STIRRUP_RUNTIME_PATH.read_text(encoding="utf-8"),
             f"{_GUEST_ROOT}/runner_config.json": json.dumps(runner_config),
         }
-        if prebuilt_world:
-            files[f"{_GUEST_ROOT}/sandbox_local_dns.py"] = load_sandbox_local_dns_source()
         return SandboxSpec(
             image=image or self._image or self.config.image,
             workdir=_GUEST_ROOT,
@@ -687,15 +644,15 @@ class ApexAgent(SimpleResponsesAPIAgent):
                             if protect.return_code != 0:
                                 detail = (protect.stderr or protect.stdout or "")[-4000:]
                                 return self._failure(body, f"could not protect sandbox inputs: {detail}")
-                            if prebuilt_world and self._local_dns_enabled():
-                                dns = await sandbox.exec(
-                                    prebuilt_local_dns_command(),
+                            if prebuilt_world:
+                                hosts = await sandbox.exec(
+                                    "printf '%s\\n' '127.0.0.1 localhost' >> /etc/hosts",
                                     user="root",
                                     timeout_s=30,
                                 )
-                                if dns.return_code != 0:
-                                    detail = (dns.stderr or dns.stdout or "")[-4000:]
-                                    return self._failure(body, f"could not start sandbox local DNS: {detail}")
+                                if hosts.return_code != 0:
+                                    detail = (hosts.stderr or hosts.stdout or "")[-4000:]
+                                    return self._failure(body, f"could not configure sandbox localhost: {detail}")
                             process = await sandbox.exec(
                                 f"{shlex.quote(_STIRRUP_ROOT + '/bin/python')} "
                                 f"{shlex.quote(_GUEST_ROOT + '/sandbox_entrypoint.py')}",

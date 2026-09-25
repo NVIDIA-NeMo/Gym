@@ -56,11 +56,3 @@ the apptainer start arguments contain `--net` or a `--network` option (`always` 
 a unix socket on the host that forwards to the model server, binds it into the sandbox at `/egress/policy.sock`, and
 `run_stirrup_rollout` points the client at a loopback listener that forwards to that socket. Unix sockets ignore
 network namespaces. Only plain-HTTP model endpoints are supported.
-
-Private network namespaces also mean the prebuilt world's own app hostnames no longer have upstream DNS. With
-`local_dns: auto` (the default) the prebuilt path starts `sandbox_local_dns.py` inside the sandbox, points
-`/etc/resolv.conf` at it, and answers local A/AAAA lookups with loopback. This is intentionally generic: it lets
-names such as ERPNext, wiki, or other in-sandbox services resolve to `127.0.0.1` without enumerating each delivered
-hostname. Use this isolated mode only for worlds whose tools are expected to be offline except for the model-policy
-request; worlds that legitimately need internet access should stay on the shared-network path until they have a
-different egress policy.
