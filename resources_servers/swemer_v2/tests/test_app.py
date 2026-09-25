@@ -25,16 +25,23 @@ multi-worker entrypoint with no module-level `app`. Both looked fine locally and
 failed once real traffic hit them, so the same tests are written here from the start.
 """
 
+from types import SimpleNamespace
+
+import pytest
+
 from resources_servers.swemer_v2.verification import (
     RESULT_FILE_BEGIN,
     RESULT_FILE_END,
     SUPPORTED_FRAMEWORKS,
     TEST_OUTPUT_BEGIN,
     TEST_OUTPUT_END,
+    TEST_PATCH_FAILED,
     VerificationInputs,
     _slice,
     build_eval_script,
+    drop_test_patch_files,
     grade,
+    run_verification,
     verification_files,
 )
 
@@ -64,6 +71,10 @@ class TestBuildEvalScript:
     def test_omits_test_patch_apply_when_empty(self) -> None:
         script = build_eval_script(_inputs(test_patch=""))
         assert "nemo_gym_test_patch.diff" not in script
+
+    def test_flags_a_test_patch_that_fails_to_apply(self) -> None:
+        script = build_eval_script(_inputs())
+        assert f"grep -q '^error: ' /tmp/nemo_gym_test_patch.log && echo {TEST_PATCH_FAILED}" in script
 
     def test_markers_bracket_the_test_command(self) -> None:
         script = build_eval_script(_inputs(test_command="pytest tests/test_x.py -v"))
@@ -102,6 +113,64 @@ class TestVerificationFiles:
     def test_omits_blank_patch(self) -> None:
         files = verification_files(_inputs(patch="   "))
         assert "/tmp/nemo_gym_patch.diff" not in files
+
+
+class TestDropTestPatchFiles:
+    def test_drops_the_model_sections_for_files_the_test_patch_touches(self) -> None:
+        patch = (
+            "diff --git a/src/calc.py b/src/calc.py\n--- a/src/calc.py\n+++ b/src/calc.py\n@@ -1 +1 @@\n-a\n+b\n"
+            "diff --git a/tests/test_calc.py b/tests/test_calc.py\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n"
+            "@@ -1 +1 @@\n-x\n+mine\n"
+            "diff --git a/tests/test_new.py b/tests/test_new.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_new.py\n"
+            "@@ -0,0 +1 @@\n+mine\n"
+            "diff --git a/tests/test_mine.py b/tests/test_mine.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_mine.py\n"
+            "@@ -0,0 +1 @@\n+mine\n"
+        )
+        test_patch = (
+            "diff --git a/tests/test_calc.py b/tests/test_calc.py\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n"
+            "@@ -1 +1 @@\n-x\n+hidden\n"
+            "diff --git a/tests/test_new.py b/tests/test_new.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_new.py\n"
+            "@@ -0,0 +1 @@\n+hidden\n"
+        )
+        kept = drop_test_patch_files(patch, test_patch)
+        assert "a/src/calc.py" in kept and "b/tests/test_mine.py" in kept
+        assert "tests/test_calc.py" not in kept and "tests/test_new.py" not in kept
+
+    def test_keeps_the_patch_when_there_is_no_test_patch(self) -> None:
+        patch = "diff --git a/tests/test_calc.py b/tests/test_calc.py\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n"
+        assert drop_test_patch_files(patch, "") == patch
+
+
+class _FakeSandbox:
+    def __init__(self, stdout: str) -> None:
+        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=0)
+
+    async def exec(self, command: str, timeout_s=None):
+        return self._result
+
+
+class TestRunVerification:
+    @pytest.mark.asyncio
+    async def test_a_test_patch_that_does_not_apply_is_incomplete(self) -> None:
+        result = await run_verification(
+            sandbox=_FakeSandbox(
+                f"{TEST_PATCH_FAILED}\n"
+                + (
+                    f"{TEST_OUTPUT_BEGIN}\n"
+                    '{"Action": "pass", "Test": "TestOne", "Package": "example.com/pkg"}\n'
+                    f"{TEST_OUTPUT_END}\n{RESULT_FILE_BEGIN}\n{RESULT_FILE_END}\n"
+                )
+            ),
+            inputs=_inputs(
+                test_framework="go",
+                test_command="go test ./...",
+                fail_to_pass=["example.com/pkg::TestOne"],
+                pass_to_pass=[],
+            ),
+        )
+        assert result.completed is False
+        assert result.resolved is False
+        assert result.test_patch_failed is True
 
 
 class TestGrade:

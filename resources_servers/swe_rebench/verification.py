@@ -34,6 +34,7 @@ from typing import Any, Callable, Iterable, Sequence
 # results, so the log is sliced before parsing rather than handed over whole.
 TEST_OUTPUT_BEGIN = "___NEMO_GYM_SWE_REBENCH_TEST_BEGIN___"
 TEST_OUTPUT_END = "___NEMO_GYM_SWE_REBENCH_TEST_END___"
+TEST_PATCH_FAILED = "___NEMO_GYM_SWE_REBENCH_TEST_PATCH_FAILED___"
 
 PASSED = "PASSED"
 
@@ -111,6 +112,11 @@ def drop_patch_sections(patch: str, paths: Iterable[str]) -> str:
     return "".join(kept)
 
 
+def drop_test_patch_files(patch: str, test_patch: str) -> str:
+    sections = re.split(r"(?=^diff --git )", test_patch, flags=re.MULTILINE)
+    return drop_patch_sections(patch, {patch_section_path(section) for section in sections if section.strip()})
+
+
 @dataclass
 class VerificationInputs:
     instance_id: str
@@ -133,6 +139,7 @@ class VerificationResult:
     test_results: dict[str, Any] | None
     test_output: str
     error: str | None = None
+    test_patch_failed: bool = False
 
 
 def build_eval_script(inputs: VerificationInputs) -> str:
@@ -156,7 +163,8 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     if inputs.test_patch.strip():
         apply_test_patch = (
             "git apply --reject --recount --ignore-space-change --whitespace=nowarn "
-            "/tmp/nemo_gym_test_patch.diff || true"
+            "/tmp/nemo_gym_test_patch.diff 2>&1 | tee /tmp/nemo_gym_test_patch.log\n"
+            f"grep -q '^error: ' /tmp/nemo_gym_test_patch.log && echo {TEST_PATCH_FAILED}"
         )
 
     return f"""#!/bin/bash
@@ -311,10 +319,13 @@ async def run_verification(
         )
 
     report = grade(statuses, inputs.fail_to_pass, inputs.pass_to_pass)
+    test_patch_failed = TEST_PATCH_FAILED in output
     return VerificationResult(
-        completed=True,
-        resolved=bool(report["resolved"]),
+        completed=not test_patch_failed,
+        resolved=bool(report["resolved"]) and not test_patch_failed,
         patch_applied=True,
         test_results=report,
         test_output=output,
+        error="held-out test patch did not apply" if test_patch_failed else None,
+        test_patch_failed=test_patch_failed,
     )

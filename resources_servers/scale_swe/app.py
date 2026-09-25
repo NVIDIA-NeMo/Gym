@@ -57,6 +57,7 @@ from resources_servers.scale_swe.verification import (
     as_id_list,
     clean_commands,
     drop_patch_sections,
+    drop_test_patch_files,
     run_verification,
     verification_files,
 )
@@ -118,6 +119,7 @@ class ScaleSWEVerifyResponse(BaseVerifyResponse):
     error: str | None
     eval_sandbox_start_time_taken: float
     patch_verification_time_taken: float
+    test_patch_failed: bool = False
 
 
 class ScaleSWEResourcesServer(SimpleResourcesServer):
@@ -133,7 +135,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         return VerificationInputs(
             instance_id=body.instance_id,
             workdir=body.workdir,
-            patch=patch,
+            patch=drop_test_patch_files(patch, body.f2p_patch),
             pre_commands=body.pre_commands,
             f2p_patch=body.f2p_patch,
             f2p_script=body.f2p_script,
@@ -354,6 +356,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                 "error": extraction_error or result.error,
                 "eval_sandbox_start_time_taken": start_time_taken,
                 "patch_verification_time_taken": verification_time_taken,
+                "test_patch_failed": result.test_patch_failed,
             }
         )
 
