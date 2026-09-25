@@ -93,7 +93,7 @@ Each JSONL row contains:
 
 `lmarena_v2` instead uses fixed Bradley-Terry style coefficients and excludes `[[BB]]` from its `win_rate*` metrics.
 
-## Generate responses only
+## Generate and judge separately
 
 Generate responses without calling the judge:
 
@@ -111,7 +111,46 @@ gym eval run \
     ++lmarena_v3_benchmark_resources_server.resources_servers.arena.generation_only=true
 ```
 
-No judge calls are made during generation-only runs.
+No judge calls are made during generation-only runs; only `response_tokens/*` and `reasoning_tokens/*` metrics are reported.
+
+Judge the saved responses without calling the policy model:
+
+```bash
+gym eval reverify \
+    --config benchmarks/lmarena_v3/config.yaml \
+    --inputs results/lmarena_v3/my-model/responses_materialized_inputs.jsonl \
+    --rollouts results/lmarena_v3/my-model/responses.jsonl \
+    --output results/lmarena_v3/my-model/judged.jsonl \
+    --concurrency 64
+```
+
+Both files are produced by the generation-only run. Reverification sends each saved response directly to the Arena verifier.
+
+## Rejudge existing responses
+
+Arena supports Gym's native stateless reverification, so saved responses can be rejudged without calling the policy model.
+
+Use the rollout and materialized-input files from the original run:
+
+```bash
+gym eval reverify \
+    --config benchmarks/lmarena_v3/config.yaml \
+    --inputs results/old-run/rollouts_materialized_inputs.jsonl \
+    --rollouts results/old-run/rollouts.jsonl \
+    --output results/old-run/rejudged.jsonl \
+    --concurrency 64
+```
+
+To recover only judge failures from a run's failure sidecar:
+
+```bash
+gym eval reverify --judge-failed-only \
+    --config benchmarks/lmarena_v3/config.yaml \
+    --inputs results/old-run/rollouts_materialized_inputs.jsonl \
+    --rollouts results/old-run/rollouts.jsonl \
+    --output results/old-run/recovered.jsonl \
+    --concurrency 64
+```
 
 ## Recompute scores
 
