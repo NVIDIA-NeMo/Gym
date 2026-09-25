@@ -889,16 +889,66 @@ def test_resolve_env_value_with_newline_is_quoted():
     assert "KEY='line1\nline2'" in out
 
 
-def test_resolve_env_runtime_marker_emits_unquoted_shell_reference():
+def test_resolve_env_runtime_marker_emits_quoted_shell_reference():
     out = _resolve_env({"FOO": "runtime:NEL_INVOCATION_ID"})
-    assert "FOO=${NEL_INVOCATION_ID}" in out
-    assert "'" not in out
+    assert 'FOO="${NEL_INVOCATION_ID}"' in out
 
 
 def test_resolve_env_runtime_marker_alongside_literal():
     out = _resolve_env({"LIT": "val", "RUN": "runtime:NEL_INVOCATION_ID"})
     assert "LIT=val" in out
-    assert "RUN=${NEL_INVOCATION_ID}" in out
+    assert 'RUN="${NEL_INVOCATION_ID}"' in out
+
+
+@pytest.mark.parametrize("target", ["service", "driver"])
+@pytest.mark.parametrize(
+    ("worker_value", "runtime_value"),
+    [
+        (None, ""),
+        ("expanded", "expanded"),
+        ("expanded value", "expanded value"),
+        ("$(printf injected) ; *", "$(printf injected) ; *"),
+    ],
+)
+def test_env_literal_runtime_prefix_reaches_process_unchanged(
+    target, worker_value, runtime_value, submit_config, bench_dir, monkeypatch
+):
+    if worker_value is None:
+        monkeypatch.delenv("WORKER", raising=False)
+    else:
+        monkeypatch.setenv("WORKER", worker_value)
+    monkeypatch.setenv("SOURCE", "runtime:WORKER")
+    raw = submit_config.model_dump()
+    target_config = raw["services"]["vllm_model"] if target == "service" else raw["driver"]
+    target_config["env"] = {
+        "LITERAL": "lit:runtime:WORKER",
+        "HOST": "host:SOURCE",
+        "RUNTIME": "runtime:WORKER",
+        "ORDINARY": "lit:ordinary value",
+    }
+    config = SubmitConfig.model_validate(raw)
+    serialized = config.model_dump(mode="json")
+    serialized_target = serialized["services"]["vllm_model"] if target == "service" else serialized["driver"]
+    assert serialized_target["env"] == {
+        "LITERAL": "lit:runtime:WORKER",
+        "HOST": "lit:runtime:WORKER",
+        "RUNTIME": "runtime:WORKER",
+        "ORDINARY": "ordinary value",
+    }
+    script = build_sbatch_script(
+        config, "gsm8k", config.driver.benchmarks["gsm8k"], config.compute["cluster"], bench_dir
+    )
+    # Execute the actual generated environment prefix with a local process instead of srun.
+    launch = next(line for line in script.splitlines() if line.startswith("env LITERAL="))
+    prefix, separator, _ = launch.partition("srun ")
+    assert separator
+    result = subprocess.run(
+        ["bash", "-c", prefix + 'bash -c \'printf "%s\\n" "$LITERAL" "$HOST" "$RUNTIME" "$ORDINARY"\''],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.splitlines() == ["runtime:WORKER", "runtime:WORKER", runtime_value, "ordinary value"]
 
 
 # ---------------------------------------------------------------------------

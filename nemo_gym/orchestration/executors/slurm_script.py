@@ -27,6 +27,7 @@ from nemo_gym.orchestration.api import (
     SlurmComputeConfig,
     SubmitConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
+    _LiteralEnvValue,
     effective_ray_serve,
 )
 from nemo_gym.orchestration.executors.otel import (
@@ -107,7 +108,7 @@ def _validate_env_key(key: str) -> None:
 def _resolve_env(env: dict[str, str]) -> str:
     """Return an 'env K=V ...' prefix string (trailing space) scoped to a single command, or '' if empty.
 
-    A `runtime:VAR` value (see resolve_env_dict in api.py) is emitted as an unquoted `K=$VAR`
+    A `runtime:VAR` value (see resolve_env_dict in api.py) is emitted as a quoted `K="$VAR"`
     shell reference instead of a literal, so it's resolved from the job's own environment when
     the command actually runs on the compute node, rather than baked in at script-generation time.
     """
@@ -116,7 +117,9 @@ def _resolve_env(env: dict[str, str]) -> str:
     for k in env:
         _validate_env_key(k)
     pairs = " ".join(
-        f"{k}=${{{v[len(RUNTIME_ENV_PREFIX) :]}}}" if v.startswith(RUNTIME_ENV_PREFIX) else f"{k}={shlex.quote(v)}"
+        f'{k}="${{{v[len(RUNTIME_ENV_PREFIX) :]}}}"'
+        if v.startswith(RUNTIME_ENV_PREFIX) and not isinstance(v, _LiteralEnvValue)
+        else f"{k}={shlex.quote(v)}"
         for k, v in env.items()
     )
     return f"env {pairs} "
