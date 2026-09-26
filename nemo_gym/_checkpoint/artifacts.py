@@ -31,6 +31,7 @@ AGENT_CONTINUATION_INDEX_FEATURE = "agent_continuation_index_v1"
 AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE = "agent_resource_dependency_index_v1"
 EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE = "external_storage_reference_index_v1"
 GENERATION_CUT_LINEAGE_FEATURE = "generation_cut_lineage_v1"
+GENERATION_CUT_INDEX_UNION_FEATURE = "generation_cut_index_union_v1"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 
 

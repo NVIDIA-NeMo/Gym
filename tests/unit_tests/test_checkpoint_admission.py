@@ -381,6 +381,7 @@ def test_policy_model_server_pause_drain_resume_cycle() -> None:
     assert capabilities["admission_states"] == ["accepting", "draining", "paused"]
     assert capabilities["features"] == [
         "external_storage_reference_index_v1",
+        "generation_cut_index_union_v1",
         "generation_cut_lineage_v1",
     ]
 

@@ -1080,6 +1080,108 @@ def test_generation_cut_receipt_is_final_before_ledger_commit(tmp_path) -> None:
     limiter.release(ticket)
 
 
+def test_model_commit_unions_generation_cut_indexes_from_peer_proxy(tmp_path) -> None:
+    shared_lineage = tmp_path / "lineage"
+    checkpoint = tmp_path / "checkpoint"
+    peer_checkpoint = checkpoint / "gym-shards" / "second"
+    control = {"checkpoint_id": "checkpoint-1", "deadline_ts": 4e9}
+
+    peer_client, peer_limiter = _participant(
+        shared_lineage,
+        generation_cut_backend=_RecordingGenerationCutBackend(),
+    )
+    peer_ticket = peer_limiter.admit(rollout_id="rollout-peer", attempt_index=0)
+    peer_ticket.generation_started = True
+    peer_ticket.model_call_id = "peer-call"
+    assert (
+        peer_client.post(
+            f"{MODEL_ADMISSION_URL_PREFIX}/pause",
+            json=control,
+            headers=AUTH_HEADERS,
+        ).status_code
+        == 200
+    )
+    peer_commit = peer_client.post(
+        f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+        json={
+            **control,
+            "checkpoint_dir": str(peer_checkpoint),
+            "continuation_indexes": [],
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert peer_commit.status_code == 200
+    peer_index = CheckpointArtifactReference.model_validate(peer_commit.json()["storage_reference_index"]).model_copy(
+        update={
+            "relative_path": str(
+                Path("gym-shards") / "second" / peer_commit.json()["storage_reference_index"]["relative_path"]
+            )
+        }
+    )
+
+    leader_client, leader_limiter = _participant(
+        shared_lineage,
+        generation_cut_backend=_RecordingGenerationCutBackend(),
+    )
+    leader_ticket = leader_limiter.admit(rollout_id="rollout-leader", attempt_index=0)
+    leader_ticket.generation_started = True
+    leader_ticket.model_call_id = "leader-call"
+    assert (
+        leader_client.post(
+            f"{MODEL_ADMISSION_URL_PREFIX}/pause",
+            json=control,
+            headers=AUTH_HEADERS,
+        ).status_code
+        == 200
+    )
+    leader_commit = leader_client.post(
+        f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+        json={
+            **control,
+            "checkpoint_dir": str(checkpoint),
+            "continuation_indexes": [],
+            "generation_cut_indexes": [peer_index.model_dump(mode="json")],
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert leader_commit.status_code == 200
+    assert leader_commit.json()["generation_cut_records"] == 2
+    references = read_jsonl_artifact(
+        checkpoint,
+        CheckpointArtifactReference.model_validate(leader_commit.json()["storage_reference_index"]),
+        ExternalStorageReference,
+    )
+    assert {
+        (reference.capture_key, reference.boundary_model_call_id)
+        for reference in references
+        if reference.kind == "generation_prefix_cut"
+    } == {
+        ("rollout-leader", "leader-call"),
+        ("rollout-peer", "peer-call"),
+    }
+
+    restored_backend = _RecordingGenerationCutBackend()
+    restored_client, _ = _participant(
+        tmp_path / "restored",
+        generation_cut_backend=restored_backend,
+    )
+    restored = restored_client.post(
+        f"{MODEL_CHECKPOINT_URL_PREFIX}/restore",
+        json={
+            "checkpoint_id": "restore-1",
+            "deadline_ts": 4e9,
+            "checkpoint_dir": str(checkpoint),
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert restored.status_code == 200
+    assert restored.json()["generation_cuts_restored"] == 2
+    assert {prefix.rollout_id for receipt, _excluded in restored_backend.restored for prefix in receipt.prefixes} == {
+        "rollout-leader",
+        "rollout-peer",
+    }
+
+
 def test_model_restore_loads_generation_cut_from_checkpointed_lineage(tmp_path) -> None:
     source_backend = _RecordingGenerationCutBackend()
     source_client, source_limiter = _participant(

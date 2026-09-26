@@ -1072,6 +1072,7 @@ class CaptureLedgerCheckpointer:
 class ModelCheckpointCommitRequest(CheckpointControlRequest):
     checkpoint_dir: str
     continuation_indexes: list[CheckpointArtifactReference]
+    generation_cut_indexes: list[CheckpointArtifactReference] = Field(default_factory=list)
 
 
 class ModelCheckpointRestoreRequest(CheckpointControlRequest):
@@ -1087,6 +1088,83 @@ def _validate_server_name(server_name: str) -> str:
             "and start with a letter or digit"
         )
     return server_name
+
+
+async def _resolve_generation_cut_receipts(
+    checkpoint_dir: Path,
+    *,
+    checkpoint_id: str,
+    server_name: str,
+    ledger: Optional[CaptureLedger],
+    generation_cut_receipts: tuple[GenerationCutReceipt, ...],
+    generation_cut_indexes: tuple[CheckpointArtifactReference, ...],
+    generation_cuts_already_recorded: bool,
+) -> tuple[GenerationCutReceipt, ...]:
+    """Build one complete cut inventory from this proxy and peer indexes."""
+    if (generation_cut_receipts or generation_cut_indexes) and not isinstance(ledger, GenerationCutCaptureLedger):
+        raise LedgerNotCheckpointableError(
+            "generation-prefix cuts require a capture ledger that can reload cut coordinates"
+        )
+    if not isinstance(ledger, GenerationCutCaptureLedger):
+        return ()
+
+    if generation_cut_receipts and not generation_cuts_already_recorded:
+        for receipt in generation_cut_receipts:
+            await ledger.record_generation_cut(receipt)
+
+    capture_keys = {
+        capture_key_for(prefix.rollout_id, prefix.attempt_index)
+        for receipt in generation_cut_receipts
+        for prefix in receipt.prefixes
+    }
+    indexed_coordinates: set[tuple[str, str, str]] = set()
+    for reference in generation_cut_indexes:
+        try:
+            records = read_jsonl_artifact(
+                checkpoint_dir,
+                reference,
+                ExternalStorageReference,
+            )
+        except (CheckpointArtifactError, ValueError) as error:
+            raise LedgerMismatchError("generation-cut storage-reference index is missing or corrupted") from error
+        for record in records:
+            if record.kind != "generation_prefix_cut":
+                continue
+            coordinate = (
+                record.capture_key,
+                record.boundary_model_call_id,
+                record.key,
+            )
+            if coordinate in indexed_coordinates:
+                raise LedgerMismatchError("generation-cut storage-reference indexes contain a duplicate coordinate")
+            indexed_coordinates.add(coordinate)
+            capture_keys.add(record.capture_key)
+
+    if not capture_keys:
+        return ()
+    receipts = await ledger.load_generation_cut_receipts(
+        tuple(sorted(capture_keys)),
+        checkpoint_id=checkpoint_id,
+        server_name=server_name,
+    )
+    loaded_coordinates = {
+        (
+            capture_key_for(prefix.rollout_id, prefix.attempt_index),
+            prefix.model_call_id,
+            staging_key,
+        )
+        for receipt in receipts
+        for prefix in receipt.prefixes
+        if prefix.disposition == "durable_prefix"
+        for staging_key in prefix.staging_keys
+    }
+    missing = indexed_coordinates - loaded_coordinates
+    if missing:
+        raise LedgerMismatchError(
+            "generation-cut storage-reference indexes do not match the shared capture ledger: "
+            f"missing={sorted(missing)!r}"
+        )
+    return receipts
 
 
 def _store_generation_cut_proof(directory: Path, proof: GenerationCutCoordinatorProof) -> None:
@@ -1127,15 +1205,18 @@ async def _commit_model_ledger(
     tombstones: set[tuple[str, int]],
     continuation_roots: list[AgentContinuationRoot],
     generation_cut_receipts: tuple[GenerationCutReceipt, ...],
+    generation_cut_indexes: tuple[CheckpointArtifactReference, ...] = (),
     generation_cuts_already_recorded: bool = False,
 ) -> dict[str, Any]:
-    if generation_cut_receipts and not generation_cuts_already_recorded:
-        if not isinstance(ledger, GenerationCutCaptureLedger):
-            raise LedgerNotCheckpointableError(
-                "generation-prefix cuts require a capture ledger that can record cut coordinates"
-            )
-        for receipt in generation_cut_receipts:
-            await ledger.record_generation_cut(receipt)
+    generation_cut_receipts = await _resolve_generation_cut_receipts(
+        checkpoint_dir,
+        checkpoint_id=checkpoint_id,
+        server_name=server_name,
+        ledger=ledger,
+        generation_cut_receipts=generation_cut_receipts,
+        generation_cut_indexes=generation_cut_indexes,
+        generation_cuts_already_recorded=generation_cuts_already_recorded,
+    )
     expected_cut_records = sum(len(receipt.prefixes) for receipt in generation_cut_receipts)
     if isinstance(ledger, CheckpointableCaptureLedger):
         participant_dir = checkpoint_dir / MODEL_LEDGER_SUBDIR / server_name
@@ -1512,6 +1593,7 @@ class PolicyModelCheckpointCoordinatorService:
                 tombstones=set(evidence.checkpoint_exclusions),
                 continuation_roots=continuation_roots,
                 generation_cut_receipts=generation_cut_receipts,
+                generation_cut_indexes=tuple(body.generation_cut_indexes),
                 generation_cuts_already_recorded=True,
             )
 
@@ -1679,18 +1761,21 @@ def install_model_checkpoint(
         generation_cut_proof: GenerationCutCoordinatorProof | None,
         continuation_roots: list[AgentContinuationRoot],
         generation_cut_receipts: tuple[GenerationCutReceipt, ...],
+        generation_cut_indexes: tuple[CheckpointArtifactReference, ...],
     ) -> dict[str, Any]:
         ledger = ledger_provider()
         participant_dir = checkpoint_dir / MODEL_LEDGER_SUBDIR / server_name
         if generation_cut_proof is not None:
             await _run_sync(lambda: _store_generation_cut_proof(participant_dir, generation_cut_proof))
-        if generation_cut_receipts:
-            if not isinstance(ledger, GenerationCutCaptureLedger):
-                raise LedgerNotCheckpointableError(
-                    "generation-prefix cuts require a capture ledger that can record cut coordinates"
-                )
-            for receipt in generation_cut_receipts:
-                await ledger.record_generation_cut(receipt)
+        generation_cut_receipts = await _resolve_generation_cut_receipts(
+            checkpoint_dir,
+            checkpoint_id=checkpoint_id,
+            server_name=server_name,
+            ledger=ledger,
+            generation_cut_receipts=generation_cut_receipts,
+            generation_cut_indexes=generation_cut_indexes,
+            generation_cuts_already_recorded=False,
+        )
         expected_cut_records = sum(len(receipt.prefixes) for receipt in generation_cut_receipts)
         if isinstance(ledger, CheckpointableCaptureLedger):
             commit_result = await ledger.checkpoint_capture_ledger(
@@ -1808,6 +1893,7 @@ def install_model_checkpoint(
                 generation_cut_proof=generation_cut_proof,
                 continuation_roots=continuation_roots,
                 generation_cut_receipts=generation_cut_receipts,
+                generation_cut_indexes=tuple(body.generation_cut_indexes),
             )
 
         return await fence.run_operation(
