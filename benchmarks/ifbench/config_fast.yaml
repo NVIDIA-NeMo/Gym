@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- benchmarks/ifbench/config.yaml
+
+ifbench_benchmark_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: ifbench
+        type: benchmark
+        jsonl_fpath: benchmarks/ifbench/data/ifbench_benchmark.jsonl
+        prompt_config: benchmarks/ifbench/prompts/default.yaml
+        prepare_script: benchmarks/ifbench/prepare.py
+        num_repeats: 1

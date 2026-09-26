@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- benchmarks/terminal_bench_2_1/terminus_2_fast.yaml
+
+terminal_bench_2_1_terminus_2_sandboxed_agent:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      datasets:
+        - name: terminal_bench_2_1
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_2_1/data/smoke4_distinct.jsonl
+          prepare_script: benchmarks/terminal_bench_2_1/prepare.py
+          num_repeats: 1

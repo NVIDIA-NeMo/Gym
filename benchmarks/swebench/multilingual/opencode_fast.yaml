@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- benchmarks/swebench/multilingual/opencode.yaml
+
+swebench_multilingual_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      sandbox_timeout: 3600
+      datasets:
+        - name: swebench_multilingual
+          type: benchmark
+          jsonl_fpath: benchmarks/swebench/data/swebench_multilingual_benchmark.jsonl
+          prepare_script: benchmarks/swebench/multilingual/prepare.py
+          num_repeats: 1
