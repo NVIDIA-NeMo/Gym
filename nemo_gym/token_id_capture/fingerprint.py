@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 import orjson
@@ -50,6 +51,20 @@ FINGERPRINT_VERSION = 3
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
 _INSTRUCTION_ROLES = frozenset({"system", "developer"})
+
+# The reasoning parser serves reasoning inline as <think>...</think>, while Anthropic and Responses
+# clients echo it back as separate blocks. Hash only the visible answer so both shapes match.
+_LEADING_THINK = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
+_REASONING_BLOCK_TYPES = {"thinking", "redacted_thinking", "reasoning"}
+
+
+def _visible_text(text: str) -> str:
+    return _LEADING_THINK.sub("", text, count=1)
+
+
+def _call_id(value: Any) -> str:
+    # Some harnesses rewrite call ids to alphanumerics (chatcmpl-tool-1 -> chatcmpltool1).
+    return re.sub(r"[^A-Za-z0-9]", "", str(value or ""))
 
 
 def assistant_fingerprint(messages: list[dict]) -> str:
@@ -163,6 +178,7 @@ def _content_of(content: Any) -> list[tuple[str, str]]:
     if content is None:
         return []
     if isinstance(content, str):
+        content = _visible_text(content)
         return [("text", content)] if content else []
     if not isinstance(content, list):
         raise ValueError(f"unsupported message content: {type(content).__name__}")
@@ -175,7 +191,7 @@ def _content_of(content: Any) -> list[tuple[str, str]]:
         if not isinstance(block, dict):
             raise ValueError(f"unsupported content block: {type(block).__name__}")
         block_type = str(block.get("type") or "")
-        if block_type in {"tool_use", "tool_result"}:
+        if block_type in {"tool_use", "tool_result"} | _REASONING_BLOCK_TYPES:
             continue
         if isinstance(block.get("text"), str) and block_type in {
             "",
@@ -183,8 +199,9 @@ def _content_of(content: Any) -> list[tuple[str, str]]:
             "input_text",
             "output_text",
         }:
-            if block["text"]:
-                parts.append(("text", block["text"]))
+            text = _visible_text(block["text"])
+            if text:
+                parts.append(("text", text))
             continue
         if not block_type:
             raise ValueError("content block has no supported type")
@@ -209,7 +226,7 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
             name = f"{message['namespace']}__{name}"
         tools.append(
             (
-                str(message.get("call_id") or message.get("id") or ""),
+                _call_id(message.get("call_id") or message.get("id")),
                 name,
                 canonicalize_tool_arguments(message.get("arguments")),
             )
@@ -220,7 +237,7 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 tools.append(
                     (
-                        str(block.get("id") or ""),
+                        _call_id(block.get("id")),
                         str(block.get("name", "")),
                         canonicalize_tool_arguments(block.get("input")),
                     )
@@ -229,7 +246,7 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
         function = (call or {}).get("function") or {}
         tools.append(
             (
-                str((call or {}).get("id") or ""),
+                _call_id((call or {}).get("id")),
                 str(function.get("name", "")),
                 canonicalize_tool_arguments(function.get("arguments")),
             )
@@ -249,7 +266,7 @@ def _tool_results_of(message: dict) -> list[tuple[str, str]]:
         output = message.get("output")
         parts.append(
             (
-                str(message.get("call_id") or message.get("id") or ""),
+                _call_id(message.get("call_id") or message.get("id")),
                 output if isinstance(output, str) else _canonical_json(output),
             )
         )
@@ -257,7 +274,7 @@ def _tool_results_of(message: dict) -> list[tuple[str, str]]:
         content = message.get("content")
         parts.append(
             (
-                str(message.get("tool_call_id") or ""),
+                _call_id(message.get("tool_call_id")),
                 content if isinstance(content, str) else _canonical_json(content),
             )
         )
@@ -267,7 +284,7 @@ def _tool_results_of(message: dict) -> list[tuple[str, str]]:
             if isinstance(block, dict) and block.get("type") == "tool_result":
                 inner = block.get("content")
                 payload = inner if isinstance(inner, str) else _canonical_json(inner)
-                parts.append((str(block.get("tool_use_id") or block.get("id") or ""), payload))
+                parts.append((_call_id(block.get("tool_use_id") or block.get("id")), payload))
     return parts
 
 
