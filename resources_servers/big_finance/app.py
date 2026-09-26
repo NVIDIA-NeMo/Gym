@@ -88,7 +88,7 @@ class BigFinanceResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: Optional[ModelServerRef] = None
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
     judge_call_timeout_s: Optional[float] = 1800.0
-    reward_mode: Literal["final_answer", "rubric_points"] = "final_answer"
+    reward_mode: Literal["final_answer", "rubric_points", "passthrough"] = "final_answer"
 
 
 class RubricLine(BaseModel):
@@ -122,7 +122,7 @@ class RubricVerdict(BaseModel):
 class BigFinanceVerifyResponse(BaseVerifyResponse):
     final_answer: Optional[str] = None
     reference_answer: str = ""
-    final_answer_correct: bool = False
+    final_answer_correct: Optional[bool] = None
     rubric_verdicts: list[RubricVerdict] = Field(default_factory=list)
     rubric_points_earned: int = 0
     rubric_points_possible: int = 0
@@ -415,6 +415,13 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: BigFinanceVerifyRequest) -> BigFinanceVerifyResponse:
         answer = extract_final_answer(body.response)
+        if self.config.reward_mode == "passthrough":
+            return BigFinanceVerifyResponse(
+                **body.model_dump(),
+                reward=1.0,
+                final_answer=answer,
+            )
+
         possible = sum(line.points for line in body.rubric)
         try:
             grade, judge_text = await self._judge(body, answer)
@@ -455,6 +462,7 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 final_answer=answer,
+                final_answer_correct=False,
                 rubric_points_possible=possible,
                 rubric_lines_possible=len(body.rubric),
                 judge_error=error,
