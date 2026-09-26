@@ -65,6 +65,11 @@ class Terminated(Exception):
     """SIGTERM from the agent or the resources server: stop after saving, exit 0 with TimeExceeded."""
 
 
+class BudgetExhausted(Exception):
+    """The wall budget ran out while a model call was in flight: the runner ends with TimeExceeded, like the
+    server-side harness does when its timeout cancels a pending model call."""
+
+
 class ModelServerError(RuntimeError):
     pass
 
@@ -214,6 +219,7 @@ class Runner:
         while True:
             remaining = self.remaining()
             timeout = float(self.cfg.get("http_timeout_sec") or 3600)
+            budget_bound = remaining is not None and remaining < timeout
             if remaining is not None:
                 timeout = max(5.0, min(timeout, remaining))
             request_id = "%s-%d-%d" % (self.cfg.get("session_id", "runner"), self.n_calls, attempt)
@@ -244,7 +250,10 @@ class Runner:
                 # A reset after the request was accepted may leave a generation running upstream; the response is
                 # lost either way, so retry with a jittered backoff and a small cap rather than a tight loop.
                 self.http_errors.append({"request_id": request_id, "error": "%s: %s" % (type(exc).__name__, exc)})
-                if attempt < retries and (self.remaining() is None or self.remaining() > 30):
+                left = self.remaining()
+                if budget_bound and left is not None and left <= 5.0:
+                    raise BudgetExhausted()
+                if attempt < retries and (left is None or left > 30):
                     self._backoff(attempt)
                     attempt += 1
                     continue
@@ -316,6 +325,10 @@ class Runner:
         body["tools"] = [BASH_TOOL]
         try:
             response = self.post_responses(body)
+        except BudgetExhausted:
+            raise LimitsExceeded(
+                {"role": "exit", "content": "TimeExceeded", "extra": {"exit_status": "TimeExceeded", "submission": ""}}
+            )
         except ContextOverflow as exc:
             # An overfull transcript cannot be repaired by format-error retries; end normally so the caller grades.
             raise LimitsExceeded(

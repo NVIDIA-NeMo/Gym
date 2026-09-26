@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -310,6 +311,36 @@ def test_http_client_retries_then_maps_overflow_and_hard_errors(tmp_path):
             runner.post_responses(body)
         with pytest.raises(module.ModelServerError, match="HTTP 422"):
             runner.post_responses(body)
+    finally:
+        server.shutdown()
+
+
+def test_budget_expiring_during_a_model_call_is_time_exceeded(tmp_path):
+    module = load_runner()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            time.sleep(12)  # never answers within the runner's budget
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        runner = module.Runner(
+            config(tmp_path, model_url=f"http://127.0.0.1:{server.server_port}/v1", budget_sec=3, http_retries=3)
+        )
+        runner.grace = lambda: 0.0  # let the call go out with the remaining budget as its socket timeout
+        started = module.now()
+        info = runner.run()
+        assert info["exit_status"] == "TimeExceeded" and module.now() - started < 10
+        result = json.loads((tmp_path / "out/result.json").read_text())
+        assert result["finished"] is True and result["exit_status"] == "TimeExceeded" and result["n_calls"] == 1
+        assert len(result["http_errors"]) == 1 and "TimeoutError" in result["http_errors"][0]["error"]
+        assert result["model_call_attempts"] == []
     finally:
         server.shutdown()
 
