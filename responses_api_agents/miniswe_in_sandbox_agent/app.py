@@ -93,6 +93,19 @@ class MiniSWEInSandboxConfig(BaseResponsesAPIAgentConfig):
     instruction_suffix: str = ""
     remote_dir_prefix: str = "/tmp/ng-miniswe-"
     python_executable: str = "python3"
+    # Deep-merged into the seed's provider block for THIS agent's transport only: one long background exec per
+    # rollout polls far less often than the resources server's many short execs.
+    provider_overrides: dict = Field(
+        default_factory=lambda: {
+            "opensandbox": {
+                "operations": {
+                    "background_poll_initial_s": 5.0,
+                    "background_poll_interval_s": 30.0,
+                    "status_poll_timeout_s": 30.0,
+                }
+            }
+        }
+    )
 
     @field_validator("model_gateway_url")
     @classmethod
@@ -180,27 +193,66 @@ def runner_config(
     }
 
 
-def classify(result, runner_result: dict | None, log_tail: str) -> Termination:
-    """Map the single exec's outcome and the runner's records to a TB4 termination (server-harness parity)."""
-    if result is None or getattr(result, "error_type", None) == "timeout":
-        return Termination(reason="timeout", detail="Runner exec reached the agent budget")
-    if result.error_type:
-        return Termination(reason="infrastructure_error", detail=f"Sandbox execution failed: {result.error_type}")
-    if result.return_code != 0:
+SEMANTIC_EXITS = {
+    "Submitted",
+    "LimitsExceeded",
+    "TimeExceeded",
+    "ContextWindowExceeded",
+    "RepeatedFormatError",
+    "OutputTokenLimitExceeded",
+}
+
+
+def classify(
+    result,
+    runner_result: dict | None,
+    log_tail: str,
+    *,
+    elapsed: float | None = None,
+    budget: float | None = None,
+) -> Termination:
+    """Map the runner's records (primary) and the exec outcome (secondary) to a TB4 termination.
+
+    The OpenSandbox provider reports no timeout marker for a budget kill, so the runner's own ``result.json`` is
+    the source of truth: a terminal record carries mini-SWE's exit status; a non-terminal record means the runner
+    was stopped from outside — by the budget, or by something inside the sandbox.
+    """
+    return_code = getattr(result, "return_code", None)
+    finished = bool(runner_result and runner_result.get("finished"))
+    status = (runner_result or {}).get("exit_status") or ""
+    if finished:
+        if status == "Submitted":
+            return Termination(reason="completed", exit_code=0)
+        if status == "TimeExceeded":
+            return Termination(reason="timeout", exit_code=0, detail="TimeExceeded")
+        if status in SEMANTIC_EXITS:
+            return Termination(reason="nonzero_exit", exit_code=0, detail=status)
+        # A recorded Python exception (model server unreachable, template error, ...) is the harness failing.
+        return Termination(
+            reason="infrastructure_error", exit_code=return_code, detail=f"{status}: {log_tail[-1200:]}"
+        )
+    budget_hit = (
+        result is None
+        or getattr(result, "error_type", None) == "timeout"
+        or (elapsed is not None and budget is not None and elapsed >= budget - 30)
+    )
+    if runner_result is None:
+        if budget_hit:
+            return Termination(reason="timeout", detail="Agent budget reached before the runner wrote any record")
         return Termination(
             reason="infrastructure_error",
-            exit_code=result.return_code,
-            detail=f"Runner exited {result.return_code}: {log_tail[-1500:]}",
+            exit_code=return_code,
+            detail=f"Runner left no records (exec returned {return_code}): {log_tail[-1500:]}",
         )
-    status = (runner_result or {}).get("exit_status")
-    if runner_result is None:
-        return Termination(reason="infrastructure_error", exit_code=0, detail="Runner left no result.json")
-    if status == "Submitted":
-        return Termination(reason="completed", exit_code=0)
-    if status == "TimeExceeded":
-        # The runner stopped itself at its wall limit (or on SIGTERM): the budget was hit, as the server harness reports.
-        return Termination(reason="timeout", exit_code=0, detail="TimeExceeded")
-    return Termination(reason="nonzero_exit", exit_code=0, detail=status or "unknown exit status")
+    if budget_hit:
+        return Termination(reason="timeout", exit_code=return_code, detail="Runner exec reached the agent budget")
+    # Records exist but the loop never reached an exit and the exec ended early: the runner was killed inside
+    # the sandbox (a model command such as `kill -9 -1`, an OOM kill) — the agent's doing, so it is graded.
+    return Termination(
+        reason="nonzero_exit",
+        exit_code=return_code,
+        detail=f"RunnerKilled: exec returned {return_code} after {int(elapsed or 0)} s without an exit record",
+    )
 
 
 class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
@@ -344,7 +396,7 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
                     timings["agent_setup"] = {"started_at": now()}
                     budget = min(seed.agent_timeout_sec, self.config.agent_max_timeout_sec or float("inf"))
                     async with asyncio.timeout(self.config.setup_timeout_sec):
-                        provider = create_provider(resolve_provider_config(seed.sandbox_provider))
+                        provider = create_provider(resolve_provider_config(self._provider_config(seed)))
                         sandbox = await AsyncSandbox.connect(seed.sandbox_descriptor, provider=provider)
                         remote_dir, workdir = await self._stage(
                             sandbox, seed, params, rollout_id, capture_model_calls, budget
@@ -354,6 +406,7 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
                     timings["agent_execution"] = {"started_at": now()}
                     agent_started = True
                     result = None
+                    exec_started = monotonic()
                     try:
                         async with asyncio.timeout(budget + 120):
                             result = await sandbox.exec(
@@ -364,13 +417,10 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
                             )
                     except TimeoutError:
                         result = None
+                    elapsed = monotonic() - exec_started
                     timings["agent_execution"]["finished_at"] = now()
-                    if result is None or getattr(result, "error_type", None) == "timeout":
-                        # The runner lives in its own session and survives the exec kill: stop it (it saves a
-                        # TimeExceeded exit on SIGTERM) before the records are downloaded.
-                        await self._stop_runner(sandbox, seed, workdir)
                     response, termination, extra = await self._collect(
-                        sandbox, remote_dir, directory, params, result, extra
+                        sandbox, seed, remote_dir, workdir, directory, params, result, extra, elapsed, budget
                     )
             except asyncio.CancelledError:
                 termination = Termination(reason="cancelled")
@@ -397,6 +447,22 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
             agent_timings=timings,
             harness_metadata=extra,
         )
+
+    def _provider_config(self, seed: SeedSessionResponse) -> dict:
+        def merge(base, override):
+            merged = dict(base)
+            for key, value in override.items():
+                if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                    merged[key] = merge(merged[key], value)
+                else:
+                    merged[key] = value
+            return merged
+
+        config = json.loads(json.dumps(seed.sandbox_provider))
+        for provider, override in self.config.provider_overrides.items():
+            if provider in config and isinstance(config[provider], dict):
+                config[provider] = merge(config[provider], override)
+        return config
 
     async def _stop_runner(self, sandbox: AsyncSandbox, seed: SeedSessionResponse, workdir: str) -> None:
         pids = quote(f"/tmp/{seed.session_id}.pids")
@@ -494,8 +560,7 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
         params.input = [NeMoGymEasyInputMessage(role="user", content=task)]
         return remote_dir, workdir
 
-    async def _collect(self, sandbox, remote_dir: str, directory: Path, params, result, extra: dict):
-        directory.mkdir(parents=True, exist_ok=True)
+    async def _download_records(self, sandbox, remote_dir: str, directory: Path) -> tuple[dict, dict | None, str]:
         records: dict = {}
         for name in RUNNER_FILES:
             try:
@@ -512,6 +577,29 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
                 runner_result = json.loads((directory / "result.json").read_text())
             except ValueError:
                 runner_result = None
+        return records, runner_result, log_tail
+
+    async def _collect(
+        self,
+        sandbox,
+        seed,
+        remote_dir: str,
+        workdir: str,
+        directory: Path,
+        params,
+        result,
+        extra: dict,
+        elapsed,
+        budget,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+        records, runner_result, log_tail = await self._download_records(sandbox, remote_dir, directory)
+        if not (runner_result and runner_result.get("finished")):
+            # The runner lives in its own session and survives the exec kill (budget or otherwise): stop it — it
+            # saves a TimeExceeded exit on SIGTERM — then take the records again.
+            await self._stop_runner(sandbox, seed, workdir)
+            await asyncio.sleep(2)
+            records, runner_result, log_tail = await self._download_records(sandbox, remote_dir, directory)
         response = empty_response(params, self.config.model_server.name)
         if (directory / "output_items.json").is_file():
             try:
@@ -536,7 +624,7 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
                 )
             except Exception as exc:
                 records["output_items.json"] = f"invalid: {type(exc).__name__}: {exc}"
-        termination = classify(result, runner_result, log_tail)
+        termination = classify(result, runner_result, log_tail, elapsed=elapsed, budget=budget)
         trajectory = None
         if (directory / "trajectory.json").is_file():
             try:
