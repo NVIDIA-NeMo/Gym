@@ -152,6 +152,12 @@ async def test_execute_stages_runs_as_the_task_user_and_builds_the_response(tmp_
     params = app_module.NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=65536)
     result = await agent.execute(seed(), params, rollout_id="r1", capture_model_calls=False)
     assert result.agent_started and result.termination.reason == "completed"
+    # The verify body carries the prompt the runner used (server-harness parity), not the row's empty input.
+    assert result.responses_create_params.input[0].role == "user"
+    assert result.responses_create_params.input[0].content.startswith("Do the task.")
+    assert result.harness_metadata["staging"]["bootstrap_uid"] == "0"
+    assert result.harness_metadata["staging"]["staged_owner"] == "cam"
+    assert result.harness_metadata["consistency"]["outputs_match_calls"] is True
     # Staging: readable dir, three uploads, chown to the task user because the default identity is root.
     commands = [c for c, _ in sandbox.calls]
     assert any(c.startswith("mkdir -p /tmp/ng-miniswe-tb4-abc") for c in commands)
@@ -217,6 +223,12 @@ async def test_capture_prefix_and_no_chown_for_root_agent(tmp_path, monkeypatch)
             "Runner exited 1",
         ),
         (SimpleNamespace(return_code=137, stdout="", stderr="", error_type="timeout"), "", "timeout", "budget"),
+        (
+            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+            "TimeExceeded",
+            "timeout",
+            "TimeExceeded",
+        ),
     ],
 )
 async def test_termination_mapping(tmp_path, monkeypatch, exec_result, exit_status, reason, detail_part):
@@ -231,6 +243,11 @@ async def test_termination_mapping(tmp_path, monkeypatch, exec_result, exit_stat
     )
     # Whatever the termination, the partial trajectory still yields the response items collected so far.
     assert len(result.response.output) == 3
+    stops = [c for c, k in sandbox.calls if "kill -TERM" in c]
+    if exec_result.error_type == "timeout":
+        assert stops and all(k["user"] == "cam" for c, k in sandbox.calls if "kill -TERM" in c)
+    else:
+        assert not stops
 
 
 async def test_exec_wall_timeout_is_a_timeout_with_partial_records(tmp_path, monkeypatch):
@@ -264,7 +281,7 @@ async def test_preflight_and_mcp_failures_are_unstarted_infrastructure_errors(tm
     params = app_module.NeMoGymResponseCreateParamsNonStreaming(input=[])
     result = await agent.execute(seed(), params, rollout_id="r", capture_model_calls=False)
     assert not result.agent_started and result.termination.reason == "infrastructure_error"
-    assert "Python >= 3.8" in result.termination.detail and not sandbox.uploads
+    assert "Python >= 3.9" in result.termination.detail and not sandbox.uploads
     sandbox = FakeSandbox()
     agent, _ = make_agent(tmp_path, monkeypatch, sandbox)
     result = await agent.execute(seed(mcp_servers=[{"name": "x"}]), params, rollout_id="r", capture_model_calls=False)
@@ -276,6 +293,7 @@ def test_classify_and_config_validation(tmp_path):
     assert classify(None, None, "").reason == "timeout"
     assert classify(ok, None, "").reason == "infrastructure_error"
     assert classify(ok, {"exit_status": "Submitted"}, "").reason == "completed"
+    assert classify(ok, {"exit_status": "TimeExceeded"}, "").reason == "timeout"
     assert classify(ok, {"exit_status": "RepeatedFormatError"}, "") == Termination(
         reason="nonzero_exit", exit_code=0, detail="RepeatedFormatError"
     )

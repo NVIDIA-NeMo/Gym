@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, TypeAdapter, field_validator
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
@@ -196,6 +197,9 @@ def classify(result, runner_result: dict | None, log_tail: str) -> Termination:
         return Termination(reason="infrastructure_error", exit_code=0, detail="Runner left no result.json")
     if status == "Submitted":
         return Termination(reason="completed", exit_code=0)
+    if status == "TimeExceeded":
+        # The runner stopped itself at its wall limit (or on SIGTERM): the budget was hit, as the server harness reports.
+        return Termination(reason="timeout", exit_code=0, detail="TimeExceeded")
     return Termination(reason="nonzero_exit", exit_code=0, detail=status or "unknown exit status")
 
 
@@ -346,6 +350,7 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
                             sandbox, seed, params, rollout_id, capture_model_calls, budget
                         )
                     timings["agent_setup"]["finished_at"] = now()
+                    extra["staging"] = getattr(self, "_staging_summary", None)
                     timings["agent_execution"] = {"started_at": now()}
                     agent_started = True
                     result = None
@@ -360,6 +365,10 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
                     except TimeoutError:
                         result = None
                     timings["agent_execution"]["finished_at"] = now()
+                    if result is None or getattr(result, "error_type", None) == "timeout":
+                        # The runner lives in its own session and survives the exec kill: stop it (it saves a
+                        # TimeExceeded exit on SIGTERM) before the records are downloaded.
+                        await self._stop_runner(sandbox, seed, workdir)
                     response, termination, extra = await self._collect(
                         sandbox, remote_dir, directory, params, result, extra
                     )
@@ -389,6 +398,17 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
             harness_metadata=extra,
         )
 
+    async def _stop_runner(self, sandbox: AsyncSandbox, seed: SeedSessionResponse, workdir: str) -> None:
+        pids = quote(f"/tmp/{seed.session_id}.pids")
+        script = (
+            f'if [ -f {pids} ]; then for p in $(cat {pids}); do kill -TERM -- -"$p" 2>/dev/null || true; done; '
+            f'sleep 3; for p in $(cat {pids}); do kill -KILL -- -"$p" 2>/dev/null || true; done; fi'
+        )
+        try:
+            await sandbox.exec(script, user=seed.user, cwd=workdir, timeout_s=30)
+        except Exception as exc:
+            LOGGER.warning("Could not stop the runner after the exec timeout: %s", exc)
+
     def _exec_command(self, seed: SeedSessionResponse, remote_dir: str) -> str:
         python = quote(self.config.python_executable)
         inner = (
@@ -416,14 +436,14 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
         python = quote(self.config.python_executable)
         preflight = await sandbox.exec(
             f"command -v setsid && command -v {python} && {python} -c "
-            + quote("import sys; assert sys.version_info >= (3, 8), sys.version; print(sys.version.split()[0])"),
+            + quote("import sys; assert sys.version_info >= (3, 9), sys.version; print(sys.version.split()[0])"),
             user=seed.user,
             cwd=workdir,
             timeout_s=60,
         )
         if preflight.return_code:
             raise RuntimeError(
-                f"Sandbox lacks setsid or a Python >= 3.8 for the runner: {(preflight.stderr or preflight.stdout or '')[-500:]}"
+                f"Sandbox lacks setsid or a Python >= 3.9 for the runner: {(preflight.stderr or preflight.stdout or '')[-500:]}"
             )
         remote_dir = f"{self.config.remote_dir_prefix}{seed.session_id}"
         default_uid = await sandbox.exec("id -u", timeout_s=30)
@@ -456,10 +476,22 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
         await sandbox.upload(RUNNER_SCRIPT, remote_dir + "/miniswe_runner.py")
         await sandbox.upload(self._vendor_zip, remote_dir + "/vendor.zip")
         await sandbox.upload(staging / "config.json", remote_dir + "/config.json")
+        staged_owner = None
         if seed.user not in (None, "root", 0) and (default_uid.stdout or "").strip() == "0":
             owned = await sandbox.exec(f"chown -R {quote(str(seed.user))} {quote(remote_dir)}", timeout_s=30)
             if owned.return_code:
                 raise RuntimeError(f"Could not hand the runner directory to {seed.user!r}: {owned.stderr}")
+            staged_owner = seed.user
+        self._staging_summary = {
+            "bootstrap_uid": (default_uid.stdout or "").strip(),
+            "staged_owner": staged_owner,
+            "sandbox_python": ((preflight.stdout or "").strip().splitlines() or [None])[-1],
+            "remote_dir": remote_dir,
+            "workdir": workdir,
+            "task_chars": len(task),
+        }
+        # The verify body carries the prompt the runner actually used, as the server-side harness does.
+        params.input = [NeMoGymEasyInputMessage(role="user", content=task)]
         return remote_dir, workdir
 
     async def _collect(self, sandbox, remote_dir: str, directory: Path, params, result, extra: dict):
@@ -511,9 +543,24 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
                 trajectory = json.loads((directory / "trajectory.json").read_text())
             except ValueError:
                 trajectory = None
+        consistency = {}
+        if (directory / "output_items.json").is_file() and runner_result is not None:
+            try:
+                raw_items = json.loads((directory / "output_items.json").read_text())
+                calls = [i["call_id"] for i in raw_items if i.get("type") == "function_call"]
+                outputs = [i["call_id"] for i in raw_items if i.get("type") == "function_call_output"]
+                consistency = {
+                    "outputs_match_calls": set(outputs) <= set(calls),
+                    "function_calls": len(calls),
+                    "function_call_outputs": len(outputs),
+                    "n_calls": runner_result.get("n_calls"),
+                }
+            except Exception as exc:
+                consistency = {"error": f"{type(exc).__name__}: {exc}"}
         extra = dict(extra)
         extra.update(
             {
+                "consistency": consistency,
                 "mini_swe_trajectory": trajectory,
                 "runner_result": runner_result,
                 "runner_exit_code": getattr(result, "return_code", None),

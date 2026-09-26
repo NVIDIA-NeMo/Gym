@@ -26,6 +26,7 @@ def load_runner():
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    module.Runner._backoff = staticmethod(lambda attempt: None)  # keep retry tests fast
     return module
 
 
@@ -303,6 +304,7 @@ def test_http_client_retries_then_maps_overflow_and_hard_errors(tmp_path):
         body = {"input": [{"role": "system", "content": "s"}], "tools": []}
         first = runner.post_responses(body)
         assert first["output"][1]["call_id"] == "h1" and calls[0][0] == "/v1/responses" and calls[0][1] == "tb4-test"
+        assert runner.model_call_attempts[0]["request_id"].startswith("tb4-test-0-")
         assert len(calls) == 2 and runner.http_errors[0]["status"] == 503
         with pytest.raises(module.ContextOverflow):
             runner.post_responses(body)
@@ -310,6 +312,54 @@ def test_http_client_retries_then_maps_overflow_and_hard_errors(tmp_path):
             runner.post_responses(body)
     finally:
         server.shutdown()
+
+
+def test_escaped_descendant_holding_output_cannot_hang_a_step(tmp_path):
+    module = load_runner()
+    runner = module.Runner(config(tmp_path, step_timeout_sec=20))
+    # A daemonized grandchild keeps running; upstream's pipe drain would block until it exits.
+    runner.post_responses = scripted(
+        runner,
+        [
+            call("setsid sleep 30 > /dev/null 2>&1 & echo started", "d1"),
+            call("echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT", "d2"),
+        ],
+    )
+    started = module.now()
+    assert runner.run()["exit_status"] == "Submitted"
+    assert module.now() - started < 10
+    observation = json.loads(json.loads((tmp_path / "out/trajectory.json").read_text())["messages"][3]["content"])
+    assert observation["returncode"] == 0 and observation["output"] == "started\n"
+    assert not list((tmp_path / "out").glob("step-*.out"))
+
+
+def test_sigterm_saves_a_time_exceeded_exit(tmp_path):
+    import os
+    import signal
+
+    module = load_runner()
+    runner = module.Runner(config(tmp_path))
+
+    def slow_post(body):
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise AssertionError("SIGTERM must interrupt the model call")
+
+    runner.post_responses = slow_post
+    try:
+        info = runner.run()
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    assert info["exit_status"] == "TimeExceeded" and info["signal"] == "SIGTERM"
+    result = json.loads((tmp_path / "out/result.json").read_text())
+    assert result["terminated"] is True and result["finished"] is True
+
+
+def test_grace_prevents_a_model_call_that_cannot_finish(tmp_path):
+    module = load_runner()
+    runner = module.Runner(config(tmp_path, budget_sec=100))
+    runner.max_model_latency = 200.0  # observed slow calls -> grace 300 s > remaining
+    runner.post_responses = scripted(runner, [])
+    assert runner.run()["exit_status"] == "TimeExceeded"
 
 
 def test_vendor_zip_provides_pure_python_jinja_on_any_interpreter(tmp_path):

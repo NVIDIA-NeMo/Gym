@@ -19,7 +19,7 @@ unstarted infrastructure error (not graded); a started runner is graded even aft
 Per rollout the server:
 
 1. connects to the seeded sandbox and, as `agent.user`, checks `pwd`, `setsid` and a
-   Python ≥ 3.8 (`python_executable`);
+   Python ≥ 3.9 (`python_executable`);
 2. stages `/tmp/ng-miniswe-<session>/{miniswe_runner.py, vendor.zip, config.json}` and hands
    the directory to the task user when the sandbox default identity is root;
 3. runs ONE exec as `agent.user` in the task workdir:
@@ -29,7 +29,7 @@ Per rollout the server:
    and builds the Gym response (native Responses items: assistant messages, `function_call`,
    `function_call_output`; usage summed when every call reported it).
 
-`runner/miniswe_runner.py` is standard-library Python 3.8+ plus a vendored pure-Python Jinja2 and
+`runner/miniswe_runner.py` is standard-library Python 3.9+ (the vendored MarkupSafe 3.0 needs 3.9) plus a vendored pure-Python Jinja2 and
 MarkupSafe (built from this venv at startup, C speedups excluded). It re-implements
 mini-swe-agent **2.4.6** `DefaultAgent` / `LocalEnvironment` / `actions_toolcall` semantics with
 the pinned `mini.yaml` templates (`runner/mini_2_4_6.yaml`, copied verbatim): native `bash` tool
@@ -42,9 +42,13 @@ process group in `/tmp/<session>.pids`, which the resources server's quiesce ste
 collection. Records are rewritten after every step, so a runner killed by the budget still leaves
 a trajectory. Trajectory format: `mini-swe-agent-1.1`.
 
-Termination mapping (same as the server-side harness): exec timeout → `timeout`; runner exit ≠ 0
-→ `infrastructure_error` (log tail in the detail); `Submitted` → `completed`; any other exit
-status → `nonzero_exit` with the status as detail.
+Termination mapping (same as the server-side harness): exec timeout or the runner's own
+`TimeExceeded` → `timeout`; runner exit ≠ 0 → `infrastructure_error` (log tail in the detail);
+`Submitted` → `completed`; any other exit status → `nonzero_exit` with the status as detail. On an
+exec timeout the agent first SIGTERMs the runner's process groups (the runner saves a `TimeExceeded`
+exit) and only then downloads the records. A command that hits the per-step timeout is observed as
+`returncode -1` with `exception_info "Command timed out after N seconds."` (mini-swe's
+LocalEnvironment mechanics; the wording follows the Gym harness, not upstream's exception text).
 
 ## Model access
 
@@ -65,7 +69,15 @@ cleanly with a saved trajectory), `instruction_suffix` (appended to the task ins
 `python_executable`, `remote_dir_prefix`, `artifacts_dir`. Benchmark profile:
 `benchmarks/terminal_bench_4/miniswe_in_sandbox.yaml` (`++tb4_model_gateway_url=…`).
 
+## Trust boundary
+
+The runner and the model's commands share one uid, so the records it leaves (and therefore the response the
+verifier and training see) are writable by the policy — the same boundary the OpenCode paradigm has. The agent
+records cheap consistency checks (`harness_metadata.consistency`: every `function_call_output` matches a
+`function_call`) and the staging identity (`harness_metadata.staging`); the server-side harness kept these in host
+memory instead. Do not run the runner as root to "fix" this: the resources server's quiesce runs as `agent.user`.
+
 ## Not supported (yet)
 
 Task MCP servers (`mcp_servers` in the seed → unstarted infrastructure error); images without
-`python3` ≥ 3.8 or `setsid`; multimodal tool output; the `mode: confirm` interactive path.
+`python3` ≥ 3.9 or `setsid`; multimodal tool output; the `mode: confirm` interactive path.

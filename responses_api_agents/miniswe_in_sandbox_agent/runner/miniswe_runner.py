@@ -3,17 +3,19 @@
 """mini-SWE loop that runs INSIDE the task sandbox and calls the Gym model server directly.
 
 Uploaded per session by ``miniswe_in_sandbox_agent``; runs as the task's agent identity with only the Python
-standard library (3.8+) plus a vendored pure-Python Jinja2 (``vendor.zip``) so the pinned mini-swe-agent 2.4.6
+standard library (3.9+) plus a vendored pure-Python Jinja2 (``vendor.zip``) so the pinned mini-swe-agent 2.4.6
 ``mini.yaml`` templates render byte-identically. It re-implements ``DefaultAgent``/``LocalEnvironment``/
 ``actions_toolcall`` semantics and the wire behaviour of Gym's server-side ``MiniSWEHarness`` (native Responses
 tool calls against ``/v1/responses``), and leaves the same records the agent server turns into a Gym response:
-``trajectory.json`` (mini-swe-agent-1.1), ``output_items.json``, ``usages.json``, ``result.json``.
+``trajectory.json`` (mini-swe-agent-1.1), ``output_items.json``, ``usages.json``, ``result.json`` — each rewritten
+atomically after every step, so a runner stopped by the budget still leaves a consistent trajectory.
 """
 
 import argparse
 import json
 import os
 import platform
+import random
 import signal
 import subprocess
 import sys
@@ -37,6 +39,8 @@ BASH_TOOL = {
 CONTEXT_OVERFLOW_MARKERS = ("context_length_exceeded", "context length", "maximum model length")
 RETRY_STATUSES = (408, 425, 429, 500, 502, 503, 504)
 SUBMIT_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+# Raw command output kept in the trajectory (head + tail); the model-facing observation elides at 10,000 chars anyway.
+RAW_OUTPUT_CAP = 1024 * 1024
 
 
 class InterruptAgentFlow(Exception):
@@ -57,8 +61,18 @@ class FormatError(InterruptAgentFlow):
     pass
 
 
+class Terminated(Exception):
+    """SIGTERM from the agent or the resources server: stop after saving, exit 0 with TimeExceeded."""
+
+
 class ModelServerError(RuntimeError):
     pass
+
+
+class ContextOverflow(Exception):
+    def __init__(self, detail):
+        self.detail = detail
+        super().__init__(detail)
 
 
 def now():
@@ -96,10 +110,15 @@ def is_context_overflow(status, detail):
     )
 
 
-class ContextOverflow(Exception):
-    def __init__(self, detail):
-        self.detail = detail
-        super().__init__(detail)
+def capped(data):
+    """Keep the head and tail of oversized command output; report how much was dropped."""
+    if len(data) <= RAW_OUTPUT_CAP:
+        return data.decode("utf-8", errors="replace"), 0
+    half = RAW_OUTPUT_CAP // 2
+    return (
+        data[:half].decode("utf-8", errors="replace") + data[-half:].decode("utf-8", errors="replace"),
+        len(data) - RAW_OUTPUT_CAP,
+    )
 
 
 class Runner:
@@ -119,9 +138,30 @@ class Runner:
         self.env = dict(os.environ)
         self.env.update({k: str(v) for k, v in (config.get("env") or {}).items()})
         self.workdir = config.get("workdir") or os.getcwd()
-        self.uname = platform.uname()._asdict()
+        # The server-side harness exposes exactly these four uname fields to the templates (never os.environ).
+        uname = platform.uname()
+        self.uname = {
+            "system": uname.system,
+            "release": uname.release,
+            "version": uname.version,
+            "machine": uname.machine,
+        }
         self.http_errors = []
+        self.model_call_attempts = []
+        self.max_model_latency = 0.0
+        self.terminated = False
+        self.current_pgid = None
         os.makedirs(self.output_dir, exist_ok=True)
+        signal.signal(signal.SIGTERM, self._on_sigterm)
+
+    def _on_sigterm(self, signum, frame):
+        self.terminated = True
+        if self.current_pgid:
+            try:
+                os.killpg(self.current_pgid, signal.SIGKILL)
+            except OSError:
+                pass
+        raise Terminated()
 
     # --- templates -------------------------------------------------------------------------------------------------
 
@@ -158,12 +198,17 @@ class Runner:
             return None
         return max(0.0, budget - (now() - self.started))
 
+    def grace(self):
+        """Do not start a model call that is unlikely to finish before the runner's own wall limit."""
+        return max(30.0, min(600.0, 1.5 * self.max_model_latency))
+
     def post_responses(self, body):
         url = self.cfg["model_url"].rstrip("/") + "/responses"
-        headers = {"Content-Type": "application/json"}
-        headers.update(self.cfg.get("headers") or {})
+        base_headers = {"Content-Type": "application/json"}
+        base_headers.update(self.cfg.get("headers") or {})
         data = json.dumps(body).encode("utf-8")
         retries = int(self.cfg.get("http_retries", 3))
+        # Never pick up http(s)_proxy from the task image: the egress policy allows the gateway only.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         attempt = 0
         while True:
@@ -171,27 +216,43 @@ class Runner:
             timeout = float(self.cfg.get("http_timeout_sec") or 3600)
             if remaining is not None:
                 timeout = max(5.0, min(timeout, remaining))
+            request_id = "%s-%d-%d" % (self.cfg.get("session_id", "runner"), self.n_calls, attempt)
+            headers = dict(base_headers)
+            headers["x-request-id"] = request_id
             request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            started = now()
             try:
                 with opener.open(request, timeout=timeout) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                    payload = json.loads(response.read().decode("utf-8"))
+                latency = now() - started
+                self.max_model_latency = max(self.max_model_latency, latency)
+                self.model_call_attempts.append({"request_id": request_id, "latency_sec": round(latency, 3)})
+                return payload
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")
                 if is_context_overflow(exc.code, detail):
                     raise ContextOverflow(detail)
-                self.http_errors.append({"status": exc.code, "detail": detail[:500], "attempt": attempt})
+                self.http_errors.append({"request_id": request_id, "status": exc.code, "detail": detail[:500]})
                 if exc.code in RETRY_STATUSES and attempt < retries:
-                    time.sleep(min(60, 2**attempt * 5))
+                    self._backoff(attempt)
                     attempt += 1
                     continue
                 raise ModelServerError("model server HTTP %s: %s" % (exc.code, detail[:2000]))
+            except Terminated:
+                raise
             except (urllib.error.URLError, OSError, ValueError) as exc:
-                self.http_errors.append({"error": "%s: %s" % (type(exc).__name__, exc), "attempt": attempt})
-                if attempt < retries and (self.remaining() is None or self.remaining() > 10):
-                    time.sleep(min(60, 2**attempt * 5))
+                # A reset after the request was accepted may leave a generation running upstream; the response is
+                # lost either way, so retry with a jittered backoff and a small cap rather than a tight loop.
+                self.http_errors.append({"request_id": request_id, "error": "%s: %s" % (type(exc).__name__, exc)})
+                if attempt < retries and (self.remaining() is None or self.remaining() > 30):
+                    self._backoff(attempt)
                     attempt += 1
                     continue
                 raise ModelServerError("model server unreachable: %s: %s" % (type(exc).__name__, exc))
+
+    @staticmethod
+    def _backoff(attempt):
+        time.sleep(min(90.0, random.uniform(5.0, 15.0) * (attempt + 1)))
 
     def parse_actions(self, calls, finish_reason):
         template = self.templates["format_error_template"]
@@ -245,7 +306,7 @@ class Runner:
                 }
             )
         remaining = self.remaining()
-        if remaining is not None and remaining <= 0:
+        if remaining is not None and remaining <= self.grace():
             raise LimitsExceeded(
                 {"role": "exit", "content": "TimeExceeded", "extra": {"exit_status": "TimeExceeded", "submission": ""}}
             )
@@ -306,33 +367,61 @@ class Runner:
             pass
 
     def execute(self, action):
+        """Run one bash command in its own session with output captured to a file (no pipe to deadlock on)."""
         step_timeout = int(self.cfg.get("step_timeout_sec") or 30)
         remaining = self.remaining()
         timeout = step_timeout if remaining is None else max(1, int(min(step_timeout, remaining)))
-        process = subprocess.Popen(
-            ["bash", "-c", action["command"]],
-            cwd=self.workdir,
-            env=self.env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        self.register_pgid(process.pid)
-        exception_info = None
-        try:
-            stdout, _ = process.communicate(timeout=timeout)
-            returncode = process.returncode
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except OSError:
-                process.kill()
-            stdout, _ = process.communicate()
-            returncode = -1
-            exception_info = "Command timed out after %d seconds." % timeout
         self.steps += 1
-        output = (stdout or b"").decode("utf-8", errors="replace")
-        return {"output": output, "returncode": returncode, "exception_info": exception_info}
+        capture = os.path.join(self.output_dir, "step-%d.out" % self.steps)
+        exception_info = None
+        extra = {}
+        try:
+            with open(capture, "wb") as sink:
+                process = subprocess.Popen(
+                    ["bash", "-c", action["command"]],
+                    cwd=self.workdir,
+                    env=self.env,
+                    stdout=sink,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                self.current_pgid = process.pid
+                self.register_pgid(process.pid)
+                try:
+                    returncode = process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except OSError:
+                        process.kill()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    returncode = -1
+                    exception_info = "Command timed out after %d seconds." % timeout
+                finally:
+                    self.current_pgid = None
+            with open(capture, "rb") as source:
+                output, dropped = capped(source.read())
+            if dropped:
+                extra["truncated_bytes"] = dropped
+        except Terminated:
+            raise
+        except Exception as exc:  # noqa: BLE001 - upstream LocalEnvironment returns the failure as an observation
+            output, returncode = "", -1
+            exception_info = "An error occurred while executing the command: %s" % exc
+            extra = {"exception_type": type(exc).__name__, "exception": str(exc)}
+        finally:
+            try:
+                os.remove(capture)
+            except OSError:
+                pass
+        outcome = {"output": output, "returncode": returncode, "exception_info": exception_info}
+        if extra:
+            outcome["extra"] = extra
+        return outcome
 
     def observation_message(self, action, outcome):
         content = self.render(self.templates["observation_template"], output=outcome, **self.template_vars())
@@ -347,6 +436,7 @@ class Runner:
                 "exception_info": outcome.get("exception_info"),
             },
         }
+        message["extra"].update(outcome.get("extra") or {})
         # The Gym harness records every executed action's output item, even when a later action submits.
         self.output_items.append(
             {"type": "function_call_output", "call_id": action["tool_call_id"], "output": content}
@@ -407,6 +497,14 @@ class Runner:
                     self.messages.extend(exc.messages)
             except InterruptAgentFlow as exc:
                 self.messages.extend(exc.messages)
+            except Terminated:
+                self.messages.append(
+                    {
+                        "role": "exit",
+                        "content": "TimeExceeded",
+                        "extra": {"exit_status": "TimeExceeded", "submission": "", "signal": "SIGTERM"},
+                    }
+                )
             except Exception as exc:  # noqa: BLE001 - recorded, then re-raised for a non-zero exit
                 self.messages.append(
                     {
@@ -435,7 +533,11 @@ class Runner:
         extra = last.get("extra", {})
         return {
             "info": {
-                "model_stats": {"instance_cost": 0.0, "api_calls": self.n_calls},
+                "model_stats": {
+                    "instance_cost": 0.0,
+                    "api_calls": self.n_calls,
+                    "model_call_attempts": len(self.model_call_attempts) + len(self.http_errors),
+                },
                 "config": {
                     "agent": {
                         "system_template": self.templates["system_template"],
@@ -446,17 +548,18 @@ class Runner:
                         "max_consecutive_format_errors": self.cfg.get("max_consecutive_format_errors", 3),
                         "output_path": os.path.join(self.output_dir, "trajectory.json"),
                     },
-                    "agent_type": "nemo_gym.miniswe_in_sandbox_agent.Runner",
+                    "agent_type": "minisweagent.agents.default.DefaultAgent",
                     "environment": {
                         "cwd": self.workdir,
                         "env": self.cfg.get("env") or {},
                         "timeout": int(self.cfg.get("step_timeout_sec") or 30),
                     },
-                    "environment_type": "nemo_gym.miniswe_in_sandbox_agent.InSandboxBash",
+                    "environment_type": "minisweagent.environments.local.LocalEnvironment",
                 },
                 "mini_version": self.cfg.get("mini_version", "2.4.6"),
+                "runner": {"name": "nemo-gym-miniswe-in-sandbox", "version": 1},
                 "model_transport": "nemo_gym_responses",
-                "environment_type": "gym_sandbox_in_process",
+                "environment_type": "gym_sandbox",
                 "exit_status": extra.get("exit_status", ""),
                 "submission": extra.get("submission", ""),
             },
@@ -477,7 +580,11 @@ class Runner:
             "gid": os.getgid(),
             "cwd": self.workdir,
             "python": sys.version.split()[0],
+            "proxy_env": sorted(k for k in os.environ if k.lower().endswith("_proxy")),
             "http_errors": self.http_errors[-20:],
+            "model_call_attempts": self.model_call_attempts[-50:],
+            "max_model_latency_sec": round(self.max_model_latency, 3),
+            "terminated": self.terminated,
             "finished": bool(self.messages) and self.messages[-1].get("role") == "exit",
         }
 
