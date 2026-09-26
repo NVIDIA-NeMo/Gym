@@ -37,11 +37,12 @@ import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, ClassVar, Iterable, Mapping, Optional
+from typing import Any, Awaitable, Callable, ClassVar, Iterable, Mapping, Optional
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
+from aiohttp import ClientError
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
@@ -55,6 +56,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    PermanentEndpointError,
 )
 from nemo_gym.responses_streaming import (
     NamespaceMap,
@@ -114,11 +116,44 @@ class ModelServerSSEHeartbeatConfig(BaseModel):
         default=20.0,
         description="Seconds between SSE comment heartbeats while a committed streaming model call is running.",
     )
+    # Once the stream is committed a failure can no longer reach the client as an HTTP 5xx, which
+    # harnesses such as OpenCode retry; a terminal SSE error ends the whole agent session instead.
+    # So retryable failures after the commit are retried here, the way the client would have.
+    model_server_sse_heartbeat_max_retries: int = Field(
+        default=5,
+        description="Server-side retries for a retryable model call failure after its SSE stream was committed.",
+    )
+    model_server_sse_heartbeat_retry_backoff_seconds: float = Field(
+        default=2.0,
+        description="Initial backoff before such a retry; doubles per attempt, capped at 30 seconds.",
+    )
+
+
+_SSE_RETRY_BACKOFF_CAP_S = 30.0
+
+
+def _retryable_after_commit(exc: BaseException) -> bool:
+    """Whether a client would have retried this failure had it arrived as an HTTP error."""
+    if isinstance(exc, PermanentEndpointError):
+        return False
+    status = getattr(exc, "status", None)
+    if not isinstance(status, int):
+        status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status >= 500 or status in (408, 429)
+    return isinstance(exc, (ClientError, asyncio.TimeoutError, ConnectionError))
 
 
 def _chat_stream_error_events(exc: BaseException) -> Iterable[str]:
     payload = {"error": {"message": str(exc) or type(exc).__name__, "type": "server_error", "code": 500}}
     yield f"data: {json.dumps(payload)}\n\n"
+
+
+def _responses_failure_response(exc: BaseException) -> StreamingResponse:
+    # The streaming contract is already the response's shape, so a backend failure must be a
+    # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
+    logger.error("responses() failed while serving a streaming /v1/responses request", exc_info=exc)
+    return StreamingResponse(synthesize_responses_failure_sse(str(exc)), media_type="text/event-stream")
 
 
 # Stateless; shared by every model server's default /v1/messages handler.
@@ -228,34 +263,79 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await self._finalize_served_response(response)
         return StreamingResponse(iter(events), media_type="text/event-stream")
 
-    async def _stream_with_heartbeat(self, work, on_error) -> Any:
-        """Serve ``work`` (a coroutine returning the SSE response), heartbeating while it runs.
+    async def _stream_with_heartbeat(
+        self,
+        make_work: Callable[[], Awaitable[StreamingResponse]],
+        on_error: Callable[[BaseException], Iterable[str | bytes]],
+        on_fast_error: Optional[Callable[[BaseException], Any]] = None,
+    ) -> Any:
+        """Serve ``make_work()`` (returns the SSE response), heartbeating while it runs.
 
-        Calls that finish within the grace period are returned untouched, so errors still surface
-        with their normal HTTP status. Longer calls commit a 200 SSE stream right away and write a
-        heartbeat comment every interval; a failure after that point is sent as a terminal event.
+        Calls that finish within the grace period are returned untouched. A failure there raises (or
+        goes to ``on_fast_error``), so it surfaces exactly as it did before heartbeats existed.
+        Longer calls commit a 200 SSE stream right away and write a heartbeat comment every
+        interval. A retryable failure after that point is retried here with backoff, since the
+        client can no longer see an HTTP error to retry on. A failure that is not retryable, or that
+        persists, is sent as a terminal event via ``on_error``.
         """
-        heartbeat = self._sse_heartbeat
-        task = asyncio.ensure_future(work)
-        done, _ = await asyncio.wait({task}, timeout=heartbeat.model_server_sse_heartbeat_grace_seconds)
+        cfg = self._sse_heartbeat
+        interval = cfg.model_server_sse_heartbeat_interval_seconds
+        # Worker-owned token capture poisons a failed call id, so it cannot be re-generated in place.
+        context = current_capture_context()
+        can_retry = context is None or not context.external_staging
+
+        def start() -> asyncio.Future:
+            task = asyncio.ensure_future(make_work())
+            # The client may go away mid-call; retrieve the outcome so it is never reported as lost.
+            task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
+            return task
+
+        task = start()
+        done, _ = await asyncio.wait({task}, timeout=cfg.model_server_sse_heartbeat_grace_seconds)
         if done:
+            if on_fast_error is not None and task.exception() is not None:
+                return on_fast_error(task.exception())
             return task.result()
-        # The client may go away mid-call; retrieve the outcome so it is never reported as lost.
-        task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
 
         async def body():
+            nonlocal task
+            attempt = 0
             while True:
-                done, _ = await asyncio.wait({task}, timeout=heartbeat.model_server_sse_heartbeat_interval_seconds)
-                if done:
+                while True:
+                    done, _ = await asyncio.wait({task}, timeout=interval)
+                    if done:
+                        break
+                    yield _SSE_HEARTBEAT
+                try:
+                    inner = task.result()
                     break
-                yield _SSE_HEARTBEAT
-            try:
-                inner = task.result()
-            except Exception as exc:
-                logger.exception("model call failed after its SSE stream was committed")
-                for event in on_error(exc):
-                    yield event
-                return
+                except Exception as exc:
+                    if not (
+                        can_retry
+                        and attempt < cfg.model_server_sse_heartbeat_max_retries
+                        and _retryable_after_commit(exc)
+                    ):
+                        logger.exception("model call failed after its SSE stream was committed")
+                        for event in on_error(exc):
+                            yield event
+                        return
+                    attempt += 1
+                    delay = min(
+                        cfg.model_server_sse_heartbeat_retry_backoff_seconds * 2 ** (attempt - 1),
+                        _SSE_RETRY_BACKOFF_CAP_S,
+                    )
+                    logger.warning(
+                        "model call failed after its SSE stream was committed (%s); retry %d/%d in %.1fs",
+                        exc,
+                        attempt,
+                        cfg.model_server_sse_heartbeat_max_retries,
+                        delay,
+                    )
+                    deadline = time.monotonic() + delay
+                    while (remaining := deadline - time.monotonic()) > 0:
+                        await asyncio.sleep(min(remaining, interval))
+                        yield _SSE_HEARTBEAT
+                    task = start()
             async for chunk in inner.body_iterator:
                 yield chunk
 
@@ -338,27 +418,28 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
 
         return await self._stream_with_heartbeat(
-            self._stream_responses(request, params, ns_map),
+            lambda: self._serve_streaming_responses(request, params, ns_map),
             lambda exc: synthesize_responses_failure_sse(str(exc)),
+            on_fast_error=_responses_failure_response,
         )
+
+    async def _serve_streaming_responses(
+        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, ns_map: NamespaceMap
+    ) -> StreamingResponse:
+        """Serve the converted response to capture and Responses SSE clients; failures propagate."""
+        response = await self._invoke_responses(request, params)
+        response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
+        response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
+        return await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
 
     async def _stream_responses(
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, ns_map: NamespaceMap
     ) -> StreamingResponse:
         """Serve the same converted response to capture and Responses SSE clients."""
         try:
-            response = await self._invoke_responses(request, params)
-            response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
-            response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
-            return await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
+            return await self._serve_streaming_responses(request, params, ns_map)
         except Exception as exc:
-            # The streaming contract is already the response's shape, so a backend failure must be a
-            # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
-            logger.exception("responses() failed while serving a streaming /v1/responses request")
-            return StreamingResponse(
-                synthesize_responses_failure_sse(str(exc)),
-                media_type="text/event-stream",
-            )
+            return _responses_failure_response(exc)
 
     async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/chat/completions`` entrypoint shared by every Gym model server.
@@ -398,7 +479,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
             )
 
-        return await self._stream_with_heartbeat(serve(), _chat_stream_error_events)
+        return await self._stream_with_heartbeat(serve, _chat_stream_error_events)
 
     async def _invoke_chat_completions(
         self, request: Request, params: NeMoGymChatCompletionCreateParamsNonStreaming
