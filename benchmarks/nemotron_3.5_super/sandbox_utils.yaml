@@ -48,3 +48,23 @@ terminal_bench_2_1_terminus_2_sandboxed_resources_server:
       sandbox_config:
         metadata:
           nemo.nvidia.com/resources: custom
+
+swebench_verified_pool_sandboxed_agent:
+  responses_api_agents:
+    pool_sandboxed_agent:
+      remote_pool_binary_path: /mnt/s3-data/data/cmrtz/pool/v1.0.16/pool-linux-amd64
+
+swebench_multilingual_pool_sandboxed_agent:
+  responses_api_agents:
+    pool_sandboxed_agent:
+      remote_pool_binary_path: /mnt/s3-data/data/cmrtz/pool/v1.0.16/pool-linux-amd64
+
+swebench_pro_pool_sandboxed_agent:
+  responses_api_agents:
+    pool_sandboxed_agent:
+      remote_pool_binary_path: /mnt/s3-data/data/cmrtz/pool/v1.0.16/pool-linux-amd64
+
+terminal_bench_2_1_pool_sandboxed_agent:
+  responses_api_agents:
+    pool_sandboxed_agent:
+      remote_pool_binary_path: /mnt/s3-data/data/cmrtz/pool/v1.0.16/pool-linux-amd64
