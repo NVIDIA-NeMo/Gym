@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 850" width="600" height="850">
+<defs>
+ <pattern id="halftone" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(20)"><circle cx="4.5" cy="4.5" r="3" fill="#2f5dab"/></pattern>
+ <radialGradient id="fade" cx="0.38" cy="0.35" r="0.75"><stop offset="0" stop-color="#ffffff"/><stop offset="0.7" stop-color="#ffffff" stop-opacity="0.55"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></radialGradient>
+ <mask id="fadeMask" maskContentUnits="userSpaceOnUse"><circle cx="356" cy="300" r="190" fill="url(#fade)"/></mask>
+ <clipPath id="disc"><circle cx="356" cy="300" r="190"/></clipPath>
+ <pattern id="stripes" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)"><rect width="10" height="10" fill="#f2b632"/><rect width="4" height="10" fill="#1b1f2a"/></pattern>
+ <path id="ring" d="M356 300 m-214 0 a214 214 0 1 1 428 0 a214 214 0 1 1 -428 0"/>
+</defs>
+<rect width="600" height="850" fill="#f3eee4"/>
+<g id="disc-art">
+ <circle cx="356" cy="300" r="190" fill="#dfe6f2"/>
+ <rect x="160" y="104" width="392" height="392" fill="url(#halftone)" mask="url(#fadeMask)"/>
+ <g clip-path="url(#disc)">
+  <circle cx="270" cy="410" r="140" fill="#e2412f" opacity="0.92"/>
+  <rect x="395" y="60" width="86" height="480" fill="#1b1f2a" opacity="0.9" transform="rotate(18 440 300)"/>
+  <path d="M356 300 L560 190 L560 410 Z" fill="#f2b632" opacity="0.85"/>
+  <g fill="none" stroke="#ffffff" stroke-width="3" opacity="0.85">
+   <path d="M150 520 Q266 300 560 206"/>
+   <path d="M170 520 Q286 290 560 238"/>
+   <path d="M190 520 Q306 280 560 270"/>
+   <path d="M210 520 Q326 270 560 302"/>
+   <path d="M230 520 Q346 260 560 334"/>
+   <path d="M250 520 Q366 250 560 366"/>
+  </g>
+ </g>
+ <circle cx="356" cy="300" r="190" fill="none" stroke="#1b1f2a" stroke-width="3"/>
+</g>
+<text font-family="Inter, sans-serif" font-size="14.5" font-weight="700" fill="#1b1f2a" letter-spacing="2" textLength="1335" lengthAdjust="spacing"><textPath href="#ring" textLength="1335" lengthAdjust="spacing">LAKESIDE JAZZ DAYS · SEVENTEENTH EDITION · 17–19 JULY 2026 · HARBOR STAGE · OPEN AIR · </textPath></text>
+<text transform="translate(126 548) rotate(-90)" font-family="Inter, sans-serif" font-size="138" font-weight="900" fill="#e2412f" letter-spacing="-4">JAZZ</text>
+<rect x="36" y="40" width="64" height="64" fill="url(#stripes)"/>
+<g fill="#1b1f2a">
+ <circle cx="520" cy="560" r="3.2"/>
+ <circle cx="520" cy="574" r="3.2"/>
+ <circle cx="520" cy="588" r="3.2"/>
+ <circle cx="520" cy="602" r="3.2"/>
+ <circle cx="534" cy="560" r="3.2"/>
+ <circle cx="534" cy="574" r="3.2"/>
+ <circle cx="534" cy="588" r="3.2"/>
+ <circle cx="534" cy="602" r="3.2"/>
+ <circle cx="548" cy="560" r="3.2"/>
+ <circle cx="548" cy="574" r="3.2"/>
+ <circle cx="548" cy="588" r="3.2"/>
+ <circle cx="548" cy="602" r="3.2"/>
+ <circle cx="562" cy="560" r="3.2"/>
+ <circle cx="562" cy="574" r="3.2"/>
+ <circle cx="562" cy="588" r="3.2"/>
+ <circle cx="562" cy="602" r="3.2"/>
+</g>
+<polygon points="36,562 36,606 80,584" fill="#2f5dab"/>
+<g id="headline" font-family="Inter, sans-serif">
+ <text x="36" y="662" font-size="58" font-weight="900" fill="#1b1f2a" letter-spacing="-1.5">Lakeside</text>
+ <text x="36" y="712" font-size="58" font-weight="900" fill="#1b1f2a" letter-spacing="-1.5">Jazz Days</text>
+ <rect x="330" y="626" width="234" height="40" fill="#1b1f2a"/>
+ <text x="447" y="653" font-size="19" font-weight="800" fill="#f3eee4" text-anchor="middle" letter-spacing="2">17–19 JULY 2026</text>
+ <text x="330" y="690" font-size="15" font-weight="600" fill="#1b1f2a">Harbor Stage, Lakeside</text>
+ <text x="330" y="710" font-size="15" font-weight="400" fill="#1b1f2a">Open air · Three nights · 12 acts</text>
+</g>
+<line x1="36" y1="734" x2="564" y2="734" stroke="#1b1f2a" stroke-width="3"/>
+<g id="lineup" font-family="Inter, sans-serif">
+ <text x="36" y="756" font-size="12" font-weight="800" fill="#e2412f" letter-spacing="2">FRI 17</text>
+ <text x="36" y="774" font-size="12.5" font-weight="700" fill="#1b1f2a">Mara Quintet</text>
+ <text x="36" y="790" font-size="12.5" font-weight="400" fill="#1b1f2a">Sol Ensemble</text>
+ <text x="36" y="806" font-size="12.5" font-weight="400" fill="#1b1f2a">The Low Tides</text>
+ <text x="36" y="822" font-size="12.5" font-weight="400" fill="#1b1f2a">Iris Vey Trio</text>
+ <text x="216" y="756" font-size="12" font-weight="800" fill="#e2412f" letter-spacing="2">SAT 18</text>
+ <text x="216" y="774" font-size="12.5" font-weight="700" fill="#1b1f2a">Otto Brandt</text>
+ <text x="216" y="790" font-size="12.5" font-weight="400" fill="#1b1f2a">Blue Heron Big Band</text>
+ <text x="216" y="806" font-size="12.5" font-weight="400" fill="#1b1f2a">Nia Okafor</text>
+ <text x="216" y="822" font-size="12.5" font-weight="400" fill="#1b1f2a">Kettle &amp; Brass</text>
+ <text x="396" y="756" font-size="12" font-weight="800" fill="#e2412f" letter-spacing="2">SUN 19</text>
+ <text x="396" y="774" font-size="12.5" font-weight="700" fill="#1b1f2a">Lumen Duo</text>
+ <text x="396" y="790" font-size="12.5" font-weight="400" fill="#1b1f2a">Carla Serrat</text>
+ <text x="396" y="806" font-size="12.5" font-weight="400" fill="#1b1f2a">Northside Six</text>
+ <text x="396" y="822" font-size="12.5" font-weight="400" fill="#1b1f2a">Dawn Session</text>
+</g>
+<text x="564" y="838" font-family="Inter, sans-serif" font-size="10.5" fill="#1b1f2a" text-anchor="end" letter-spacing="1">TICKETS FROM €39 · LAKESIDEJAZZ.EXAMPLE</text>
+</svg>

@@ -1,0 +1,99 @@
+# Visual agent tasks (MiMo-V2.6 §4.2.3) with an agentic OpenCode verifier. See ../README.md.
+#
+#   gym env start --config resources_servers/visual_agent/configs/visual_agent.yaml
+config_paths:
+  - responses_api_agents/opencode_visual_sandboxed_agent/configs/opencode_visual_sandboxed_agent.yaml
+
+visual_agent_resources_server:
+  resources_servers:
+    visual_agent:
+      allowed_agents: [opencode_visual_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Websites, apps, games, 3D scenes, slides, SVG, videos and Figma-style designs built in a sandbox and graded by an agentic judge plus pixel-similarity metrics.
+      value: Improve visual design and replication skills (MiMo-V2.6 §4.2.3) with rubric and pixel rewards.
+
+      # Docker Hub image with Python 3.12, Playwright 1.63 and Chromium/Chrome. The setup script adds
+      # numpy, Pillow, ffmpeg, Node.js and web fonts (~40s per sandbox).
+      default_docker_image: apify/actor-python-playwright:3.12-1.63.0
+      sandbox_setup_script: resources_servers/visual_agent/sandbox_tools/setup_sandbox.sh
+      setup_timeout_s: 900
+
+      data_dir: resources_servers/visual_agent/data
+      grading_output_dir: resources_servers/visual_agent/results
+      max_artifact_bytes: 209715200
+      measure_timeout_s: 900
+      max_concurrent_graders: 1024
+
+      # The judge runs OpenCode against this model server (the policy model by default).
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_base_url: null
+      judge:
+        # Optional cached OpenCode binaries inside the grader sandbox (install script + glibc/musl
+        # binaries, as for the OpenCode agent); unset downloads `version` from opencode.ai.
+        install_script_path: null
+        binary_path: null
+        musl_binary_path: null
+        version: 1.17.11
+        max_context_window: 262144
+        timeout_s: 1800
+        enable_image_input: true
+        opencode_config: {}
+      judge_max_attempts: 2
+      mask_on_judge_failure: true
+
+      reward:
+        replication_similarity_weight: 0.6
+        judge_hack_flag_zeroes_reward: true
+        use_automatic_items: true
+        automatic_item_weight: 1.0
+
+      # Groupwise grading of open-ended tasks within a rollout group; group_size must equal num_repeats.
+      groupwise:
+        enabled: false
+        group_size: 1
+        collection_timeout_s: 3600
+        bonus: 0.15
+        min_gated_candidates: 2
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        derive_cpu_env: true
+        env:
+          # execd holds each finished command's response open for this long (default 1s);
+          # a short grace keeps every command and the readiness probe from paying that tail.
+          EXECD_API_GRACE_SHUTDOWN: "50ms"
+        resources:
+          cpu: 2
+          # 4 GiB OOM-killed grader sandboxes while the judge decoded 1080p video frames; 8 GiB OOM-killed
+          # 7% of policy sandboxes on video tasks once agents wrote their own frame renderers (2026-09-24).
+          # 16 GiB is also Fargate's ceiling for 2 vCPU.
+          memory_mib: 16384
+          # 30 GiB works on every provider: within Fargate's 21-200 GiB ephemeral range.
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 0.5
+            memory_mib: 1024
+            disk_gib: 30
+        metadata:
+          benchmark: visual-agent
+
+      debug: false
+
+visual_agent_opencode_visual_sandboxed_agent:
+  _inherit_from: opencode_visual_sandboxed_agent
+  responses_api_agents:
+    opencode_visual_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: visual_agent_resources_server
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/visual_agent/data/example.jsonl

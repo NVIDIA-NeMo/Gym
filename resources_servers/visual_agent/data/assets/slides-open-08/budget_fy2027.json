@@ -1,0 +1,32 @@
+{
+  "agency": "Riverton Transit",
+  "unit": "USD millions",
+  "fy2026_net_operating_cost": 96.4,
+  "fy2027_changes": [
+    {
+      "item": "Operator labor contract",
+      "change": 6.4
+    },
+    {
+      "item": "Fuel and energy",
+      "change": 1.1
+    },
+    {
+      "item": "Paratransit demand",
+      "change": 2.3
+    },
+    {
+      "item": "Fare revenue growth",
+      "change": -1.9
+    },
+    {
+      "item": "Network redesign efficiencies",
+      "change": -3.6
+    },
+    {
+      "item": "State formula aid increase",
+      "change": -2.8
+    }
+  ],
+  "note": "Net operating cost = operating expenses minus fare and other operating revenue. Positive changes raise the cost the city must fund."
+}

@@ -1,0 +1,1367 @@
+[
+ {
+  "task_id": "app-open-13",
+  "category": "interactive_app",
+  "mode": "open_ended",
+  "title": "Pixel-art editor with layers, edge-connected fill, mirror drawing and palette import",
+  "prompt": "Build Pixelforge, a pixel-art editor for 16×16 game sprites. Draw the editing grid yourself (canvas or DOM); do not use a drawing or image library.\n\nThe provided sprite.json is my current sprite: copy it into the output folder next to index.html and, when nothing is saved yet, load it at runtime with fetch('sprite.json'); never hard-code its pixels. Format: width, height, a palette of hex colors, and layers listed bottom to top, each with a name, a visible flag and 16 row strings in which '.' is transparent and a digit or lowercase letter is a palette index in base 36.\n\nLayout: a left tool rail; the editing canvas in the middle, showing each sprite pixel as a 24×24 square (384×384 in total) over a light checkerboard with thin grid lines; a right panel with the Palette, Layers, a live 4× Preview and a 'Colors used' list. A status bar shows the pixel under the pointer as 'x 5 · y 8' (0-based from the top-left) and its visible hex color.\n\nTools, as rail buttons with SVG icons and shortcuts: Pencil (B), Eraser (E), Fill (G), Eyedropper (I) and a Mirror toggle (M).\n- Pencil paints the active color on the active layer; a drag paints every pixel along the pointer path with no gaps, even when the pointer moves fast. Eraser makes pixels transparent.\n- Fill replaces the area of the clicked pixel's color that is connected through edges (not diagonals), looking only at the active layer's own pixels (transparent counts as a color). Shift+click with Fill replaces every pixel of that color on the active layer.\n- Eyedropper makes the topmost visible color at a pixel the active color.\n- With Mirror on, Pencil and Eraser also apply at the mirrored pixel (x becomes 15 − x).\n\nPalette: clicking a swatch sets the active color, shown as a large chip with its hex. 'Import palette' opens a dialog to paste a GIMP .gpl palette: the first line must be 'GIMP Palette' (otherwise show 'Not a GIMP palette'); 'Name:' and 'Columns:' lines and lines starting with # are ignored; every other line is R G B as integers 0-255 separated by whitespace, optionally followed by a name. New colors are appended, colors already in the palette are skipped, bad lines are skipped, and a notice reports it like 'Imported 4 colors · 1 duplicate skipped · 2 invalid lines (lines 6, 8)' with the real counts and line numbers of the pasted text.\n\nLayers: the list shows the top layer first, and the top layer is active on load. Each row has a visibility eye. Buttons add a layer ('Layer 4', 'Layer 5', ... inserted directly above the active layer and made active), delete, move up, move down and merge down (the active layer's opaque pixels are painted onto the layer below, which becomes active).\n\n'Colors used' lists every color in the visible image (visible layers composited, upper layers on top) with its pixel count, most used first and ties by hex ascending, and updates after every change.\n\nHistory: Ctrl+Z undoes; Ctrl+Shift+Z and Ctrl+Y redo (at least 50 steps). A stroke, a fill, and each layer add, delete, reorder or merge is one step; visibility toggles and palette imports are not.\n\n'Export JSON' opens a dialog with the current sprite in the sprite.json format (lowercase hex). Pixels, palette and layers autosave to localStorage and are restored after a reload.\n\nVisual direction: a dark, focused editor in the spirit of Aseprite: charcoal panels, crisp 1 px borders, one teal accent for the active tool and layer, compact 12-13 px labels and tabular numbers.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": false
+  },
+  "assets": [
+   "sprite.json"
+  ],
+  "interaction_hints": "The input file is /grader/task/sprite.json; grep the page's JS for a relative fetch of sprite.json (hard-coded pixels fail R2). Find the editing grid's screen origin with eval (getBoundingClientRect of the 384×384 canvas or grid element); the center of sprite pixel (x,y) is at origin + (24x + 12, 24y + 12). Hover a pixel and read the status bar to confirm the mapping. Read 'Colors used' with eval of its innerText. Every scenario starts from a fresh load. (1) Screenshot; read the layer list, palette and Colors used; hover pixel (8,8). (2) Click the Body layer row, click the #ffcd75 swatch, press g, click pixel (8,8); read Colors used and look at pixel (4,4); then press Control+z and read it again; press Control+Shift+z. (3) Fresh load (Outline is active): click the #ffcd75 swatch, press g, click pixel (8,8); read Colors used (98 expected; an 8-connected or composite-based fill gives something else). (4) Click Body, click the #b13e53 swatch, press g, then keydown Shift, click pixel (8,8), keyup Shift; read Colors used. (5) Click the #b13e53 swatch, press b, press m, click pixel (2,1); read Colors used; press i and click pixel (5,8) and read the active color chip, then pixel (4,8). (6) Click the add-layer button; check 'Layer 4' is listed first and active; click the #b13e53 swatch, press b, drag from pixel (1,15) to pixel (14,15) with steps 4 (a pencil without interpolation leaves gaps); read Colors used (#b13e53 14); press Control+z, read; press Control+z again and check Layer 4 is gone; press Control+Shift+z twice and read. (7) Toggle the Outline eye and read Colors used; turn it back on; with Outline active click move down and read Colors used; press Control+z; then merge down and read the layer list and Colors used. (8) Open Import palette, type into its textarea (type action with a selector) the text 'GIMP Palette\\nName: Dusk\\nColumns: 4\\n# warm tones\\n255 205 117 Sand\\n177 62 83\\tBerry\\n 93  39  93 Plum\\n59 93 201 Cobalt\\n300 10 10 Broken\\n115 239 247 Ice' (\\n are newlines, \\t a tab), submit, read the notice and count the swatches; then import the text 'Palette\\n1 2 3' and read the message. (9) After step (2)'s fill, open Export JSON and read the text. (10) localStorage starts empty in every new interact call, so test persistence inside ONE call: make the changes, then eval 'setTimeout(() => location.reload(), 50)', wait 1500 ms and read Colors used again.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The layout has a tool rail with Pencil, Eraser, Fill, Eyedropper and Mirror, a 384×384 editing grid (24 px per sprite pixel) with a checkerboard and grid lines, the 8-color palette, a Layers list showing Outline, Body, Shadow from top to bottom with Outline active, a live preview, and a status bar that reads 'x 8 · y 8' and #38b764 when hovering sprite pixel (8,8)."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "sprite.json is in the output folder and loaded with a relative fetch (pixels not hard-coded); the green slime sprite with outline, eyes and shadow is drawn, and on load 'Colors used' lists exactly #38b764 87, #1a1c2c 40, #333c57 8, #a7f070 5, #f4f4f4 4, #ef7d57 2 in that order."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With Body active, Fill with #ffcd75 at pixel (8,8) makes 'Colors used' show #ffcd75 86 and #38b764 1: the green pixel at (4,4), which touches the body only diagonally, stays green."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With Outline active (the default), Fill with #ffcd75 at pixel (8,8) fills only the transparent inside of the outline on that layer: 'Colors used' becomes exactly #ffcd75 98, #1a1c2c 40, #333c57 8, and everything outside the outline stays transparent."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Shift+click with Fill on the Body layer using #b13e53 at (8,8) replaces all 87 green pixels: 'Colors used' shows #b13e53 87 and no #38b764."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "With Mirror on, one Pencil click with #b13e53 at (2,1) also paints (13,1) ('Colors used' shows #b13e53 2); the Eyedropper on (5,8) sets the active color to #1a1c2c and on (4,8) to #f4f4f4."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Adding a layer lists 'Layer 4' at the top as the active layer; a fast Pencil drag from (1,15) to (14,15) paints 14 contiguous pixels (#b13e53 14); Ctrl+Z removes the stroke, a second Ctrl+Z removes Layer 4, and Ctrl+Shift+Z twice brings back the layer and then the stroke."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Hiding Outline gives exactly #38b764 87, #333c57 8, #f4f4f4 8, #a7f070 5, #ef7d57 2; moving Outline below Body gives #1a1c2c 36 and #f4f4f4 8; merging Outline down leaves two layers (Body active) and the on-load counts."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Importing the Dusk palette text from the hints shows 'Imported 3 colors · 2 duplicates skipped · 1 invalid line (line 9)' and the palette grows to 11 swatches ending with #5d275d, #3b5dc9 and #73eff7; text whose first line is not 'GIMP Palette' shows 'Not a GIMP palette' and adds nothing."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After the Body fill of R3, Export JSON shows width 16, height 16, the 8 lowercase palette hex values and the layers bottom first (Shadow, Body, Outline) with visible flags, and the Body layer's fifth row (index 4) reads '....12266666....'."
+   },
+   {
+    "id": "R11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After edits (for example the R3 fill and an added layer), reloading the page restores the pixels, layers and palette: 'Colors used' still shows #ffcd75 86."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "It looks like a polished pixel editor: charcoal panels with crisp 1 px borders, one teal accent marking the active tool and layer, a crisp unblurred grid and preview (no smoothing), compact aligned labels and tabular numbers in 'Colors used'."
+   }
+  ]
+ },
+ {
+  "task_id": "app-open-14",
+  "category": "interactive_app",
+  "mode": "open_ended",
+  "title": "Logic circuit simulator with truth tables, loop detection and JSON import",
+  "prompt": "Build Gatewise, a digital logic circuit simulator in the browser. Write the simulator yourself; no logic or diagram library.\n\nThe provided circuit.json is my tank-controller circuit: copy it into the output folder next to index.html and, when nothing is saved yet, load it at runtime with fetch('circuit.json'); never hard-code it. It has a name, components (id, type, x, y) and wires (from a component's output to input number 0 or 1 of another component). Types: SWITCH, LED, AND, OR, NOT, XOR, NAND, NOR, XNOR.\n\nCanvas: an SVG canvas at 1:1 scale with a 20 px grid; (x, y) is a part's top-left corner in canvas pixels. Gates are 80×60 with standard distinctive-shape symbols; two-input gates have input ports on the left edge 20 and 40 px below the top, NOT has one input in the middle, and the output port is in the middle of the right edge. Switches and LEDs are 60×40 with one port in the middle of the right edge (switch) or left edge (LED). Every part shows its name.\n\nEditing:\n- Drag a part from the left palette onto the canvas to add it; new gates take the next free number for their type (AND3, NOR1), new switches are S1, S2 and LEDs L1, L2. Dragging a part moves it; drops snap to the 20 px grid and wires follow.\n- Drag from an output port to an input port to add a wire. An input takes one wire: connecting to an occupied input replaces its old wire. Click a wire or a part to select it; Delete removes it, and deleting a part also removes its wires.\n- Clicking a switch toggles it between 0 and 1. Selecting a gate shows an Inspector with its name and a type dropdown; changing the type keeps the name.\n- Ctrl+Z and Ctrl+Shift+Z undo and redo every edit (add, move, wire, delete, type change, import); switch toggles are not undo steps.\n\nSimulation is live and combinational; an unconnected input reads 0. Wires carrying 1 are green and 0 slate gray; lit LEDs glow. If wires form a cycle, a red banner reads 'Combinational loop: ' followed by the cycle in signal order starting from the part whose name sorts first and ending with it again (like 'NOR1 → XOR2 → NOR1'); the loop and everything it feeds show an amber unknown state (LEDs show '?') while the rest keeps simulating.\n\nA status line reads like 'Components 10 · Wires 11'. A live Truth table panel has the switches in name order (the first is the most significant bit) and the LEDs in name order, rows from all 0 to all 1, and a last row with each LED's minterms like 'Σm(1,4,6)'; with a loop it shows 'Resolve the combinational loop first'.\n\nExport shows the circuit as JSON in the circuit.json format. Import takes pasted JSON and replaces the circuit, or shows 'Invalid JSON', 'Unknown component type: <type>' or 'Unknown component in wire: <id>' and changes nothing. Autosave to localStorage and restore after a reload.\n\nVisual direction: a clean schematic tool: off-white canvas with a dotted grid, crisp black gate outlines with NOT bubbles and the XOR double arc, wires with right-angle bends, a compact light side panel and monospaced truth-table digits.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": false
+  },
+  "assets": [
+   "circuit.json"
+  ],
+  "interaction_hints": "The input file is /grader/task/circuit.json; grep the page's JS for a relative fetch of circuit.json (a hard-coded circuit fails R2). Find the canvas origin with eval (getBoundingClientRect of the SVG canvas); canvas point (cx, cy) is at page origin + (cx, cy). Port positions in canvas pixels: Low output (100,100), High output (100,260), Manual output (100,420), AND1 inputs (340,140) and (340,160), OR1 output (600,190), AND2 inputs (520,360) and (520,380), AND2 body center (560,370), NOT1 body center (220,250), switch centers Low (70,100), High (70,260), Manual (70,420). Use drag with steps 15 or more; if a drag does not connect, retry with move to the start point first. Read the status line and the truth table with eval of innerText. Every scenario starts from a fresh load. (1) Screenshot; check that the NOT1 output wire is green and others gray. Click Low, screenshot (Pump lit); click High (Pump off); click Low again (Alarm lit); click Manual (Pump lit). (2) Read the truth table. (3) Click AND2's body, change its type to NAND in the Inspector (select action or eval), read the truth table and the Alarm LED with all switches off. (4) Drag from Manual's output (100,420) to AND2's second input (520,380); read the status line (wires still 11) and the Alarm column. (5) Drag from OR1's output (600,190) to AND1's first input (340,140); screenshot the banner and the Pump LED; click High and check Alarm lights; read the truth table panel; press Control+z and read the status line and truth table (Pump back to Σm(1,2,3,5,7)). (6) Click NOT1's body, press Delete, read the status line and the Pump minterms; press Control+z (NOT1 and both wires back); press Control+Shift+z. (7) Drag AND2's body from (560,370) to (597,388) and check it snaps to x 560, y 360 in Export; drag an XOR from the palette onto an empty canvas spot and read its name and the status line. (8) Import: paste {\"name\":\"Equality\",\"components\":[{\"id\":\"A\",\"type\":\"SWITCH\",\"x\":40,\"y\":80},{\"id\":\"B\",\"type\":\"SWITCH\",\"x\":40,\"y\":200},{\"id\":\"XNOR1\",\"type\":\"FLIPFLOP\",\"x\":200,\"y\":120},{\"id\":\"Same\",\"type\":\"LED\",\"x\":360,\"y\":130}],\"wires\":[{\"from\":\"A\",\"to\":\"XNOR1\",\"input\":0},{\"from\":\"B\",\"to\":\"XNOR1\",\"input\":1},{\"from\":\"XNOR1\",\"to\":\"Same\",\"input\":0}]} and read the message (circuit unchanged); then paste {\"name\":\"Equality\",\"components\":[{\"id\":\"A\",\"type\":\"SWITCH\",\"x\":40,\"y\":80},{\"id\":\"B\",\"type\":\"SWITCH\",\"x\":40,\"y\":200},{\"id\":\"XNOR1\",\"type\":\"XNOR\",\"x\":200,\"y\":120},{\"id\":\"Same\",\"type\":\"LED\",\"x\":360,\"y\":130}],\"wires\":[{\"from\":\"A\",\"to\":\"XNOR1\",\"input\":0},{\"from\":\"B\",\"to\":\"XNOR1\",\"input\":1},{\"from\":\"XNOR1\",\"to\":\"Same\",\"input\":0}]} and read the truth table (A, B, Same). (9) localStorage starts empty in every new interact call, so test persistence inside ONE call: change AND2 to NAND, then eval 'setTimeout(() => location.reload(), 50)', wait 1500 ms and read the truth table again.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The layout has a part palette (Switch, LED, AND, OR, NOT, XOR, NAND, NOR, XNOR), an SVG canvas with a 20 px grid, an Inspector, a status line reading 'Components 10 · Wires 11' and a Truth table panel; gates use distinctive-shape symbols (D-shaped AND, curved OR, XOR with the extra arc, bubble on NOT)."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "circuit.json is in the output folder and loaded with a relative fetch; all 10 parts are drawn at their file positions with their names and the 11 wires connect the right ports; on load every switch is 0, Pump and Alarm are off, and only the wire leaving NOT1 is green."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Clicking switches simulates live: Low on lights Pump; then High on turns Pump off with Alarm off; then Low off lights Alarm; then Manual on lights Pump as well, and wire colors follow the signals."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The truth table has columns High, Low, Manual then Alarm, Pump and rows 000 to 111; Alarm is 1 only in rows 100 and 101, Pump is 1 in rows 001, 010, 011, 101 and 111, and the minterm row reads Σm(4,5) for Alarm and Σm(1,2,3,5,7) for Pump."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Changing AND2 to NAND in the Inspector keeps the name AND2, lights Alarm with all switches off, and makes Alarm's minterms Σm(0,1,2,3,6,7)."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Wiring Manual's output to AND2's second input replaces the High→AND2 wire: the status line still reads 'Wires 11' and Alarm's minterms become Σm(3,5)."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Wiring OR1's output to AND1's first input shows 'Combinational loop: AND1 → OR1 → AND1', Pump shows the amber unknown state, the truth table shows 'Resolve the combinational loop first', and toggling High still lights Alarm; Ctrl+Z removes the loop wire and restores Low→AND1 with Pump back to Σm(1,2,3,5,7)."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Deleting NOT1 removes it with its two wires ('Components 9 · Wires 9') and Pump's minterms become Σm(1,3,5,7); Ctrl+Z restores NOT1 and both wires and Ctrl+Shift+Z deletes them again."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Dragging AND2 by about (37, 18) snaps it to x 560, y 360 with its wires following, and Export then shows that position in the circuit.json format; dragging an XOR from the palette adds 'XOR2' and 'Components 11'."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Importing JSON with a FLIPFLOP part shows 'Unknown component type: FLIPFLOP' and leaves the circuit unchanged; importing the two-switch Equality circuit replaces it, with a truth table over A, B and Same reading Σm(0,3) and 'Components 4 · Wires 3'."
+   },
+   {
+    "id": "R11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After edits (for example AND2 changed to NAND), reloading the page restores the circuit and the edited truth table."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "It looks like a clean schematic tool: off-white dotted grid, crisp gate outlines with NOT bubbles, tidy right-angle wires that meet the ports exactly, clear green/gray/amber signal colors, and monospaced truth-table digits in an aligned table."
+   }
+  ]
+ },
+ {
+  "task_id": "app-open-15",
+  "category": "interactive_app",
+  "mode": "open_ended",
+  "title": "Drum step sequencer with swing timing, song chain, Euclid fills and text import",
+  "prompt": "Build Pulse16, a 16-step drum machine with a song chain, written without audio or UI libraries.\n\nTracks, top to bottom: Kick, Snare, Clap, Closed hat, Open hat, Low tom, Rim, Cowbell. Each bar has 16 steps shown in four groups of four. A step is off, on or accent (drawn clearly stronger). Clicking a step turns off into on and on or accent into off; Shift+click turns off or on into accent and accent back into on.\n\nPatterns A, B, C and D are tabs that choose the pattern being edited. Start with these (x on, X accent, . off); C and D are empty:\nPattern A: Kick X.....x...X..x.. / Snare ....X.......X... / Clap ............x... / Closed hat x.x.x.x.x.x.x.xX / Open hat ..............x. / Low tom and Cowbell empty / Rim ...x......x.....\nPattern B: Kick X.....x...X...x. / Snare ....X.......X.xx / Clap ....x.......x... / Closed hat x.x.x.x.x.x.x... / Open hat ..............X. / Low tom and Rim empty / Cowbell ..x...x...x...x.\nA line above the grid reads like 'Pattern B · 22 hits · 5 accents' for the edited pattern (hits count on and accent steps).\n\nTransport: Play/Stop (also Space), BPM (60-200, default 120) and Swing (50-75%, default 60). A sixteenth lasts T = 60 / BPM / 4 seconds; step n (1-16) starts floor((n − 1) / 2) × 2T into its bar, plus 2T × swing / 100 when n is even; bar b starts at (b − 1) × 4 × 60 / BPM. Times show as m:ss.mmm rounded to the millisecond.\n\nSong: a chain field of pattern letters separated by spaces (default 'A A B A'; anything else shows 'Use A, B, C or D'), a timeline strip with one block per bar labeled with its pattern, and a line like 'Song: 4 bars · 0:08.000'.\n\nPlayhead: a readout like 'Bar 3 · B · Step 6 · 0:04.650' (bar, its pattern, step, time from the song start). While stopped, the period key moves one step forward and the comma key one step back through the whole chain, wrapping at both ends; Home returns to the start. The playhead column lights up in the grid when the edited pattern is the current bar's, and the current bar's block is highlighted in the timeline. Playing advances the playhead in time with the swing and loops the chain; synthesize the drum sounds with the Web Audio API.\n\nEuclid: each track has a Euclid button with Hits k (0-16) and Rotate r (0-15): step i (0-based) is on when (i × k) mod 16 < k, then the row is rotated right by r steps; it replaces the row and clears its accents. 'Copy pattern' and 'Paste' copy the edited pattern onto another tab.\n\nExport shows the edited pattern as text: one line per track in track order with the track name, one space and the 16 step characters. Import takes text in that format and replaces the edited pattern with its valid lines: the last whitespace-separated token is the steps and the rest the track name (case-insensitive), and every track without a valid line is cleared; bad lines are skipped and listed as 'Line 2: unknown track Cymbal', 'Line 4: expected 16 steps' or 'Line 5: invalid step character' (line numbers count every pasted line).\n\nCtrl+Z and Ctrl+Shift+Z undo and redo step edits, Euclid, Paste and Import (at least 50 steps). Patterns, chain, BPM and swing persist in localStorage.\n\nVisual direction: hardware-inspired: a dark graphite body, rounded square pads that light orange (brighter for accents), a monospaced LCD-style readout, clearly separated beat groups.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": false
+  },
+  "interaction_hints": "Find the step pads from a screenshot or the DOM (row = track in the listed order, column = step 1-16) and click them; for Shift+click use keydown Shift, click, keyup Shift. Read the pattern header, the readout and the song line with eval of document.body.innerText or from screenshots. Before pressing the period, comma or Home keys, click an empty non-input area so no text field has focus. Every scenario starts from a fresh load. (1) Screenshot pattern A; click tab B and C and read their headers. (2) Press . 5 times and read the readout; press Home, press . 20 times, read; press . 17 more times (37 total), read; press Home then , once and read. (3) Set BPM to 90 and Swing to 66 (type with a selector, then press Tab or Enter), click an empty area, press Home and . 5 times, read the readout and the song line; then set BPM 120 and Swing 50 and read step 6 again (0:00.625). (4) Click Kick step 3 and read the header; fresh load: Shift+click Snare step 5 and read the header. (5) Open the Open hat Euclid control, set Hits 5 and Rotate 2, apply, look at the row and header. (6) Undo chain in ONE call: click Kick step 3; Euclid Open hat 5 / 2; Import the text 'kick x...x...x...x...\\nCymbal x...............\\nClosed hat   xxxxxxxxxxxxxxxx\\nSnare ....X.......X..x...\\nRim ..X...........X.' (\\n are newlines) and read the messages, the rows and the header; press Control+z three times reading the header after each; press Control+Shift+z three times and read. (7) Open Export on pattern A and read the text. Press Space, wait 1500 ms, screenshot (timeline block and readout moved), press Space again. (8) Click Copy pattern, click tab C, click Paste, read the header; set the chain to 'A C' and read the song line and timeline; set it to 'A E' and read the message. (9) localStorage starts empty in every new interact call, so test persistence inside ONE call: make changes (a step, the chain, BPM), then eval 'setTimeout(() => location.reload(), 50)', wait 1500 ms and read again.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The layout has Play/Stop, BPM 120, Swing 60% and the position readout; tabs A, B, C and D; eight named tracks (Kick to Cowbell) with 16 pads grouped visibly in fours and a Euclid control per track; the chain field 'A A B A' with a timeline of four blocks labeled A, A, B, A; 'Song: 4 bars · 0:08.000'; and Export and Import controls."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Pattern A shows exactly the seeded steps (accents visibly stronger) with the header 'Pattern A · 19 hits · 5 accents'; tab B shows its seed with 'Pattern B · 22 hits · 5 accents'; tab C is empty with 0 hits and 0 accents."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Stepping with the period key from the start reads 'Bar 1 · A · Step 6 · 0:00.650' after 5 presses, 'Bar 2 · A · Step 5 · 0:02.500' after 20 and 'Bar 3 · B · Step 6 · 0:04.650' after 37; one comma press from the start wraps to 'Bar 4 · A · Step 16 · 0:07.900'."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With BPM 90 and Swing 66%, step 6 of bar 1 reads 0:00.887 and the song line reads 'Song: 4 bars · 0:10.667'; with BPM 120 and Swing 50% step 6 reads 0:00.625."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Clicking Kick step 3 makes the header 'Pattern A · 20 hits · 5 accents'; from a fresh load, Shift+clicking the accented Snare step 5 turns it into a normal hit and the header reads 19 hits and 4 accents."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Euclid on Open hat with Hits 5 and Rotate 2 sets the row to ..x...x..x..x..x (steps 3, 7, 10, 13 and 16 on) and the header to 23 hits and 5 accents."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Importing the five-line text from the hints lists 'Line 2: unknown track Cymbal' and 'Line 4: expected 16 steps', sets Kick to x...x...x...x..., all 16 Closed hat steps on and Rim accents on steps 3 and 15, clears every other row including Snare, and the header reads 22 hits and 2 accents."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Undo and redo span different operations: after clicking Kick step 3, the Euclid change and the import, Ctrl+Z three times shows 24/5, then 20/5, then 19/5 hits/accents, and Ctrl+Shift+Z three times returns to 22 hits and 2 accents."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Export of pattern A shows exactly eight lines in track order, from 'Kick X.....x...X..x..' to 'Cowbell ................' (with 'Closed hat x.x.x.x.x.x.x.xX'); Space starts playback so the readout and the highlighted timeline block advance, and Space stops it."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Copy pattern then Paste on tab C makes C read 19 hits and 5 accents; the chain 'A C' gives two timeline blocks and 'Song: 2 bars · 0:04.000'; the chain 'A E' shows 'Use A, B, C or D'."
+   },
+   {
+    "id": "R11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After edits to steps, the chain and BPM, reloading the page restores the patterns, chain and tempo."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "It looks like polished drum-machine hardware: dark graphite surfaces, rounded pads that glow orange with brighter accents, an LCD-style monospaced readout, clear beat grouping and aligned track labels."
+   }
+  ]
+ },
+ {
+  "task_id": "app-open-16",
+  "category": "interactive_app",
+  "mode": "open_ended",
+  "title": "Crossword constructor with live numbering, symmetric blocks and grid health",
+  "prompt": "Build Gridsmith, a crossword construction tool for 13×13 American-style grids.\n\nThe provided grid.json is the puzzle I am building: copy it into the output folder next to index.html and, when nothing is saved yet, load it at runtime with fetch('grid.json'); never hard-code it. It has a title, a size, 13 row strings ('#' block, '.' empty white cell, a letter for a filled cell) and clues for across and down keyed by the entry's start cell as 'row,col' (0-based).\n\nGrid: 40×40 px cells, black blocks, letters centered, and standard numbering in the top-left corner: scanning rows top to bottom and left to right, a white cell gets the next number when it starts an across entry (a block or the edge on its left and a white cell on its right) or a down entry (the same vertically). An entry is a run of two or more white cells.\n\nSelection and typing: clicking a white cell selects it (the direction starts as Across); clicking it again or pressing Space switches between Across and Down. The selected cell and its current entry are highlighted in the grid and in the clue list. Typing a letter fills the cell and moves to the next cell of the entry (it stays on the last cell). Backspace clears the cell, or if it is already empty moves back one cell in the entry and clears that. Arrow keys move to the next white cell in that direction. Tab and Shift+Tab go to the next and previous entry in clue order (all Across, then all Down).\n\nBlocks: the period key or a right-click toggles the selected cell between white and block (a letter in it is removed). A Symmetry switch, on by default, toggles the cell rotated 180° around the center at the same time.\n\nClue lists: Across and Down, each item showing the number, the clue text (click to edit), and the letters as a pattern with underscores for empty cells (like AT_M). Clues stay with their entry's start cell when numbers change.\n\nHealth: a stats bar reads like 'Words 60 · Blocks 28 · Avg length 4.70 · Letters 10/141' (entries, blocks, the mean entry length with two decimals, filled cells over white cells). A warnings panel lists 'Unchecked cells: N' (white cells not in both an across and a down entry), 'Two-letter words: N' and 'Not symmetric' when they apply, or 'No warnings'.\n\nHistory: Ctrl+Z and Ctrl+Shift+Z undo and redo letters (one step per letter), block toggles (a symmetric pair is one step, and undo brings back any removed letters) and clue edits. Export shows the puzzle as JSON in the grid.json format. Everything is saved to localStorage and restored after a reload.\n\nVisual direction: a newspaper-grade construction tool: crisp black blocks and thin gray rules, small numbers, a pale yellow highlight for the current entry with a stronger selected cell, serif clue lists in two columns beside the grid, and a quiet sidebar for stats and warnings.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": false
+  },
+  "assets": [
+   "grid.json"
+  ],
+  "interaction_hints": "The input file is /grader/task/grid.json; grep the page's JS for a relative fetch of grid.json (a hard-coded grid fails R2). Find the grid's top-left with eval (getBoundingClientRect of the grid element); the center of cell (row r, column c), 0-based, is at origin + (40c + 20, 40r + 20). Read the stats bar, warnings and clue lists with eval of innerText. Every scenario starts from a fresh load. (1) Screenshot; read the numbers in the first rows, the counts of Across and Down clues, clues 1 Across, 8 Across and 1 Down, the stats bar and warnings. (2) Click cell (1,5) (direction Across) and type ORBITING (type action without a selector); read the stats and the patterns of 5, 8 and 11 Down. (3) Continue in the same call: click cell (1,6) and press the period key; read the grid (cells (1,6) and (11,6) black), stats, warnings, and where 'Exploding star' is listed now; press Control+z and read (1,6) and the stats; press Control+z again; press Control+Shift+z twice. (4) Fresh load: turn Symmetry off, click (1,6), press the period key, read the stats and warnings. Fresh load: click (6,6), press the period key, read the stats and warnings. (5) Click (1,1), press Space, type OE; read 2 Down, 12 Across and 15 Across; press Backspace twice and read 2 Down. (6) Click cell (0,0) and press Tab; check that 5 Across is highlighted; press Shift+Tab. (7) Click the 15 Across clue text and change it to 'Small bay'; click cell (1,6) and press the period key; read which number 'Small bay' has now (14 Across, the entry starting at (2,0)); press Control+z. Then click (1,5), type ORBITING, open Export and read rows[1] and the across clues. (8) localStorage starts empty in every new interact call, so test persistence inside ONE call: type ORBITING, then eval 'setTimeout(() => location.reload(), 50)', wait 1500 ms and read the stats and row 1 again.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The page shows a 13×13 grid with 40 px cells, corner numbers and centered letters, Across and Down clue lists with numbers, clue text and letter patterns, the stats bar, a warnings panel, a Symmetry switch that is on, and an Export control."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "grid.json is in the output folder and loaded with a relative fetch; blocks and letters match the file (ATOM, NOVA, ARC filled); numbering gives 27 Across and 33 Down clues ending at 55, with 1 Across ATOM 'Smallest unit of an element', 8 Across NOVA 'Exploding star' and 1 Down ARC 'Rainbow shape'; the stats read 'Words 60 · Blocks 28 · Avg length 4.70 · Letters 10/141' with 'No warnings'."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Clicking cell (1,5) and typing ORBITING fills 13 Across left to right; the stats show 'Letters 18/141' and the patterns read 5 Down _O_, 8 Down NT__ and 11 Down AG__."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With Symmetry on, the period key on cell (1,6) blocks both (1,6) and (11,6): the stats read 'Words 58 · Blocks 30 · Avg length 4.69' (Letters 17/139 after ORBITING, 10/139 from a fresh load), warnings show 'Unchecked cells: 6', numbering ends at 53, and 'Exploding star' is now 7 Across."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "With Symmetry off, toggling only (1,6) gives 'Words 59 · Blocks 29 · Avg length 4.69' with 'Unchecked cells: 3' and 'Not symmetric'; from a fresh load, blocking the center cell (6,6) gives 'Words 60 · Blocks 29 · Avg length 4.63' with 'Two-letter words: 2' and 'Unchecked cells: 2'."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "After typing ORBITING and blocking (1,6), Ctrl+Z reopens both cells and brings back the R at (1,6) (Letters 18/141, 13 Across ORBITING); a second Ctrl+Z removes the final G (Letters 17/141); Ctrl+Shift+Z twice re-applies the letter and the block pair."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Clicking (1,1), pressing Space and typing OE makes 2 Down TOE, 12 Across RO__ and 15 Across CE__; two Backspaces then leave 2 Down as T__."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The current entry is highlighted in the grid and its clue in the list; Tab from 1 Across moves to 5 Across and Shift+Tab back; arrow keys move between white cells."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "A clue edited on 15 Across ('Small bay') stays with its entry: after blocking (1,6) it is listed as 14 Across; Export shows JSON in the grid.json format with row 1 'R...#ORBITING' after typing ORBITING and 'Small bay' under the across key '2,0'."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After typing letters, reloading the page restores the grid, letters and stats."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The grid and the two clue columns sit side by side without overlap at 1280×800, long clue lists scroll inside their panels, and numbers never collide with letters."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "It looks like a newspaper-grade tool: crisp black blocks and thin rules, small corner numbers, a pale yellow entry highlight with a stronger selected cell, serif clue text and a calm, aligned sidebar."
+   }
+  ]
+ },
+ {
+  "task_id": "app-open-17",
+  "category": "interactive_app",
+  "mode": "open_ended",
+  "title": "Family tree from GEDCOM with a relationship calculator and round-trip export",
+  "prompt": "Build Rootline, a family-tree viewer and editor that reads GEDCOM.\n\nThe provided family.ged is my family file: copy it into the output folder next to index.html and, when nothing is saved yet, load it at runtime with fetch('family.ged'); never hard-code the people. Parse it yourself. Each line is 'level [@xref@] TAG [value]'. Use INDI records (NAME 'Given /Surname/', SEX M or F, BIRT and DEAT with a level-2 DATE, FAMC, FAMS) and FAM records (HUSB, WIFE, CHIL, MARR with DATE). Dates are 'D MON YYYY' or just 'YYYY'. Ignore unknown tags silently. A line that does not match the pattern is skipped. After loading, show a notice like 'Loaded 30 people and 11 families · 2 lines skipped (lines 14, 90)' ('1 line skipped (line 14)' for one, and no skipped part when none were skipped) and list a warning like '@F3@ refers to missing @I42@' for every reference to a record that does not exist.\n\nViews:\n- Family chart: one row per generation from the oldest at the top; spouses side by side joined by a marriage line; children below their parents' couple with connector lines. Someone married twice appears once, next to both spouses. Cards show the name, the life span ('1902–1979', or 'b. 1952' for the living) and a blue or rose accent for M or F.\n- Clicking a card selects it and sets the hash to '#/person/I17' (the xref without @); opening that hash selects the person. The details panel shows the full name, born and died dates as '12 Jan 1978', the age on 1 June 2026 as 'Age 48' for the living or 'Died aged 77', and clickable parents, spouses and children. Ages need full dates.\n- A stats line: 'People 24 · Families 9 · Generations 5 · Living 15', where generations is the number of people in the longest parent-to-child chain and living means no DEAT record.\n- A search box highlights cards whose name contains the text (case-insensitive) and shows '3 matches'.\n\nRelationship calculator: pick person A and person B to get a sentence 'A is the R of B' with full names. Spouses are 'husband' or 'wife'. Otherwise find their nearest common ancestors (fewest generations in total); if none, show 'No blood relationship'. With A a generations and B b generations below them: a = 0 is father or mother, then grandfather, great-grandfather, great-great-grandfather; b = 0 is son or daughter, grandson, great-grandson and so on; a = b = 1 is brother or sister; a = 1 is uncle or aunt, great-uncle, great-great-uncle; b = 1 is nephew or niece, great-nephew, great-great-nephew; otherwise they are cousins of degree min(a, b) − 1 (first, second, third) and |a − b| times removed ('once removed', 'twice removed'). Words follow A's sex. When the nearest common ancestor is one person rather than a couple, siblings, uncles, aunts, nephews and nieces get the prefix 'half-'. Unless A is B's ancestor or descendant, a second line reads 'Common ancestors: ' with the nearest common ancestor or couple, husband first.\n\nEditing: 'Add child' on the selected person asks for given name, surname, sex and birth date and adds the child to the person's only family, or creates a new family with them as the single parent. Ctrl+Z and Ctrl+Shift+Z undo and redo. Export shows the tree as GEDCOM text (HEAD, INDI and FAM records, TRLR) that Import (pasted text, same rules and notice) reads back to the same tree. Changes persist in localStorage.\n\nVisual direction: warm and archival: cream background, serif names on white cards with soft shadows, thin sepia connector lines, readable at a glance.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": false
+  },
+  "assets": [
+   "family.ged"
+  ],
+  "interaction_hints": "The input file is /grader/task/family.ged; grep the page's JS for a relative fetch of family.ged (hard-coded people fail R2). Pick people in the calculator with the select action or by typing, as the UI allows. Read text with eval of innerText. Every scenario starts from a fresh load. (1) Screenshot the notice, stats line and chart (scroll or use full_page screenshots). Find Sven Lindqvist and check he appears once with Maj Ek and Lena Dahl beside him, Mats under Sven and Maj, Jonas under Sven and Lena. (2) Click Emily Wright: read the details panel and location.hash; click Maya Park and read her age. In a fresh call eval 'location.hash = \"#/person/I1\"' (or load with that hash) and read the details (Erik Lindqvist, Died aged 77). (3) Calculator pairs (A then B): Maya Park / Nils Lindqvist; Britt Nyberg / Maya Park; Emily Wright / Leo Lindqvist; Mats Lindqvist / Jonas Lindqvist; Leo Lindqvist / Mats Lindqvist; Theo Park / Sven Lindqvist; Erik Lindqvist / Nils Lindqvist; Anna Lindqvist / Thomas Wright; Sara Olsen / Anna Lindqvist. (4) Select Nils Lindqvist, Add child: Ella, Lindqvist, F, 2019-05-03; read the stats line and see Ella under Nils; calculator Ella Lindqvist / Maya Park; press Control+z (click an empty area first) and read the stats; press Control+Shift+z. (5) Type lind in the search box and read the match count. (6) After adding Ella, open Export and read the text; copy it with eval (the textarea or pre content), then open Import, paste it with a type action with a selector, submit, and read the notice and stats. (7) localStorage starts empty in every new interact call, so test persistence inside ONE call: add Ella, then eval 'setTimeout(() => location.reload(), 50)', wait 1500 ms and read the stats again.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The page has the family chart, a details panel, the relationship calculator with two person pickers, the stats line, a search box and Import and Export controls; cards show names, life spans like '1902–1979' or 'b. 1952', and blue or rose accents by sex."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "family.ged is in the output folder and loaded with a relative fetch; the notice reads 'Loaded 24 people and 9 families · 1 line skipped (line 85)', a warning reads '@F8@ refers to missing @I99@', and the stats line reads 'People 24 · Families 9 · Generations 5 · Living 15'."
+   },
+   {
+    "id": "R3",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The chart has five generation rows from Erik Lindqvist and Astrid Holm at the top down to Maya and Theo Park, spouses side by side with marriage lines and children connected below their parents; Sven Lindqvist appears once with Maj Ek and Lena Dahl beside him, Mats under Sven and Maj, Jonas under Sven and Lena, and no cards or lines overlap."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Clicking Emily Wright sets the hash to #/person/I17 and shows born 12 Jan 1978, Age 48, parents Thomas Wright and Anna Lindqvist, spouse Daniel Park and children Maya and Theo Park; Maya shows Age 18 (born 29 Feb 2008); opening #/person/I1 selects Erik Lindqvist with 'Died aged 77'."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Cousins: 'Maya Park is the first cousin once removed of Nils Lindqvist' with 'Common ancestors: Karl Lindqvist, Greta Berg'; 'Britt Nyberg is the first cousin twice removed of Maya Park'; 'Emily Wright is the second cousin of Leo Lindqvist' with Erik Lindqvist and Astrid Holm as common ancestors."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Half and lineal relations: 'Mats Lindqvist is the half-brother of Jonas Lindqvist' with 'Common ancestors: Sven Lindqvist'; 'Leo Lindqvist is the half-nephew of Mats Lindqvist'; 'Theo Park is the great-great-nephew of Sven Lindqvist'; 'Erik Lindqvist is the great-grandfather of Nils Lindqvist'."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "'Anna Lindqvist is the wife of Thomas Wright', and Sara Olsen with Anna Lindqvist gives 'No blood relationship'."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Adding Ella Lindqvist (F, 2019-05-03) as Nils's child shows her card under Nils and the stats 'People 25 · Families 10 · Generations 5 · Living 16'; the calculator gives 'Ella Lindqvist is the second cousin of Maya Park'; Ctrl+Z removes her (stats back to 24 and 9) and Ctrl+Shift+Z restores her."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Searching 'lind' highlights the ten Lindqvist cards and shows '10 matches'."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Export shows GEDCOM text with HEAD, INDI and FAM records and TRLR, including Ella after she is added; importing that exported text reads back the same tree: 'Loaded 25 people and 10 families' with no skipped lines and the same stats line."
+   },
+   {
+    "id": "R11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After adding Ella, reloading the page restores the edited tree (People 25) instead of re-reading family.ged."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "It looks warm and archival yet clear: cream background, serif names on white cards with soft shadows, thin sepia connectors routed neatly between couples and children, consistent card sizes and spacing."
+   }
+  ]
+ },
+ {
+  "task_id": "app-open-18",
+  "category": "interactive_app",
+  "mode": "open_ended",
+  "title": "Invoicing app with VAT rules, due-date terms, numbering and print layout",
+  "prompt": "Build Billwise, the invoicing app for my design studio, Northlight Studio B.V. in Amsterdam. For this app today is Monday 15 June 2026; never use the system clock.\n\nThe provided invoices.json holds my seller details, clients, the next invoice number and my existing invoices: copy it into the output folder next to index.html and, when nothing is saved yet, load it at runtime with fetch('invoices.json'); never hard-code its contents.\n\nViews (hash routing):\n- '#/invoices' (the default): summary cards Outstanding (Sent invoices, overdue included), Overdue and 'Paid in 2026', then a table with Number, Client, Issued, Due, Status and Total. Status is Draft, Sent or Paid, and a Sent invoice whose due date is before today shows a red Overdue badge. Row actions: Mark as paid and Duplicate.\n- '#/invoice/NLS-2026-0041': the editor, a form beside a live A4-proportioned preview of the invoice.\n\nNumbers: 'New invoice' takes the next number formatted NLS-YYYY-NNNN from the issue date's year (the file says the next is 41) and opens as a Draft dated today; Duplicate makes a new Draft with the next number, today's date and the same client and lines. The counter only advances when an invoice is created.\n\nEditor: client select (its default terms fill in), issue date, terms (Net 14, Net 30, End of month + 30 = 30 days after the last day of the issue month, Due on receipt) with the computed due date, and line items with description, quantity (up to 2 decimals), unit, unit price, VAT rate (21%, 9% or 0%) and discount %.\n\nMath: a line amount is quantity × price × (1 − discount), rounded to the cent (half up). VAT is computed per rate on the sum of that rate's line amounts and then rounded, not line by line. The preview shows a VAT summary row per rate (rate, net, VAT), the subtotal, total VAT and the total. VAT treatment by client: Dutch clients pay the line rates; clients in another EU country with a VAT number pay 0% with the note 'VAT reverse-charged to the recipient (Art. 196 VAT Directive)' and their VAT number; clients outside the EU pay 0% with the note 'Outside the scope of Dutch VAT'. Money shows as €1,234.56 and dates as 15 Jul 2026.\n\nValidation, shown inline and blocking save: 'Choose a client', 'Add at least one line', 'Quantity must be greater than 0', 'Price cannot be negative'. Buttons: Save draft, Save and send (status Sent), Print.\n\nThe preview (and print) has the seller block with VAT and KvK numbers, 'INVOICE' with number, issue and due dates, the bill-to block, the line table, the VAT summary, the total and the sentence 'Please pay €4,944.32 by 15 Jul 2026 to IBAN NL91 ABNA 0417 1643 00 (BIC ABNANL2A) quoting NLS-2026-0041.' with the real values. In print, only the invoice document appears, on white, fitting an A4 page.\n\nEverything persists in localStorage. At 390 px wide the editor stacks the form above the preview without horizontal scrolling.\n\nVisual direction: a refined Scandinavian-style finance tool: white surfaces on a warm light gray, one deep teal accent, tabular numerals right-aligned, and an invoice preview that looks like a real printed document with generous margins.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "invoices.json"
+  ],
+  "interaction_hints": "The input file is /grader/task/invoices.json; grep the page's JS for a relative fetch of invoices.json (hard-coded invoices fail R2). Inputs: type with a selector; date inputs accept 2026-01-31; use the select action for selects (or set .value and dispatch input and change events with eval). Read the preview with eval of its innerText. Every scenario starts from a fresh load. (1) Screenshot #/invoices; read the cards and the three rows. (2) Click New invoice; read the number, hash and issue date; choose Harbour & Co B.V. and read terms and due date; switch terms to End of month + 30 (due 30 Jul 2026); set issue date 2026-01-31 (due 2 Mar 2026). (3) New invoice for Harbour & Co B.V. with lines: Brand strategy workshop 1.5 days × 1150 at 21%; Logo design 1 × 2400 at 21% with 10% discount; Printed style guide 3 × 48.35 at 9%; Font licence 3 × 9.05 at 21%; Icon set 7 × 6.20 at 21%. Read the line amounts, VAT summary, subtotal, total and the payment sentence (line-by-line VAT rounding gives €830.66 and a €4,944.31 total, which fails R4). (4) Same invoice: switch the client to Bäckerei Sommer GmbH, read the note, VAT, total and due date; then Maple Leaf Media Inc. (5) Validation: a line with quantity 0 and Save; a new invoice with a line but no client and Save. (6) Save the scenario-3 invoice with Save and send; go to #/invoices and read the cards and new row; click New invoice and read its number. (7) Fresh load: Mark NLS-2026-0039 as paid and read the cards; Duplicate NLS-2026-0038 and read the new draft (number, date, due, total) and the cards. (8) Print: open the scenario-3 invoice, then use the media action with print and take a full_page screenshot. (9) Set location.hash to #/invoice/NLS-2026-0039 with eval and read the preview. (10) localStorage starts empty in every new interact call, so test persistence inside ONE call: save an invoice and mark one paid, then eval 'setTimeout(() => location.reload(), 50)', wait 1500 ms and read the list again. Check mobile.png and the editor at 390 px with a Playwright script if needed.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "#/invoices shows the Outstanding, Overdue and 'Paid in 2026' cards and a table with Number, Client, Issued, Due, Status and Total; New invoice opens #/invoice/NLS-2026-0041 with the form beside a live A4-proportioned preview; at 390 px the editor stacks without horizontal scrolling."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "invoices.json is in the output folder and loaded with a relative fetch; the list shows NLS-2026-0038 Harbour & Co B.V. Paid due 2 May 2026 €2,341.35, NLS-2026-0039 Bäckerei Sommer GmbH Overdue due 18 May 2026 €1,260.00 and NLS-2026-0040 Maple Leaf Media Inc. Sent due 30 Jun 2026 €3,040.00, with cards Outstanding €4,300.00, Overdue €1,260.00 and Paid in 2026 €2,341.35."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "A new invoice is NLS-2026-0041 dated 15 Jun 2026; choosing Harbour & Co B.V. sets Net 30 with due 15 Jul 2026; End of month + 30 gives 30 Jul 2026, and with issue date 2026-01-31 it gives 2 Mar 2026."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With the five lines from the hints for Harbour & Co B.V., the line amounts are €1,725.00, €2,160.00, €145.05, €27.15 and €43.40; the VAT summary reads 21% on €3,955.55 = €830.67 and 9% on €145.05 = €13.05; subtotal €4,100.60, VAT €843.72 and total €4,944.32."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Switching that invoice to Bäckerei Sommer GmbH sets every line to 0%, shows 'VAT reverse-charged to the recipient (Art. 196 VAT Directive)' with DE811234567, a total of €4,100.60 and due 29 Jun 2026 (Net 14); Maple Leaf Media Inc. shows 'Outside the scope of Dutch VAT', €4,100.60 and due 30 Jul 2026."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Saving is blocked with inline messages: a line with quantity 0 shows 'Quantity must be greater than 0', and an invoice without a client shows 'Choose a client'."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Save and send adds NLS-2026-0041 to the list as Sent, due 15 Jul 2026, €4,944.32, Outstanding becomes €9,244.32, and the next New invoice is NLS-2026-0042."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "From a fresh load, Mark as paid on NLS-2026-0039 makes Overdue €0.00, Outstanding €3,040.00 and Paid in 2026 €3,601.35; Duplicate on NLS-2026-0038 creates Draft NLS-2026-0041 dated 15 Jun 2026, due 15 Jul 2026, €2,341.35, without changing Outstanding."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "In print media only the invoice document is shown on white (no navigation, form or buttons), with seller VAT NL862114587B01 and KvK 71234567, the bill-to block, the line table, the VAT summary, the total and 'Please pay €4,944.32 by 15 Jul 2026 to IBAN NL91 ABNA 0417 1643 00 (BIC ABNANL2A) quoting NLS-2026-0041.'"
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Opening #/invoice/NLS-2026-0039 directly shows that invoice with its reverse-charge note and total €1,260.00; the list link returns to #/invoices."
+   },
+   {
+    "id": "R11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After saving an invoice and marking one paid, reloading the page restores the invoices, their statuses, the cards and the next number."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "It looks like a refined finance tool: white surfaces on warm light gray, one deep teal accent, right-aligned tabular amounts, clear status badges (red Overdue), and a preview that reads as a real printed invoice with generous margins and a clean table."
+   }
+  ]
+ },
+ {
+  "task_id": "app-open-19",
+  "category": "interactive_app",
+  "mode": "open_ended",
+  "title": "Habit tracker with schedules, streak math and CSV round-trip",
+  "prompt": "Build Streakwise, a habit tracker. Today is Sunday 15 March 2026 regardless of the system clock, and the header reads 'Today · Sunday 15 March 2026'. Weeks run Monday to Sunday.\n\nSeed four habits in this order, all started on Monday 22 December 2025: 'Read 20 pages' (Daily, blue), 'Morning run' (Mon, Wed, Fri; coral), 'Spanish lesson' (Tue, Thu, Sat; violet) and 'Strength training' (3 times per week, green).\n\nThe provided habits.csv is my check-in history: copy it next to index.html and load it at runtime with fetch('habits.csv'); never hard-code its rows. The header is date,habit and each other line is one check-in. Fields are trimmed, habit names match ignoring case and blank lines are ignored. A row is skipped when its date is not a real YYYY-MM-DD date, is after today, names an unknown habit, is not a scheduled day of that habit (or is before its start), or repeats a check-in already read. Show a notice like 'Imported 12 check-ins · 2 rows skipped (lines 7, 9)' ('1 row skipped (line 7)' for one), counting lines from the header as line 1. If the file cannot be loaded on a first visit, show an error card instead of the dashboard.\n\nEach habit card shows its name, schedule, stats and a 12-week heatmap:\n- Heatmap: week columns from the week of 22 December 2025 (left) to this week, rows Monday to Sunday, month labels above. Done days in the habit color, missed days light gray, unscheduled days hatched, today outlined. Hovering a cell shows e.g. 'Tue 10 Mar 2026 · Missed' (Done, Missed, Pending for today when not done, Not scheduled). Clicking a scheduled cell toggles it and all numbers update at once; unscheduled cells and days before the start do nothing.\n- Daily and weekday habits: the current streak counts back over scheduled days from today; today counts when done and is skipped while pending; the count stops at the first scheduled day not done. Unscheduled days neither break nor extend a streak. The longest streak is the longest run of consecutive scheduled days all done. The 30-day rate is done ÷ scheduled days over the 30 days ending today, counting only days from the start date and counting today only once done; one decimal like 93.1%, or '—' with no scheduled days. Streaks read '9 days' or '1 day'.\n- Times-per-week habits count weeks, met with at least N check-ins. The current streak is the run of met weeks ending with this week if already met, otherwise with last week; the longest is the longest run of met weeks; both read like '4 wk'. Instead of a rate they show 'This week 2/3' and 'Weeks met 10 of 12' over the heatmap weeks.\n\nAdd habit takes a name, schedule (Daily, chosen weekdays or N times per week) and color; a new habit starts today, and a name already in use (ignoring case) is refused with 'A habit with this name already exists'. Archive moves a card to a collapsible 'Archived (1)' section with Restore, keeping its check-ins; Delete removes the habit and its check-ins.\n\nCtrl+Z undoes the last change (toggle, add, archive, restore, delete or import) and Ctrl+Shift+Z redoes it.\n\nExport CSV opens a dialog with the CSV text (header date,habit, then one line per check-in sorted by date, then habit name A–Z) and a Download button. Import CSV takes pasted text with the same rules and notice and replaces all check-ins.\n\nSave everything to localStorage and restore it after a reload; once saved data exists, do not re-read the CSV.\n\nVisual direction: a calm, friendly wellness app with a warm off-white background, white rounded cards, each habit's color only on its own heatmap and accents, and large tabular streak numbers with small labels. At 390px wide the cards stack in one column and each heatmap still fits inside its card.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "habits.csv"
+  ],
+  "interaction_hints": "The input file is /grader/task/habits.csv; grep the page's HTML/JS for a relative fetch of habits.csv (hard-coded rows fail R1). Heatmap geometry: 12 week columns, Mon 22 Dec 2025 top-left, today Sun 15 Mar 2026 bottom-right, rows Monday..Sunday. Locate a cell from a screenshot, or with eval find the element in the right card whose title/tooltip/aria-label text starts with the date (e.g. 'Tue 10 Mar 2026'); hover to see the tooltip. Suggested calls from a fresh load each: (1) screenshot; read the notice and every card's stats; hover Spanish lesson's Tue 10 Mar cell. (2) click Read 20 pages' today cell and read that card; click Spanish lesson's Tue 10 Mar cell; click Morning run's Fri 13 Mar cell (un-checks it); read all cards. (3) click Strength training's Sat 14 Mar cell and read it; then click Morning run's Tue 10 Mar cell and a Saturday cell (nothing should change). (4) click Read today, then Strength Sat 14 Mar; press Control+z, screenshot; Control+z, screenshot; Control+Shift+z, screenshot. (5) add habit 'Drink water' (Daily), read its stats, click its today cell and one earlier cell; then try adding 'read 20 PAGES'. (6) archive Spanish lesson, screenshot, restore it; delete Morning run, screenshot, press Control+z and read its stats. (7) open Export CSV and eval the dialog text (count lines, first and last lines); store it with eval in window.__csv. Open Import CSV, type into the textarea (type with its selector) the text 'date,habit\\n2026-03-13,Morning run\\n2026-03-14,Morning run\\n2026-03-11,morning run\\n2026-03-16,Read 20 pages\\n2026-03-12,Spanish lesson', submit, read the notice and all stats; then open Import again, set the textarea to window.__csv with eval (assign .value and dispatch an input event) or type it, submit and check the load values return. (8) localStorage starts empty in every new interact call, so test persistence inside ONE call: check a cell and add a habit, then eval 'setTimeout(() => location.reload(), 50)', wait 1500 ms and screenshot or eval again. (9) Missing file: copy /grader/artifact to /tmp/nocsv, delete habits.csv there and run interact with --artifact-dir /tmp/nocsv. Check mobile.png.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "habits.csv is in the output folder and loaded at runtime with a relative fetch (no hard-coded rows), and the notice reads 'Imported 175 check-ins · 5 rows skipped (lines 51, 115, 149, 181, 182)'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "On load the stats read: Read 20 pages current 9 days, longest 17 days, 30-day 93.1%; Morning run 5 days, 9 days, 91.7%; Spanish lesson 2 days, 10 days, 84.6%; Strength training current 4 wk, longest 6 wk, 'This week 2/3' and 'Weeks met 10 of 12'."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The header reads 'Today · Sunday 15 March 2026'; every card has a 12-column by 7-row heatmap from Mon 22 Dec 2025 to Sun 15 Mar 2026 with month labels, done cells in the habit color, missed cells gray, unscheduled cells hatched (Morning run's Tue/Thu/Sat/Sun rows) and today outlined; hovering Spanish lesson's Tue 10 Mar cell shows 'Tue 10 Mar 2026 · Missed'."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Clicking Read 20 pages' today cell makes it 10 days and 93.3% (longest stays 17 days); checking Spanish lesson's Tue 10 Mar makes it 8 days and 92.3%; un-checking Morning run's Fri 13 Mar makes its current streak 0 days and its rate 83.3%."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Checking Strength training on Sat 14 Mar shows 'This week 3/3', current 5 wk and 'Weeks met 11 of 12' with longest still 6 wk; clicking Morning run cells on a Tuesday or Saturday changes nothing."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After checking Read today and Strength Sat 14 Mar, Ctrl+Z returns Strength to 4 wk and 2/3, a second Ctrl+Z returns Read to 9 days and 93.1%, and Ctrl+Shift+Z re-applies 10 days and 93.3%."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Adding 'Drink water' (Daily) shows 0 days and a rate of '—'; checking its today cell gives 1 day and 100.0% while its earlier cells cannot be toggled; adding 'read 20 PAGES' is refused with 'A habit with this name already exists'."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Archive moves Spanish lesson into an 'Archived (1)' section and Restore brings it back with the same stats; deleting Morning run removes its card and Ctrl+Z restores it with 5 days, 9 days and 91.7%."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Export CSV shows 176 lines: 'date,habit', then '2025-12-22,Morning run', '2025-12-22,Read 20 pages', '2025-12-22,Strength training', ending with '2026-03-14,Spanish lesson'. Importing the five-row test text shows 'Imported 3 check-ins · 2 rows skipped (lines 3, 5)' with Morning run 2 days, 2 days, 16.7%, Spanish lesson 0 days, 1 day, 7.7%, Read 20 pages 0 days, 0.0% and Strength training 0 wk, 'Weeks met 0 of 12'; importing the exported text restores the load values."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "A checked cell and an added habit survive a reload without the CSV being re-imported over them, and with habits.csv missing on a first visit the page shows an error card instead of a broken or empty dashboard."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px wide the cards stack in one column and each heatmap fits inside its card (or scrolls within it) with nothing clipped or overlapping; on desktop the cards form a tidy aligned grid."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A polished wellness look: warm off-white background, white rounded cards with consistent spacing, each habit's color used for its own heatmap and accents, large tabular streak numbers with small labels, and done, missed, unscheduled and today cells clearly distinguishable."
+   }
+  ]
+ },
+ {
+  "task_id": "app-open-20",
+  "category": "interactive_app",
+  "mode": "open_ended",
+  "title": "Color palette studio with WCAG contrast math, scales and GPL import",
+  "prompt": "Build Huebench, a color palette studio for UI designers. Write the color math yourself; do not use a color library.\n\nThe palette has a title (start with 'Product UI') and five swatches in this order: Primary #2563EB, Secondary #0D9488, Accent #F59E0B, Neutral #64748B and Danger #DC2626. Each swatch shows a large color block, a hex field, H, S and L fields and a lock toggle.\n\nColor rules:\n- The hex value is the source of truth, shown uppercase like #2563EB. The hex field accepts 3 or 6 hex digits with or without '#' in any case (e11 means #EE1111) and applies on Enter or blur; anything else shows 'Use a hex color like #1A2B3C' under the field and keeps the old color.\n- The H, S and L fields show the hex as HSL in whole numbers (H 0–359, S and L in percent). Editing one and pressing Enter sets the hex from the three whole numbers, rounding each RGB channel to the nearest integer (halves up); out-of-range values are clamped.\n- Each swatch has a ten-step scale 50, 100, 200 … 900 built from its H and S fields with L set to 97, 93, 85, 75, 63, 52, 43, 35, 27 and 20; every step shows its number and hex.\n\nContrast matrix: rows are the five swatches as text; columns are White, Black and the five swatches as backgrounds. Each cell shows 'Aa' in the text color on the background, the WCAG 2 contrast ratio from relative luminance truncated (not rounded) to two decimals, and a badge from the exact ratio: AAA from 7, AA from 4.5, AA Large from 3, otherwise Fail. Diagonal cells are empty. Clicking a cell shows its details with a 'Fix for AA' button when the ratio is below 4.5. Fix for AA changes the text swatch's L by 1 at a time, keeping its H and S, darker when the background has the higher luminance and lighter otherwise, until the ratio reaches 4.5; if L runs out first it shows 'Cannot reach AA by changing lightness' and changes nothing. A locked text swatch is never changed: show 'Unlock Accent to fix it' with that swatch's name.\n\nHarmony: a menu with Analogous (Secondary = Primary's hue + 30°, Accent = hue − 30°), Complementary (Secondary = hue + 180°) and Triadic (Secondary + 120°, Accent + 240°), all with Primary's S and L. Locked swatches, Neutral and Danger never change.\n\nImport: a dialog where I can paste GIMP palette text or pick a .gpl file; harbor.gpl is a sample. The first line must be 'GIMP Palette'; 'Name:' sets the palette title; 'Columns:', '#' comments and blank lines are ignored; other lines must be R G B values from 0 to 255 plus an optional name, and any other line is skipped. The colors fill the unlocked swatches in order (extra colors are ignored) and a notice reads like 'Read 6 colors · 1 line skipped (line 9)'.\n\nExport CSS opens a dialog with '/* <title> */', then ':root {', then for each swatch in order its base like '  --primary: #2563eb;' followed by '  --primary-50: …;' through '  --primary-900: …;' (two-space indent, lowercase hex), then '}'.\n\nEvery color change (hex or HSL edit, harmony, Fix for AA, import with its title) is one undo step: Ctrl+Z and Ctrl+Shift+Z and toolbar buttons undo and redo it; locking is not a step. The URL hash always holds the colors like '#p=2563eb,0d9488,f59e0b,64748b,dc2626', and opening the page with such a hash, or changing it, loads those colors. The title, colors and locks persist in localStorage; a hash present on load wins.\n\nVisual direction: a precise designer tool: a near-white neutral UI so the colors stand out, monospace hex and ratio values, badges green for AAA and AA, amber for AA Large and red for Fail, a clear lock state, and scale steps whose labels switch between dark and light text to stay readable.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": false
+  },
+  "assets": [
+   "harbor.gpl"
+  ],
+  "interaction_hints": "Fields: type with a selector, then press Enter. Read values from screenshots and with eval of the DOM text. Matrix cells: rows are the text swatch, columns the background (White, Black, then the swatches); find a cell from a screenshot. Suggested calls from a fresh load each: (1) screenshot; read every hex and HSL field, the scales (Primary 50/500/900, Accent 100/600, Danger 700, Neutral 300) and the matrix cells named in R3. (2) Danger hex: type e11, Enter; read its hex, HSL and the Danger/White cell. Primary hex: type zz1234, Enter; read the message and Primary's hex. Primary L field: type 45, Enter; read Primary's hex and the Primary/White cell. (3) Click the Secondary/White cell and Fix for AA; click Accent/White and Fix for AA; click Danger/Neutral and Fix for AA; read hexes, cells and messages. Then lock Accent (fresh load or after undo) and try Fix for AA on Accent/White. (4) Lock Accent, apply Analogous; read Secondary and Accent. Unlock Accent, apply Triadic; read Secondary, Accent, Neutral and Danger. (5) Lock Neutral, open Import, type the full text of /grader/task/harbor.gpl into the textarea (type with its selector; tabs and newlines are fine), apply; read the notice, title, five hexes, the Primary/White and Accent/Primary cells; press Control+z and check the seed colors and 'Product UI' return. (6) Open Export CSS; eval the dialog text: line count, first four lines, the --secondary-500, --accent-700 and last lines. (7) Primary L 45 + Enter, apply Triadic, then press Control+z, screenshot, Control+z, screenshot, Control+Shift+z, screenshot. (8) Hash: after an edit eval location.hash; then eval \"location.hash = '#p=0f4c81,2a9d8f,e9c46a,264653,e76f51'\", wait 800 ms and read the swatches. (9) localStorage starts empty in every new interact call, so test persistence inside ONE call: change a color and lock a swatch, then eval 'setTimeout(() => location.reload(), 50)', wait 1500 ms and read again.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Five swatches Primary, Secondary, Accent, Neutral and Danger show hex #2563EB, #0D9488, #F59E0B, #64748B, #DC2626 with HSL fields 221/83/53, 175/84/32, 38/92/50, 215/16/47 and 0/72/51, each with a lock toggle; the title reads 'Product UI'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Each swatch has a labeled 50–900 scale with exact hexes, including Primary 50 #F1F5FE, 500 #1F5FEA, 900 #09235D; Accent 100 #FEF2DD, 600 #D38909; Danger 700 #9A1919; Neutral 300 #B5BEC9."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The matrix has five text rows and seven background columns (White, Black, the swatches) with empty diagonal cells; on load it reads Primary/White 5.16 AA, Secondary/White 3.74 AA Large, Accent/White 2.14 Fail, Accent/Black 9.77 AAA, Neutral/White 4.75 AA, Danger/Black 4.34 AA Large and Primary on Secondary 1.38 Fail (truncated, so 5.17, 2.15 or 4.76 fail this item)."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Typing e11 in Danger's hex gives #EE1111 with HSL 0/87/50 and Danger/White 4.44 AA Large; zz1234 in Primary's hex shows 'Use a hex color like #1A2B3C' and keeps #2563EB; setting Primary's L to 45 gives #1450D2 with Primary/White 6.75 AA."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Fix for AA on Secondary over White makes Secondary #0B8379 at 4.62 AA; on Accent over White makes Accent #A26907 at 4.60 AA; on Danger over Neutral shows 'Cannot reach AA by changing lightness' and keeps #DC2626; with Accent locked it shows 'Unlock Accent to fix it' and keeps #F59E0B."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "With Accent locked, Analogous sets Secondary to #4824EB and keeps Accent #F59E0B; with nothing locked, Triadic sets Secondary #EB2463 and Accent #63EB24; Neutral and Danger never change."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With Neutral locked, importing harbor.gpl shows 'Read 6 colors · 1 line skipped (line 9)', the title 'Harbor' and swatches #0F4C81, #2A9D8F, #E9C46A, #64748B (kept) and #F4A261, with Primary/White 8.85 AAA and Accent on Primary 5.30 AA; Ctrl+Z restores the previous colors and title."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Export CSS on load shows 58 lines: '/* Product UI */', ':root {', '  --primary: #2563eb;', '  --primary-50: #f1f5fe;' … including '  --secondary-500: #1eebda;' and '  --accent-700: #ab6f07;', ending with '  --danger-900: #580e0e;' and '}'."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "After setting Primary's L to 45 and applying Triadic, Ctrl+Z restores Secondary #0D9488 and Accent #F59E0B, a second Ctrl+Z restores Primary #2563EB, and Ctrl+Shift+Z re-applies #1450D2, with the scales and matrix following each step."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The hash follows the palette (after the L 45 edit it reads '#p=1450d2,0d9488,f59e0b,64748b,dc2626'); setting the hash to '#p=0f4c81,2a9d8f,e9c46a,264653,e76f51' loads #0F4C81, #2A9D8F, #E9C46A, #264653 and #E76F51; colors and locks survive a reload."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1280×800 the swatch columns, their scales and the contrast matrix are aligned without overlap or clipping; every scale step's number and hex is readable on its own color."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A polished designer tool: near-white neutral chrome, consistent spacing and radii, monospace hex and ratio values, badges green for AAA/AA, amber for AA Large and red for Fail, and an obvious locked state."
+   }
+  ]
+ },
+ {
+  "task_id": "app-open-21",
+  "category": "interactive_app",
+  "mode": "open_ended",
+  "title": "Document viewer with search, outline, highlights, notes and JSON round-trip",
+  "prompt": "Build Folio, a document viewer for our annual report. The provided report.json holds the document: an id, a title and pages, each page a list of blocks with a type (h1, h2 or p) and text. Copy it next to index.html and load it at runtime with fetch('report.json'); never hard-code its text. If it cannot be loaded, show an error card reading 'Could not open report.json'.\n\nLayout: a toolbar with the document title, page navigation, zoom and search; a left sidebar with Thumbnails, Outline and 'Annotations (N)' tabs; and a gray scrolling viewer showing every page as a white sheet, 816×1056 px at 100%, with a shadow, a small running header with the document title and the page number at the bottom.\n\nNavigation: a 'Page [3] of 7' field: typing a number and pressing Enter scrolls that page's top to the top of the viewer; out-of-range numbers revert. J or PageDown goes to the next page and K or PageUp to the previous one when no field has focus. The current page is the one under the vertical middle of the viewer; the field and the highlighted thumbnail follow scrolling. Thumbnails are miniature pages with numbers; clicking one goes there. The outline lists the h1 headings with the following h2 headings nested under them; clicking an entry scrolls to that heading.\n\nZoom: − and + buttons and a menu with 50%, 75%, 100%, 125%, 150%, 200% and Fit width (the sheet 48 px narrower than the viewer). It opens at 100%. The sheet and its text scale together and the current page stays in view.\n\nSearch: Ctrl+F focuses the search field. As I type, every match in the block text of all pages (headings included, running headers not; non-overlapping, never across blocks) gets a yellow highlight, the first becomes current in orange and scrolls to the middle of the viewer, and a label reads like 'Match 1 of 17'. Enter and Shift+Enter step forward and back in document order and wrap around; 'No results' when nothing matches. Matching ignores case unless the Aa toggle is on; the whole-word toggle keeps only matches with no letter or digit right before or after. Escape clears the search.\n\nAnnotations:\n- Select text inside a block and press H or click Highlight to mark it in the current color (Yellow, Green or Pink in the toolbar; Yellow by default); surrounding spaces are left out.\n- The Note tool (button or N) places a numbered sticky note where I click on a page and opens a text box; Enter saves, Escape cancels.\n- The Annotations tab groups them by page under headers like 'Page 2 · 2 annotations' ('1 annotation' for one), showing each highlight's text or the note's text with its color; clicking one scrolls to it; each has a delete button, and Delete removes a selected one.\n- Ctrl+Z and Ctrl+Shift+Z undo and redo adding, deleting and importing annotations.\n- Export shows JSON with a document field holding the document id and an annotations array sorted by page, highlights (by block, then start) before notes. A highlight has type 'highlight', page (from 1), block (index in the page, from 0), start and end (character offsets in the block text, end exclusive), color ('yellow', 'green' or 'pink') and text; a note has type 'note', page, x and y (fractions of the page width and height, 3 decimals) and text.\n- Import takes such JSON pasted into a dialog and replaces all annotations. Another document id is refused with 'This file belongs to another document'; entries with an unknown page or block, offsets outside the block, start not before end or an unknown color are skipped, and a notice reads like 'Imported 2 annotations · 1 skipped'. Imported highlights take their text from the offsets.\n\nAnnotations, the zoom and the current page persist in localStorage under the key 'folio:' plus the document id and are restored after a reload.\n\nVisual direction: a calm reading app in the spirit of Preview or Acrobat: a medium-gray canvas, crisp white sheets with soft shadows, a serif for the document text with a clear h1/h2/body hierarchy, a sans-serif UI, one blue accent, and highlights that keep the text readable.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": false
+  },
+  "assets": [
+   "report.json"
+  ],
+  "interaction_hints": "The input file is /grader/task/report.json; grep the page's HTML/JS for a relative fetch of report.json (hard-coded text fails R1). Measure sheets with eval (getBoundingClientRect of the page elements). Press single-letter keys only after clicking an empty part of the gray viewer so no field has focus. To double-click a word: bring its page into view (page field), then with eval walk the text nodes, build a Range around the word and return its getBoundingClientRect center, and dblclick those coordinates. Suggested calls from a fresh load each: (1) screenshot; eval the number and size of the sheets; open Outline, screenshot, click 'Capital program' and read the page field. (2) type 6 into the page field with its selector, press Enter, screenshot; click the gray viewer background, press j, then k; type 9 + Enter in the field and read it; click thumbnail 2. (3) choose 150% and measure a sheet; 50%; Fit width (compare with the viewer's width); go to page 5, choose 150% and read the page field. (4) press Control+f, type water, read the label; toggle Aa, read; toggle Aa off and whole word on, read; repeat for rate and district (all four combinations) and desalination. (5) search water, press Enter 10 times, screenshot, read the label and the page field; clear and type water again, press Shift+Enter; press Escape and check the highlights are gone. (6) dblclick 'turbidity' on page 2, press h; choose Green, dblclick 'acoustic' on page 3, press h; open the Annotations tab and screenshot. (7) click Note (or press n), click inside page 5, type Check call volumes, press Enter; click that item in the Annotations tab and read the page field. (8) after (6), delete the turbidity item, press Control+z, then Control+Shift+z, screenshotting each step. (9) after (6), open Export and read the JSON; open Import, type this into the textarea with its selector and apply: {\"document\":\"nwa-ar-2025\",\"annotations\":[{\"type\":\"highlight\",\"page\":3,\"block\":2,\"start\":0,\"end\":22,\"color\":\"green\",\"text\":\"x\"},{\"type\":\"note\",\"page\":4,\"x\":0.5,\"y\":0.3,\"text\":\"Verify figure\"},{\"type\":\"highlight\",\"page\":9,\"block\":0,\"start\":0,\"end\":5,\"color\":\"yellow\",\"text\":\"x\"}]} ; read the notice and the Annotations tab and check the green highlight covers exactly 'Non-revenue water fell' on page 3; then import {\"document\":\"other\",\"annotations\":[]} and read the message. (10) localStorage starts empty in every new interact call, so test persistence inside ONE call: add a highlight, zoom to 125% and go to page 4, eval Object.keys(localStorage), then eval 'setTimeout(() => location.reload(), 50)', wait 1500 ms and screenshot. (11) Missing file: copy /grader/artifact to /tmp/nodoc, delete report.json there and run interact with --artifact-dir /tmp/nodoc.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "report.json is in the output folder and loaded at runtime with a relative fetch (no hard-coded text); all 7 pages render in order as white sheets 816×1056 px at 100% (within 2 px) with a running header and page numbers; the toolbar shows 'Page 1 of 7' and the sidebar has Thumbnails, Outline and Annotations tabs."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The outline nests: 2025 Annual Report › Letter from the Chair; Operations › Water supply, Treatment, Distribution network, Metering; Finance › Revenue and rates, Capital program; Customers and Community › Customer service, Education and outreach; Sustainability › Energy and emissions, Watershed protection; Outlook for 2026 › Board of Directors. Clicking 'Capital program' scrolls to it and the field reads 'Page 4 of 7'."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Entering 6 in the page field puts page 6 at the top with 'Page 6 of 7' and thumbnail 6 highlighted; J then goes to page 7 and K back to 6; entering 9 reverts the field to 6; clicking thumbnail 2 goes to page 2."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 150% the sheets are 1224 px wide and at 50% 408 px (within 2 px) with the text scaled along; Fit width makes a sheet about 48 px narrower than the viewer's visible width; going to page 5 and zooming to 150% keeps 'Page 5 of 7'."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Search counts: 'water' gives 'Match 1 of 17', 10 with Aa, 14 with whole word; 'rate' 17 and 9 with whole word; 'district' 3, 2 with Aa, 2 with whole word and 1 with both; 'desalination' shows 'No results'."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "For 'water', pressing Enter ten times shows 'Match 11 of 17' with the orange current match on page 4 and the field at 'Page 4 of 7'; Shift+Enter from the first match wraps to 'Match 17 of 17' on page 7; Escape removes all search highlights."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Double-clicking 'turbidity' on page 2 and pressing H adds a yellow highlight on exactly that word, and the tab reads 'Annotations (1)' with 'Page 2 · 1 annotation' and 'turbidity'; choosing Green and highlighting 'acoustic' on page 3 adds a green one under 'Page 3 · 1 annotation' and 'Annotations (2)'."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The Note tool places a numbered note where clicked on page 5; typing 'Check call volumes' and Enter saves it; it is listed under page 5 and clicking the list item brings page 5 into view."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With both highlights, deleting 'turbidity' removes it from the page and the list ('Annotations (1)'); Ctrl+Z restores it and Ctrl+Shift+Z deletes it again."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Export shows document 'nwa-ar-2025' and the turbidity highlight as type 'highlight', page 2, block 5, start 98, end 107, color 'yellow', text 'turbidity'. Importing the three-entry test JSON shows 'Imported 2 annotations · 1 skipped' and replaces the annotations with a green highlight on exactly 'Non-revenue water fell' on page 3 and the note 'Verify figure' on page 4; a JSON for document 'other' is refused with 'This file belongs to another document'."
+   },
+   {
+    "id": "R11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Annotations, the zoom level and the current page survive a reload, stored under the localStorage key 'folio:nwa-ar-2025'; with report.json missing the page shows 'Could not open report.json'."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A polished reading app: medium-gray canvas, crisp white sheets with soft shadows, a serif document font with clear h1/h2/body hierarchy, a tidy sans-serif toolbar and sidebar with one blue accent, and highlights that keep the text readable."
+   }
+  ]
+ },
+ {
+  "task_id": "app-open-22",
+  "category": "interactive_app",
+  "mode": "open_ended",
+  "title": "Flowchart editor with snapping connectors, live validation and JSON/SVG round-trip",
+  "prompt": "Build Flowline, a flowchart editor drawn with SVG (no diagram or canvas library).\n\nLayout: a toolbar (Undo, Redo, Import JSON, Export JSON, Export SVG), a left palette (Start, End, Process, Decision), a canvas with a 20 px grid, a right panel with the Inspector above an Issues panel, and a status line like 'Nodes 4 · Connectors 3'.\n\nShapes are 140 px wide: Start and End are 40 px tall pills, Process a 60 px tall rectangle and Decision an 80 px tall diamond, each with a centered label and four ports at the middles of its sides. Clicking a palette item adds that shape, labeled with its type name, at X 320, Y 40; dragging it onto the canvas drops it where released. New ids continue the numbering (n11, e11).\n\nGrid: X and Y are a shape's top-left corner in canvas pixels. Whenever a shape is placed, dragged or typed into the Inspector, both snap to the nearest multiple of 20, halves rounding up (233 becomes 240, 50 becomes 60). Arrow keys move the selection by 20 px.\n\nConnectors: drag from a port (shown on hover) and release over another shape to connect to its port nearest the release point. Connectors are arrows of horizontal and vertical segments only, stay attached to their ports and re-route when shapes move. Double-click one to edit its label.\n\nSelection: click, Shift+click to add or remove, and a marquee drag on empty canvas selects the shapes entirely inside it. Delete removes the selected shapes with every connector touching them, or a selected connector; Escape deselects. The Inspector edits the selected shape's Label, X and Y.\n\nIssues: a panel titled 'Issues (N)' lists every problem, updated after every change, in these groups and this order: 'Missing Start node' or 'More than one Start node'; 'Missing End node' or 'More than one End node'; 'Unreachable: <label>' for every shape that cannot be reached from the Start by following arrows (checked only when there is exactly one Start); 'Decision <label> needs 2 labeled exits' unless it has exactly two outgoing connectors, both labeled; and 'Dead end: <label>' for every shape other than an End without an outgoing connector. Within a group, shapes follow document order (file order, then creation order). With no problems it reads 'Flowchart is valid'.\n\nData: when nothing is autosaved, import flowchart.json (copy it next to index.html and fetch it at runtime); if it cannot be loaded, show 'Could not load flowchart.json' and start empty. Its format is {name, nodes: [{id, type, label, x, y}], edges: [{id, from, fromPort, to, toPort, label}]} with types start, end, process, decision and ports top, right, bottom, left. Export JSON shows the diagram in exactly this format; Import JSON replaces it from pasted text, and invalid input shows a message starting 'Invalid flowchart' and changes nothing. Export SVG shows standalone SVG markup without the grid, its viewBox fitted to the shapes plus a 20 px margin.\n\nHistory: Ctrl+Z and Ctrl+Shift+Z undo and redo every change (add, move, connect, label, delete, import), one step per drag or key press, at least 50 steps. The diagram autosaves to localStorage and is restored after a reload.\n\nVisual direction: a clean diagramming tool in the spirit of Whimsical: white canvas with a faint grid, soft fills per type (green Start and End, blue Process, amber Decision), 1.5 px slate outlines and arrows, a blue selection outline with visible ports, and a compact side panel.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": false
+  },
+  "assets": [
+   "flowchart.json"
+  ],
+  "interaction_hints": "The input file is /grader/task/flowchart.json; grep the page's JS for a relative fetch of flowchart.json (hard-coded shapes fail R2). Shapes can usually be clicked by their label text (selector text=Refund). For coordinates, eval the getBoundingClientRect of the canvas svg and add a shape's X/Y from the Inspector (check the mapping by clicking a label first). Shape sizes: 140 wide, 40/60/80 tall; ports sit at side midpoints. Use drag with steps 20 or more; for Shift+click use keydown Shift, click, keyup Shift. Type into Inspector fields with a selector, then press Enter. Suggested calls from a fresh load each: (1) screenshot; read the status line and the Issues panel. (2) Click Refund; set X to 587 and press Enter, set Y to 50 and press Enter; read X and Y (580, 60); press ArrowDown and read Y (80); screenshot its connector to Notify customer. (3) Drag Ship order by its body to another spot; read X and Y (multiples of 20) and look at its two connectors. (4) Double-click the unlabeled connector from In stock? to Backorder (on its horizontal segment), type No, press Enter; read Issues. Hover Backorder, drag from its top port (canvas point 630,460) onto Notify customer; read the status line and Issues. Click Refund, press Delete; read. Press Control+z and read; press Control+z twice more and read; press Control+Shift+z and read. (5) Click Check stock, press Delete; read the status line and all Issues in order. Separately, click Start in the palette and read Issues. (6) Shift+click Refund and Backorder (or marquee-drag on empty canvas from canvas point 540,100 to 720,540), press Delete; read. (7) Export JSON and read it (10 nodes, 10 edges, file ids and coordinates); Export SVG and read the viewBox; Import JSON with the exported text but Ship order renamed to Ship parcel; then Import JSON with the text {oops. (8) localStorage starts empty in every new interact call, so test persistence inside ONE call: make changes (move a shape, add a connector), then eval 'setTimeout(() => location.reload(), 50)', wait 1500 ms and screenshot or eval again. (9) Missing file: copy /grader/artifact to /tmp/noflow, delete flowchart.json there and run interact with --artifact-dir /tmp/noflow.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The layout has the toolbar (Undo, Redo, Import JSON, Export JSON, Export SVG), a palette with Start, End, Process and Decision, a gridded SVG canvas, the Inspector and Issues panels and the status line; with flowchart.json missing the page shows 'Could not load flowchart.json', an empty canvas and exactly the issues 'Missing Start node' and 'Missing End node'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "flowchart.json is loaded at runtime with a relative fetch and drawn as 10 shapes at their file positions: pills for Order received and Done, diamonds for Payment OK? and In stock?, rectangles for the other six; 10 arrow connectors with the labels Yes and No out of Payment OK? and Yes out of In stock?; the status line reads 'Nodes 10 · Connectors 10'."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "On load the Issues panel reads 'Issues (3)' with exactly 'Unreachable: Refund', 'Decision In stock? needs 2 labeled exits' and 'Dead end: Backorder' in that order."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "With Refund selected, typing X 587 and Y 50 in the Inspector puts it at X 580, Y 60; ArrowDown then shows Y 80; the Refund to Notify customer connector stays attached and is made only of horizontal and vertical segments."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Dragging a shape moves it to a position whose X and Y are multiples of 20 (as shown in the Inspector), and every connector attached to it follows and re-routes with only horizontal and vertical segments."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Double-clicking the unlabeled In stock? to Backorder connector and entering No leaves 'Issues (2)' (Unreachable: Refund, Dead end: Backorder); dragging from a Backorder port onto Notify customer adds an arrow, the status line reads 'Nodes 10 · Connectors 11' and only 'Unreachable: Refund' remains."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Continuing, deleting Refund gives 'Nodes 9 · Connectors 10' and 'Flowchart is valid'; Ctrl+Z restores Refund with its connector (Nodes 10 · Connectors 11, Issues (1)); two more Ctrl+Z remove the new connector and the No label (Issues (3) again); Ctrl+Shift+Z re-applies the label."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "From a fresh load, deleting Check stock also removes its two connectors ('Nodes 9 · Connectors 8') and the panel reads 'Issues (7)': Unreachable: In stock?, Unreachable: Ship order, Unreachable: Refund, Unreachable: Backorder, Decision Payment OK? needs 2 labeled exits, Decision In stock? needs 2 labeled exits, Dead end: Backorder. Separately, clicking Start in the palette adds a Start shape at X 320, Y 40 and the panel reads 'Issues (4)' starting with 'More than one Start node' and ending with 'Dead end: Start'."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Selecting Refund and Backorder together (Shift+click or a marquee around both) and pressing Delete removes both with their connectors: 'Nodes 8 · Connectors 8' and 'Issues (1)' with only 'Decision In stock? needs 2 labeled exits'."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Export JSON right after load shows the file format with the same 10 nodes and 10 edges (same ids, types, labels, coordinates, ports and labels) and reflects a moved shape's new x and y; importing edited JSON updates the canvas (a renamed shape shows its new label) and invalid text shows a message starting 'Invalid flowchart' without changing the diagram; Export SVG markup has viewBox '40 20 680 620'."
+   },
+   {
+    "id": "R11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After moving a shape and adding a connector, reloading the page restores the diagram with the same positions, connectors and labels instead of re-importing the file."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A polished diagramming look: faint grid, distinct fills per shape type, crisp labels centered in their shapes, arrowheads that end exactly at the ports, a clear blue selection outline with ports, and an aligned, compact side panel."
+   }
+  ]
+ },
+ {
+  "task_id": "app-open-23",
+  "category": "interactive_app",
+  "mode": "open_ended",
+  "title": "Text diff and three-way merge tool with word highlights, conflicts and undo",
+  "prompt": "Build Mergewise, a text diff and three-way merge tool for config files.\n\nFiles: copy base.txt, ours.txt and theirs.txt next to index.html and load them at runtime with fetch; never hard-code their text. If one cannot be loaded, show an error card naming it, like 'Could not load theirs.txt'.\n\nCompare view (#/compare/<left>/<right>, default #/compare/base/ours): Left and Right selectors choose among Base, Ours and Theirs and update the hash, and opening such a URL directly shows that pair.\n- Use a minimal line diff (a longest common subsequence of lines). Stats read like '+3 −2' (added and removed lines). A hunk is a maximal run of consecutive changed lines.\n- Side-by-side mode: old on the left and new on the right with line numbers on both sides, removed lines red and added lines green. Within a hunk, removed and added lines are paired in order on shared rows; unpaired lines face an empty filler.\n- Unified mode: one column with both line-number gutters and '-' or '+' prefixes; unchanged lines stay visible.\n- Word highlights: in each paired row, split both lines into words (letters, digits and underscores), runs of spaces and single other characters, and highlight only the tokens outside their longest common subsequence.\n- 'Ignore whitespace' compares lines with leading and trailing spaces or tabs removed and inner runs collapsed to one space; stats, hunks and colors follow it.\n- The toolbar shows 'Hunk 1 of N'; the n and p keys move to the next or previous hunk (stopping at the ends), outline it and scroll it into view.\n\nMerge view (#/merge): a three-way merge of Ours and Theirs against Base, using each side's minimal diff from Base. A change made by one side only is applied automatically, the same change on both sides is applied once, and different changes by both sides to the same Base lines are a conflict. Show Ours and Theirs side by side (read-only, their changed lines tinted) above the Result, where each conflict is a block showing both versions with three buttons: Accept ours, Accept theirs and Accept both (ours first). The header reads 'Conflicts remaining: N' and 'Auto-merged: X from ours · Y from theirs · Z identical', counting hunks. Download merged (saving relay.merged.conf) stays disabled until no conflicts remain; then the Result becomes an editable text area with a footer like 'Merged: 40 lines' that follows edits (a final newline does not count as a line). Ctrl+Z and Ctrl+Shift+Z undo and redo resolutions. Resolutions and edits persist in localStorage and survive a reload.\n\nVisual direction: a developer tool in the spirit of GitHub's diff view: 13 px monospace code (DejaVu Sans Mono or Liberation Mono), a light theme, soft red and green line backgrounds with stronger word highlights, gray line-number gutters, amber conflict blocks and a compact toolbar with a segmented Side-by-side / Unified switch.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": false
+  },
+  "assets": [
+   "base.txt",
+   "ours.txt",
+   "theirs.txt"
+  ],
+  "interaction_hints": "The input files are /grader/task/base.txt, ours.txt and theirs.txt; grep the page's JS for relative fetches of them (hard-coded text fails R1). Read the stats, the hunk indicator, the header and the Result with eval (innerText) and screenshots. Navigate with an eval that sets location.hash to '#/compare/ours/theirs' or the selectors. Suggested calls from a fresh load each: (1) screenshot the default view; read the stats and the hunk indicator; zoom into the port, version and legacy_mode rows. (2) Toggle Ignore whitespace; read the stats and hunk count; toggle it off again. (3) Open #/compare/ours/theirs; read the stats; toggle Ignore whitespace and read again. Open #/compare/base/theirs and look at the Maintainer comment row. (4) Switch to Unified; press n three times, screenshot and read the indicator; press p once and read it. (5) Open #/merge: read the header and the Result; check that Download merged is disabled. Click Accept ours on the port conflict, Accept theirs on the logging conflict and Accept both on the legacy_mode conflict (conflicts appear in file order: port, logging, legacy_mode); read the header, the footer and the Result text; check the button is enabled. Press Control+z and read; press Control+Shift+z and read. (6) From a fresh load of #/merge: Accept ours on port, Accept both on logging, Accept ours on legacy_mode; read the Result lines and the footer. (7) localStorage starts empty in every new interact call, so test persistence inside ONE call: resolve the port and logging conflicts, eval 'setTimeout(() => location.reload(), 50)', wait 1500 ms and read the header; then resolve the last conflict, click into the text area, press Control+End and type two new lines, and read the footer. (8) Missing file: copy /grader/artifact to /tmp/nofile, delete theirs.txt there and run interact with --artifact-dir /tmp/nofile.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The three files are loaded at runtime with relative fetches (no hard-coded text); Compare and Merge are separate views on #/compare/... and #/merge; with theirs.txt missing an error card names theirs.txt."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The default Base vs Ours side-by-side view shows line numbers on both sides with red removed and green added lines, stats '+8 −8' (either minus sign) and 'Hunk 1 of 7'; modified lines share a row with their counterpart, and the deleted 'legacy_mode = true' appears only on the left facing an empty filler."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Turning on Ignore whitespace changes the stats to '+6 −6' and the hunk indicator to 6 hunks ('Hunk k of 6'), and the cert and ttl lines are no longer marked as changed; turning it off restores '+8 −8' and 7 hunks."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Opening #/compare/ours/theirs directly (or choosing Ours and Theirs, which updates the hash) shows '+11 −10' with 10 hunks, and '+9 −8' with Ignore whitespace on."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Word highlights: in Base vs Ours the port row highlights only 8080 and 8443 and the version row only the changed version part, not 'port =' or 'version ='; in Base vs Theirs the Maintainer row highlights only platform and edge (or platform-team and edge-team)."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Unified mode shows one column with '-' and '+' prefixed lines and both line-number gutters; pressing n three times shows 'Hunk 4 of 7' with the level/format hunk outlined and in view, and p then shows 'Hunk 3 of 7' on the enabled/cert hunk."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The Merge view reads 'Conflicts remaining: 3' and 'Auto-merged: 3 from ours · 4 from theirs · 1 identical'; the Result already has the edge-team Maintainer line, 'version = 2.5.0' exactly once, timeout = 45s, enabled = true, eviction = lru, the 10.0.0.14 secondary and circuit_breaker = on, with conflict blocks for port, logging and legacy_mode in that order; Download merged is disabled."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Accept ours on port, Accept theirs on logging and Accept both on legacy_mode give 'Conflicts remaining: 0', a Result with port = 8443, level = warn, format = logfmt and legacy_mode = false and no conflict blocks, the footer 'Merged: 43 lines', and an enabled Download merged button."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "From a fresh load, Accept ours on port, Accept both on logging and Accept ours on legacy_mode give level = debug, format = json, level = warn, format = logfmt in that order, no legacy_mode line at all, and 'Merged: 44 lines'."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Ctrl+Z after the last resolution brings that conflict back ('Conflicts remaining: 1', Download merged disabled again) and Ctrl+Shift+Z re-applies it."
+   },
+   {
+    "id": "R11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After resolving two conflicts and reloading, they stay resolved ('Conflicts remaining: 1'); once all are resolved the Result is an editable text area whose line count in the footer changes when lines are typed."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "It looks like a professional diff tool: monospace code with aligned gutters, rows of the two sides at equal heights, clear red and green backgrounds with stronger word highlights, amber conflict blocks with legible buttons, and a tidy toolbar."
+   }
+  ]
+ },
+ {
+  "task_id": "app-open-24",
+  "category": "interactive_app",
+  "mode": "open_ended",
+  "title": "Round-robin league manager with head-to-head tie-breakers, what-if mode and CSV round-trip",
+  "prompt": "Build Fixtura, a league manager for the Riverside Sunday League 2026: six five-a-side teams playing a double round robin (10 rounds of 3 matches).\n\nTeams in seeding order 1 to 6: Ashford Albion, Bramley Rovers, Cobalt City, Dockside United, Elmwood Athletic, Fenwick Town. A team's slug is its name in lower case with hyphens (cobalt-city).\n\nFixtures use the circle method. Start from the list [1, 2, 3, 4, 5, 6]. Each round pairs list positions 1 and 6, 2 and 5, then 3 and 4, in that order; the first team of each pair is at home, except that seed 1 plays away in even rounds. After each round seed 1 stays first and the others rotate: the last team moves to position 2 and the rest shift right, so round 2 uses [1, 6, 2, 3, 4, 5] (Elmwood Athletic v Ashford Albion, Fenwick Town v Dockside United, Bramley Rovers v Cobalt City). Rounds 6 to 10 repeat rounds 1 to 5 with home and away swapped.\n\nResults: when nothing is saved, load results.csv (copy it next to index.html and fetch it at runtime; never hard-code its rows). Its header is round,home,away,home_goals,away_goals. A row is skipped when that home team does not host that away team in that round, a score is not a whole number from 0 to 99, or the match already has a result earlier in the file. Show a notice like 'Loaded 12 results · 2 rows skipped (lines 4, 9)' with file line numbers (the header is line 1), or just 'Loaded 12 results'. If the file is missing, show 'Could not load results.csv' and start with no results.\n\nTable (#/table, the default): Pos, Team, P, W, D, L, GF, GA, GD, Pts and Form (the last five results as W, D or L chips, newest on the right). A win earns 3 points and a draw 1. Teams level on points are ordered by a mini-table of only the matches between all of the tied teams (points, then goal difference), then overall goal difference, goals for and name. Every team gets its own position.\n\nFixtures (#/fixtures): all rounds with two score inputs per match. Entering both scores and pressing Enter saves a result, clearing both removes it, and anything else shows 'Scores must be whole numbers from 0 to 99' and saves nothing. Ctrl+Z and Ctrl+Y undo and redo result changes, imports included.\n\nWhat if: a switch that makes the inputs of unplayed matches record predictions, shown dashed and in another color. While it is on, the table is labeled 'Projected' and counts predictions; 'Discard predictions' or switching it off removes them. Predictions are never saved or exported.\n\nTeam pages (#/team/<slug>, opened by clicking a team name anywhere): position like '4th of 6', points, W-D-L, GF and GA, form, and the team's 10 fixtures in round order with scores and a W, D or L chip.\n\nExport CSV shows the played results in the file format, in round and fixture order, with a Download button; Import CSV replaces all results from pasted text with the same validation and notice. Results persist in localStorage.\n\nVisual direction: a clean sports dashboard: deep navy header with one lime accent, white cards on a light gray background, tabular numbers, green, gray and red form chips, and a subtle highlight on the leader. At 390 px wide the views stack and the table scrolls sideways inside its card.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "results.csv"
+  ],
+  "interaction_hints": "The input file is /grader/task/results.csv; grep the page's JS for a relative fetch of results.csv (hard-coded rows fail R2). Read the table with eval (innerText of the table) and screenshots. Score inputs: fill them with type + selector (or click and type), then press Enter. Navigate with the nav or an eval that sets location.hash to '#/fixtures'. Suggested calls from a fresh load each: (1) screenshot #/table; read the notice, every row and the Form chips. (2) Open the fixtures; read rounds 3, 4, 7, 9 and 10 and the round 6 Fenwick Town v Ashford Albion score. (3) Change round 5 Dockside United v Elmwood Athletic to 2 and 2, press Enter, and read the table. (4) Enter round 7 Cobalt City 0 Bramley Rovers 2 and read the table; press Control+z and read; press Control+y and read. Then type 2.5 and -1 into another unplayed match and press Enter. (5) Switch What if on; enter round 7 predictions Ashford Albion 2 Elmwood Athletic 0, Dockside United 0 Fenwick Town 0, Cobalt City 3 Bramley Rovers 1; screenshot the fixtures and the table; click Discard predictions and read the table; open Export CSV and count its rows. (6) Click Dockside United in the table; read the hash and the team page. In a new call, set location.hash to '#/team/cobalt-city' with eval (or load with that hash) and read the page. (7) Open Export CSV and read the text. Open Import CSV and paste the same text with the line 5,Dockside United,Elmwood Athletic,1,2 changed to 5,Dockside United,Elmwood Athletic,2,2; import; read the notice and the table; press Control+z and read. (8) localStorage starts empty in every new interact call, so test persistence inside ONE call: enter a round 7 result and edit a round 3 score, then eval 'setTimeout(() => location.reload(), 50)', wait 1500 ms and read the table and fixtures. (9) Missing file: copy /grader/artifact to /tmp/nocsv, delete results.csv there and run interact with --artifact-dir /tmp/nocsv. Check mobile.png for the stacked layout.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Fixtures follow the stated circle method: round 3 is Ashford Albion v Dockside United, Elmwood Athletic v Cobalt City, Fenwick Town v Bramley Rovers; round 4 Cobalt City v Ashford Albion, Dockside United v Bramley Rovers, Elmwood Athletic v Fenwick Town; round 9 Ashford Albion v Cobalt City, Bramley Rovers v Dockside United, Fenwick Town v Elmwood Athletic; round 10 Bramley Rovers v Ashford Albion, Fenwick Town v Cobalt City, Elmwood Athletic v Dockside United; rounds 7 to 10 are unplayed."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "results.csv is loaded at runtime with a relative fetch; the notice reads 'Loaded 18 results · 3 rows skipped (lines 6, 13, 22)', and round 6 Fenwick Town v Ashford Albion shows 0–1 (the later duplicate 2–2 row is ignored)."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The table values are exactly: Cobalt City P6 W3 D1 L2 GF9 GA8 GD+1 10 pts; Bramley Rovers 6 3 1 2 7 9 −2 10; Elmwood Athletic 6 3 0 3 4 6 −2 9; Dockside United 6 3 0 3 13 9 +4 9; Fenwick Town 6 3 0 3 11 7 +4 9; Ashford Albion 6 2 0 4 3 8 −5 6."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The order applies the tie-breakers: 1 Cobalt City, 2 Bramley Rovers (level on 10, they drew head-to-head, so goal difference decides), 3 Elmwood Athletic, 4 Dockside United, 5 Fenwick Town (level on 9; the head-to-head mini-table ranks them despite Elmwood's worse goal difference), 6 Ashford Albion."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Form chips, oldest to newest left to right: Cobalt City D L W L W, Dockside United W W W L L, Elmwood Athletic L W W W L, Ashford Albion W L L L W."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Changing round 5 Dockside United v Elmwood Athletic to 2–2 reorders the table to Cobalt City 10, Dockside United 10 (GD +5), Bramley Rovers 10, Fenwick Town 9, Elmwood Athletic 7, Ashford Albion 6."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Entering round 7 Cobalt City 0–2 Bramley Rovers puts Bramley Rovers first with P7 and 13 pts and Cobalt City second with 10; Ctrl+Z restores the original table and Ctrl+Y re-applies it; scores 2.5 or -1 show 'Scores must be whole numbers from 0 to 99' and save nothing."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "In What if mode the round 7 predictions Ashford Albion 2–0 Elmwood Athletic, Dockside United 0–0 Fenwick Town and Cobalt City 3–1 Bramley Rovers look visibly different from results and give a 'Projected' table of Cobalt City 13, Dockside United 10, Fenwick Town 10, Bramley Rovers 10, Ashford Albion 9, Elmwood Athletic 9; Discard predictions restores the real table with round 7 unplayed and Export CSV still has 18 result rows."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Clicking Dockside United opens #/team/dockside-united showing '4th of 6', 9 points, 3-0-3 (W-D-L), GF 13 and GA 9, and its 10 fixtures in round order starting Cobalt City 3–2 Dockside United (L) with rounds 7 to 10 unplayed; loading #/team/cobalt-city directly shows Cobalt City as '1st of 6'."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Export CSV right after load shows the header and the 18 valid rows in round and fixture order, starting '1,Ashford Albion,Fenwick Town,1,3'; importing that text with round 5 Dockside United v Elmwood Athletic changed to 2,2 shows 'Loaded 18 results' and the reordered table from R6, and Ctrl+Z undoes the import."
+   },
+   {
+    "id": "R11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Entered and edited results survive a reload; with results.csv missing the page shows 'Could not load results.csv', every team on 0 points in seeding (alphabetical) order and all 30 fixtures unplayed."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A polished sports dashboard: navy header with one lime accent, aligned tabular numbers, colored W/D/L chips, clear current-view navigation; at 390 px the layout stacks and the table scrolls inside its card with nothing clipped."
+   }
+  ]
+ },
+ {
+  "task_id": "app-rep-03",
+  "category": "interactive_app",
+  "mode": "replication",
+  "title": "Recreate a responsive flight search results page with live filters and fare math",
+  "prompt": "Recreate the attached Skyway flight search results page as a real, working, responsive web app. The two targets show the same page captured full-page at 1280 wide (desktop) and at 390 wide (mobile).\n\nDesktop: a dark navy header with the Skyway logo, a white search pill (SFO → JFK, Thu, Oct 15 – Sun, Oct 25, 1 adult · Economy) with a blue Edit search button, the Trips, Deals and Help links and a JR avatar. Below it, a 7-day date strip with the lowest price per day and Thu, Oct 15 selected. Then three columns: a Filters card (Stops and Airlines checkboxes with counts and from-prices, four Departure time chips, a Max price slider and a Checked bag included switch) above a Track prices card; the results column with the heading, the count line, the Best / Cheapest / Fastest sort tabs and eight flight cards; and a Your trip summary card (outbound flight, return placeholder, Basic / Standard / Flex fare cards, a travelers stepper, the totals and Continue).\n\nMobile: a compact navy header with the route, dates and an edit button, the date strip scrolling sideways, Filters and Sort buttons with the count, compact flight cards, and a bottom bar with the selected flight, the total and Continue. The sidebar and the summary card are hidden.\n\nOpen in exactly the state shown (Best sort, BW 1822 selected, Standard fare, 1 adult). Then make it work with these rules:\n- Best sorts by the lowest score, where score = price in dollars + 0.5 × travel time in minutes; Cheapest sorts by price; Fastest by travel time. Ties go to the earlier departure. Each tab shows the price and travel time of the flight that would be first under that sort among the flights currently shown, or — when none are shown.\n- Filters combine: a flight is shown only if its stop count and its airline are checked, its departure falls in one of the selected time chips (no chip selected means any time; Morning 5:00–11:59 AM, Afternoon 12:00–5:59 PM, Evening 6:00–9:59 PM, Night 10:00 PM–4:59 AM), its price is at most the Max price ($150 to $400 in $10 steps), and, when the switch is on, its fare includes a bag. The count reads like '3 of 8 flights'. The sidebar counts and from-prices always describe all eight flights.\n- The Cheapest and Fastest badges mark the cheapest and the fastest of the flights currently shown. With nothing left, show 'No flights match your filters' and a 'Clear all filters' button; Reset all also clears every filter.\n- Select puts that flight in Your trip and marks its card Selected (one at a time). Per traveler, Basic is the flight price, Standard adds $45 and Flex adds $110; each fare card shows its per-traveler price.\n- Travelers go from 1 to 6 (the minus and plus buttons disable at the limits) and the header pill follows ('3 adults'). Taxes and fees are $38.20 per traveler; the total is (price + fare add-on) × travelers + taxes. Money shows like $1,398.60.\n- On mobile, Filters opens a bottom sheet with the same filters and a 'Show N flights' button, and a badge on Filters counts the active filters; Sort opens a menu with Best, Cheapest and Fastest; the bottom bar shows the selected flight, fare, travelers and total.\nDraw the logo, the airline marks and every icon with inline SVG or CSS.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 800
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "interaction_hints": "Read the page text with eval (document.body.innerText) and screenshots; the flight numbers (BW 1822, CL 942, ...) identify the cards. The sort tabs, badges and filters may share words (Cheapest appears in a tab and a badge), so locate controls in a screenshot and click by coordinates when a text selector is ambiguous. From a fresh load each: (1) screenshot; click the Cheapest tab and read the card order; click the Fastest tab and read the order. (2) Click the Morning chip, read the count and the three tabs; uncheck 1 stop, read again; click the Night chip, read again. (3) Set the Max price slider to 250 (type with the slider's selector and the value 250), read the count and badges; turn on Checked bag included, screenshot; click Clear all filters. (4) Click Select on the SA 77 card, read Your trip; click the Flex fare card, click the travelers plus twice, read the totals and the header pill; click Basic and read again. (5) Click plus until it disables and read the traveler count and total; check the minus button is disabled at 1 on load. (6) Mobile: run interact with --width 390 --height 844: click Filters, screenshot the sheet, click the Night chip, read the sheet button, click it, read the count, the Filters badge and the cards; from a fresh mobile load open Sort, choose Cheapest, then click Select on CL 942 and read the bottom bar. Compare /grader/renders compare images with the references side by side.",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Desktop layout matches: a navy header with the Skyway logo, the white search pill with the blue Edit search button, Trips / Deals / Help and the JR avatar; a full-width 7-day date strip with Thu, Oct 15 highlighted; then a filter sidebar about 262 px wide, the results column and a Your trip card about 312 px wide on the right, with the eight flight cards stacked in the middle."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Mobile layout matches: compact navy header with 'SFO → JFK', 'Oct 15 – 25 · 1 adult · Economy' and an edit button; the date strip; Filters and 'Sort: Best' buttons with '8 of 8 flights'; stacked compact cards each with its price and a Select button; a bottom bar with 'Bluewing BW 1822 · Standard · 1 adult', $347.20 and Continue; no sidebar, no summary card and no horizontal overflow."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Text and values match: date prices $214, $196, $203, $178, $249, $231, $187; Nonstop (4) from $264, 1 stop (3) from $214, 2+ stops (1) from $178, Bluewing (3) from $236, Coastline (2) from $178, Northstar (2) from $259, Summit Air (1) from $318; tabs Best $264 5h 15m, Cheapest $178 10h 20m, Fastest $264 5h 15m; cards in the order BW 1822, CL 1180, BW 412, BW 1506, NS 530, SA 77, CL 942, NS 208 with their times, durations, stops and prices; Standard fare × 1 $309.00, Taxes & fees $38.20, Total $347.20."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Colors and typography match: navy header, one royal-blue accent on Edit search, the selected date, the active tab underline, the selected card outline, the Selected and Continue buttons and the Standard fare card; green for the lowest date price, Nonstop and negative CO₂; amber stop dots, stop labels and positive CO₂; green Cheapest and blue Fastest badges; navy, teal, red and purple airline marks; large bold prices."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Details match: SVG icons (plane, calendar, traveler, search, date arrows, sun and moon chips, bag, leaf, bell, shield), duration lines with end circles and amber stop dots, red '+1' on next-day arrivals, 'Bag included' on NS 530, SA 77 and NS 208, CO₂ notes and layover lines such as 'Layover DEN 1h 10m', a 2×2 grid of departure chips, the price slider and switch, the dashed return card and the fare cards with $264, $309 and $374."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Sorting works: Cheapest orders the cards CL 942, CL 1180, BW 1506, NS 530, BW 1822, BW 412, SA 77, NS 208; Fastest orders them BW 1822, NS 208, BW 412, SA 77, CL 1180, NS 530, BW 1506, CL 942; Best (the load order) puts SA 77 before CL 942 by the earlier-departure tie rule."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Filters combine: the Morning chip gives '4 of 8 flights' (CL 1180, BW 412, SA 77, NS 208) with tabs Best $214 7h 05m, Cheapest $214 7h 05m and Fastest $342 5h 25m; then unchecking 1 stop gives '3 of 8 flights' with Best $289 5h 32m, Cheapest $289 5h 32m and Fastest $342 5h 25m; adding the Night chip gives '4 of 8 flights' with BW 1822 first."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Max price $250 leaves '3 of 8 flights' (CL 1180, BW 1506, CL 942) with the Cheapest badge on CL 942 and the Fastest badge on CL 1180; turning on Checked bag included then shows '0 of 8 flights', 'No flights match your filters' and — in all three tabs; Clear all filters brings back all eight cards and '8 of 8 flights'."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Fare math: selecting SA 77 marks its card Selected and shows it in Your trip with fare cards $318, $363 and $428 and a Total of $401.20; choosing Flex and raising travelers to 3 shows a fare line of $1,284.00, Taxes & fees $114.60, Total $1,398.60 and '3 adults' in the header pill; switching to Basic shows $954.00 and $1,068.60."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The travelers stepper stops at 1 and 6 with the matching button disabled; with BW 1822 on Standard, 6 travelers show $1,854.00, taxes $229.20 and Total $2,083.20."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390 px wide, Filters opens a bottom sheet whose button reads 'Show 8 flights' and then 'Show 1 flight' after tapping Night; applying it leaves only BW 1822 with '1 of 8 flights' and a 1 badge on Filters; Sort → Cheapest puts CL 942 first, and selecting CL 942 makes the bottom bar read Coastline CL 942 · Standard · 1 adult with $261.20."
+   }
+  ]
+ },
+ {
+  "task_id": "app-rep-04",
+  "category": "interactive_app",
+  "mode": "replication",
+  "title": "Recreate a responsive cloud file manager with selection, sorting and trash",
+  "prompt": "Recreate the attached Stratus Drive file manager as a real, working, responsive web app. The two targets show the same page at 1280×800 (desktop) and at 390 wide (mobile, captured full page).\n\nDesktop: a light gray app background. Left: the Stratus Drive logo (a white cloud on a blue tile), a white New button, the navigation (My Drive active, Shared with me, Recent, Starred, Trash), a SHARED DRIVES list with colored squares, and a Storage card with a meter, '41.3 GB of 100 GB used' and a Get more storage button. Top: a wide rounded search field, help and settings icons and the MC avatar. Center: a white rounded panel with the breadcrumbs My Drive › Projects › Aurora, a list/grid view toggle, Type / People / Modified filter chips, the count '10 files · 380.8 MB', a Folders row of four folder chips with file counts, and the Files section: a selection pill, a sort button and a table with Name (file-type icon), Owner (initials avatar, 'me' for Maya Chen), Last modified, File size and a star. Right: a white details pane for the selected file with a drawn preview, Details (Type, Size, Location, Owner, Modified, Created), Who has access avatars with Manage, and an Activity list. The desktop app fits the window without page scrolling.\n\nMobile: a rounded search bar with a menu icon and the avatar, a '‹ Projects' link above the 'Aurora' title, the count with the view toggle, the folders as a two-column grid, the Files header with the selection pill and the sort button, compact file rows (icon, name, a 'date · size' line, star), a floating New button and a bottom navigation (Home, Starred, Shared, Files). The sidebar, top bar, breadcrumbs and details pane are hidden.\n\nOpen in exactly the state shown: the Aurora folder sorted by Last modified, newest first, with Aurora brand guidelines.pdf selected. Then make it work:\n- Sizes use 1 MB = 1000 KB and 1 GB = 1000 MB: under 1000 KB show whole KB, under 1000 MB show MB with one decimal, otherwise GB with one decimal. The storage meter always shows GB with one decimal.\n- Clicking a file selects only that file and shows it in the details pane. Ctrl+click (Cmd+click on Mac) adds or removes a file, and Shift+click selects the range from the last clicked file to this one in the current order. The selection pill reads like '3 selected · 1.4 MB' with the total size of the selection; with several files selected the details pane lists them with their total.\n- Clicking the Name, Last modified or File size header sorts by that column ascending (A to Z, oldest first, smallest first); clicking the same header again reverses it. The active header shows an arrow.\n- The list/grid toggle switches between the table and cards with drawn previews.\n- The star on a file toggles it. Starred in the sidebar lists every starred file with the count; My Drive returns to the Aurora folder.\n- Typing in the search field filters the current list by file name (case-insensitive) as you type, and the count reads like '3 results'; clearing it restores the list.\n- Double-clicking a folder chip opens that folder: the breadcrumbs gain its name, the list and count show its files, and clicking Aurora in the breadcrumbs goes back.\n- The Delete key (or the trash button in the selection pill) moves the selected files to Trash: they leave the list, the count and the storage meter drop by their total, the Trash item shows how many files it holds once it is not empty, and Trash lists them.\n\nFolder contents (name, size, owner, last modified):\n- Brand assets: Logo primary.png 48 KB Lena Fischer Sep 5, 2026; Brand palette.pdf 1.9 MB Lena Fischer Sep 3, 2026; Typography specimen.fig 12.6 MB Lena Fischer Aug 31, 2026.\n- Research: User survey results.xlsx 2.3 MB Priya Raman Aug 28, 2026; Competitor audit.pdf 14.7 MB Daniel Okafor Aug 30, 2026; Usability test clips.mp4 512.4 MB Tomás Silva Sep 2, 2026; Persona sketches.png 3.1 MB Lena Fischer Aug 25, 2026.\n- Sprint reviews: Sprint 14 review.pdf 3.8 MB Priya Raman Aug 29, 2026; Sprint 15 review.pdf 4.2 MB Priya Raman Sep 12, 2026.\n- Archive 2025: Aurora 2025 assets.zip 1.4 GB Maya Chen Jan 15, 2026.\nDraw every icon, avatar and preview with inline SVG or CSS.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 800
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "interaction_hints": "Click files by their name text (for example the selector text=Q3 budget forecast.xlsx). For Ctrl+click and Shift+click use keydown Control (or Shift), then click, then keyup. Read the count, the selection pill, the storage line and the details pane from screenshots and with eval of document.body.innerText. From a fresh load each: (1) click Q3 budget forecast.xlsx and screenshot. (2) Click Launch plan v3.docx; keydown Control; click Interview notes.docx and Pricing experiments.xlsx; keyup Control; screenshot. (3) Click Launch plan v3.docx; keydown Shift; click Hero illustration.png; keyup Shift; screenshot. (4) Click the File size column header, screenshot, click it again, screenshot; click the Name header, screenshot. (5) Click the star at the end of the Press kit.zip row (coordinates from a screenshot), click Starred in the sidebar and screenshot; click My Drive, type pr into the search field and screenshot. (6) Double-click the Research folder chip (use coordinates from a screenshot if a text selector matches other text), screenshot; click Aurora in the breadcrumbs and screenshot. (7) Click Product walkthrough.mp4, Ctrl+click Press kit.zip and App icon exports.zip, screenshot, press Delete, screenshot; click Trash in the sidebar and screenshot. (8) Click the grid toggle, screenshot, click a card, then click the list toggle. Mobile: write a short Playwright script with a 390x844 viewport to view the layout. Compare /grader/renders compare images with the references side by side.",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Desktop layout matches: a left sidebar about 248 px wide on the light gray background, a top bar with the wide rounded search field, a white rounded center panel with breadcrumbs, filter chips, the folder row and the file table, and a details pane about 296 px wide on the right, fitting 1280×800 without page scrolling."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Mobile layout matches: a rounded search bar with menu icon and avatar, '‹ Projects' above the 'Aurora' title, the count with the view toggle, a two-column folder grid, the Files header with selection pill and sort button, compact rows with a 'date · size' line, a floating New button and a bottom bar with Home, Starred, Shared and Files (Files active); no sidebar, breadcrumbs or details pane and no horizontal overflow."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Text and values match: My Drive › Projects › Aurora, '10 files · 380.8 MB', the chips Brand assets 3 files, Research 4 files, Sprint reviews 2 files and Archive 2025 1 file, the ten files in order (Q3 budget forecast.xlsx to App icon exports.zip) with their owners, dates from Sep 24, 2026 to Sep 8, 2026 and sizes 1.2 MB, 486 KB, 8.4 MB, 32.4 MB, 740 KB, 5.8 MB, 248.6 MB, 212 KB, 64.1 MB and 18.9 MB, '1 selected · 8.4 MB', the details PDF document, 8.4 MB, Aurora, Maya Chen, Sep 22, 2026 and Aug 14, 2026, and '41.3 GB of 100 GB used'."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Colors and typography match: a blue accent on the logo tile, the active My Drive pill, the list toggle, the selection pill, the selected row and the sorted header; white rounded panels on a light gray background; tinted file-type tiles (red PDF, green sheets, blue docs, purple image, orange video, slate zips and the multicolor Figma mark); filled amber stars on Q3 budget forecast.xlsx, Launch plan v3.docx and Onboarding flows.fig; distinct avatar colors."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Details match: SVG icons for navigation, search, toolbar and selection actions; colored folder icons in the chips; the drawn PDF page preview with a gradient block in the details pane; access avatars with +1 and a Manage button; the three activity entries (Lena Fischer edited Sep 22, Daniel Okafor commented Sep 20, Maya Chen uploaded Aug 14); the storage meter about 41% filled."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Clicking Q3 budget forecast.xlsx selects only that row, the pill reads '1 selected · 1.2 MB', and the details pane shows Q3 budget forecast.xlsx with Size 1.2 MB, Owner Daniel Okafor and Modified Sep 24, 2026."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Multi-select works: clicking Launch plan v3.docx then Ctrl+clicking Interview notes.docx and Pricing experiments.xlsx shows '3 selected · 1.4 MB'; from a fresh load, clicking Launch plan v3.docx then Shift+clicking Hero illustration.png selects exactly the five rows from Launch plan v3.docx to Hero illustration.png and shows '5 selected · 47.8 MB'."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Sorting works: clicking File size puts Interview notes.docx (212 KB) first and Product walkthrough.mp4 (248.6 MB) last, clicking it again reverses the order, and clicking Name puts App icon exports.zip first and Q3 budget forecast.xlsx last."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Starring Press kit.zip and opening Starred lists exactly Q3 budget forecast.xlsx, Launch plan v3.docx, Onboarding flows.fig and Press kit.zip with '4 files · 98.2 MB'; in Aurora, typing 'pr' in the search field leaves only Pricing experiments.xlsx, Product walkthrough.mp4 and Press kit.zip and shows '3 results'."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Double-clicking the Research chip shows the breadcrumbs My Drive › Projects › Aurora › Research, its four files newest first (Usability test clips.mp4, Competitor audit.pdf, User survey results.xlsx, Persona sketches.png) and '4 files · 532.5 MB'; clicking Aurora in the breadcrumbs returns to the ten Aurora files."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Selecting Product walkthrough.mp4, Press kit.zip and App icon exports.zip shows '3 selected · 331.6 MB'; pressing Delete removes them from the list, the count reads '7 files · 49.2 MB', the storage reads '41.0 GB of 100 GB used', the Trash item shows 3, and Trash lists exactly those three files."
+   },
+   {
+    "id": "F12",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The grid toggle shows the same files as cards with drawn type previews and stars, clicking a card selects it and updates the pill, and the list toggle brings the table back."
+   }
+  ]
+ }
+]

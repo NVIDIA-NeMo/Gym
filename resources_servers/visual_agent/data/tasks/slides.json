@@ -1,0 +1,1107 @@
+[
+ {
+  "task_id": "slides-open-01",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "SaaS board review deck computed from ARR movement data",
+  "prompt": "Build the FY2026 Q4 board review deck for Lumenstack, a B2B observability software company, presented by CEO Daniel Reyes and CFO Priya Natarajan to the board on 22 July 2026. Every number must come from your own analysis of the two files provided: arr_movements.csv (monthly new, expansion, contraction and churned ARR in $K per segment, July 2024 to June 2026) and account_executives.csv (FY2026 quota and closed ARR in $K per account executive).\n\nDefinitions: the fiscal year runs July to June (FY2026 = July 2025 to June 2026). ARR on 1 July 2024 was Enterprise 6,240, Mid-Market 4,180 and SMB 2,310 ($K). Month-end ARR = previous ARR + new + expansion - contraction - churned. NRR = (ARR at 30 June 2025 + FY2026 expansion - contraction - churned) / ARR at 30 June 2025; GRR is the same without expansion. Attainment = closed / quota. Show ARR in $M with two decimals (one decimal for chart totals), percentages with one decimal and bridge steps in whole $K.\n\nExactly 14 slides, with these titles:\n1. 'FY2026 Q4 Board Review' (company name, date and both presenters)\n2. 'Agenda': Performance, Retention, Sales efficiency, FY2027 plan\n3. 'FY2026 at a glance': KPI tiles for ending ARR, year-over-year ARR growth, NRR and GRR\n4. 'ARR by segment': stacked bar chart of quarter-end ARR, Q1 FY25 to Q4 FY26, stacked by segment, total above each bar\n5. 'Net new ARR by month': line chart of the 24 monthly values with a dashed 3-month moving average; annotate the highest and lowest months with their values\n6. 'FY2026 ARR bridge': waterfall from ARR at 30 June 2025 through new, expansion, contraction and churn to ARR at 30 June 2026 (increases green, decreases red, totals in the accent color, thin connectors)\n7. 'Retention by segment': table with rows Enterprise, Mid-Market, SMB, Total and columns Ending ARR, YoY growth, NRR, GRR, Share of ARR; the lowest NRR cell highlighted red\n8. 'Tenure drives attainment': scatter of tenure (x) vs attainment (y) for every account executive, a dashed 100% line, a least-squares trend line labeled with its slope (points per month, two decimals) and R² (two decimals), plus the team attainment (total closed / total quota)\n9. 'Land-and-expand motion': left-to-right process diagram Free trial → Team plan → Platform deal → Enterprise agreement, arrows labeled 22%, 35% and 41%\n10. 'FY2027 targets': an ARR target equal to FY2026 ending ARR grown 35%, NRR 102%, GRR 88%\n11. 'Risks and mitigations': three risks, each with a mitigation and an owner\n12. 'Decisions for the board': three numbered decisions\n13. 'Appendix: metric definitions'\n14. 'Appendix: account executive detail': all 16 account executives in one table sorted by attainment, highest first\n\nMaster layout: white slides, Inter only, one indigo accent (#4F46E5). On slides 2-14 the title is an h2 in Inter 700 at 34px whose left edge is 64px from the slide edge, at the same top position on every slide; a section tracker at the top right lists the four agenda sections in 12px capitals with the current one in the accent color (Performance = slides 3-5, Retention = 6-7, Sales efficiency = 8-9, FY2027 plan = 10-12; slides 2, 13 and 14 highlight none); a footer with a hairline rule shows 'Lumenstack · Board confidential' on the left and the slide number as 'n / 14' on the right. Draw every chart as inline SVG with titled axes; no text smaller than 12px.\n\nPresenter mode: only slide 1 is visible on load. ArrowRight, Space and PageDown go forward; ArrowLeft and PageUp go back; Home and End jump to the first and last slide; the URL hash follows the slide (#5 for slide 5) and opening slides.html#5 starts on slide 5. Every slide carries 1-3 sentences of speaker notes in an aside with class notes that stays hidden on the slide; pressing N toggles a panel showing the current slide's notes. The slide 6 notes must state FY2026 net new ARR in $K; the slide 8 notes must name the account executives at or above 100% of quota.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "arr_movements.csv",
+   "account_executives.csv"
+  ],
+  "slides_spec": {
+   "min_slides": 14,
+   "max_slides": 14
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 14 slides in this order with these titles: 'FY2026 Q4 Board Review', 'Agenda', 'FY2026 at a glance', 'ARR by segment', 'Net new ARR by month', 'FY2026 ARR bridge', 'Retention by segment', 'Tenure drives attainment', 'Land-and-expand motion', 'FY2027 targets', 'Risks and mitigations', 'Decisions for the board', 'Appendix: metric definitions', 'Appendix: account executive detail'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 3 shows the correctly computed KPIs exactly: ending ARR $25.10M, YoY ARR growth 36.7%, NRR 98.0% and GRR 85.5%."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 4 is a stacked bar chart with 8 bars labeled Q1 FY25 to Q4 FY26, each stacked Enterprise / Mid-Market / SMB in one consistent order with a legend and a titled $M value axis with ticks, with totals above the bars reading 14.1, 15.4, 16.9, 18.4, 19.9, 21.4, 23.0 and 25.1 and bar heights proportional to them."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 5 is a line chart of 24 monthly net new ARR points (Jul 2024 to Jun 2026) with a dashed 3-month moving average line, titled axes, and annotations marking the highest month (May 2026, 724) and the lowest month (Nov 2025, 383)."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 6 is a waterfall reading 18,361 (ARR 30 Jun 2025), +7,102 new, +2,295 expansion, -646 contraction, -2,011 churn and 25,101 (ARR 30 Jun 2026); each step floats at the running total, increases are green, decreases red, totals in the indigo accent, with connector lines."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 7's table shows (ending ARR $M, YoY, NRR, GRR, share): Enterprise 13.27, 39.0%, 104.9%, 90.6%, 52.9%; Mid-Market 8.15, 35.7%, 96.8%, 84.7%, 32.5%; SMB 3.68, 31.1%, 77.3%, 70.2%, 14.7%; Total 25.10, 36.7%, 98.0%, 85.5%, 100.0%; the SMB NRR cell (77.3%) is highlighted red."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 8's scatter plots 16 points (tenure in months vs attainment %) with titled axes, a dashed 100% line and a least-squares trend line labeled with slope 1.24 points per month and R² 0.63, and states team attainment 80.0%."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 9 is a drawn left-to-right diagram of the four stages with arrows labeled 22%, 35% and 41%; slide 10 shows an FY2027 ARR target of $33.89M with NRR 102% and GRR 88%; slide 14's table lists all 16 account executives sorted by attainment from P. Sato (117.6%) down to F. Brennan (56.4%)."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide contains a non-empty aside.notes that is not visible in the slide renders; the slide 6 notes state net new ARR of 6,740 ($K) and the slide 8 notes name O. Adeyemi, P. Sato and J. Mensah (the only three at or above quota)."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Presenter navigation works: on load only slide 1 is visible; ArrowRight three times shows only slide 4 and sets the hash to #4; End shows slide 14; Home returns to slide 1; loading slides.html#5 opens on slide 5; N shows a panel with the current slide's notes and N again hides it. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "The master layout holds on slides 2-14: each h2 title computes to Inter, weight 700, 34px, with its left edge 64px (±2px) from the slide's left edge and the same top on every slide; the top-right section tracker highlights the correct section (Performance 3-5, Retention 6-7, Sales efficiency 8-9, FY2027 plan 10-12, none on 2, 13 and 14); the footer shows 'Lumenstack · Board confidential' and the correct 'n / 14'."
+   },
+   {
+    "id": "R12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "No text overlaps, is clipped or runs off a slide; chart text is at least 12px and legible, and the 16-row appendix table fits inside its slide."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-open-02",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "Phase 2 clinical trial topline deck from patient-level data",
+  "prompt": "Create the topline results deck for study NRP-24-201, a 24-week randomized, double-blind phase 2 trial of NRP-24 (10 mg and 20 mg once daily) versus placebo in adults with type 2 diabetes. Dr. Lena Marsh, clinical lead at Nerida Therapeutics, presents it to the investigator meeting on 3 October 2026. Analyze patients.csv (one row per randomized patient: arm, HbA1c in % at baseline, week 12 and week 24, completion status, discontinuation reason and worst adverse-event severity) and screening.json (screening counts and study design).\n\nRules: completers have status Completed. Mean change = mean of (week 24 - baseline) over completers; placebo-adjusted = active mean change minus placebo mean change (both two decimals). Responders have week 24 HbA1c below 7.0% and are counted over all randomized patients in the arm (non-completers are non-responders). Visit means use every patient with a value at that visit (two decimals). Percentages one decimal.\n\nExactly 14 slides, titled:\n1. 'NRP-24-201 Topline Results' (study one-liner, presenter, date)\n2. 'Study design': schema diagram: 2-week run-in, 1:1:1 randomization into the three arms, 24 weeks of treatment, 4 weeks of follow-up, with the stratification note from screening.json\n3. 'Patient disposition': waterfall from Screened down through each screen-failure reason to Randomized, then each discontinuation reason to Completed, count on every bar\n4. 'Baseline characteristics': table by arm with N and mean baseline HbA1c\n5. 'Key results': three KPI tiles: 20 mg placebo-adjusted change, 20 mg vs placebo responder rate, total completers\n6. 'HbA1c over time': line chart of mean HbA1c at baseline, week 12 and week 24 per arm, endpoints value-labeled, y-axis titled in %\n7. 'Change from baseline at week 24': bars per arm with mean change labels and the placebo-adjusted difference bracketed above each active bar\n8. 'Responders': responder count and rate per arm\n9. 'Response by baseline HbA1c (20 mg)': scatter of baseline (x) vs change (y) for 20 mg completers with a least-squares line labeled with slope and R² (two decimals)\n10. 'Safety overview': 100% stacked bar per arm of worst AE severity (None, Mild, Moderate, Severe) with segment percentages\n11. 'Arm comparison': columns Placebo, 10 mg, 20 mg; rows Randomized, Completed, Mean change, Placebo-adjusted, Responders, Any AE, Severe AE\n12. 'Conclusions': three conclusions\n13. 'Next steps': the phase 3 plan as three steps on a timeline\n14. 'Appendix: definitions'\n\nStyle: clinical and calm, white background, navy text (#1B2A4A); arm colors used identically on every chart and table: placebo gray #9CA3AF, 10 mg sky #60A5FA, 20 mg teal #0F766E. From slide 2 on, the title is an h2 in Lato 700 at 32px, 72px from the left edge, same top on every slide; body text in Open Sans, 16px or larger. Every slide except the first has a footer with 'NRP-24-201 · Topline · Confidential' on the left, 'Data cut 15 Sep 2026' centered and 'n / 14' on the right, plus a 4px progress bar along the bottom edge whose filled width is n/14 of the slide width. Charts may use Chart.js or inline SVG and must be fully drawn without animation.\n\nNavigation: only slide 1 shows on load; ArrowRight/ArrowLeft move one slide, Home/End go to the ends, typing a slide number then Enter jumps to it (1, 0, Enter opens slide 10), and the hash reads #slide-n. Store each slide's speaker notes in a data-notes attribute on its .slide element; S toggles an overlay with the current slide's notes. The slide 3 notes must state how many patients discontinued for adverse events, and the slide 9 notes must give the fitted slope.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "patients.csv",
+   "screening.json"
+  ],
+  "slides_spec": {
+   "min_slides": 14,
+   "max_slides": 14
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 14 slides in this order: 'NRP-24-201 Topline Results', 'Study design', 'Patient disposition', 'Baseline characteristics', 'Key results', 'HbA1c over time', 'Change from baseline at week 24', 'Responders', 'Response by baseline HbA1c (20 mg)', 'Safety overview', 'Arm comparison', 'Conclusions', 'Next steps', 'Appendix: definitions'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 3's waterfall steps down 212 screened, -49 HbA1c outside 7.0-10.5%, -21 eGFR below 45, -13 withdrew before randomization, -9 other eligibility criteria, to 120 randomized, then -4 adverse event, -3 withdrew consent, -3 lost to follow-up, -2 lack of efficacy (discontinuations in any order) to 108 completed, with floating bars and a count on every bar."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Mean change from baseline is -0.27 (placebo), -0.99 (10 mg) and -1.41 (20 mg), with placebo-adjusted differences -0.72 (10 mg) and -1.14 (20 mg), on slide 7 and in the slide 11 table; slide 5 shows -1.14, responders 37.5% vs 7.5%, and 108 completers."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 4 shows N = 40 per arm and mean baseline HbA1c 8.40 (placebo), 8.45 (10 mg) and 8.43 (20 mg); slide 8 shows responders 3 (7.5%), 7 (17.5%) and 15 (37.5%)."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 6 plots one line per arm through baseline, week 12 and week 24 means: placebo 8.40, 8.23, 8.10; 10 mg 8.45, 7.81, 7.46; 20 mg 8.43, 7.53, 7.03, with value labels at the endpoints and a y-axis titled in %."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 9 plots 35 points (baseline HbA1c vs change) with titled axes and a least-squares line labeled with slope -0.58 and R² 0.59."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 10 has one 100% stacked bar per arm with None / Mild / Moderate / Severe of 55.0 / 30.0 / 12.5 / 2.5% (placebo), 42.5 / 37.5 / 15.0 / 5.0% (10 mg) and 32.5 / 37.5 / 20.0 / 10.0% (20 mg); slide 11 also shows any AE 45.0%, 57.5%, 67.5% and severe AE 1, 2, 4."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 2 is a drawn schema (run-in, randomization splitting into three arms, 24-week treatment, 4-week follow-up) including the stratification by baseline HbA1c (<8.5% vs >=8.5%)."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide has a non-empty data-notes attribute (notes are not visible in the renders); the slide 3 notes say 4 patients discontinued for adverse events and the slide 9 notes give the slope -0.58."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; ArrowRight twice shows slide 3 with hash #slide-3; typing 1, 0 then Enter shows slide 10; End shows slide 14 and Home slide 1; S shows an overlay with the current slide's notes and S again hides it. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-14 the h2 title computes to Lato, weight 700, 32px, left edge 72px (±2px) from the slide edge, same top on every slide; the footer shows the three required texts with the correct 'n / 14'; the bottom progress bar's filled width is n/14 of 1280px (e.g. 640px on slide 7, ±4px)."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Arm colors are consistent across every chart and table (placebo gray, 10 mg sky blue, 20 mg teal), no text overlaps or is clipped, and no text is smaller than 12px."
+   }
+  ],
+  "vendor": [
+   "chartjs"
+  ]
+ },
+ {
+  "task_id": "slides-open-03",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "Solar portfolio performance review from plant telemetry",
+  "prompt": "Prepare the 2025 annual performance review of Helio Ridge Renewables' four solar plants, presented by asset manager Tomás Ibarra to the investment committee on 12 February 2026. Base every figure on site_monthly.csv (per site and month: AC capacity in MW, plane-of-array irradiance in kWh/m², modeled expected energy and actual energy in MWh, availability in %) and losses_2025.json (energy lost versus expected, by cause).\n\nDefinitions: performance index (PI) = actual / expected; capacity factor = actual MWh / (capacity MW × 8,760); specific yield = actual MWh / capacity MW; a site's availability is the mean of its 12 monthly values. Show GWh with two decimals, PI and capacity factor with one decimal, availability with two, energy in whole MWh.\n\nExactly 14 slides, titled:\n1. 'Helio Ridge Portfolio Review 2025' (presenter, date)\n2. 'Agenda': Performance, Losses, Plants, Outlook\n3. 'Portfolio at a glance': KPI tiles: total capacity, actual generation, PI, portfolio capacity factor\n4. 'Actual vs expected by month': line chart of portfolio expected (dashed) and actual (solid) MWh for 12 months, the gap shaded, and the month with the largest shortfall annotated with that shortfall\n5. 'Generation by site': stacked bar of monthly actual MWh by site, with legend\n6. 'From expected to actual': waterfall from total expected through the five loss causes, largest first, to total actual (MWh)\n7. 'Irradiance explains output': scatter of irradiance (x) vs specific yield (y) for all 48 site-months colored by site, one least-squares line for all points labeled 'y = a x + b' (a three decimals, b one decimal) and R² (two decimals)\n8. 'Site scorecard': table: site, capacity, actual GWh, capacity factor, PI, availability; the best PI cell green, the worst red\n9. 'Worst month deep dive': the site and month with the lowest monthly PI, its expected and actual MWh and PI, and a likely cause\n10. 'Plant architecture': single-line diagram: PV arrays → string inverters → 34.5 kV collection bus → main power transformer → point of interconnection → grid, a battery storage system on the collection bus, and a SCADA box with dashed links to inverters, transformer and battery\n11. 'Loss recovery plan': three actions with owners\n12. '2026 outlook': target PI 96.0% and three priorities\n13. 'Appendix: monthly portfolio data': table of the 12 months with expected, actual, shortfall (MWh) and PI\n14. 'Appendix: definitions'\n\nStyle: light, Roboto only, sun-orange accent #F59E0B. Fixed site colors everywhere: Sagebrush Flats #F59E0B, Coyote Ridge #0EA5E9, Pinon Basin #10B981, Red Cliffs #EF4444. From slide 2 on: an h2 title in Roboto 500 at 30px, left edge 56px from the slide edge, same top everywhere, with a 48px-wide orange rule under it; a top-right tracker of the four agenda sections as pills, the current one filled orange (Performance = slides 3-5, Losses = 6-7, Plants = 8-10, Outlook = 11-12; none on 2, 13 and 14); footer 'Helio Ridge Renewables · Investment Committee' left and 'n / 14' right. Charts as inline SVG, titled axes with units, no text under 12px.\n\nPresenter mode: only slide 1 visible on load; ArrowRight/ArrowLeft/PageDown/PageUp navigate; Home/End jump; the hash is #n and loading slides.html#n opens slide n; B toggles a full black screen and B again restores the slide. Each slide has speaker notes in a hidden div with class notes; N toggles a notes panel. The slide 6 notes must name the largest loss and its MWh; the slide 9 notes must give that month's shortfall in MWh.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "site_monthly.csv",
+   "losses_2025.json"
+  ],
+  "slides_spec": {
+   "min_slides": 14,
+   "max_slides": 14
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 14 slides in this order: 'Helio Ridge Portfolio Review 2025', 'Agenda', 'Portfolio at a glance', 'Actual vs expected by month', 'Generation by site', 'From expected to actual', 'Irradiance explains output', 'Site scorecard', 'Worst month deep dive', 'Plant architecture', 'Loss recovery plan', '2026 outlook', 'Appendix: monthly portfolio data', 'Appendix: definitions'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 3 shows exactly: total capacity 355 MW, actual generation 679.11 GWh, PI 94.6% and capacity factor 21.8%."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 4 has 12 months with a dashed expected line and a solid actual line, the gap shaded, titled axes in MWh, and July annotated with the largest shortfall of 7,041 MWh."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 5 has 12 monthly bars stacked by the four sites in their fixed colors with a legend; June is the tallest bar (72,955 MWh total) and the Pinon Basin (green) segment visibly shrinks in July."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 6's waterfall reads 717,818 expected, -14,057 soiling, -8,781 inverter downtime, -8,561 curtailment, -4,811 degradation and other, -2,498 grid outages, and 679,110 actual, in that order, with floating steps at the running totals."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 7 plots 48 points colored by site with titled axes (irradiance kWh/m², specific yield MWh/MW) and a single least-squares line labeled y = 0.722x + 9.4 with R² = 0.96."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 8's table shows (capacity MW, GWh, CF, PI, availability): Sagebrush Flats 120, 233.77, 22.2%, 93.6%, 99.00%; Coyote Ridge 80, 153.85, 22.0%, 96.1%, 98.73%; Pinon Basin 95, 183.20, 22.0%, 94.6%, 97.52%; Red Cliffs 60, 108.29, 20.6%, 94.7%, 98.88%; Coyote Ridge's PI is green and Sagebrush Flats' PI red."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 9 identifies Pinon Basin in July 2025 with expected 19,515 MWh, actual 14,970 MWh and PI 76.7%; slide 10 is a drawn single-line diagram containing every named element in order, the battery on the collection bus and dashed SCADA links."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide has a non-empty hidden div.notes; the slide 6 notes name soiling (14,057 MWh) as the largest loss and the slide 9 notes give a shortfall of 4,545 MWh; slide 13's table lists all 12 months with correct values (e.g. Jul: 71,796 / 64,755 / 7,041 / 90.2%)."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; ArrowRight twice shows slide 3 and hash #3; End shows slide 14; loading slides.html#7 opens slide 7; B blacks out the screen and B again restores the same slide; N toggles a panel with the current slide's notes. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-14 the h2 computes to Roboto, weight 500, 30px, left edge 56px (±2px) from the slide edge, same top on every slide, with an orange rule under it; the tracker fills the correct section pill (Performance 3-5, Losses 6-7, Plants 8-10, Outlook 11-12, none on 2, 13 and 14); the footer shows 'Helio Ridge Renewables · Investment Committee' and the correct 'n / 14'."
+   },
+   {
+    "id": "R12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Site colors are identical on slides 5, 7 and 8; no text overlaps or is clipped, chart text is at least 12px, and the 12-row appendix table fits its slide."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-open-04",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "Marketing performance deck from campaign-level spend data",
+  "prompt": "Build the H1 2026 marketing performance review for Fernway Outdoor, a direct-to-consumer outdoor gear brand, presented by VP Growth Nadia Kerr to the executive team on 14 July 2026. Analyze campaigns_h1_2026.csv (42 rows: one campaign in one month with spend, clicks, orders, attributed revenue and new customers) and h2_2025_revenue.json (H2 2025 attributed revenue by channel and the ROAS target).\n\nDefinitions: ROAS = revenue / spend, shown with two decimals like 3.87x; conversion rate = orders / clicks (two decimals); CAC = spend / new customers and AOV = revenue / orders (dollars and cents). Total spend in whole $K, total revenue in $M with two decimals, channel figures and the bridge in $K with one decimal.\n\nExactly 14 slides, titled:\n1. 'H1 2026 Marketing Performance' (presenter, date)\n2. 'Agenda': Results, Channels, Efficiency, H2 plan\n3. 'H1 in numbers': six KPI tiles: spend, revenue, blended ROAS against the 4.0x target, conversion rate, AOV, CAC\n4. 'Spend by channel and month': stacked bars for Jan-Jun by channel with each month's total in $K above the bar\n5. 'Blended ROAS by month': line chart with a dashed 4.0x target line; months below target get red markers and ROAS labels\n6. 'Revenue bridge': waterfall from H2 2025 total through each channel's change (Paid Search, Paid Social, Affiliate, Email, Display) to H1 2026 total, signed labels, growth % in the subtitle\n7. 'Channel scorecard': rows for the five channels sorted by ROAS descending, columns Spend, Revenue, ROAS, Conversion rate, CAC; ROAS cells under 4.0x tinted red\n8. 'Does more spend pay back?': scatter of spend (x) vs revenue (y) for all 42 rows colored by channel, least-squares line labeled with slope and R² (two decimals)\n9. 'Paid Social deep dive': monthly Paid Social ROAS as bars, the weakest month called out with its value, and the H1 Paid Social ROAS\n10. 'Measurement architecture': diagram: Ad platforms → UTM-tagged sessions → Event collector → Warehouse → Attribution model → Dashboard, with Shopify orders feeding the warehouse\n11. 'H2 budget shifts': three reallocation moves with amounts\n12. 'Risks to watch': three risks\n13. 'Appendix: top campaigns': the 8 campaign rows with the highest revenue, sorted, with month, channel, campaign, spend, revenue and ROAS\n14. 'Appendix: definitions'\n\nStyle: editorial and warm: sand background #FAF7F2, forest-green accent #1F4D3A, titles in DejaVu Serif, everything else in Inter. Fixed channel colors on every chart and table: Paid Search #1F4D3A, Paid Social #D97706, Affiliate #7C3AED, Email #0EA5E9, Display #9CA3AF. From slide 2 on: an h2 in DejaVu Serif 700 at 36px, left edge 80px from the slide edge, same top everywhere, with its agenda section above it as a 12px uppercase green kicker (RESULTS = slides 3-5, CHANNELS = 6-7, EFFICIENCY = 8-10, H2 PLAN = 11-12; 'AGENDA' on slide 2 and 'APPENDIX' on 13-14); footer 'Fernway Outdoor · H1 2026 review' left and 'n / 14' right. Charts may use Chart.js or inline SVG, fully drawn with no animation.\n\nPresenter mode: only slide 1 visible on load; ArrowRight/ArrowLeft/Space navigate, Home/End jump, the hash is #/n (e.g. #/6) and loading slides.html#/6 opens slide 6; O toggles an overview grid of all 14 slides as thumbnails, clicking a thumbnail opens that slide, and Escape closes the grid. Speaker notes go in an aside with class notes inside each slide (hidden); N toggles a notes panel. The slide 5 notes must list the months below target; the slide 9 notes must give the weakest month's ROAS.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "campaigns_h1_2026.csv",
+   "h2_2025_revenue.json"
+  ],
+  "slides_spec": {
+   "min_slides": 14,
+   "max_slides": 14
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 14 slides in this order: 'H1 2026 Marketing Performance', 'Agenda', 'H1 in numbers', 'Spend by channel and month', 'Blended ROAS by month', 'Revenue bridge', 'Channel scorecard', 'Does more spend pay back?', 'Paid Social deep dive', 'Measurement architecture', 'H2 budget shifts', 'Risks to watch', 'Appendix: top campaigns', 'Appendix: definitions'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 3 shows exactly: spend $793K, revenue $3.07M, blended ROAS 3.87x (shown as below the 4.0x target), conversion rate 2.71%, AOV $132.84 and CAC $77.58."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 4 has six monthly bars stacked by the five channels in their fixed colors with a legend and totals 93.8, 119.8, 106.3, 147.3, 175.5 and 150.7 ($K) for Jan-Jun."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 5 plots ROAS 3.46, 3.28, 4.23, 4.17, 3.81, 4.14 for Jan-Jun with a dashed 4.0x line; exactly Jan, Feb and May are marked red and labeled."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 6's waterfall reads 2,883.5 (H2 2025), +213.9 Paid Search, -97.1 Paid Social, +66.2 Affiliate, -12.8 Email, +20.3 Display and 3,074.0 (H1 2026) in $K, with floating steps and growth of 6.6%."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 7 lists channels in the order Email, Affiliate, Paid Search, Paid Social, Display with (spend $K, revenue $K, ROAS, CVR, CAC): Email 20.0, 218.9, 10.95x, 2.61%, $138.82; Affiliate 68.4, 320.5, 4.69x, 3.88%, $67.12; Paid Search 335.9, 1,532.5, 4.56x, 4.71%, $76.01; Paid Social 270.3, 805.3, 2.98x, 1.94%, $76.45; Display 98.7, 196.7, 1.99x, 0.86%, $89.03; only the Paid Social and Display ROAS cells are tinted red."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 8 plots 42 points colored by channel with titled axes and a least-squares line labeled with slope 3.72 and R² 0.67; slide 9 shows Paid Social ROAS by month with February (1.63x) called out and H1 Paid Social ROAS 2.98x."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 10 is a drawn left-to-right diagram with the six named stages connected by arrows and Shopify orders feeding the warehouse; slide 13 lists 8 rows sorted by revenue starting with FW-023 (Apr, Paid Search, Tents and shelters, $260,555, 5.69x) then FW-036 ($184,539)."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide contains a non-empty hidden aside.notes; the slide 5 notes name January, February and May, and the slide 9 notes give 1.63x."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; ArrowRight five times shows slide 6 with hash #/6; loading slides.html#/6 opens slide 6; End and Home jump to 14 and 1; O shows a grid of 14 thumbnails, clicking the fourth thumbnail opens slide 4, and Escape closes the grid; N toggles the current slide's notes. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-14 the h2 computes to DejaVu Serif, weight 700, 36px, left edge 80px (±2px) from the slide edge, same top on every slide, with the correct uppercase green kicker above it (AGENDA 2, RESULTS 3-5, CHANNELS 6-7, EFFICIENCY 8-10, H2 PLAN 11-12, APPENDIX 13-14) and the footer 'Fernway Outdoor · H1 2026 review' with the correct 'n / 14'."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Channel colors are identical on slides 4, 6, 7 and 8, the sand background and serif titles are used throughout, no text overlaps or is clipped, and chart text is at least 12px."
+   }
+  ],
+  "vendor": [
+   "chartjs"
+  ]
+ },
+ {
+  "task_id": "slides-open-05",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "SRE quarterly reliability review from incident records",
+  "prompt": "Create the Q2 2026 reliability review for Orbital Pay's payments platform, presented by Head of SRE Kwame Asante to engineering leadership on 8 July 2026. Use incidents_q2_2026.json (the 91-day period, the availability SLO of each service and all incidents with timestamps, severity, root cause and customer impact) and team_delivery.csv (deploys per week and change failure rate per team).\n\nDefinitions: time to detect = detected_at - started_at and time to mitigate = mitigated_at - started_at, in minutes. Downtime counts only customer-impacting incidents, from started_at to mitigated_at. A service's error budget = (1 - SLO/100) × 91 × 1,440 minutes; budget consumed = downtime / budget. Change-induced incidents have root cause Deploy or Config change. Weeks start on Monday 30 March. Percentages one decimal, budgets in minutes with two decimals.\n\nExactly 14 slides, titled:\n1. 'Q2 2026 Reliability Review' (presenter, date)\n2. 'Agenda': Incidents, Error budgets, Deep dives, Q3 plan\n3. 'Quarter at a glance': KPI tiles: incidents with the SEV1 count, median time to detect, median time to mitigate, change-induced share\n4. 'Incidents by root cause': stacked bars for April, May and June by the five root causes, totals on top\n5. 'Error budget burn-up': one line per service of cumulative % of budget consumed at the end of each of the 13 weeks, a dashed 100% line, end labels, and the week where a service crosses 100% annotated\n6. 'checkout-api error budget': waterfall from the starting budget through each customer-impacting checkout-api incident (chronological, labeled by ID) to the remaining budget, drawn below zero if exhausted\n7. 'Service scorecard': table: service, SLO, incidents, SEV1, downtime min, budget min, consumed %, and a status pill (Exhausted at 100% or more, At risk 80-99.9%, Healthy below 80%)\n8. 'Anatomy of the slowest SEV1': a horizontal timeline of the SEV1 with the longest time to mitigate: started, detected, mitigated and resolved times (UTC) with the durations between them\n9. 'Deploy frequency vs failure rate': scatter per team with point labels and a least-squares line labeled with slope and R² (two decimals)\n10. 'Payment request path': architecture diagram: Client apps → API gateway → checkout-api, which calls auth, ledger and notifications; ledger → Postgres; notifications → Kafka → SMS and email providers; each service box colored by its budget status\n11. 'What we changed': three remediations with owners\n12. 'Q3 reliability goals': three measurable goals\n13. 'Appendix: customer-impacting incidents': table of every customer-impacting incident with ID, service, severity, root cause, detect and mitigate minutes\n14. 'Appendix: definitions'\n\nStyle: dark, background #0B1020, text #E5E7EB, cyan accent #22D3EE, status colors red #F87171, amber #FBBF24, green #34D399; Inter for text and DejaVu Sans Mono for IDs, timestamps and numbers in tables. From slide 2 on: an h2 in Inter 600 at 32px, left edge 60px from the slide edge, same top everywhere, with a monospace eyebrow above it reading the section and the zero-padded slide number (e.g. 'ERROR BUDGETS / 05'; AGENDA = slide 2, INCIDENTS = 3-4, ERROR BUDGETS = 5-7, DEEP DIVES = 8-10, Q3 PLAN = 11-12, APPENDIX = 13-14); footer 'Orbital Pay · SRE' left and the slide number as '05 / 14' (zero-padded, monospace) right. Charts as inline SVG, titled axes, no text under 12px.\n\nPresenter mode: only slide 1 visible on load; ArrowRight or j goes forward, ArrowLeft or k back, Home/End jump, the hash is #n and loading slides.html#n opens slide n. Each slide has speaker notes in an aside with class notes (hidden); N toggles a notes panel. The slide 5 notes must name the incident that pushed checkout-api past 100%; the slide 7 notes must give ledger's consumed %.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "incidents_q2_2026.json",
+   "team_delivery.csv"
+  ],
+  "slides_spec": {
+   "min_slides": 14,
+   "max_slides": 14
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 14 slides in this order: 'Q2 2026 Reliability Review', 'Agenda', 'Quarter at a glance', 'Incidents by root cause', 'Error budget burn-up', 'checkout-api error budget', 'Service scorecard', 'Anatomy of the slowest SEV1', 'Deploy frequency vs failure rate', 'Payment request path', 'What we changed', 'Q3 reliability goals', 'Appendix: customer-impacting incidents', 'Appendix: definitions'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 3 shows exactly: 26 incidents with 3 SEV1, median time to detect 6.5 min, median time to mitigate 32 min, change-induced 53.8% (14 of 26)."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 4 stacks the five root causes per month with totals 8 (Apr), 10 (May) and 8 (Jun); e.g. May has Deploy 3, Config change 2, Dependency 3, Capacity 2, Hardware 0, with a legend."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 5 has four lines over 13 weeks ending at checkout-api 128.2%, ledger 99.2%, notifications 90.8% and auth 35.1%, with a dashed 100% line and the checkout-api crossing annotated in week 9 (week of 25 May, INC-2726)."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 6's waterfall starts at 65.52 min, subtracts INC-2649 (14), INC-2670 (9), INC-2698 (18), INC-2726 (31) and INC-2775 (12) in that order, and ends at -18.48 min drawn below a zero baseline."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 7's table shows (SLO, incidents, SEV1, downtime, budget, consumed, status): checkout-api 99.95%, 8, 2, 84, 65.52, 128.2%, Exhausted; ledger 99.99%, 5, 1, 13, 13.10, 99.2%, At risk; auth 99.95%, 6, 0, 23, 65.52, 35.1%, Healthy; notifications 99.9%, 7, 0, 119, 131.04, 90.8%, At risk."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 8 shows INC-2726 (checkout-api, SEV1): started 05:51, detected 05:53, mitigated 06:22, resolved 07:58 UTC on 31 May 2026 with durations 2, 29 and 96 minutes (31 min to mitigate); slide 9 plots 9 labeled teams with a least-squares line labeled slope -0.94 and R² 0.81."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 10 is a drawn diagram with all named components and arrows, checkout-api colored red (exhausted), ledger and notifications amber, auth green; slide 13's table has exactly 14 rows, one per customer-impacting incident."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide contains a non-empty hidden aside.notes; the slide 5 notes name INC-2726 and the slide 7 notes give ledger's 99.2%."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; ArrowRight twice then j once shows slide 4 with hash #4; k goes back to slide 3; End and Home jump to 14 and 1; loading slides.html#6 opens slide 6; N toggles the current slide's notes. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-14 the h2 computes to Inter, weight 600, 32px, left edge 60px (±2px) from the slide edge, same top on every slide, with a monospace eyebrow like 'ERROR BUDGETS / 05' matching the stated section ranges and the slide number, and a monospace footer number in the form '05 / 14' that is correct on every slide."
+   },
+   {
+    "id": "R12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The dark theme is consistent on all slides, status colors match the definitions everywhere, nothing overlaps or is clipped, and chart text is at least 12px with readable contrast."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-open-06",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "Tutoring program impact report from student assessment data",
+  "prompt": "Make the 2025-26 impact report deck that ReadBridge Tutoring presents to its funder, the Alder Family Foundation, on 18 June 2026 (presenter: executive director Rosa Delgado). Analyze students_2025_26.csv (every student served: school, grade, sessions attended, fall and spring reading scores) and program_2025_26.json (grant, spending by category, grade benchmarks, planned and delivered sessions by month).\n\nDefinitions: gain = spring - fall. A score meets benchmark when it is at or above the grade's benchmark for that term, is approaching when it is less than 30 points below, and is below otherwise. Cost per student = total spent / students; cost per session = total spent / total sessions attended. Averages and rates one decimal; band shares whole percents; dollars whole except cost per session (cents).\n\nExactly 13 slides, titled:\n1. 'Reading Growth Report 2025-26' (funder, presenter, date)\n2. 'Our year in numbers': KPI tiles: students served, sessions attended, average sessions per student, mean gain\n3. 'Benchmark progress': share of students meeting benchmark in fall vs spring as two large numbers with an arrow, and the student counts\n4. 'Proficiency bands by grade': 100% stacked bars for fall and spring of each grade (six bars grouped by grade) with segment percentages\n5. 'More sessions, more growth': scatter of sessions (x) vs gain (y) for every student, least-squares line labeled with slope (points per session, two decimals) and R² (two decimals)\n6. 'Delivery vs plan': line chart of sessions delivered per month against the flat monthly plan, the gap shaded, the weakest month annotated\n7. 'School comparison': table: school, students, average sessions, mean gain, meets fall, meets spring; the highest spring rate highlighted\n8. 'How ReadBridge works': flow diagram: Screen → Match with a tutor → Three sessions a week → Progress check every 6 weeks → Exit or continue, with a loop arrow from the check back to the sessions\n9. 'Where the grant went': waterfall from the grant through the five spending categories to the unspent balance\n10. 'Cost per outcome': cost per student and cost per session\n11. 'What we learned': three lessons\n12. '2026-27 plan': three commitments with targets\n13. 'Thank you' with contact rosa@readbridge.org\n\nStyle: warm and friendly, cream background #FFFBF3, Lato only, coral #E4572E and teal #17808E accents. Fixed band colors: Below #E4572E, Approaching #F2C14E, Meets #17808E. From slide 2 on: an h2 in Lato 900 at 38px, left edge 72px from the slide edge, same top everywhere; a chapter tracker at top right with Reach (slides 2-3), Growth (4-7), Delivery (8) and Stewardship (9-12), the current chapter in a coral pill, none on slide 13; footer 'ReadBridge Tutoring · Report to the Alder Family Foundation' left and 'n of 13' right. Charts as inline SVG, titled axes, no text under 12px.\n\nPresenter mode: only slide 1 visible on load; ArrowRight/ArrowLeft navigate, Home/End jump, clicking the right half of the screen advances and the left half goes back, the hash is #n and loading slides.html#n opens slide n. Each slide has speaker notes in an aside with class notes (hidden); N toggles a notes panel. The slide 4 notes must give the grade with the largest rise in its meets-benchmark share; the slide 9 notes must state the unspent balance.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "students_2025_26.csv",
+   "program_2025_26.json"
+  ],
+  "slides_spec": {
+   "min_slides": 13,
+   "max_slides": 13
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 13 slides in this order: 'Reading Growth Report 2025-26', 'Our year in numbers', 'Benchmark progress', 'Proficiency bands by grade', 'More sessions, more growth', 'Delivery vs plan', 'School comparison', 'How ReadBridge works', 'Where the grant went', 'Cost per outcome', 'What we learned', '2026-27 plan', 'Thank you'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 2 shows exactly 147 students, 7,280 sessions, 49.5 sessions per student and mean gain 38.5; slide 3 shows 12.9% (19 students) in fall rising to 26.5% (39 students) in spring."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 4 has six 100% stacked bars grouped by grade with Below / Approaching / Meets of 46/44/10 (G2 fall), 32/46/22 (G2 spring), 52/36/12 (G3 fall), 50/26/24 (G3 spring), 54/28/17 (G4 fall) and 37/28/35 (G4 spring) percent, labeled, in the fixed band colors."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 5 plots 147 points with titled axes and a least-squares line labeled with slope 0.72 points per session and R² 0.51."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 6 plots delivered sessions 764, 983, 619, 946, 910, 1,056, 1,019, 983 for Oct-May against a flat plan of 1,323 per month, with the gap shaded and December (619) annotated."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 7's table shows (students, avg sessions, mean gain, meets fall, meets spring): Maple Street 38, 50.8, 39.8, 21.1%, 31.6%; Riverside 35, 42.8, 29.7, 8.6%, 17.1%; Cedar Hill 41, 56.1, 48.6, 17.1%, 41.5%; Lincoln Park 33, 47.0, 33.6, 3.0%, 12.1%; Cedar Hill's 41.5% is highlighted."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 9's waterfall goes from $480,000 through -$286,400 tutor stipends, -$41,850 curriculum and materials, -$27,300 tutor training, -$64,200 site coordination and -$18,900 evaluation to a $41,350 unspent balance; slide 10 shows $2,984 per student and $60.25 per session."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 8 is a drawn flow diagram with the five named steps connected by arrows and a loop arrow from the progress check back to the sessions."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide contains a non-empty hidden aside.notes; the slide 4 notes name grade 4 (meets share up from 17% to 35%) and the slide 9 notes state $41,350 unspent."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; ArrowRight three times shows slide 4 with hash #4; clicking at (1000, 360) advances to slide 5 and clicking at (200, 360) returns to slide 4; End and Home jump to 13 and 1; loading slides.html#9 opens slide 9; N toggles the current slide's notes. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-13 the h2 computes to Lato, weight 900, 38px, left edge 72px (±2px) from the slide edge, same top everywhere; the chapter tracker highlights the correct chapter per the stated slide ranges (none on 13) and the footer reads 'ReadBridge Tutoring · Report to the Alder Family Foundation' with the correct 'n of 13'."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Cream background, Lato and the coral/teal palette are used consistently, band colors match the legend everywhere, nothing overlaps or is clipped, and chart text is at least 12px."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-open-07",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "Distribution network redesign deck from DC operations data",
+  "prompt": "Build the distribution network review for Kestrel Home, an online home furnishings retailer, presented by COO Martin Adebayo to the executive committee on 20 January 2026 to recommend a redesign. Analyze dc_monthly_2025.csv (per distribution center and month: orders, on-time orders, freight and warehouse cost in USD, average miles and average transit days) and network_scenario.json (the on-time target and the cost levers of the proposed network).\n\nDefinitions: on-time rate = on-time orders / orders; cost per order = (freight + warehouse) / orders, also split into freight per order and warehouse per order; annual figures sum the 12 months; a DC's average transit days is weighted by monthly orders. The proposal keeps 2025 order volume. $M with two decimals, per-order costs in dollars and cents, rates one decimal.\n\nExactly 14 slides, titled:\n1. 'Distribution Network Review 2025' (presenter, date)\n2. 'Executive summary': KPI tiles for 2025 orders, network on-time rate against the 95% target, total logistics cost and cost per order, plus a one-line recommendation\n3. 'Network today': schematic: ports Long Beach and Savannah feed the four DCs, which serve the West, Southwest, Midwest, Northeast and Southeast regions; each DC's outbound line width is proportional to its 2025 orders\n4. 'On-time performance by DC': line chart, one line per DC over 12 months, dashed 95% target, the lowest point annotated with DC, month and value\n5. 'Cost per order by DC': stacked bars of freight and warehouse cost per order for each DC with the total on top\n6. 'Distance drives transit time': scatter of average miles (x) vs transit days (y) for all 48 DC-months colored by DC, least-squares line labeled in days per 100 miles (two decimals) with R² (two decimals)\n7. 'DC scorecard': table: DC, orders, on-time rate, freight/order, warehouse/order, cost/order, average transit days; the worst value in each of the five rate, cost and transit columns in red\n8. 'Peak season strain': November and December on-time rate per DC against the 95% target\n9. 'Proposed network': the slide 3 schematic redrawn with Columbus replaced by Indianapolis, a new Phoenix cross-dock and a line-haul link between Indianapolis and Atlanta, changes highlighted\n10. 'Cost bridge': waterfall from 2025 total cost through the five levers in file order to the proposed total cost, with the % reduction\n11. 'Today vs proposed': comparison table: nodes, total cost, cost per order\n12. 'Implementation roadmap': Gantt chart of four workstreams across Q1-Q4 2026 with a go-live milestone\n13. 'Risks and mitigations': three rows\n14. 'Appendix: definitions and data notes'\n\nStyle: Roboto only, white slides, slate text #1E293B, safety-orange accent #EA580C. Fixed DC colors: Reno #2563EB, Dallas #EA580C, Columbus #6B7280, Atlanta #059669 (Indianapolis reuses gray, Phoenix #7C3AED). From slide 2 on: a 6px orange bar along the left edge, an h2 in Roboto 700 at 32px with its left edge 48px from the slide edge and the same top everywhere, footer 'Kestrel Home · Network Strategy' left, 14 progress dots centered (current one filled orange), and 'Slide n of 14' right. Charts as inline SVG with titled axes, no text under 12px.\n\nPresenter mode: only slide 1 visible on load; ArrowRight/ArrowLeft/PageDown/PageUp navigate, Home/End jump, the hash is #n and loading slides.html#n opens slide n. Each slide has speaker notes in an aside with class notes (hidden); N toggles a notes panel. The slide 4 notes must name the DC and month of the lowest on-time rate; the slide 10 notes must give the proposed cost per order.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "dc_monthly_2025.csv",
+   "network_scenario.json"
+  ],
+  "slides_spec": {
+   "min_slides": 14,
+   "max_slides": 14
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 14 slides in this order: 'Distribution Network Review 2025', 'Executive summary', 'Network today', 'On-time performance by DC', 'Cost per order by DC', 'Distance drives transit time', 'DC scorecard', 'Peak season strain', 'Proposed network', 'Cost bridge', 'Today vs proposed', 'Implementation roadmap', 'Risks and mitigations', 'Appendix: definitions and data notes'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 2 shows exactly: 1,086,605 orders, on-time 94.2% (below the 95% target), total logistics cost $13.87M and cost per order $12.76."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 3 is a drawn schematic with both ports, the four DCs and five regions connected by lines, and DC outbound line widths ordered Dallas > Columbus > Reno > Atlanta (proportional to orders 314,400, 292,347, 254,916, 224,942)."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 4 has four lines in the fixed DC colors over Jan-Dec with a dashed 95% line and the lowest point annotated as Dallas, February, 86.2%; slide 8 shows Nov / Dec on-time of Reno 93.7 / 93.4, Dallas 92.7 / 91.4, Columbus 90.3 / 88.0 and Atlanta 93.5 / 92.9 (%)."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 5's stacked bars show freight + warehouse per order: Reno 9.65 + 4.20 (13.85), Dallas 8.36 + 3.67 (12.04), Columbus 8.83 + 4.49 (13.32), Atlanta 7.82 + 3.99 (11.81)."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 6 plots 48 points colored by DC with titled axes and a least-squares line labeled 0.47 days per 100 miles with R² 0.75."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 7's table shows orders, on-time, freight/order, warehouse/order, cost/order and transit days: Reno 254,916, 95.5%, $9.65, $4.20, $13.85, 4.48; Dallas 314,400, 93.9%, $8.36, $3.67, $12.04, 3.77; Columbus 292,347, 92.6%, $8.83, $4.49, $13.32, 4.20; Atlanta 224,942, 95.1%, $7.82, $3.99, $11.81, 3.49; worst values in red: Columbus on-time and warehouse/order, Reno freight/order, cost/order and transit days."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 10's waterfall reads $13.87M, -1.24, -0.87, -2.05, +0.62, +0.39 and $10.72M in that order with a 22.7% reduction; slide 11 shows cost per order $12.76 today vs $9.86 proposed."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide has a non-empty hidden aside.notes; the slide 4 notes name Dallas in February (86.2%) and the slide 10 notes give $9.86 per order; slide 9 visibly shows Indianapolis, Phoenix and the Indianapolis-Atlanta line-haul."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; PageDown three times shows slide 4 with hash #4; ArrowLeft returns to slide 3; End and Home jump to 14 and 1; loading slides.html#10 opens slide 10; N toggles the current slide's notes. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-14 the h2 computes to Roboto, weight 700, 32px, left edge 48px (±2px) from the slide edge, same top everywhere; every such slide has the 6px orange left bar, 14 footer dots with only the current one filled, and 'Slide n of 14' with the correct n."
+   },
+   {
+    "id": "R12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "DC colors are identical across slides 3-9, nothing overlaps or is clipped, and chart and diagram text is at least 12px."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-open-08",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "City council transit briefing deck from ridership data",
+  "prompt": "Prepare Riverton Transit's briefing to the City Council transportation committee on 30 September 2026, presented by general manager Aisha Bello, on ridership recovery and the proposed 2027 bus network. Analyze routes_weekday.csv (14 routes: tier, average weekday boardings in 2019 and 2026, peak headway in minutes, weekday revenue hours), monthly_boardings.csv (monthly boardings in thousands by tier for 2019, 2025 and January-August 2026) and budget_fy2027.json (FY2026 net operating cost and FY2027 changes, $M).\n\nDefinitions: year to date (YTD) = January-August; recovery = 2026 / 2019 for the same period; productivity = weekday boardings / weekday revenue hours (per route, tier or system); route recovery uses weekday boardings. Boardings in millions with two decimals, percentages and productivity one decimal, budget in $M one decimal.\n\nExactly 14 slides, titled:\n1. 'Ridership Recovery and the 2027 Network' (presenter, committee, date)\n2. 'Agenda': Ridership, Productivity, Budget, Redesign\n3. 'Where ridership stands': KPI tiles: 2026 YTD boardings, YTD recovery vs 2019, YTD growth vs 2025, system productivity\n4. 'Monthly boardings': line chart of total monthly boardings (thousands) for 2019, 2025 and 2026 (Jan-Aug), each line labeled at its end\n5. '2026 boardings by tier': stacked bars for Jan-Aug 2026 by tier with monthly totals\n6. 'Recovery by tier': table: tier, routes, weekday 2019, weekday 2026, recovery, productivity, share of 2026 weekday boardings\n7. 'Frequency drives productivity': scatter of peak headway (x) vs productivity (y), 14 points labeled by route number and colored by tier, least-squares line labeled with slope and R² (two decimals)\n8. 'Route spotlight': the route with the highest and the one with the lowest recovery, side by side with their numbers\n9. 'FY2027 budget bridge': waterfall from FY2026 net operating cost through the six changes in file order to FY2027\n10. 'The proposed network': stylized SVG map: four frequent corridors as thick lines meeting at a Downtown Transit Center, local routes as thin gray lines, express as dashed lines, with a legend and a north arrow\n11. 'What changes for riders': three columns\n12. 'Engagement timeline': Draft plan (Oct 2026) → Public meetings (Nov 2026) → Revised plan (Jan 2027) → Council vote (Feb 2027) → Launch (Aug 2027)\n13. 'Decisions requested': three numbered asks\n14. 'Appendix: route data': all 14 routes with tier, weekday 2019, weekday 2026, recovery and productivity, sorted by productivity, highest first\n\nStyle: civic and clear: white slides, navy #0B3C5D text, Open Sans only. Fixed tier colors: Frequent #D7263D, Local #1B998B, Express #F49D37. From slide 2 on: an h2 in Open Sans 700 at 34px, left edge 64px from the slide edge, same top everywhere; a top-right tracker of the four agenda sections with the current one underlined in navy (Ridership = slides 3-5, Productivity = 6-8, Budget = 9, Redesign = 10-13; none on 2 and 14); footer 'Riverton Transit · Council Transportation Committee · 30 Sep 2026' left and 'n / 14' right. Charts as inline SVG, titled axes, no text under 12px.\n\nPresenter mode (for a clicker): only slide 1 visible on load; ArrowRight/PageDown forward, ArrowLeft/PageUp back, Home/End jump, the hash is #n and loading slides.html#n opens slide n, and B toggles a black screen. Each slide has speaker notes in an aside with class notes (hidden); N toggles a notes panel. The slide 3 notes must state weekday recovery; the slide 9 notes must give the FY2027 total.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "routes_weekday.csv",
+   "monthly_boardings.csv",
+   "budget_fy2027.json"
+  ],
+  "slides_spec": {
+   "min_slides": 14,
+   "max_slides": 14
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 14 slides in this order: 'Ridership Recovery and the 2027 Network', 'Agenda', 'Where ridership stands', 'Monthly boardings', '2026 boardings by tier', 'Recovery by tier', 'Frequency drives productivity', 'Route spotlight', 'FY2027 budget bridge', 'The proposed network', 'What changes for riders', 'Engagement timeline', 'Decisions requested', 'Appendix: route data'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 3 shows exactly: 2026 YTD boardings 7.29M, recovery 88.3% of 2019 YTD, growth 12.1% vs 2025 YTD and system productivity 15.5 boardings per revenue hour."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 4 has three labeled lines: 2019 and 2025 over 12 months and 2026 over Jan-Aug, 2026 lying between 2025 and 2019 (e.g. Aug 2026 936.1 vs Aug 2019 1,062.7 thousand), with titled axes."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 5 has eight stacked bars in the fixed tier colors with totals 807.7, 866.1, 956.5, 936.3, 996.9, 909.9, 878.0 and 936.1 (thousands) for Jan-Aug."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 6's table shows (routes, weekday 2019, weekday 2026, recovery, productivity, share): Frequent 4, 29,500, 26,177, 88.7%, 23.0, 65.4%; Local 7, 16,400, 12,220, 74.5%, 11.9, 30.5%; Express 3, 3,400, 1,652, 48.6%, 4.0, 4.1%."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 7 plots 14 route-labeled points colored by tier with titled axes and a least-squares line labeled with slope -0.53 and R² 0.68."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 8 features Route 7 Eastgate (104.1% recovery) and Route 52X Commuter North Express (46.5%); slide 14 lists all 14 routes sorted by productivity from Route 7 (27.0) down to Route 50X (3.8)."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 9's waterfall reads 96.4, +6.4, +1.1, +2.3, -1.9, -3.6, -2.8 and 97.9 ($M) in file order with floating steps; slide 10 is a drawn map with four thick frequent corridors meeting at the Downtown Transit Center, thin gray locals, dashed express lines, a legend and a north arrow."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide contains a non-empty hidden aside.notes; the slide 3 notes state weekday recovery of 81.2% and the slide 9 notes give $97.9M."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; PageDown four times shows slide 5 with hash #5; PageUp returns to slide 4; End and Home jump to 14 and 1; loading slides.html#9 opens slide 9; B blacks out the screen and B again restores it; N toggles the current slide's notes. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-14 the h2 computes to Open Sans, weight 700, 34px, left edge 64px (±2px) from the slide edge, same top everywhere; the tracker underlines the correct section (Ridership 3-5, Productivity 6-8, Budget 9, Redesign 10-13, none on 2 and 14) and the footer shows the committee line and the correct 'n / 14'."
+   },
+   {
+    "id": "R12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Tier colors are identical on slides 5, 6, 7 and 10, nothing overlaps or is clipped, and chart text is at least 12px."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-rep-01",
+  "category": "slides",
+  "mode": "replication",
+  "title": "Recreate a four-slide equity research initiation deck",
+  "prompt": "Recreate the four attached slides from Halvorsen & Co.'s equity research initiation on Northwind Semiconductors as one HTML deck with four slides, in order. Headlines are set in DejaVu Serif bold and everything else in Inter; the palette is navy, teal, orange and gray-blue on white, with tabular figures in the tables.\n\nSlide 1 is the cover: a full-height navy sidebar (brand, rating, a 2×2 grid of price target, last price, upside and horizon, a key-data table and the analyst block) and, on the right, an eyebrow, a two-line serif headline, a lede, three numbered thesis points and a 12-month share price area chart with a dashed price-target line and labeled 52-week high, low and last price. Slide 2 is an estimates table (FY2024A to FY2028E plus a CAGR column) with grouped rows, shaded estimate columns, an italic consensus row, a red negative value and a callout box at the top right. Slide 3 is a stacked revenue bar chart by segment with an EBITDA-margin line on a secondary axis and lighter estimate bars under an ESTIMATES band, beside a donut with a mix table and a note. Slide 4 is a valuation football field with last-price and target lines next to a color-coded 5×5 DCF sensitivity table.\n\nDraw every chart with inline SVG or CSS and match positions, sizes, colors, text and numbers as closely as you can.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "slides_spec": {
+   "min_slides": 4,
+   "max_slides": 4
+  },
+  "reference_images": [
+   "slide_1.png",
+   "slide_2.png",
+   "slide_3.png",
+   "slide_4.png"
+  ],
+  "golden": {
+   "entry": "slides.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1 layout matches: a navy sidebar about 390px wide and full height with the brand, 'OUTPERFORM' in green, the 2×2 grid ($148.00, $112.40, +31.7%, 12 months), a 7-row key-data table and the analyst block; on the right the teal eyebrow, the two-line serif headline, the lede, three numbered thesis items and the chart along the bottom, at matching positions and sizes."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1 chart matches: a teal price line with a light teal area over Oct-Sep, gridlines labeled 80-140, a dashed orange 'PT $148' line, labeled markers '52w high $126.90' (July) and '52w low $78.15' (early December), a hollow end marker labeled '$112.40', and a similar path (flat low through the winter, rising from April)."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 2's table matches in structure and values: three teal group rows, e.g. Revenue 6,412 / 7,388 / 8,905 / 10,760 / 12,610 / 19.5%, EPS 3.12 / 3.86 / 5.04 / 6.51 / 7.94 / 27.2%, Net cash (412) in red, P/E 36.0 to 14.2 and EV/EBITDA 18.2 to 7.4; the FY2026E-FY2028E columns are shaded, the header has a navy underline and the consensus row (4.92, 6.14, 7.38) is gray italic."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 2's header matches: the 'FINANCIAL SUMMARY' eyebrow, the serif title 'We are 6% above consensus on FY2027E EPS' and the top-right callout with a teal left border ('FY2027E EPS', '$6.51', 'vs consensus $6.14 · +6.0%'), plus the footnote and footer."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 3's chart matches: seven stacked bars FY22A-FY28E with totals 5.05, 5.77, 6.41, 7.39, 8.91, 10.76 and 12.61 in navy / teal / gray-blue, lighter bars for FY26E-FY28E under a pale 'ESTIMATES' band, an orange margin line with hollow markers labeled 27.4% to 38.5%, a left axis 0-20 and right axis 0-50% with titles, and the legend row."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 3's right panel matches: a donut split 58% navy / 20% teal / 22% gray-blue with '$12.6B' and 'FY2028E' in the center, a three-row mix table with $7.31B, $2.52B and $2.78B, and the orange-bordered note box."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 4's football field matches: five labeled horizontal bars with values inside ($78.15-$126.90, $137-$161, $121-$157, $117-$156, $95-$160), teal for DCF and the two multiples and gray-blue for the others, a $60-$200 axis, a dashed navy 'Last $112.40' line and a solid orange 'PT $148' line."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 4's sensitivity table matches: WACC rows 8.5-10.5% by growth columns 2.0-4.0% with the same values (first row 148, 161, 177, 195, 218; last row 111, 118, 127, 137, 148), green tint for values of 148 or more, red tint for 111, neutral gray otherwise, the base cell (9.5%, 3.0%) outlined in navy, and the legend and base-case note below."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "All text matches the targets exactly, including the thesis sentences, key-data rows, table labels, footnotes, the 'HALVORSEN & CO. · Northwind Semiconductors' footers and page numbers 1-4."
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and colors match: bold DejaVu Serif headlines, Inter elsewhere with letter-spaced bold eyebrows and section labels, the navy / teal / orange / green accents in the same roles, and white slides with a thin navy top bar on slides 2-4."
+   },
+   {
+    "id": "F11",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every slide is built from live HTML text and SVG or CSS shapes; no image of the targets (or any raster image) is embedded, traced or used as a background."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-rep-02",
+  "category": "slides",
+  "mode": "replication",
+  "title": "Recreate a dark three-slide architecture review deck",
+  "prompt": "Recreate the three attached slides from the Atlas platform architecture review as one HTML deck with three slides, in order. The deck is dark (near-black #0B0F17 background, slightly lighter panels with thin borders) with Inter for text and DejaVu Sans Mono for eyebrows, identifiers, owners and footers, and cyan, green, amber, red and purple accents. Every slide has a monospace cyan eyebrow, a pill chip at the top right, a bold white headline, and a footer rule with a monospace footer and page number.\n\nSlide 1 is an architecture diagram: client, edge and ingress boxes on the left feeding a dashed us-east-1 region with five services on a gRPC bus, three data stores and arrows between them, a dashed eu-west-1 standby region below with purple async replication arrows, status dots on the boxes, and a legend panel. Slide 2 is a 24-hour latency chart (p50, p95, p99) with a dashed 800 ms SLO line, a shaded incident window with an annotation box and the peak labeled, plus an endpoint table and two summary cards on the right. Slide 3 is a six-month Gantt roadmap with five swimlanes, done, in-progress and planned bars, gate diamonds, game-day dots, dashed dependency curves, a TODAY line and a legend.\n\nUse inline SVG and CSS and match layout, text, numbers and colors as closely as you can.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "slides_spec": {
+   "min_slides": 3,
+   "max_slides": 3
+  },
+  "reference_images": [
+   "slide_1.png",
+   "slide_2.png",
+   "slide_3.png"
+  ],
+  "golden": {
+   "entry": "slides.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1 layout matches: CLIENTS / EDGE / INGRESS captions over three client boxes, the 'CDN + WAF' and 'API gateway' boxes on the left, a dashed us-east-1 container at the upper right, a dashed eu-west-1 container below it and the legend panel at the lower left, at matching positions and sizes."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1 diagram content matches: a gRPC bus from the gateway dropping into auth, cart, orders, payments and inventory (p99 64, 188, 704, 1,084 and 142 ms), arrows to Redis, Postgres 16 and Kafka, dashed purple arrows to 'Postgres replica' and 'Kafka mirror' labeled 'async · 140 ms lag' and 'replicate', a dimmed 'services' box, and status dots (payments red, orders and Kafka amber, the rest green)."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 2's chart matches: cyan p50, purple p95 and amber p99 lines over 00:00-23:00 on a 0-1,200 ms axis, a dashed red 'SLO 800 ms' line, a shaded window from about 12:36 to 15:48, the 'INC-4471 · 12:36–15:48' box to its left with a leader line, three red-ringed points above the SLO and the '1,084 ms' peak label."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 2's right side matches: 'ENDPOINTS · LAST 24 H' with seven monospace endpoints and exact p50 / p99 / error values (e.g. POST /payments 236, 1,084, 0.91%), 912 and 1,084 in red and 0.91% in amber, and cards 'Availability 99.94%' (target 99.95%) and 'Error budget left 18%' in amber."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 3's Gantt matches: month columns Jan-Jun 2027 with alternating shading, lanes Data, Messaging, Services, Edge & DNS and Validation with monospace owners, and the same bars at the same dates and states (green done, cyan in progress, dashed planned), e.g. 'Dual-write + backfill' mid-Feb to end of Mar and 'Chaos suite in CI' Feb-Jun."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 3's markers match: amber diamonds 'Gate 1 · read failover' at 1 Apr and 'Gate 2 · active-active GA' in late June on a GATES row, purple 'Game day 1' and 'Game day 2' dots, two dashed dependency curves, the cyan TODAY line with the 'TODAY 17 FEB' tag, and the legend row."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The shared chrome matches on all slides: eyebrows 'ATLAS PLATFORM / ARCHITECTURE / 01', '/ LATENCY / 02', '/ ROADMAP / 03', the chip 'Q3 2026 · draft for review', the exact headlines, and the footer 'atlas-platform · sre-review-2026-09' with 1/3, 2/3, 3/3."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "All text matches exactly, including box titles and subtitles, legend labels, lane, bar and gate names and table text, with monospace used where the target uses it (service and store names, region labels, IDs, owners)."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Colors match: near-black background, dark panels with thin slate borders, and the accent colors used for the same meanings (cyan p50 and today, purple replication and game days, amber p99 and gates, red SLO and incident, green healthy and done)."
+   },
+   {
+    "id": "F10",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every slide is built from live HTML text and SVG or CSS shapes; no image of the targets (or any raster image) is embedded, traced or used as a background."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-rep-03",
+  "category": "slides",
+  "mode": "replication",
+  "title": "Recreate a four-slide consulting strategy deck",
+  "prompt": "Recreate the four attached slides (pages 12-15) from Marlowe & Pike's strategy deck for Verdant Foods as one HTML deck with four slides, in order. The style is a classic consulting deck set entirely in Lato: white background, navy text, a coral 'PRELIMINARY · FOR DISCUSSION' tag at the top left, a section tracker at the top right with the current section bold and underlined in green, a heavy one-line action title with a gray subtitle and a navy rule, and a source line, the MARLOWE & PIKE wordmark and the page number at the bottom.\n\nSlide 1 is a 2×2 bubble matrix (ability to win against market attractiveness) with a tinted 'Invest to lead' quadrant, eight labeled bubbles sized by sales, a navy recommendation box and a bubble-size legend. Slide 2 is a competitor table scored with Harvey balls on six criteria plus an overall score bar, with Verdant's row highlighted, a Harvey-ball legend and a note. Slide 3 is an EBIT bridge waterfall from 2025 to 2028 with a subtotal, colored increases and decreases, dotted connectors and a bracket callout, next to a key-assumptions table. Slide 4 is a Marimekko chart of segment size and brand share with a rank legend and two insight boxes.\n\nDraw everything with HTML, CSS and inline SVG and match the targets as closely as you can.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "slides_spec": {
+   "min_slides": 4,
+   "max_slides": 4
+  },
+  "reference_images": [
+   "slide_1.png",
+   "slide_2.png",
+   "slide_3.png",
+   "slide_4.png"
+  ],
+  "golden": {
+   "entry": "slides.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1's matrix matches: axes 0-10 with titles, dashed midlines at 5, the top-right quadrant tinted with a green 'INVEST TO LEAD' label and gray labels in the other corners, and eight bubbles at matching positions and relative sizes (Almond milk largest at lower center, Oat milk large near the top center, Creamers at the upper right), teal in the top-right quadrant and slate elsewhere, each labeled with its name and $ size."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 1's right side matches: the navy box with a gold 'RECOMMENDATION' label, the white title 'Lead with creamers and plant yogurt; build toward oat milk by 2028' and three numbered points, and the bubble-size legend with $0.5B, $1B and $3B circles."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 2's table matches: rows Oatly, Silk, Califia Farms, So Delicious, Kite Hill and Verdant (today) by six criteria with the same Harvey-ball fills (e.g. Oatly full, 3/4, half, 3/4, half, half; Verdant 1/4, 3/4, 3/4, half, full, full) and overall bars and scores 72, 70, 61, 57, 44 and 63; Verdant's row has a cream background, a gold left edge and a gold bar."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 2's legend (Absent, Weak, Average, Strong, Leading) and the green-bordered 'Gap to close' note match the target."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 3's waterfall matches: nine bars 42 (navy), +38 and +12 (green), -17 (coral), 75 subtotal (gray), -14 (coral), +21 and +9 (green), 91 (navy), floating at the right levels with dotted connectors, value labels above, two-line category labels and the green '23% of 2028 EBIT' bracket over +21."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 3's key-assumptions table matches (six rows with 6.5%, +1.8%, 3.2%, $240M, 8.8% and $14M in bold on the right) along with the four-item color legend."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 4's Marimekko matches: five columns Milk, Creamer, Yogurt, Frozen and Cheese with widths proportional to $2.8B, $1.1B, $0.6B, $0.5B and $0.4B, each stacked in rank colors (navy, teal, gold, gray, light gray) with brand and share labels in the larger cells (e.g. Milk: Silk 28%, Oatly 22%, Califia 14%, Private label 16%, Others 20%) and a 0-100% axis."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 4's right panel matches: the 'SHARE RANK' legend with five swatches and the two green-bordered insight boxes with the same text."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The shared chrome matches on every slide: the coral tag, the tracker with the correct current section (Opportunity, Competition, Economics, Market map), exact action titles and subtitles, the navy rule, the source lines, 'MARLOWE & PIKE' and page numbers 12-15."
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and colors match: Lato throughout with heavy (900) titles and labels, navy, teal green, gold and coral used in the same roles, and the same spacing on a white background."
+   },
+   {
+    "id": "F11",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every slide is built from live HTML text and SVG or CSS shapes; no image of the targets (or any raster image) is embedded, traced or used as a background."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-rep-04",
+  "category": "slides",
+  "mode": "replication",
+  "title": "Recreate a three-slide editorial climate report deck",
+  "prompt": "Recreate the three attached slides from The Meridian Climate Review 2026 as one HTML deck with three slides, in order. The style is editorial: a warm cream background (#FBF7F0), DejaVu Serif for headlines, figures, panel titles and year labels, Open Sans for everything else, a deep red accent, and a thin rule with a right-aligned folio at the bottom of each slide.\n\nSlide 1 is a cover: warming stripes (one 10px stripe per year from 1898 to 2025, colored on a ten-step blue-to-red scale) across the top 330px with year ticks and a caption label, then a masthead, a huge red '+1.48°C', a caption, a small color-scale key, a headline with an italic red phrase, a short deck and three fact columns. Slide 2 shows six small-multiple area charts of decadal temperature anomaly by region on a shared scale, each with an end-value label, above a note. Slide 3 is a calendar heatmap of monthly anomalies for 2016-2025 with the value printed in every cell and record months outlined, with a legend and two statistics on the right.\n\nDraw everything with HTML, CSS and inline SVG and match the targets as closely as you can, including the individual stripe and cell colors.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "slides_spec": {
+   "min_slides": 3,
+   "max_slides": 3
+  },
+  "reference_images": [
+   "slide_1.png",
+   "slide_2.png",
+   "slide_3.png"
+  ],
+  "golden": {
+   "entry": "slides.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1's stripes match: 128 full-height vertical stripes across the whole width of the top band, going from dark and mid blues on the left through pale tones in the 1980s-1990s to deep reds at the right, with the stripe-by-stripe color sequence closely following the target, year ticks 1900-2025 below, and the pale caption label at the top left."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1's lower half matches: the letter-spaced masthead with 'CLIMATE REVIEW' in red, the huge red serif '+1.48' with a smaller raised '°C', the caption and the ten-swatch key (-0.3°C to +1.6°C) on the left; on the right the headline 'Another year above 1.4°C' with '1.4°C' in red italics, the deck text and three fact columns (10 / 10, 0.27°C, 423 ppm) separated by thin rules."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 2's grid matches: six panels in two rows (Arctic, Europe, Asia / North America, Africa, Oceans), each with a serif title, gridlines 0 to +3, a red line over a light salmon area across 13 decades with the same shape, an end dot labeled +3.1°, +2.2°, +1.9°, +1.7°, +1.4° and +0.9° respectively, and x labels 1900s / 1960s / 2020s."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 2's header and note match: the red 'REGIONS' kicker, the serif headline 'The Arctic is warming at twice the global pace', the dek, the black rule and the 'Why the Arctic?' note."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 3's heatmap matches: 10 rows (2016-2025) by 12 month columns with the same printed values (e.g. 2016 Jan 1.38, 2024 Jan 1.57, 2025 Dec 1.32), orange sequential fills by value with white text on the darker cells, and dark outlines on exactly the record cells (2019 Nov; 2020 Aug, Oct; 2021 Jul, Dec; 2022 Jun, Dec; 2023 Jun-Dec; 2024 Jan-Sep)."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 3's side panel matches: 'ANOMALY (°C)' with the 0.9-1.8 swatch bar, the 'Record for the month' key, and the red serif statistics '9 of 12' (months of 2024 set a record) and '1.57°C' (warmest month in the series)."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "All text matches exactly on the three slides, including captions, fact labels, dek lines, panel titles and the folios 'The Meridian Climate Review · 1', '· 2' and '· 3'."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and colors match: serif headlines, big figures, panel titles and heatmap year labels, Open Sans body text, the cream background, the deep red accent and the thin warm-gray rules."
+   },
+   {
+    "id": "F9",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The grid matches the targets: 64px side margins, the slide 1 split into a left figure column and a right text column starting near the horizontal center, evenly spaced small-multiple panels, the heatmap and side panel side by side, and nothing overlapping or clipped."
+   },
+   {
+    "id": "F10",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every slide is built from live HTML text and SVG or CSS shapes; no image of the targets (or any raster image) is embedded, traced or used as a background."
+   }
+  ]
+ }
+]

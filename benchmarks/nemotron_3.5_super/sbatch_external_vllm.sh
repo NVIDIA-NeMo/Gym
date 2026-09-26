@@ -38,6 +38,17 @@ SLURM_COMMENT="${SLURM_COMMENT:-}"
 OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
 OPENSANDBOX_PROTOCOL="${OPENSANDBOX_PROTOCOL:-http}"
+# Optional script (repo-relative) sourced in the eval container before Gym starts, e.g. to reuse
+# prebuilt server venvs for servers the container does not ship.
+EVAL_SETUP_SCRIPT="${EVAL_SETUP_SCRIPT:-}"
+# Optional absolute path. Once the router answers, the job writes its base URL
+# (http://<router-ip>:8000/v1) there and removes it on exit, so a Gym run elsewhere can use
+# this job as a shared endpoint (vllm_model `endpoint_file`) and follow it across restarts.
+ENDPOINT_FILE="${ENDPOINT_FILE:-}"
+if [[ -n "$ENDPOINT_FILE" && "$ENDPOINT_FILE" != /* ]]; then
+    echo "ENDPOINT_FILE must be an absolute path" >&2
+    exit 1
+fi
 
 case "$VLLM_PD_DEPLOYMENT_MODE" in
     independent | coupled)
@@ -89,6 +100,9 @@ set -euo pipefail
 # Activate environment in container and cd into Gym. The Gym path here may be mounted.
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
+if [[ -n "$EVAL_SETUP_SCRIPT" ]]; then
+    source "$EVAL_SETUP_SCRIPT"
+fi
 
 export NEMO_GYM_RUN_ID="\$SLURM_JOB_ID"
 export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
@@ -433,10 +447,32 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-ex
     ' bash bash -c "\$vllm_command" &
 server_step=\$!
 
+publisher_pid=""
+if [[ -n "$ENDPOINT_FILE" ]]; then
+    router_url=http://\$(getent hosts "\${nodes[0]}" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1
+    (
+        until curl -fs --connect-timeout 5 --max-time 10 "\$router_url/models" >/dev/null; do
+            sleep 15
+        done
+        mkdir -p "\$(dirname "$ENDPOINT_FILE")"
+        printf '%s\n' "\$router_url" > "$ENDPOINT_FILE.\$SLURM_JOB_ID"
+        mv -f "$ENDPOINT_FILE.\$SLURM_JOB_ID" "$ENDPOINT_FILE"
+        echo "Published \$router_url to $ENDPOINT_FILE"
+    ) &
+    publisher_pid=\$!
+fi
+
 cleanup_server() {
     job_status=\$?
     trap - EXIT INT TERM
     set +e
+    if [[ -n "\$publisher_pid" ]]; then
+        kill "\$publisher_pid" 2>/dev/null || true
+        # Leave a successor job's publication alone.
+        if [[ "\$(cat "$ENDPOINT_FILE" 2>/dev/null)" == "\$router_url" ]]; then
+            rm -f "$ENDPOINT_FILE"
+        fi
+    fi
     kill "\$server_step" 2>/dev/null || true
     wait "\$server_step" 2>/dev/null || true
     exit "\$job_status"

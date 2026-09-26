@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Checkout · Northwind Outfitters</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { font-family: Inter, sans-serif; font-size: 14px; color: #1c1917; background: #f5f3ee; -webkit-font-smoothing: antialiased; }
+  button, input, select { font-family: inherit; font-size: inherit; color: inherit; }
+  button { cursor: pointer; }
+  svg { display: block; flex: none; }
+  .ico { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  header { height: 72px; background: #fff; border-bottom: 1px solid #e7e3da; }
+  .hwrap { max-width: 1152px; height: 100%; margin: 0 auto; padding: 0 16px; display: flex; align-items: center; }
+  .logo { display: flex; align-items: center; gap: 10px; width: 280px; }
+  .logo-mark { width: 36px; height: 36px; border-radius: 50%; background: #1e4d3b; display: grid; place-items: center; }
+  .logo-name { font-family: Lato, sans-serif; font-weight: 700; font-size: 17px; letter-spacing: 0.01em; color: #1e4d3b; line-height: 18px; }
+  .logo-name small { display: block; font-size: 10px; letter-spacing: 0.26em; color: #8a8375; font-weight: 700; }
+  .steps { flex: 1; display: flex; align-items: center; justify-content: center; gap: 10px; }
+  .step { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: #a39d90; }
+  .step i { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; font-style: normal; font-size: 12px; font-weight: 700; border: 1.5px solid #d6d1c5; color: #a39d90; }
+  .step.done { color: #1e4d3b; }
+  .step.done i { background: #1e4d3b; border-color: #1e4d3b; color: #fff; }
+  .step.active { color: #1c1917; }
+  .step.active i { border-color: #1e4d3b; color: #1e4d3b; box-shadow: 0 0 0 3px #dce9e2; }
+  .line { width: 36px; height: 1.5px; background: #d6d1c5; }
+  .line.done { background: #1e4d3b; }
+  .secure { width: 280px; display: flex; justify-content: flex-end; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: #57534e; }
+
+  .page { max-width: 1152px; margin: 0 auto; padding: 28px 16px 24px; display: grid; grid-template-columns: 1fr 404px; grid-template-rows: auto 1fr; gap: 16px 28px; align-items: start; }
+  .card { background: #fff; border: 1px solid #e7e3da; border-radius: 14px; padding: 20px 24px 22px; }
+  .card + .card { margin-top: 16px; }
+  .card-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+  .card-head h2 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+  .card-head h2 span { display: inline-grid; place-items: center; width: 22px; height: 22px; margin-right: 8px; border-radius: 50%; background: #efece4; font-size: 12px; color: #57534e; vertical-align: 1px; }
+  .link { font-size: 13px; color: #1e4d3b; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+  .grid { display: grid; gap: 12px; }
+  .g2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .g3 { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 0.8fr); }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field label { font-size: 12px; font-weight: 600; color: #57534e; }
+  .input { height: 42px; border: 1px solid #d6d1c5; border-radius: 9px; padding: 0 12px; background: #fff; display: flex; align-items: center; gap: 8px; }
+  .input input, .input select { border: 0; outline: 0; background: none; flex: 1; min-width: 0; width: 100%; height: 100%; padding: 0; appearance: none; }
+  .input:focus-within { border-color: #1e4d3b; box-shadow: 0 0 0 3px #dce9e2; }
+  .input.err { border-color: #c2410c; }
+  .error { font-size: 12px; color: #c2410c; display: none; }
+  .error.show { display: block; }
+  .check { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 13px; color: #44403c; }
+  input[type=checkbox], input[type=radio] { accent-color: #1e4d3b; width: 16px; height: 16px; margin: 0; }
+
+  .ship { border: 1px solid #d6d1c5; border-radius: 10px; overflow: hidden; }
+  .opt { display: flex; align-items: center; gap: 12px; padding: 14px 16px; cursor: pointer; }
+  .opt + .opt { border-top: 1px solid #e7e3da; }
+  .opt.sel { background: #f1f6f3; box-shadow: inset 3px 0 0 #1e4d3b; }
+  .opt-title { font-size: 14px; font-weight: 600; }
+  .opt-sub { margin-top: 2px; font-size: 12px; color: #78716c; }
+  .opt-price { margin-left: auto; font-weight: 700; font-size: 14px; }
+  .free { color: #15803d; }
+  .ship-note { margin-top: 10px; font-size: 12px; color: #78716c; display: flex; align-items: center; gap: 6px; }
+
+  .pay-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .pay-tab { height: 46px; border: 1px solid #d6d1c5; border-radius: 10px; background: #fff; display: flex; align-items: center; justify-content: center; gap: 8px; font-weight: 700; font-size: 14px; color: #57534e; }
+  .pay-tab.active { border: 1.5px solid #1e4d3b; background: #f1f6f3; color: #1e4d3b; }
+  .brand { font-size: 11px; font-weight: 800; font-style: italic; color: #1a1f71; letter-spacing: 0.02em; background: #eef0fb; padding: 2px 6px; border-radius: 4px; }
+
+  .forms { grid-row: span 2; }
+  .summary { grid-column: 2; }
+  .help { grid-column: 2; padding: 16px 20px; display: grid; gap: 14px; }
+  .help-row { display: flex; align-items: center; gap: 12px; font-size: 13px; color: #57534e; }
+  .help-row b { display: block; font-size: 14px; color: #1c1917; margin-bottom: 2px; }
+  .help-icon { width: 36px; height: 36px; border-radius: 10px; background: #efece4; display: grid; place-items: center; color: #1e4d3b; }
+  .help-row .link { margin-left: auto; }
+  .sum-head { display: flex; align-items: center; justify-content: space-between; }
+  .sum-head h2 { margin: 0; font-size: 17px; font-weight: 700; }
+  .sum-head .muted { font-size: 13px; color: #78716c; }
+  .sum-toggle, .sum-total-m { display: none; }
+  .items { margin-top: 12px; }
+  .item { display: grid; grid-template-columns: 64px 1fr auto; gap: 14px; padding: 14px 0; border-bottom: 1px solid #efece4; }
+  .thumb { width: 64px; height: 64px; border-radius: 12px; display: grid; place-items: center; position: relative; }
+  .item-name { font-size: 14px; font-weight: 600; line-height: 19px; }
+  .item-meta { margin-top: 2px; font-size: 12px; color: #78716c; }
+  .qty { margin-top: 8px; display: inline-flex; align-items: center; border: 1px solid #d6d1c5; border-radius: 8px; height: 30px; }
+  .qty button { width: 28px; height: 28px; border: 0; background: none; font-size: 16px; color: #57534e; display: grid; place-items: center; }
+  .qty span { min-width: 22px; text-align: center; font-size: 13px; font-weight: 600; }
+  .remove { margin-left: 10px; font-size: 12px; color: #78716c; background: none; border: 0; text-decoration: underline; text-underline-offset: 2px; padding: 0; }
+  .item-total { font-size: 14px; font-weight: 700; text-align: right; }
+  .promo { display: flex; gap: 8px; margin-top: 16px; }
+  .promo .input { flex: 1; }
+  .btn-outline { height: 42px; padding: 0 18px; border: 1px solid #1e4d3b; border-radius: 9px; background: #fff; color: #1e4d3b; font-weight: 700; }
+  .promo-msg { margin-top: 6px; font-size: 12px; min-height: 0; }
+  .promo-msg.ok { color: #15803d; }
+  .promo-msg.bad { color: #c2410c; }
+  .rows { margin-top: 14px; }
+  .r { display: flex; justify-content: space-between; padding: 5px 0; font-size: 14px; color: #44403c; }
+  .r.discount { color: #15803d; }
+  .r.total { margin-top: 8px; padding-top: 14px; border-top: 1px solid #e7e3da; align-items: baseline; color: #1c1917; }
+  .r.total b { font-size: 16px; }
+  .r.total .amt { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; }
+  .r.total .amt small { font-size: 12px; font-weight: 600; color: #78716c; margin-right: 6px; letter-spacing: 0; }
+  .place { margin-top: 16px; width: 100%; height: 52px; border: 0; border-radius: 11px; background: #1e4d3b; color: #fff; font-size: 16px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 10px; box-shadow: 0 6px 16px rgba(30, 77, 59, 0.25); }
+  .fine { margin-top: 12px; display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 12px; color: #78716c; }
+  .perks { margin-top: 16px; padding-top: 16px; border-top: 1px dashed #e7e3da; display: grid; gap: 10px; }
+  .perk { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #57534e; }
+  .perk .ico { color: #1e4d3b; }
+  .notice { display: none; margin-top: 12px; padding: 10px 12px; border-radius: 9px; background: #fdecea; color: #b42318; font-size: 13px; font-weight: 600; }
+  .notice.show { display: block; }
+  .notice.ok { background: #e7f5ec; color: #15803d; }
+
+  footer { max-width: 1152px; margin: 0 auto; padding: 8px 16px 28px; display: flex; gap: 20px; font-size: 12px; color: #8a8375; }
+  footer span:first-child { margin-right: auto; }
+  .m-only { display: none; }
+
+  @media (max-width: 760px) {
+    header { height: 60px; }
+    .logo { width: auto; }
+    .logo-name { font-size: 15px; }
+    .steps { display: none; }
+    .secure { width: auto; margin-left: auto; }
+    .m-only { display: block; }
+    .m-steps { padding: 12px 16px; background: #fff; border-bottom: 1px solid #e7e3da; }
+    .m-steps-top { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; color: #78716c; }
+    .m-steps-top b { color: #1c1917; }
+    .m-bar { margin-top: 8px; height: 4px; border-radius: 4px; background: #e7e3da; }
+    .m-bar i { display: block; width: 50%; height: 100%; border-radius: 4px; background: #1e4d3b; }
+    .page { display: flex; flex-direction: column; align-items: stretch; padding: 12px 12px 16px; gap: 12px; }
+    .page > * { min-width: 0; }
+    .card-head { flex-wrap: wrap; gap: 4px 12px; }
+    .summary { order: -1; position: static; padding: 14px 16px; }
+    .help { display: none; }
+    .sum-head .muted { display: none; }
+    .sum-toggle { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; color: #1e4d3b; background: none; border: 0; padding: 0; }
+    .sum-toggle .ico { transition: none; }
+    .summary.open .sum-toggle .ico { transform: rotate(180deg); }
+    .sum-head h2 { display: none; }
+    .sum-total-m { display: block; font-size: 17px; font-weight: 800; }
+    .sum-body { display: none; }
+    .summary.open .sum-body { display: block; }
+    .card { padding: 18px 16px 20px; }
+    .card + .card { margin-top: 12px; }
+    .g3 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .g3 .field:first-child { grid-column: 1 / -1; }
+    .pay-tab { font-size: 13px; }
+    .m-cta { background: #fff; border: 1px solid #e7e3da; border-radius: 14px; padding: 16px; }
+    .d-only { display: none; }
+    footer { flex-wrap: wrap; justify-content: center; gap: 8px 16px; padding: 4px 16px 24px; }
+    footer span:first-child { width: 100%; text-align: center; margin: 0; }
+  }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></symbol>
+    <symbol id="i-truck" viewBox="0 0 24 24"><path d="M3 6h11v10H3z"/><path d="M14 9h4l3 3v4h-7"/><circle cx="7" cy="17.5" r="1.8"/><circle cx="17" cy="17.5" r="1.8"/></symbol>
+    <symbol id="i-return" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></symbol>
+    <symbol id="i-leaf" viewBox="0 0 24 24"><path d="M5 19c0-8 5-13 15-14-1 10-6 15-14 15"/><path d="M5 19 13 11"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 0 1 4.9.7c0 1.7-2.4 2.1-2.4 3.6"/><path d="M12 17h.01"/></symbol>
+    <symbol id="i-card" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="M2.5 10h19"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></symbol>
+    <symbol id="i-tag" viewBox="0 0 24 24"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z"/><circle cx="7.5" cy="7.5" r="1.3"/></symbol>
+  </defs>
+</svg>
+
+<header>
+  <div class="hwrap">
+    <div class="logo">
+      <div class="logo-mark"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M2.5 18.5 9 8l3.2 5 2.3-3.3 7 8.8z" fill="#f5f3ee"/><path d="M9 8l1.6 2.6-1.6 1-1.5-1z" fill="#1e4d3b"/></svg></div>
+      <div class="logo-name">Northwind<small>OUTFITTERS</small></div>
+    </div>
+    <nav class="steps">
+      <div class="step done"><i><svg class="ico" style="width:13px;height:13px;stroke-width:3"><use href="#i-check"/></svg></i>Cart</div><span class="line done"></span>
+      <div class="step active"><i>2</i>Shipping</div><span class="line"></span>
+      <div class="step"><i>3</i>Payment</div><span class="line"></span>
+      <div class="step"><i>4</i>Review</div>
+    </nav>
+    <div class="secure"><svg class="ico" style="width:16px;height:16px"><use href="#i-lock"/></svg>Secure checkout</div>
+  </div>
+</header>
+<div class="m-only m-steps"><div class="m-steps-top"><span>Step 2 of 4 · <b>Shipping</b></span><span>Payment next</span></div><div class="m-bar"><i></i></div></div>
+
+<main class="page">
+  <div class="forms">
+    <section class="card">
+      <div class="card-head"><h2><span>1</span>Contact</h2><a class="link">Have an account? Log in</a></div>
+      <div class="field"><label for="email">Email</label><div class="input" id="email-box"><input id="email" value="alex.morgan@example.com"></div><div class="error" id="email-err">Enter a valid email address</div></div>
+      <label class="check"><input type="checkbox" checked>Email me with news and offers</label>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2><span>2</span>Shipping address</h2></div>
+      <div class="grid g2">
+        <div class="field"><label>First name</label><div class="input"><input value="Alex"></div></div>
+        <div class="field"><label>Last name</label><div class="input"><input value="Morgan"></div></div>
+      </div>
+      <div class="grid" style="margin-top:12px">
+        <div class="field"><label>Address</label><div class="input"><input value="2150 Harbor View Drive"></div></div>
+        <div class="field"><label>Apartment, suite, etc. (optional)</label><div class="input"><input value="Unit 4B"></div></div>
+      </div>
+      <div class="grid g3" style="margin-top:12px">
+        <div class="field"><label>City</label><div class="input"><input value="Portland"></div></div>
+        <div class="field"><label>State</label><div class="input"><select><option>Oregon</option><option>Washington</option><option>California</option></select><svg class="ico" style="width:16px;height:16px;color:#78716c"><use href="#i-down"/></svg></div></div>
+        <div class="field"><label>ZIP code</label><div class="input"><input value="97209"></div></div>
+      </div>
+      <div class="grid" style="margin-top:12px">
+        <div class="field"><label>Phone</label><div class="input"><input value="(503) 555-0142"><svg class="ico" style="width:16px;height:16px;color:#a39d90"><use href="#i-help"/></svg></div></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2><span>3</span>Shipping method</h2></div>
+      <div class="ship" id="ship">
+        <label class="opt sel" data-ship="standard"><input type="radio" name="ship" checked><div><div class="opt-title">Standard</div><div class="opt-sub">5–7 business days</div></div><div class="opt-price num" id="std-price"><span class="free">Free</span></div></label>
+        <label class="opt" data-ship="express"><input type="radio" name="ship"><div><div class="opt-title">Express</div><div class="opt-sub">2–3 business days</div></div><div class="opt-price num">$14.95</div></label>
+        <label class="opt" data-ship="overnight"><input type="radio" name="ship"><div><div class="opt-title">Overnight</div><div class="opt-sub">Next business day, order by 2 PM</div></div><div class="opt-price num">$29.00</div></label>
+      </div>
+      <div class="ship-note"><svg class="ico" style="width:15px;height:15px"><use href="#i-truck"/></svg>Standard shipping is free on orders of $150 or more.</div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2><span>4</span>Payment</h2><span style="font-size:12px;color:#78716c">All transactions are secure and encrypted.</span></div>
+      <div class="pay-tabs">
+        <button class="pay-tab active"><svg class="ico"><use href="#i-card"/></svg>Card</button>
+        <button class="pay-tab"><span style="color:#1d3f8f;font-style:italic;font-weight:800">Pay</span><span style="color:#1f8ad6;font-style:italic;font-weight:800;margin-left:-8px">Pal</span></button>
+        <button class="pay-tab"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M16.4 12.6c0-2.3 1.9-3.4 2-3.5-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.1-2.8.9-3.5.9s-1.8-.8-3-.8C7 7.4 5.5 8.3 4.7 9.8c-1.7 2.9-.4 7.2 1.2 9.6.8 1.2 1.7 2.4 2.9 2.4s1.6-.8 3-.8 1.8.8 3 .7c1.3 0 2.1-1.2 2.8-2.4.9-1.3 1.3-2.6 1.3-2.7-.1 0-2.5-1-2.5-4zM14.2 5.8c.6-.8 1.1-1.9 1-3-.9 0-2.1.6-2.7 1.4-.6.7-1.1 1.8-1 2.9 1 .1 2.1-.5 2.7-1.3z" fill="#1c1917"/></svg>Apple Pay</button>
+      </div>
+      <div class="field"><label>Card number</label><div class="input"><input id="card" value="4242 4242 4242 4242" inputmode="numeric"><span class="brand">VISA</span></div></div>
+      <div class="grid g2" style="margin-top:12px">
+        <div class="field"><label>Expiration (MM / YY)</label><div class="input"><input value="08 / 28"></div></div>
+        <div class="field"><label>Security code</label><div class="input"><input value="•••"><svg class="ico" style="width:16px;height:16px;color:#a39d90"><use href="#i-help"/></svg></div></div>
+      </div>
+      <div class="grid" style="margin-top:12px"><div class="field"><label>Name on card</label><div class="input"><input value="Alex Morgan"></div></div></div>
+      <label class="check"><input type="checkbox" checked>Billing address is the same as shipping</label>
+    </section>
+  </div>
+
+  <aside class="card summary" id="summary">
+    <div class="sum-head">
+      <h2>Order summary</h2><span class="muted" id="count">5 items</span>
+      <button class="sum-toggle" id="toggle"><span id="toggle-label">Show order summary</span><svg class="ico" style="width:16px;height:16px"><use href="#i-down"/></svg></button>
+      <span class="sum-total-m num" id="m-total">$302.02</span>
+    </div>
+    <div class="sum-body">
+      <div class="items" id="items"></div>
+      <div class="promo"><div class="input"><svg class="ico" style="width:16px;height:16px;color:#a39d90"><use href="#i-tag"/></svg><input id="code" placeholder="Discount code"></div><button class="btn-outline" id="apply">Apply</button></div>
+      <div class="promo-msg" id="promo-msg"></div>
+      <div class="rows num totals"></div>
+      <div class="d-only">
+        <button class="place" data-place><svg class="ico"><use href="#i-lock"/></svg>Place order</button>
+        <div class="notice" data-notice></div>
+        <div class="fine"><svg class="ico" style="width:14px;height:14px"><use href="#i-lock"/></svg>Payments are secured with 256-bit encryption</div>
+        <div class="perks">
+          <div class="perk"><svg class="ico"><use href="#i-return"/></svg>Free returns within 60 days</div>
+          <div class="perk"><svg class="ico"><use href="#i-leaf"/></svg>Carbon-neutral shipping on every order</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <section class="card help">
+    <div class="help-row"><div class="help-icon"><svg class="ico"><use href="#i-truck"/></svg></div><div><b>Estimated delivery</b>Standard · 5–7 business days to Portland, OR</div></div>
+    <div class="help-row"><div class="help-icon"><svg class="ico"><use href="#i-chat"/></svg></div><div><b>Need help?</b>Gear specialists, daily 7 AM – 7 PM PT</div><a class="link">Chat</a></div>
+  </section>
+
+  <section class="m-only m-cta">
+    <div class="rows num totals" style="margin-top:0"></div>
+    <button class="place" data-place><svg class="ico"><use href="#i-lock"/></svg>Place order</button>
+    <div class="notice" data-notice></div>
+  </section>
+</main>
+<footer><span>© Northwind Outfitters Co.</span><span>Refund policy</span><span>Shipping</span><span>Privacy</span><span>Terms of service</span></footer>
+
+<script>
+const ITEMS = [
+  { name: "Summit 35L Daypack", meta: "Color: Moss", price: 89.0, qty: 1, bg: "#e1e9dc",
+    art: '<svg viewBox="0 0 40 40" width="40" height="40"><rect x="9" y="8" width="22" height="28" rx="7" fill="#4d6b3c"/><rect x="13" y="20" width="14" height="11" rx="3" fill="#6b8a57"/><path d="M15 8a5 5 0 0 1 10 0" fill="none" stroke="#3b5330" stroke-width="2.4"/><rect x="17" y="24" width="6" height="2" rx="1" fill="#e1e9dc"/></svg>' },
+  { name: "Merino Crew Socks", meta: "Size: M", price: 18.5, qty: 2, bg: "#f4e6d7",
+    art: '<svg viewBox="0 0 40 40" width="40" height="40"><path d="M15 5h11v16l-2 9a6 6 0 0 1-7 4l-7-2a4 4 0 0 1-2-6l7-6z" fill="#b45f2b"/><rect x="15" y="5" width="11" height="5" rx="1" fill="#8c4520"/><path d="M15 14h11" stroke="#e7a878" stroke-width="2"/></svg>' },
+  { name: "Trail Bottle 750 ml", meta: "Color: Glacier", price: 24.0, qty: 1, bg: "#dcebf1",
+    art: '<svg viewBox="0 0 40 40" width="40" height="40"><rect x="16" y="4" width="8" height="5" rx="1.5" fill="#1f5f7d"/><path d="M14 11h12l1 4v18a3 3 0 0 1-3 3h-8a3 3 0 0 1-3-3V15z" fill="#2f7fa3"/><rect x="15" y="19" width="10" height="8" rx="1" fill="#9fd0e3"/></svg>' },
+  { name: "Packable Rain Shell", meta: "Size: L", price: 129.0, qty: 1, bg: "#fde8d4",
+    art: '<svg viewBox="0 0 40 40" width="40" height="40"><path d="M14 6l6 3 6-3 8 5-3 8-3-1v16H12V18l-3 1-3-8z" fill="#e8702a"/><path d="M20 9v25" stroke="#b9531a" stroke-width="1.6"/><path d="M16 6.5a4 4 0 0 0 8 0" fill="#b9531a"/></svg>' },
+];
+let ship = "standard", code = null;
+const money = (c) => "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function totals() {
+  const sub = ITEMS.reduce((s, it) => s + Math.round(it.price * 100) * it.qty, 0);
+  const disc = code ? Math.round(sub * 0.1) : 0;
+  const net = sub - disc;
+  const shipC = ship === "standard" ? (net >= 15000 ? 0 : 695) : ship === "express" ? 1495 : 2900;
+  const tax = Math.round(net * 0.0825);
+  return { sub, disc, shipC, tax, total: net + shipC + tax };
+}
+function render() {
+  document.getElementById("items").innerHTML = ITEMS.map((it, i) => `
+    <div class="item"><div class="thumb" style="background:${it.bg}">${it.art}</div>
+      <div><div class="item-name">${it.name}</div><div class="item-meta">${it.meta} · ${money(it.price * 100)}</div>
+        <div><span class="qty"><button data-dec="${i}" aria-label="Decrease">−</button><span class="num">${it.qty}</span><button data-inc="${i}" aria-label="Increase">+</button></span><button class="remove" data-rm="${i}">Remove</button></div></div>
+      <div class="item-total num">${money(Math.round(it.price * 100) * it.qty)}</div></div>`).join("");
+  const t = totals();
+  const n = ITEMS.reduce((s, it) => s + it.qty, 0);
+  document.getElementById("count").textContent = `${n} item${n === 1 ? "" : "s"}`;
+  const stdFree = t.sub - t.disc >= 15000;
+  document.getElementById("std-price").innerHTML = stdFree ? '<span class="free">Free</span>' : "$6.95";
+  const rows = `<div class="r"><span>Subtotal</span><span>${money(t.sub)}</span></div>
+    ${code ? `<div class="r discount"><span>Discount (TRAIL10)</span><span>−${money(t.disc)}</span></div>` : ""}
+    <div class="r"><span>Shipping</span><span>${t.shipC === 0 ? '<span class="free">Free</span>' : money(t.shipC)}</span></div>
+    <div class="r"><span>Estimated tax (8.25%)</span><span>${money(t.tax)}</span></div>
+    <div class="r total"><b>Total</b><span class="amt"><small>USD</small>${money(t.total)}</span></div>`;
+  document.querySelectorAll(".totals").forEach((el) => (el.innerHTML = rows));
+  document.getElementById("m-total").textContent = money(t.total);
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.dataset.inc) { ITEMS[+b.dataset.inc].qty = Math.min(9, ITEMS[+b.dataset.inc].qty + 1); render(); }
+  else if (b.dataset.dec) { const it = ITEMS[+b.dataset.dec]; if (it.qty > 1) it.qty--; render(); }
+  else if (b.dataset.rm) { ITEMS.splice(+b.dataset.rm, 1); render(); }
+  else if (b.id === "apply") {
+    const msg = document.getElementById("promo-msg");
+    if (document.getElementById("code").value.trim().toUpperCase() === "TRAIL10") { code = "TRAIL10"; msg.className = "promo-msg ok"; msg.textContent = "TRAIL10 applied: 10% off your items"; }
+    else { msg.className = "promo-msg bad"; msg.textContent = "Enter a valid discount code"; }
+    render();
+  } else if (b.id === "toggle") {
+    const s = document.getElementById("summary"); s.classList.toggle("open");
+    document.getElementById("toggle-label").textContent = s.classList.contains("open") ? "Hide order summary" : "Show order summary";
+  } else if (b.hasAttribute("data-place")) {
+    const email = document.getElementById("email").value.trim();
+    const ok = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email);
+    document.getElementById("email-err").classList.toggle("show", !ok);
+    document.getElementById("email-box").classList.toggle("err", !ok);
+    document.querySelectorAll("[data-notice]").forEach((n) => {
+      n.className = "notice show" + (ok ? " ok" : "");
+      n.textContent = ok ? `Order placed: ${money(totals().total)}` : "Please fix the highlighted fields";
+    });
+  }
+});
+document.getElementById("ship").addEventListener("change", () => {
+  document.querySelectorAll(".opt").forEach((o) => {
+    const on = o.querySelector("input").checked; o.classList.toggle("sel", on); if (on) ship = o.dataset.ship;
+  });
+  render();
+});
+document.getElementById("card").addEventListener("input", (e) => {
+  const d = e.target.value.replace(/\D/g, "").slice(0, 16);
+  e.target.value = d.replace(/(\d{4})(?=\d)/g, "$1 ");
+});
+render();
+</script>
+</body>
+</html>

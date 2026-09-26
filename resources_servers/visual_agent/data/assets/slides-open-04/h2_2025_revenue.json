@@ -1,0 +1,13 @@
+{
+  "brand": "Fernway Outdoor",
+  "period": "H2 2025 (Jul-Dec 2025)",
+  "unit": "USD",
+  "attributed_revenue_by_channel": {
+    "Paid Search": 1318640,
+    "Paid Social": 902380,
+    "Affiliate": 254310,
+    "Email": 231700,
+    "Display": 176470
+  },
+  "roas_target": 4.0
+}

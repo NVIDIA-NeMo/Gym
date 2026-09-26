@@ -1,0 +1,254 @@
+{
+ "library": "Northgate Public Library",
+ "year": 2025,
+ "unit": "loans",
+ "departments": [
+  {
+   "id": "audio-video",
+   "name": "Audio & Video",
+   "color": "#7b4fa0",
+   "collections": [
+    {
+     "name": "DVDs & Blu-ray",
+     "loans_2025": 26400,
+     "loans_2024": 34700
+    },
+    {
+     "name": "Audiobooks on CD",
+     "loans_2025": 11300,
+     "loans_2024": 15600
+    },
+    {
+     "name": "Music CDs",
+     "loans_2025": 6900,
+     "loans_2024": 8800
+    },
+    {
+     "name": "Vinyl",
+     "loans_2025": 3200,
+     "loans_2024": 2100
+    },
+    {
+     "name": "Video games",
+     "loans_2025": 14800,
+     "loans_2024": 12300
+    }
+   ]
+  },
+  {
+   "id": "fiction",
+   "name": "Fiction",
+   "color": "#2f6fae",
+   "collections": [
+    {
+     "name": "General fiction",
+     "loans_2025": 98400,
+     "loans_2024": 95100
+    },
+    {
+     "name": "Crime & thriller",
+     "loans_2025": 71250,
+     "loans_2024": 64800
+    },
+    {
+     "name": "Romance",
+     "loans_2025": 38900,
+     "loans_2024": 41200
+    },
+    {
+     "name": "Science fiction & fantasy",
+     "loans_2025": 44600,
+     "loans_2024": 39300
+    },
+    {
+     "name": "Historical fiction",
+     "loans_2025": 22150,
+     "loans_2024": 22900
+    },
+    {
+     "name": "Graphic novels",
+     "loans_2025": 17800,
+     "loans_2024": 13900
+    },
+    {
+     "name": "Short stories",
+     "loans_2025": 5420,
+     "loans_2024": 5600
+    },
+    {
+     "name": "Poetry",
+     "loans_2025": 4980,
+     "loans_2024": 4700
+    },
+    {
+     "name": "Plays",
+     "loans_2025": 2310,
+     "loans_2024": 2800
+    }
+   ]
+  },
+  {
+   "id": "local-history",
+   "name": "Local History",
+   "color": "#8a6d3b",
+   "collections": [
+    {
+     "name": "Local newspapers",
+     "loans_2025": 6200,
+     "loans_2024": 6500
+    },
+    {
+     "name": "Maps & plans",
+     "loans_2025": 2900,
+     "loans_2024": 2600
+    },
+    {
+     "name": "Family history",
+     "loans_2025": 7400,
+     "loans_2024": 6100
+    },
+    {
+     "name": "Photographs",
+     "loans_2025": 3100,
+     "loans_2024": 3300
+    },
+    {
+     "name": "Microfilm",
+     "loans_2025": 0,
+     "loans_2024": 1200
+    }
+   ]
+  },
+  {
+   "id": "children",
+   "name": "Children & Teens",
+   "color": "#d9692a",
+   "collections": [
+    {
+     "name": "Picture books",
+     "loans_2025": 84300,
+     "loans_2024": 80200
+    },
+    {
+     "name": "Early readers",
+     "loans_2025": 41700,
+     "loans_2024": 38000
+    },
+    {
+     "name": "Middle grade",
+     "loans_2025": 52900,
+     "loans_2024": 49500
+    },
+    {
+     "name": "Young adult",
+     "loans_2025": 36400,
+     "loans_2024": 40100
+    },
+    {
+     "name": "Children's non-fiction",
+     "loans_2025": 28600,
+     "loans_2024": 27900
+    },
+    {
+     "name": "Board books",
+     "loans_2025": 19750,
+     "loans_2024": 16200
+    },
+    {
+     "name": "Comics for kids",
+     "loans_2025": 7300,
+     "loans_2024": 5100
+    }
+   ]
+  },
+  {
+   "id": "digital",
+   "name": "Digital",
+   "color": "#c23b5f",
+   "collections": [
+    {
+     "name": "E-books",
+     "loans_2025": 118500,
+     "loans_2024": 101200
+    },
+    {
+     "name": "E-audiobooks",
+     "loans_2025": 76300,
+     "loans_2024": 59800
+    },
+    {
+     "name": "E-magazines",
+     "loans_2025": 21400,
+     "loans_2024": 22100
+    },
+    {
+     "name": "Streaming film",
+     "loans_2025": 9800,
+     "loans_2024": 7400
+    }
+   ]
+  },
+  {
+   "id": "non-fiction",
+   "name": "Non-fiction",
+   "color": "#3d8b5a",
+   "collections": [
+    {
+     "name": "Biography & memoir",
+     "loans_2025": 31200,
+     "loans_2024": 29800
+    },
+    {
+     "name": "History",
+     "loans_2025": 24600,
+     "loans_2024": 25900
+    },
+    {
+     "name": "Health & wellbeing",
+     "loans_2025": 21900,
+     "loans_2024": 18400
+    },
+    {
+     "name": "Cookery",
+     "loans_2025": 19300,
+     "loans_2024": 19900
+    },
+    {
+     "name": "Travel",
+     "loans_2025": 12800,
+     "loans_2024": 10100
+    },
+    {
+     "name": "Science & nature",
+     "loans_2025": 15400,
+     "loans_2024": 15000
+    },
+    {
+     "name": "Business & money",
+     "loans_2025": 9700,
+     "loans_2024": 10800
+    },
+    {
+     "name": "Arts & crafts",
+     "loans_2025": 11200,
+     "loans_2024": 10900
+    },
+    {
+     "name": "Computing",
+     "loans_2025": 3100,
+     "loans_2024": 3900
+    },
+    {
+     "name": "Languages",
+     "loans_2025": 2650,
+     "loans_2024": 2300
+    },
+    {
+     "name": "Religion & philosophy",
+     "loans_2025": 2900,
+     "loans_2024": 3200
+    }
+   ]
+  }
+ ]
+}

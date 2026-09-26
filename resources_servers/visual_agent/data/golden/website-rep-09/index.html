@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Halden H7 Wireless · Halden Audio</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:#faf8f5}
+body{font-family:'Lato',sans-serif;color:#1d1f22;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+.serif{font-family:'Liberation Serif',serif}
+.wrap{width:1184px;margin:0 auto}
+.ic{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.m-only{display:none}
+
+/* announcement + header */
+.announce{background:#1d1f22;color:#efe9e1;font-size:13px;letter-spacing:0.01em}
+.announce .wrap{height:38px;display:flex;align-items:center;justify-content:center;gap:10px}
+.announce b{color:#e7c9a9;font-weight:700}
+.announce .sep{color:#6e6a64}
+.hdr{background:#ffffff;border-bottom:1px solid #e8e3dc}
+.hdr .wrap{height:74px;display:flex;align-items:center}
+.logo{display:flex;align-items:center;gap:10px}
+.logo-mark{width:32px;height:32px}
+.logo-word{font-family:'Liberation Serif',serif;font-size:26px;font-weight:700;letter-spacing:-0.01em}
+.logo-sub{font-size:10px;font-weight:700;letter-spacing:0.24em;color:#8a847c;margin-top:5px}
+.nav{display:flex;gap:30px;margin-left:52px;font-size:15px;font-weight:700;color:#5f5a54}
+.nav a{height:74px;display:flex;align-items:center;position:relative}
+.nav a.on{color:#1d1f22}
+.nav a.on:after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:3px;background:#b8703f;border-radius:3px 3px 0 0}
+.search{margin-left:auto;width:268px;height:42px;border-radius:999px;background:#f3f0eb;display:flex;align-items:center;gap:10px;padding:0 16px;color:#8a847c;font-size:14px}
+.search .ic{width:18px;height:18px}
+.hicons{display:flex;align-items:center;gap:18px;margin-left:26px}
+.cart{position:relative;display:flex}
+.badge{position:absolute;top:-7px;right:-9px;min-width:18px;height:18px;border-radius:9px;background:#b8703f;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0 5px}
+.crumbs{font-size:13px;color:#8a847c;padding:18px 0 20px;display:flex;gap:8px}
+.crumbs b{color:#1d1f22;font-weight:700}
+
+/* product hero */
+.product{display:grid;grid-template-columns:664px 1fr;gap:56px;padding-bottom:52px}
+.gallery{display:grid;grid-template-columns:88px 560px;gap:16px;align-content:start}
+.thumbs{display:flex;flex-direction:column;gap:12px}
+.thumb{width:88px;height:88px;border-radius:14px;background:#efebe5;border:1px solid #e3ddd4;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.thumb svg{width:78px;height:78px}
+.thumb.on{border:2px solid #1d1f22;background:#ece6de}
+.stage{position:relative;height:564px;border-radius:22px;background:radial-gradient(circle at 50% 42%,#f5f1eb 0%,#ebe4da 70%,#e5ddd1 100%);overflow:hidden}
+.stage .halo{position:absolute;left:80px;top:52px;width:400px;height:400px;border-radius:50%;background:#f1ebe2;opacity:0.9}
+.stage svg.hp{position:absolute;left:30px;top:28px;width:500px;height:500px}
+.pill{display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 13px;border-radius:999px;font-size:12px;font-weight:700}
+.stage .new{position:absolute;left:20px;top:20px;background:#ffffff;color:#1d1f22;box-shadow:0 1px 2px rgba(0,0,0,0.06)}
+.stage .new i{width:9px;height:9px;border-radius:50%;background:#2f4f8f}
+.stage .zoom{position:absolute;right:20px;top:20px;width:40px;height:40px;border-radius:50%;background:#ffffff;display:flex;align-items:center;justify-content:center}
+.stage .zoom .ic{width:19px;height:19px}
+.stage .v360{position:absolute;left:20px;bottom:20px;background:#1d1f22;color:#fff;height:36px;padding:0 16px;font-size:13px}
+.stage .v360 .ic{width:16px;height:16px}
+.stage .count{position:absolute;right:20px;bottom:20px;background:rgba(255,255,255,0.85);color:#5f5a54;height:30px}
+.dots{justify-content:center;gap:8px;padding-top:14px}
+.dots i{width:8px;height:8px;border-radius:50%;background:#d3ccc2}
+.dots i.on{width:22px;border-radius:4px;background:#1d1f22}
+
+.buy{padding-top:4px}
+.eyebrow{font-size:12px;font-weight:700;letter-spacing:0.16em;color:#b8703f}
+.buy h1{font-family:'Liberation Serif',serif;font-size:44px;line-height:1.08;font-weight:700;letter-spacing:-0.01em;margin-top:10px}
+.buy .sub{font-size:17px;color:#5f5a54;margin-top:8px}
+.rating{display:flex;align-items:center;gap:10px;margin-top:12px;font-size:14px}
+.stars{position:relative;display:inline-block;width:88px;height:16px}
+.stars svg{position:absolute;left:0;top:0;width:88px;height:16px}
+.s-base{fill:#ddd6cc}
+.s-fill{position:absolute;left:0;top:0;height:16px;overflow:hidden}
+.s-fill svg{fill:#e0a526}
+.rating b{font-weight:700}
+.rating a{text-decoration:underline;text-underline-offset:3px;color:#1d1f22}
+.rating .mut{color:#8a847c}
+.hr{height:1px;background:#e8e3dc;margin:16px 0}
+.price{display:flex;align-items:center;gap:12px}
+.price .now{font-size:34px;font-weight:900;letter-spacing:-0.01em}
+.price s{font-size:18px;color:#8a847c}
+.save{background:#f6e3d3;color:#9a4f22}
+.pay{font-size:14px;color:#5f5a54;margin-top:6px}
+.pay a{color:#1d1f22;font-weight:700;text-decoration:underline;text-underline-offset:3px}
+.lbl{display:flex;justify-content:space-between;font-size:14px;margin-top:16px}
+.lbl span{color:#5f5a54}
+.lbl .mut{color:#8a847c}
+.swatches{display:flex;gap:12px;margin-top:10px}
+.sw{width:40px;height:40px;border-radius:50%;border:2px solid transparent;padding:3px;display:flex}
+.sw i{flex:1;border-radius:50%;box-shadow:inset 0 0 0 1px rgba(0,0,0,0.1)}
+.sw.on{border-color:#1d1f22}
+.ful{margin-top:16px;border:1px solid #e3ddd4;border-radius:14px;background:#ffffff;overflow:hidden}
+.opt{display:flex;align-items:center;gap:14px;padding:11px 16px}
+.opt+.opt{border-top:1px solid #eee9e2}
+.opt.on{box-shadow:inset 0 0 0 2px #1d1f22;border-radius:14px}
+.radio{width:18px;height:18px;border-radius:50%;border:2px solid #b9b2a8;flex:none}
+.opt.on .radio{border:5px solid #1d1f22}
+.opt .ic{color:#5f5a54}
+.opt div{flex:1;font-size:13px;color:#5f5a54;line-height:1.4}
+.opt div b{display:block;font-size:15px;color:#1d1f22;font-weight:700}
+.opt em{font-style:normal;font-size:14px;font-weight:700;color:#2f7d4f}
+.stock{display:flex;align-items:center;gap:8px;font-size:14px;color:#2f7d4f;font-weight:700;margin-top:14px}
+.stock i{width:8px;height:8px;border-radius:50%;background:#2f7d4f;box-shadow:0 0 0 4px #dcefe3}
+.cta{display:flex;gap:12px;margin-top:14px}
+.add{flex:1;height:56px;border-radius:999px;background:#1d1f22;color:#ffffff;display:flex;align-items:center;justify-content:center;gap:10px;font-size:16px;font-weight:700}
+.add .ic{width:20px;height:20px}
+.wish{width:56px;height:56px;border-radius:50%;border:1.5px solid #cfc8be;display:flex;align-items:center;justify-content:center;background:#ffffff}
+.trust{display:grid;grid-template-columns:auto auto auto;justify-content:space-between;gap:10px;margin-top:16px}
+.trust div{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:#3d3a36}
+.trust .ic{width:20px;height:20px;color:#b8703f}
+
+/* sections */
+.sec{padding-bottom:48px}
+.sh{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:20px}
+.sh .acts{display:flex;align-items:center;gap:20px}
+.sh h2{font-family:'Liberation Serif',serif;font-size:34px;line-height:1.15;font-weight:700;letter-spacing:-0.01em}
+.sh p{font-size:15px;color:#5f5a54;margin-top:4px;max-width:560px}
+.sh p.side{max-width:470px;text-align:right;margin-top:0}
+.link{font-size:14px;font-weight:700;display:flex;align-items:center;gap:4px;white-space:nowrap}
+.link .ic{width:16px;height:16px}
+.btn-line{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:44px;padding:0 20px;border-radius:999px;border:1.5px solid #1d1f22;font-size:14px;font-weight:700;background:#ffffff;white-space:nowrap}
+
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.tile{background:#ffffff;border:1px solid #e8e3dc;border-radius:18px;padding:20px;display:grid;grid-template-columns:44px 1fr;gap:16px;align-items:start}
+.tile .ib{width:44px;height:44px;border-radius:12px;background:#f6e3d3;color:#9a4f22;display:flex;align-items:center;justify-content:center}
+.tile b{display:block;font-family:'Liberation Serif',serif;font-size:28px;line-height:1.1}
+.tile strong{display:block;font-size:15px;font-weight:700;margin-top:4px}
+.tile span{display:block;font-size:13px;color:#8a847c;margin-top:2px}
+
+.two{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+.card{background:#ffffff;border:1px solid #e8e3dc;border-radius:18px;padding:24px 28px}
+.card h3{font-family:'Liberation Serif',serif;font-size:24px;font-weight:700;line-height:1.2}
+.card .cap{font-size:13px;color:#8a847c;margin-top:4px}
+.chead{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+.chead .link{margin-top:6px}
+.specs{width:100%;border-collapse:collapse;margin-top:14px;font-size:14px}
+.specs th,.specs td{text-align:left;padding:8px 0;line-height:1.4;border-bottom:1px solid #f0ebe4;vertical-align:top}
+.specs tr:last-child th,.specs tr:last-child td{border-bottom:0}
+.specs th{width:44%;font-weight:400;color:#8a847c}
+.specs td{font-weight:700}
+.cmp{width:100%;border-collapse:collapse;margin-top:14px;font-size:14px}
+.cmp th,.cmp td{padding:8px 8px;line-height:1.4;text-align:center;border-bottom:1px solid #f0ebe4}
+.cmp th:first-child,.cmp td:first-child{text-align:left;padding-left:0;color:#8a847c;font-weight:400}
+.cmp thead th{border-bottom:1px solid #e3ddd4;vertical-align:bottom;padding-top:0}
+.cmp thead b{display:block;font-size:16px;color:#1d1f22;font-weight:700}
+.cmp thead span{display:block;font-size:13px;color:#8a847c;font-weight:400}
+.cmp tbody td{font-weight:700}
+.cmp .me{background:#f8efe7}
+.cmp thead .me{border-radius:12px 12px 0 0;padding-top:12px}
+.cmp tbody tr:last-child td{border-bottom:0}
+.cmp tbody tr:last-child .me{border-radius:0 0 12px 12px}
+.cmp thead .tag{display:inline-block;font-size:10px;font-weight:700;letter-spacing:0.12em;color:#ffffff;background:#b8703f;border-radius:999px;padding:3px 8px;margin-bottom:6px}
+.ck{width:20px;height:20px;fill:none;stroke:#2f7d4f;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round;vertical-align:middle}
+.dash{color:#c3bcb2;font-weight:400}
+.card .foot{margin-top:14px;padding-top:14px;border-top:1px solid #f0ebe4}
+
+/* reviews */
+.rv{display:grid;grid-template-columns:352px 1fr;gap:40px;align-items:start}
+.sum{background:#ffffff;border:1px solid #e8e3dc;border-radius:18px;padding:24px 28px}
+.big{display:flex;align-items:center;gap:16px}
+.big b{font-family:'Liberation Serif',serif;font-size:64px;line-height:1;font-weight:700}
+.big .stars{display:block;width:110px;height:20px}
+.big .stars svg{width:110px;height:20px}
+.big .s-fill{height:20px}
+.big span.n{display:block;font-size:13px;color:#8a847c;margin-top:6px}
+.hist{margin-top:18px;display:flex;flex-direction:column;gap:8px}
+.hrow{display:grid;grid-template-columns:30px 1fr 40px;gap:10px;align-items:center;font-size:13px}
+.hrow span:first-child{font-weight:700}
+.hrow span:last-child{text-align:right;color:#8a847c}
+.bar{height:8px;border-radius:4px;background:#efebe5;overflow:hidden}
+.bar i{display:block;height:100%;background:#e0a526;border-radius:4px}
+.sum h4{font-size:12px;font-weight:700;letter-spacing:0.14em;color:#8a847c;margin-top:20px;padding-top:18px;border-top:1px solid #f0ebe4}
+.meters{margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:14px 20px}
+.meter div{display:flex;justify-content:space-between;font-size:13px;font-weight:700;margin-bottom:6px}
+.meter div span{color:#5f5a54;font-weight:400}
+.seg{display:grid;grid-template-columns:repeat(5,1fr);gap:3px}
+.seg i{height:5px;border-radius:3px;background:#e9e4dc;overflow:hidden;display:block}
+.seg i b{display:block;height:100%;background:#1d1f22}
+.rec{margin-top:18px;display:flex;align-items:center;gap:10px;font-size:14px;background:#f3f0eb;border-radius:12px;padding:12px 14px}
+.rec .ic{color:#2f7d4f;width:20px;height:20px}
+.rec b{font-weight:900}
+.chips{display:flex;align-items:center;gap:8px;margin-bottom:16px}
+.chip{height:36px;padding:0 15px;border-radius:999px;border:1px solid #ddd6cc;background:#ffffff;font-size:13px;font-weight:700;display:flex;align-items:center}
+.chip.on{background:#1d1f22;border-color:#1d1f22;color:#ffffff}
+.sort{margin-left:auto;font-size:13px;color:#5f5a54;display:flex;align-items:center;gap:4px}
+.sort b{color:#1d1f22}
+.sort .ic{width:16px;height:16px}
+.rcard{background:#ffffff;border:1px solid #e8e3dc;border-radius:18px;padding:18px 24px}
+.rcard+.rcard{margin-top:12px}
+.rtop{display:flex;align-items:center;gap:12px}
+.rtop b{font-size:16px;font-weight:700}
+.rtop .date{margin-left:auto;font-size:13px;color:#8a847c}
+.rcard p{font-size:14px;line-height:1.6;color:#3d3a36;margin-top:8px}
+.rmeta{display:flex;align-items:center;gap:10px;margin-top:12px;font-size:13px;color:#8a847c}
+.av{width:30px;height:30px;border-radius:50%;color:#ffffff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.rmeta .who{color:#1d1f22;font-weight:700}
+.ver{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 8px;border-radius:999px;background:#dcefe3;color:#2f7d4f;font-size:11px;font-weight:700}
+.ver svg{width:12px;height:12px;fill:none;stroke:#2f7d4f;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.help{margin-left:auto;display:flex;align-items:center;gap:6px;color:#5f5a54;font-weight:700}
+.help .ic{width:16px;height:16px}
+.more{margin-top:18px;display:flex}
+
+/* accessories */
+.acc{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.acard{background:#ffffff;border:1px solid #e8e3dc;border-radius:18px;padding:12px 12px 16px}
+.ill{height:124px;border-radius:12px;background:#f3eee7;display:flex;align-items:center;justify-content:center}
+.ill svg{width:156px;height:109px}
+.acard h5{font-size:15px;font-weight:700;margin-top:12px;padding:0 4px}
+.acard p{font-size:13px;color:#8a847c;padding:0 4px;margin-top:2px}
+.arow{display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding:0 4px}
+.arow b{font-size:16px;font-weight:900}
+.addsm{height:34px;padding:0 14px 0 10px;border-radius:999px;border:1.5px solid #1d1f22;display:flex;align-items:center;gap:4px;font-size:13px;font-weight:700}
+.addsm .ic{width:16px;height:16px}
+
+/* faq */
+.faq{display:grid;grid-template-columns:352px 1fr;gap:40px;align-items:start}
+.help-card{background:#1d1f22;color:#efe9e1;border-radius:18px;padding:28px}
+.help-card h2{font-family:'Liberation Serif',serif;font-size:30px;line-height:1.15;color:#ffffff}
+.help-card p{font-size:14px;line-height:1.6;color:#c9c3ba;margin-top:10px}
+.help-card .btn{margin-top:20px;height:44px;border-radius:999px;background:#e7c9a9;color:#1d1f22;display:inline-flex;align-items:center;gap:8px;padding:0 18px;font-size:14px;font-weight:700}
+.help-card .btn .ic{width:18px;height:18px}
+.help-card small{display:block;font-size:12px;color:#9a948b;margin-top:12px}
+.qa{border-top:1px solid #e3ddd4}
+.q{display:flex;align-items:center;gap:16px;padding:13px 4px;border-bottom:1px solid #e3ddd4;font-size:17px;font-weight:700}
+.q>span:first-child{flex:1}
+.q .pm{flex:none;width:32px;height:32px;border-radius:50%;border:1.5px solid #cfc8be;display:flex;align-items:center;justify-content:center;background:#ffffff}
+.q .pm .ic{width:16px;height:16px}
+.q.open{border-bottom:0;padding-bottom:6px}
+.q.open .pm{background:#1d1f22;border-color:#1d1f22;color:#ffffff}
+.ans{font-size:15px;line-height:1.6;color:#5f5a54;padding:0 60px 14px 4px;border-bottom:1px solid #e3ddd4}
+
+/* footer */
+.ftr{background:#1d1f22;color:#c9c3ba}
+.ftr .wrap{padding:40px 0 0}
+.fgrid{display:grid;grid-template-columns:1.6fr 1fr 1fr 1fr;gap:40px}
+.ftr .logo-word{color:#ffffff}
+.ftr .logo-sub{color:#9a948b}
+.ftr .logo-mark circle{fill:#34373c}
+.fblurb{font-size:14px;line-height:1.6;margin-top:14px;max-width:320px}
+.news{display:flex;margin-top:18px;max-width:360px;height:44px;border-radius:999px;background:#2a2d31;padding:4px}
+.news span{flex:1;display:flex;align-items:center;padding-left:14px;font-size:14px;color:#8f897f}
+.news b{border-radius:999px;background:#e7c9a9;color:#1d1f22;font-size:13px;font-weight:700;display:flex;align-items:center;padding:0 16px}
+.fcol h6{font-size:12px;font-weight:700;letter-spacing:0.14em;color:#ffffff;margin-bottom:12px}
+.fcol a{display:block;font-size:14px;margin-bottom:7px}
+.fbot{margin-top:24px;border-top:1px solid #34373c;height:52px;display:flex;align-items:center;justify-content:space-between;font-size:13px;color:#9a948b}
+.fbot div{display:flex;gap:22px}
+
+@media (max-width:640px){
+ body{font-size:14px}
+ .wrap{width:auto;margin:0 16px}
+ .m-only{display:flex}
+ .d-only{display:none !important}
+ .announce{font-size:12px}
+ .announce .wrap{height:34px}
+ .hdr .wrap{height:60px}
+ .logo-word{font-size:23px}
+ .logo-mark{width:28px;height:28px}
+ .nav,.search,.acct{display:none}
+ .hicons{margin-left:auto;gap:18px}
+ .crumbs{font-size:12px;padding:12px 0 14px}
+ .product{grid-template-columns:1fr;gap:26px;padding-bottom:44px}
+ .gallery{grid-template-columns:1fr;gap:0}
+ .thumbs{display:none}
+ .stage{height:380px;border-radius:18px}
+ .meters{gap:12px 16px}
+ .stage .halo{left:59px;top:50px;width:240px;height:240px}
+ .stage svg.hp{left:9px;top:20px;width:340px;height:340px}
+ .stage .new{left:12px;top:12px}
+ .stage .zoom{right:12px;top:12px;width:36px;height:36px}
+ .stage .v360{left:12px;bottom:12px;height:32px;padding:0 12px;font-size:12px}
+ .stage .count{right:12px;bottom:12px}
+ .buy h1{font-size:34px}
+ .buy .sub{font-size:15px}
+ .rating{flex-wrap:wrap;row-gap:4px}
+ .hr{margin:18px 0}
+ .price .now{font-size:30px}
+ .opt{padding:12px 14px}
+ .trust{grid-template-columns:1fr;gap:10px}
+ .sec{padding-bottom:44px}
+ .sh{flex-direction:column;align-items:flex-start;gap:10px;margin-bottom:18px}
+ .sh p.side{text-align:left}
+ .sh .acts{width:100%;justify-content:space-between}
+ .chead .link{display:none}
+ .sh h2{font-size:28px}
+ .tiles{grid-template-columns:1fr 1fr;gap:12px}
+ .tile{padding:16px 16px 18px;display:block}
+ .tile b{font-size:26px;margin-top:12px}
+ .tile strong{font-size:14px}
+ .two{grid-template-columns:1fr;gap:16px}
+ .card{padding:20px 18px}
+ .card h3{font-size:22px}
+ .specs{font-size:13px}
+ .specs th{width:38%}
+ .cmp .h5{display:none}
+ .rv{grid-template-columns:1fr;gap:18px}
+ .sum{padding:22px 18px}
+ .chips{flex-wrap:wrap}
+ .sort{display:none}
+ .rcard{padding:18px}
+ .rtop{flex-wrap:wrap;row-gap:4px}
+ .rtop .date{margin-left:auto}
+ .rtop b{order:3;width:100%}
+ .rmeta{flex-wrap:wrap}
+ .rmeta .col{display:none}
+ .acc{grid-template-columns:1fr 1fr;gap:12px}
+ .acard{padding:10px 10px 14px}
+ .ill{height:110px}
+ .ill svg{width:130px;height:92px}
+ .acard h5{font-size:14px;margin-top:10px;padding:0 2px}
+ .acard p{padding:0 2px}
+ .arow{padding:0 2px}
+ .addsm{padding:0 10px 0 8px}
+ .faq{grid-template-columns:1fr;gap:20px}
+ .help-card{padding:22px}
+ .q{font-size:15px;padding:16px 2px}
+ .ans{padding:0 44px 16px 2px;font-size:14px}
+ .fgrid{grid-template-columns:1fr 1fr 1fr;gap:28px 16px}
+ .fcol a{font-size:13px}
+ .fgrid .fbrand{grid-column:1 / -1}
+ .ftr .wrap{padding-top:36px}
+ .fbot{height:auto;padding:18px 0 22px;flex-direction:column;align-items:flex-start;gap:10px}
+}
+</style>
+</head>
+<body>
+<div class="announce"><div class="wrap"><span><b>Free 2-day shipping</b> on orders over $99</span><span class="sep d-only">·</span><span class="d-only">45-day returns</span><span class="sep d-only">·</span><span class="d-only">Trade in your old headphones for up to $80 credit</span></div></div>
+<header class="hdr"><div class="wrap">
+ <a class="logo"><svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="16" fill="#1d1f22"/><path d="M9 19v-3a7 7 0 0 1 14 0v3" fill="none" stroke="#e7c9a9" stroke-width="2.4" stroke-linecap="round"/><rect x="7" y="17" width="5" height="8" rx="2.2" fill="#b8703f"/><rect x="20" y="17" width="5" height="8" rx="2.2" fill="#b8703f"/></svg><span class="logo-word">Halden</span><span class="logo-sub">AUDIO</span></a>
+ <nav class="nav"><a class="on">Headphones</a><a>Earbuds</a><a>Speakers</a><a>Accessories</a><a>Journal</a></nav>
+ <div class="search"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>Search products</div>
+ <div class="hicons"><a class="acct"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4.2 4.2-6.5 8-6.5s7 2.3 8 6.5"/></svg></a><a class="m-only"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg></a><a class="cart"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14l-1 13H6L5 8z"/><path d="M9 10V7a3 3 0 0 1 6 0v3"/></svg><span class="badge">2</span></a><a class="m-only"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></a></div>
+</div></header>
+<main>
+<div class="wrap crumbs"><span>Home</span><span>/</span><span>Headphones</span><span>/</span><span>Over-ear</span><span>/</span><b>Halden H7 Wireless</b></div>
+
+<section class="wrap product">
+ <div class="gallery">
+  <div class="thumbs"><div class="thumb on"><svg class="" viewBox="0 0 520 520" aria-hidden="true">
+ <defs>
+  <radialGradient id="t1g" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#000" stop-opacity="0.22"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+  <linearGradient id="t1m" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#9ea2a8"/><stop offset="0.5" stop-color="#e4e6e9"/><stop offset="1" stop-color="#a7abb1"/></linearGradient>
+  <linearGradient id="t1s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.10"/><stop offset="0.55" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.22"/></linearGradient>
+ </defs>
+ <ellipse cx="260" cy="458" rx="190" ry="22" fill="url(#t1g)"/>
+ <path d="M166 196 C160 66 360 66 354 196" fill="none" stroke="#232529" stroke-width="20" stroke-linecap="round"/>
+ <path d="M166 190 C160 72 360 72 354 190" fill="none" stroke="#ffffff" stroke-opacity="0.25" stroke-width="1.5" stroke-dasharray="4 5"/>
+ <path d="M142 196 C136 40 384 40 378 196" fill="none" stroke="#2b2e33" stroke-width="26" stroke-linecap="round"/>
+ <path d="M186 104 C220 70 300 70 334 104" fill="none" stroke="#ffffff" stroke-opacity="0.2" stroke-width="4" stroke-linecap="round"/>
+ 
+  <path d="M98 318 C98 250 116 222 142 222 C168 222 186 250 186 318" fill="none" stroke="url(#t1m)" stroke-width="8"/>
+  <rect x="136" y="170" width="12" height="60" rx="3" fill="url(#t1m)"/>
+  <rect x="136" y="186" width="12" height="2" fill="#8e9298"/><rect x="136" y="196" width="12" height="2" fill="#8e9298"/><rect x="136" y="206" width="12" height="2" fill="#8e9298"/>
+  <ellipse cx="182" cy="338" rx="32" ry="90" fill="#232529"/>
+  <ellipse cx="192" cy="338" rx="10" ry="72" fill="#000" opacity="0.16"/>
+  <ellipse cx="184" cy="336" rx="8" ry="92" fill="#b8703f"/>
+  <ellipse cx="142" cy="336" rx="46" ry="96" fill="#3a3d43"/>
+  <ellipse cx="137" cy="336" rx="32" ry="80" fill="#474b52"/>
+  <ellipse cx="142" cy="336" rx="46" ry="96" fill="url(#t1s)"/>
+  <ellipse cx="120" cy="290" rx="6" ry="34" fill="#ffffff" opacity="0.2"/>
+  <path d="M334 318 C334 250 352 222 378 222 C404 222 422 250 422 318" fill="none" stroke="url(#t1m)" stroke-width="8"/>
+  <rect x="372" y="170" width="12" height="60" rx="3" fill="url(#t1m)"/>
+  <rect x="372" y="186" width="12" height="2" fill="#8e9298"/><rect x="372" y="196" width="12" height="2" fill="#8e9298"/><rect x="372" y="206" width="12" height="2" fill="#8e9298"/>
+  <ellipse cx="338" cy="338" rx="32" ry="90" fill="#232529"/>
+  <ellipse cx="328" cy="338" rx="10" ry="72" fill="#000" opacity="0.16"/>
+  <ellipse cx="336" cy="336" rx="8" ry="92" fill="#b8703f"/>
+  <ellipse cx="378" cy="336" rx="46" ry="96" fill="#3a3d43"/>
+  <ellipse cx="383" cy="336" rx="32" ry="80" fill="#474b52"/>
+  <ellipse cx="378" cy="336" rx="46" ry="96" fill="url(#t1s)"/>
+  <ellipse cx="400" cy="290" rx="6" ry="34" fill="#ffffff" opacity="0.2"/>
+ <rect x="128" y="176" width="28" height="26" rx="8" fill="#2b2e33"/>
+ <rect x="364" y="176" width="28" height="26" rx="8" fill="#2b2e33"/>
+</svg></div><div class="thumb"><svg class="" viewBox="0 0 520 520" aria-hidden="true">
+ <defs>
+  <linearGradient id="t2m" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#9ea2a8"/><stop offset="0.5" stop-color="#e4e6e9"/><stop offset="1" stop-color="#a7abb1"/></linearGradient>
+  <radialGradient id="t2r" cx="0.35" cy="0.3" r="0.8"><stop offset="0" stop-color="#fff" stop-opacity="0.18"/><stop offset="1" stop-color="#000" stop-opacity="0.2"/></radialGradient>
+ </defs>
+ <path d="M150 40 C200 20 330 20 380 40" fill="none" stroke="#2b2e33" stroke-width="34" stroke-linecap="round"/>
+ <rect x="248" y="40" width="24" height="120" rx="5" fill="url(#t2m)"/>
+ <path d="M140 300 C140 180 200 150 260 150 C320 150 380 180 380 300" fill="none" stroke="url(#t2m)" stroke-width="14"/>
+ <circle cx="260" cy="310" r="150" fill="#232529"/>
+ <circle cx="260" cy="300" r="140" fill="#b8703f"/>
+ <circle cx="260" cy="300" r="132" fill="#3a3d43"/>
+ <circle cx="260" cy="300" r="104" fill="#474b52"/>
+ <circle cx="260" cy="300" r="132" fill="url(#t2r)"/>
+ <circle cx="260" cy="300" r="34" fill="none" stroke="#b8703f" stroke-width="4"/>
+ <path d="M248 284 V316 M272 284 V316 M248 300 H272" stroke="#b8703f" stroke-width="5" stroke-linecap="round"/>
+</svg></div><div class="thumb"><svg class="" viewBox="0 0 520 520" aria-hidden="true">
+ <defs>
+  <radialGradient id="t3g" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#000" stop-opacity="0.22"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+  <linearGradient id="t3m" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#9ea2a8"/><stop offset="0.5" stop-color="#e4e6e9"/><stop offset="1" stop-color="#a7abb1"/></linearGradient>
+  <linearGradient id="t3s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.10"/><stop offset="0.55" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.22"/></linearGradient>
+ </defs>
+ <ellipse cx="260" cy="458" rx="190" ry="22" fill="url(#t3g)"/>
+ <path d="M166 196 C160 66 360 66 354 196" fill="none" stroke="#b29f81" stroke-width="20" stroke-linecap="round"/>
+ <path d="M166 190 C160 72 360 72 354 190" fill="none" stroke="#ffffff" stroke-opacity="0.25" stroke-width="1.5" stroke-dasharray="4 5"/>
+ <path d="M142 196 C136 40 384 40 378 196" fill="none" stroke="#c4b08f" stroke-width="26" stroke-linecap="round"/>
+ <path d="M186 104 C220 70 300 70 334 104" fill="none" stroke="#ffffff" stroke-opacity="0.2" stroke-width="4" stroke-linecap="round"/>
+ 
+  <path d="M98 318 C98 250 116 222 142 222 C168 222 186 250 186 318" fill="none" stroke="url(#t3m)" stroke-width="8"/>
+  <rect x="136" y="170" width="12" height="60" rx="3" fill="url(#t3m)"/>
+  <rect x="136" y="186" width="12" height="2" fill="#8e9298"/><rect x="136" y="196" width="12" height="2" fill="#8e9298"/><rect x="136" y="206" width="12" height="2" fill="#8e9298"/>
+  <ellipse cx="182" cy="338" rx="32" ry="90" fill="#b29f81"/>
+  <ellipse cx="192" cy="338" rx="10" ry="72" fill="#000" opacity="0.16"/>
+  <ellipse cx="184" cy="336" rx="8" ry="92" fill="#a4623a"/>
+  <ellipse cx="142" cy="336" rx="46" ry="96" fill="#d8c6a9"/>
+  <ellipse cx="137" cy="336" rx="32" ry="80" fill="#e4d5bd"/>
+  <ellipse cx="142" cy="336" rx="46" ry="96" fill="url(#t3s)"/>
+  <ellipse cx="120" cy="290" rx="6" ry="34" fill="#ffffff" opacity="0.2"/>
+  <path d="M334 318 C334 250 352 222 378 222 C404 222 422 250 422 318" fill="none" stroke="url(#t3m)" stroke-width="8"/>
+  <rect x="372" y="170" width="12" height="60" rx="3" fill="url(#t3m)"/>
+  <rect x="372" y="186" width="12" height="2" fill="#8e9298"/><rect x="372" y="196" width="12" height="2" fill="#8e9298"/><rect x="372" y="206" width="12" height="2" fill="#8e9298"/>
+  <ellipse cx="338" cy="338" rx="32" ry="90" fill="#b29f81"/>
+  <ellipse cx="328" cy="338" rx="10" ry="72" fill="#000" opacity="0.16"/>
+  <ellipse cx="336" cy="336" rx="8" ry="92" fill="#a4623a"/>
+  <ellipse cx="378" cy="336" rx="46" ry="96" fill="#d8c6a9"/>
+  <ellipse cx="383" cy="336" rx="32" ry="80" fill="#e4d5bd"/>
+  <ellipse cx="378" cy="336" rx="46" ry="96" fill="url(#t3s)"/>
+  <ellipse cx="400" cy="290" rx="6" ry="34" fill="#ffffff" opacity="0.2"/>
+ <rect x="128" y="176" width="28" height="26" rx="8" fill="#c4b08f"/>
+ <rect x="364" y="176" width="28" height="26" rx="8" fill="#c4b08f"/>
+</svg></div><div class="thumb"><svg class="" viewBox="0 0 520 520" aria-hidden="true">
+ <defs>
+  <radialGradient id="t4g" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#000" stop-opacity="0.22"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+  <linearGradient id="t4m" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#9ea2a8"/><stop offset="0.5" stop-color="#e4e6e9"/><stop offset="1" stop-color="#a7abb1"/></linearGradient>
+  <linearGradient id="t4s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.10"/><stop offset="0.55" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.22"/></linearGradient>
+ </defs>
+ <ellipse cx="260" cy="458" rx="190" ry="22" fill="url(#t4g)"/>
+ <path d="M166 196 C160 66 360 66 354 196" fill="none" stroke="#1f345c" stroke-width="20" stroke-linecap="round"/>
+ <path d="M166 190 C160 72 360 72 354 190" fill="none" stroke="#ffffff" stroke-opacity="0.25" stroke-width="1.5" stroke-dasharray="4 5"/>
+ <path d="M142 196 C136 40 384 40 378 196" fill="none" stroke="#243d6f" stroke-width="26" stroke-linecap="round"/>
+ <path d="M186 104 C220 70 300 70 334 104" fill="none" stroke="#ffffff" stroke-opacity="0.2" stroke-width="4" stroke-linecap="round"/>
+ 
+  <path d="M98 318 C98 250 116 222 142 222 C168 222 186 250 186 318" fill="none" stroke="url(#t4m)" stroke-width="8"/>
+  <rect x="136" y="170" width="12" height="60" rx="3" fill="url(#t4m)"/>
+  <rect x="136" y="186" width="12" height="2" fill="#8e9298"/><rect x="136" y="196" width="12" height="2" fill="#8e9298"/><rect x="136" y="206" width="12" height="2" fill="#8e9298"/>
+  <ellipse cx="182" cy="338" rx="32" ry="90" fill="#1f345c"/>
+  <ellipse cx="192" cy="338" rx="10" ry="72" fill="#000" opacity="0.16"/>
+  <ellipse cx="184" cy="336" rx="8" ry="92" fill="#c98a55"/>
+  <ellipse cx="142" cy="336" rx="46" ry="96" fill="#2f4f8f"/>
+  <ellipse cx="137" cy="336" rx="32" ry="80" fill="#3b5c9e"/>
+  <ellipse cx="142" cy="336" rx="46" ry="96" fill="url(#t4s)"/>
+  <ellipse cx="120" cy="290" rx="6" ry="34" fill="#ffffff" opacity="0.2"/>
+  <path d="M334 318 C334 250 352 222 378 222 C404 222 422 250 422 318" fill="none" stroke="url(#t4m)" stroke-width="8"/>
+  <rect x="372" y="170" width="12" height="60" rx="3" fill="url(#t4m)"/>
+  <rect x="372" y="186" width="12" height="2" fill="#8e9298"/><rect x="372" y="196" width="12" height="2" fill="#8e9298"/><rect x="372" y="206" width="12" height="2" fill="#8e9298"/>
+  <ellipse cx="338" cy="338" rx="32" ry="90" fill="#1f345c"/>
+  <ellipse cx="328" cy="338" rx="10" ry="72" fill="#000" opacity="0.16"/>
+  <ellipse cx="336" cy="336" rx="8" ry="92" fill="#c98a55"/>
+  <ellipse cx="378" cy="336" rx="46" ry="96" fill="#2f4f8f"/>
+  <ellipse cx="383" cy="336" rx="32" ry="80" fill="#3b5c9e"/>
+  <ellipse cx="378" cy="336" rx="46" ry="96" fill="url(#t4s)"/>
+  <ellipse cx="400" cy="290" rx="6" ry="34" fill="#ffffff" opacity="0.2"/>
+ <rect x="128" y="176" width="28" height="26" rx="8" fill="#243d6f"/>
+ <rect x="364" y="176" width="28" height="26" rx="8" fill="#243d6f"/>
+</svg></div></div>
+  <div class="stage">
+   <div class="halo"></div>
+   <svg class="hp" viewBox="0 0 520 520" aria-hidden="true">
+ <defs>
+  <radialGradient id="maing" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#000" stop-opacity="0.22"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+  <linearGradient id="mainm" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#9ea2a8"/><stop offset="0.5" stop-color="#e4e6e9"/><stop offset="1" stop-color="#a7abb1"/></linearGradient>
+  <linearGradient id="mains" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.10"/><stop offset="0.55" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.22"/></linearGradient>
+ </defs>
+ <ellipse cx="260" cy="458" rx="190" ry="22" fill="url(#maing)"/>
+ <path d="M166 196 C160 66 360 66 354 196" fill="none" stroke="#232529" stroke-width="20" stroke-linecap="round"/>
+ <path d="M166 190 C160 72 360 72 354 190" fill="none" stroke="#ffffff" stroke-opacity="0.25" stroke-width="1.5" stroke-dasharray="4 5"/>
+ <path d="M142 196 C136 40 384 40 378 196" fill="none" stroke="#2b2e33" stroke-width="26" stroke-linecap="round"/>
+ <path d="M186 104 C220 70 300 70 334 104" fill="none" stroke="#ffffff" stroke-opacity="0.2" stroke-width="4" stroke-linecap="round"/>
+ 
+  <path d="M98 318 C98 250 116 222 142 222 C168 222 186 250 186 318" fill="none" stroke="url(#mainm)" stroke-width="8"/>
+  <rect x="136" y="170" width="12" height="60" rx="3" fill="url(#mainm)"/>
+  <rect x="136" y="186" width="12" height="2" fill="#8e9298"/><rect x="136" y="196" width="12" height="2" fill="#8e9298"/><rect x="136" y="206" width="12" height="2" fill="#8e9298"/>
+  <ellipse cx="182" cy="338" rx="32" ry="90" fill="#232529"/>
+  <ellipse cx="192" cy="338" rx="10" ry="72" fill="#000" opacity="0.16"/>
+  <ellipse cx="184" cy="336" rx="8" ry="92" fill="#b8703f"/>
+  <ellipse cx="142" cy="336" rx="46" ry="96" fill="#3a3d43"/>
+  <ellipse cx="137" cy="336" rx="32" ry="80" fill="#474b52"/>
+  <ellipse cx="142" cy="336" rx="46" ry="96" fill="url(#mains)"/>
+  <ellipse cx="120" cy="290" rx="6" ry="34" fill="#ffffff" opacity="0.2"/>
+  <path d="M334 318 C334 250 352 222 378 222 C404 222 422 250 422 318" fill="none" stroke="url(#mainm)" stroke-width="8"/>
+  <rect x="372" y="170" width="12" height="60" rx="3" fill="url(#mainm)"/>
+  <rect x="372" y="186" width="12" height="2" fill="#8e9298"/><rect x="372" y="196" width="12" height="2" fill="#8e9298"/><rect x="372" y="206" width="12" height="2" fill="#8e9298"/>
+  <ellipse cx="338" cy="338" rx="32" ry="90" fill="#232529"/>
+  <ellipse cx="328" cy="338" rx="10" ry="72" fill="#000" opacity="0.16"/>
+  <ellipse cx="336" cy="336" rx="8" ry="92" fill="#b8703f"/>
+  <ellipse cx="378" cy="336" rx="46" ry="96" fill="#3a3d43"/>
+  <ellipse cx="383" cy="336" rx="32" ry="80" fill="#474b52"/>
+  <ellipse cx="378" cy="336" rx="46" ry="96" fill="url(#mains)"/>
+  <ellipse cx="400" cy="290" rx="6" ry="34" fill="#ffffff" opacity="0.2"/>
+ <rect x="128" y="176" width="28" height="26" rx="8" fill="#2b2e33"/>
+ <rect x="364" y="176" width="28" height="26" rx="8" fill="#2b2e33"/>
+</svg>
+   <span class="pill new"><i></i>New colour: Cobalt</span>
+   <span class="zoom"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5M8.5 11h5M11 8.5v5"/></svg></span>
+   <span class="pill v360"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4.5h-4.5"/></svg>360° view</span>
+   <span class="pill count">1 / 4</span>
+  </div>
+  <div class="dots m-only"><i class="on"></i><i></i><i></i><i></i></div>
+ </div>
+ <div class="buy">
+  <div class="eyebrow">OVER-EAR · WIRELESS</div>
+  <h1>Halden H7 Wireless</h1>
+  <p class="sub">Adaptive noise-cancelling headphones with a 60-hour battery</p>
+  <div class="rating"><span class="stars"><svg viewBox="0 0 88 16" class="s-base"><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(0 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(18 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(36 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(54 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(72 0)"/></svg><span class="s-fill" style="width:92%"><svg viewBox="0 0 88 16"><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(0 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(18 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(36 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(54 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(72 0)"/></svg></span></span><b>4.6</b><a>1,284 reviews</a><span class="mut d-only">·</span><span class="mut">86 answered questions</span></div>
+  <div class="hr"></div>
+  <div class="price"><span class="now">$279.00</span><s>$349.00</s><span class="pill save">Save $70</span></div>
+  <p class="pay">or 4 interest-free payments of $69.75 · <a>Learn more</a></p>
+  <div class="lbl"><span>Colour: <b style="color:#1d1f22">Graphite</b></span><span class="mut">4 colours</span></div>
+  <div class="swatches"><span class="sw on" title="Graphite"><i style="background:#3a3d43"></i></span><span class="sw" title="Sand"><i style="background:#d8c6a9"></i></span><span class="sw" title="Moss"><i style="background:#6e7c5b"></i></span><span class="sw" title="Cobalt"><i style="background:#2f4f8f"></i></span></div>
+  <div class="ful">
+   <div class="opt on"><span class="radio"></span><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 6.5h11v9h-11z"/><path d="M13.5 9.5h4l3 3v3h-7"/><circle cx="7" cy="17" r="1.8"/><circle cx="17" cy="17" r="1.8"/></svg><div><b>Free delivery</b>Arrives Thu, Oct 1 – Fri, Oct 2</div><em>Free</em></div>
+   <div class="opt"><span class="radio"></span><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5V20h16V9.5"/><path d="M3 9.5l2-5.5h14l2 5.5c0 1.4-1.2 2.3-2.5 2.3S16 10.9 16 9.5c0 1.4-1.3 2.3-2.7 2.3S10.7 10.9 10.7 9.5c0 1.4-1.2 2.3-2.6 2.3S5.5 10.9 5.5 9.5"/><path d="M10 20v-5h4v5"/></svg><div><b>Pick up at Halden SoHo</b>Ready in 2 hours · 3 left in stock</div><em>Free</em></div>
+  </div>
+  <div class="stock"><i></i>In stock and ready to ship</div>
+  <div class="cta"><span class="add"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14l-1 13H6L5 8z"/><path d="M9 10V7a3 3 0 0 1 6 0v3"/></svg>Add to cart · $279.00</span><span class="wish"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10z"/></svg></span></div>
+  <div class="trust"><div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7.5 3v6c0 4.5-3.2 7.8-7.5 9-4.3-1.2-7.5-4.5-7.5-9V6L12 3z"/><path d="M8.8 12l2.2 2.2 4.2-4.4"/></svg>2-year warranty</div><div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6L4.5 10.5 9 15"/><path d="M4.5 10.5H15a4.5 4.5 0 0 1 0 9h-3"/></svg>45-day free returns</div><div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19c0-8 5-13 15-14-1 10-6 15-14 15"/><path d="M5 19l7-7"/></svg>Recycled packaging</div></div>
+ </div>
+</section>
+
+<section class="wrap sec">
+ <div class="sh"><h2>Built for long listening</h2><p class="side">Every detail of the H7 is tuned for all-day wear, from the memory-foam cushions to the 254 g frame.</p></div>
+ <div class="tiles"><div class="tile"><span class="ib"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="7" width="17" height="10" rx="2.2"/><path d="M21.5 10.5v3"/><path d="M6 10v4M9.5 10v4M13 10v4"/></svg></span><div><b>60 h</b><strong>Battery with ANC on</strong><span>10-minute charge = 6 hours</span></div></div><div class="tile"><span class="ib"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h1.5M7 8.5v7M11 5v14M15 8.5v7M19 10.5v3"/></svg></span><div><b>8 mics</b><strong>Adaptive noise cancelling</strong><span>Adjusts 200 times per second</span></div></div><div class="tile"><span class="ib"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 4C11 4 6 9 6 16v4"/><path d="M6 16c6 0 11-3 12.5-9"/><path d="M9.5 12.5H15"/></svg></span><div><b>254 g</b><strong>Featherweight frame</strong><span>Memory-foam cushions</span></div></div><div class="tile"><span class="ib"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7.5l10 9-5 4.5V3l5 4.5-10 9"/></svg></span><div><b>LDAC</b><strong>Hi-Res wireless audio</strong><span>Plus aptX Adaptive and AAC</span></div></div></div>
+</section>
+
+<section class="wrap sec two">
+ <div class="card"><div class="chead"><div><h3>Technical specifications</h3><p class="cap">Model H7-W · Firmware 3.2</p></div><a class="link">Spec sheet (PDF)<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></a></div>
+  <table class="specs"><tbody><tr><th>Driver</th><td>40 mm dynamic, beryllium-coated</td></tr><tr><th>Frequency response</th><td>4 Hz – 40 kHz</td></tr><tr><th>Impedance</th><td>32 Ω</td></tr><tr><th>Battery life</th><td>60 h with ANC · 80 h without</td></tr><tr><th>Charging</th><td>USB-C, 10 min for 6 h playback</td></tr><tr><th>Bluetooth</th><td>5.4, multipoint (2 devices)</td></tr><tr><th>Codecs</th><td>SBC, AAC, aptX Adaptive, LDAC</td></tr><tr><th>Microphones</th><td>8 (6 for ANC, 2 for calls)</td></tr><tr><th>Weight</th><td>254 g</td></tr><tr><th>In the box</th><td>Hard case, USB-C cable, 3.5 mm cable</td></tr></tbody></table></div>
+ <div class="card"><div class="chead"><div><h3>Compare the H-series</h3><p class="cap">Three over-ear models, one sound signature</p></div><a class="link">Compare all<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></a></div>
+  <table class="cmp"><thead><tr><th></th><th class="h5"><b>H5</b><span>$179</span></th><th class="me"><span class="tag">THIS MODEL</span><b>H7</b><span>$279</span></th><th><b>H9 Studio</b><span>$449</span></th></tr></thead>
+  <tbody><tr><td>Battery life</td><td class="h5">40 h</td><td class="me">60 h</td><td>50 h</td></tr><tr><td>Noise cancelling</td><td class="h5">Standard</td><td class="me">Adaptive</td><td>Adaptive Pro</td></tr><tr><td>Spatial audio</td><td class="h5"><span class="dash">—</span></td><td class="me"><svg class="ck" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></td><td><svg class="ck" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></td></tr><tr><td>LDAC Hi-Res</td><td class="h5"><span class="dash">—</span></td><td class="me"><svg class="ck" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></td><td><svg class="ck" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></td></tr><tr><td>Multipoint</td><td class="h5"><svg class="ck" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></td><td class="me"><svg class="ck" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></td><td><svg class="ck" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></td></tr><tr><td>Wear detection</td><td class="h5"><span class="dash">—</span></td><td class="me"><svg class="ck" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></td><td><svg class="ck" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></td></tr><tr><td>Weight</td><td class="h5">238 g</td><td class="me">254 g</td><td>312 g</td></tr><tr><td>Case</td><td class="h5">Soft pouch</td><td class="me">Hard case</td><td>Hard case</td></tr></tbody></table></div>
+</section>
+
+<section class="wrap sec">
+ <div class="sh"><div><h2>Customer reviews</h2><p>What owners say after a few weeks with the H7.</p></div><div class="acts"><a class="link">Show all 1,284 reviews<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></a><span class="btn-line">Write a review</span></div></div>
+ <div class="rv">
+  <aside class="sum">
+   <div class="big"><b>4.6</b><div><span class="stars"><svg viewBox="0 0 88 16" class="s-base"><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(0 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(18 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(36 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(54 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(72 0)"/></svg><span class="s-fill" style="width:92%"><svg viewBox="0 0 88 16"><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(0 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(18 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(36 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(54 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(72 0)"/></svg></span></span><span class="n">Based on 1,284 reviews</span></div></div>
+   <div class="hist"><div class="hrow"><span>5 ★</span><span class="bar"><i style="width:74.8%"></i></span><span>960</span></div><div class="hrow"><span>4 ★</span><span class="bar"><i style="width:16.7%"></i></span><span>214</span></div><div class="hrow"><span>3 ★</span><span class="bar"><i style="width:4.5%"></i></span><span>58</span></div><div class="hrow"><span>2 ★</span><span class="bar"><i style="width:2.1%"></i></span><span>27</span></div><div class="hrow"><span>1 ★</span><span class="bar"><i style="width:1.9%"></i></span><span>25</span></div></div>
+   <h4>RATED BY FEATURE</h4>
+   <div class="meters"><div class="meter"><div><span>Comfort</span>4.7</div><span class="seg"><i><b style="width:100%"></b></i><i><b style="width:100%"></b></i><i><b style="width:100%"></b></i><i><b style="width:100%"></b></i><i><b style="width:70%"></b></i></span></div><div class="meter"><div><span>Sound quality</span>4.8</div><span class="seg"><i><b style="width:100%"></b></i><i><b style="width:100%"></b></i><i><b style="width:100%"></b></i><i><b style="width:100%"></b></i><i><b style="width:80%"></b></i></span></div><div class="meter"><div><span>Battery life</span>4.9</div><span class="seg"><i><b style="width:100%"></b></i><i><b style="width:100%"></b></i><i><b style="width:100%"></b></i><i><b style="width:100%"></b></i><i><b style="width:90%"></b></i></span></div><div class="meter"><div><span>Noise cancelling</span>4.5</div><span class="seg"><i><b style="width:100%"></b></i><i><b style="width:100%"></b></i><i><b style="width:100%"></b></i><i><b style="width:100%"></b></i><i><b style="width:50%"></b></i></span></div></div>
+   <div class="rec"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 10.5v9.5H4v-9.5h3.5z"/><path d="M7.5 10.5L11 4c1.7 0 2.6 1.2 2.3 2.8l-.6 3.2H18a2 2 0 0 1 2 2.3l-1.1 6a2 2 0 0 1-2 1.7H7.5"/></svg><span><b>94%</b> of reviewers recommend the H7</span></div>
+  </aside>
+  <div>
+   <div class="chips"><span class="chip on">All reviews</span><span class="chip">5 stars (960)</span><span class="chip">Verified only</span><span class="chip">Mentions comfort</span><span class="sort">Sort: <b>Most helpful</b><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></span></div>
+   <article class="rcard"><div class="rtop"><span class="stars"><svg viewBox="0 0 88 16" class="s-base"><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(0 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(18 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(36 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(54 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(72 0)"/></svg><span class="s-fill" style="width:100%"><svg viewBox="0 0 88 16"><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(0 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(18 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(36 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(54 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(72 0)"/></svg></span></span><b>Quiet flights, finally</b><span class="date">Sep 14, 2026</span></div>
+<p>I wore these on a 14-hour flight to Singapore and forgot the engines were there. Adaptive mode handles cabin rumble better than my old pair, and the clamp is gentle enough to wear with glasses.</p>
+<div class="rmeta"><span class="av" style="background:#b8703f">PS</span><span class="who">Priya S.</span>
+<span class="ver"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Verified buyer</span><span class="col">Colour: Graphite</span>
+<span class="help"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 10.5v9.5H4v-9.5h3.5z"/><path d="M7.5 10.5L11 4c1.7 0 2.6 1.2 2.3 2.8l-.6 3.2H18a2 2 0 0 1 2 2.3l-1.1 6a2 2 0 0 1-2 1.7H7.5"/></svg>Helpful (48)</span></div></article><article class="rcard"><div class="rtop"><span class="stars"><svg viewBox="0 0 88 16" class="s-base"><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(0 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(18 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(36 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(54 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(72 0)"/></svg><span class="s-fill" style="width:80%"><svg viewBox="0 0 88 16"><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(0 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(18 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(36 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(54 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(72 0)"/></svg></span></span><b>Great sound, the app needs work</b><span class="date">Sep 2, 2026</span></div>
+<p>Tuning is warm without being muddy and LDAC over my phone sounds superb. I took one star off because the EQ presets reset after a firmware update. Hardware is flawless.</p>
+<div class="rmeta"><span class="av" style="background:#57644a">MT</span><span class="who">Marcus T.</span>
+<span class="ver"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Verified buyer</span><span class="col">Colour: Sand</span>
+<span class="help"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 10.5v9.5H4v-9.5h3.5z"/><path d="M7.5 10.5L11 4c1.7 0 2.6 1.2 2.3 2.8l-.6 3.2H18a2 2 0 0 1 2 2.3l-1.1 6a2 2 0 0 1-2 1.7H7.5"/></svg>Helpful (21)</span></div></article><article class="rcard"><div class="rtop"><span class="stars"><svg viewBox="0 0 88 16" class="s-base"><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(0 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(18 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(36 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(54 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(72 0)"/></svg><span class="s-fill" style="width:100%"><svg viewBox="0 0 88 16"><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(0 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(18 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(36 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(54 0)"/><polygon points="8,0.8 10.1,5.4 15.2,5.9 11.4,9.3 12.5,14.3 8,11.7 3.5,14.3 4.6,9.3 0.8,5.9 5.9,5.4" transform="translate(72 0)"/></svg></span></span><b>Battery that lasts all week</b><span class="date">Aug 27, 2026</span></div>
+<p>Two commutes a day plus office calls and I charge them on Sunday night. The eight mics make my voice clear even at a busy station.</p>
+<div class="rmeta"><span class="av" style="background:#2f4f8f">EK</span><span class="who">Elin K.</span>
+<span class="ver"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Verified buyer</span><span class="col">Colour: Moss</span>
+<span class="help"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 10.5v9.5H4v-9.5h3.5z"/><path d="M7.5 10.5L11 4c1.7 0 2.6 1.2 2.3 2.8l-.6 3.2H18a2 2 0 0 1 2 2.3l-1.1 6a2 2 0 0 1-2 1.7H7.5"/></svg>Helpful (17)</span></div></article>
+  </div>
+ </div>
+</section>
+
+<section class="wrap sec">
+ <div class="sh"><div><h2>Complete your setup</h2><p>Accessories designed for the H-series.</p></div><a class="link">View all accessories<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></a></div>
+ <div class="acc"><div class="acard"><div class="ill"><svg viewBox="0 0 200 140"><ellipse cx="100" cy="124" rx="70" ry="7" fill="#000" opacity="0.08"/>
+<ellipse cx="100" cy="70" rx="74" ry="50" fill="#2b2e33"/><ellipse cx="100" cy="66" rx="66" ry="42" fill="#3a3d43"/>
+<ellipse cx="100" cy="68" rx="70" ry="46" fill="none" stroke="#b8703f" stroke-width="2" stroke-dasharray="3 3"/>
+<rect x="160" y="54" width="16" height="9" rx="3" fill="#b9bcc2"/><circle cx="100" cy="64" r="9" fill="none" stroke="#b8703f" stroke-width="2"/></svg></div><h5>H-Series Hard Case</h5><p>Moulded shell with a cable pocket</p><div class="arow"><b>$39.00</b><span class="addsm"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12"/></svg>Add</span></div></div><div class="acard"><div class="ill"><svg viewBox="0 0 200 140"><path d="M40 40 C90 40 60 100 110 100 C150 100 140 52 168 52" fill="none" stroke="#2b2e33" stroke-width="6" stroke-linecap="round"/>
+<path d="M40 40 C90 40 60 100 110 100 C150 100 140 52 168 52" fill="none" stroke="#b8703f" stroke-width="1.5" stroke-dasharray="2 4"/>
+<rect x="14" y="31" width="30" height="18" rx="5" fill="#3a3d43"/><rect x="4" y="35" width="12" height="10" rx="3" fill="#b9bcc2"/>
+<rect x="164" y="45" width="22" height="14" rx="4" fill="#3a3d43"/><rect x="185" y="49.5" width="12" height="5" rx="2" fill="#c9ccd1"/><rect x="190" y="49.5" width="1.6" height="5" fill="#8e9298"/></svg></div><h5>USB-C to 3.5 mm Cable</h5><p>1.2 m braided, built-in DAC</p><div class="arow"><b>$19.00</b><span class="addsm"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12"/></svg>Add</span></div></div><div class="acard"><div class="ill"><svg viewBox="0 0 200 140"><ellipse cx="100" cy="126" rx="72" ry="6" fill="#000" opacity="0.08"/>
+<ellipse cx="74" cy="68" rx="38" ry="52" fill="#2b2e33"/><ellipse cx="74" cy="68" rx="20" ry="32" fill="#474b52"/>
+<ellipse cx="128" cy="72" rx="38" ry="52" fill="#3a3d43"/><ellipse cx="128" cy="72" rx="20" ry="32" fill="#55595f"/>
+<ellipse cx="128" cy="72" rx="29" ry="42" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="1.5" stroke-dasharray="3 4"/></svg></div><h5>Memory-Foam Ear Cushions</h5><p>Replacement pair, protein leather</p><div class="arow"><b>$29.00</b><span class="addsm"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12"/></svg>Add</span></div></div><div class="acard"><div class="ill"><svg viewBox="0 0 200 140"><defs><linearGradient id="acm" x1="0" x2="1"><stop offset="0" stop-color="#a3a7ad"/><stop offset="0.5" stop-color="#e2e4e7"/><stop offset="1" stop-color="#a3a7ad"/></linearGradient></defs>
+<ellipse cx="100" cy="120" rx="52" ry="10" fill="url(#acm)"/><ellipse cx="100" cy="117" rx="46" ry="7" fill="#d4d6da"/>
+<rect x="95" y="36" width="10" height="82" rx="3" fill="url(#acm)"/>
+<path d="M66 44 C66 20 134 20 134 44" fill="none" stroke="#b9bcc2" stroke-width="10" stroke-linecap="round"/>
+<path d="M72 38 C76 26 124 26 128 38" fill="none" stroke="#b8703f" stroke-width="3" stroke-linecap="round"/></svg></div><h5>Aluminium Headphone Stand</h5><p>Weighted base with cable channel</p><div class="arow"><b>$59.00</b><span class="addsm"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12"/></svg>Add</span></div></div></div>
+</section>
+
+<section class="wrap sec faq">
+ <div class="help-card"><h2>Questions, answered</h2><p>Our audio team is based in Oslo and New York and can help you choose the right fit.</p>
+  <span class="btn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4V5z"/><path d="M8 9.5h8M8 12.5h5"/></svg>Chat with an expert</span><small>Mon–Sat, 9 am – 7 pm ET</small></div>
+ <div class="qa"><div class="q open"><span>How long does a full charge take?</span><span class="pm"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12"/></svg></span></div><div class="ans">About 2 hours from empty with a 15 W USB-C charger. A 10-minute top-up gives 6 hours of playback with noise cancelling on.</div><div class="q"><span>Can I connect two devices at once?</span><span class="pm"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12"/></svg></span></div><div class="q"><span>Are the ear cushions replaceable?</span><span class="pm"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12"/></svg></span></div><div class="q"><span>Does the H7 work with a wired connection?</span><span class="pm"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12"/></svg></span></div><div class="q"><span>What does the 2-year warranty cover?</span><span class="pm"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12"/></svg></span></div></div>
+</section>
+</main>
+
+<footer class="ftr"><div class="wrap">
+ <div class="fgrid">
+  <div class="fbrand"><a class="logo"><svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="16" fill="#1d1f22"/><path d="M9 19v-3a7 7 0 0 1 14 0v3" fill="none" stroke="#e7c9a9" stroke-width="2.4" stroke-linecap="round"/><rect x="7" y="17" width="5" height="8" rx="2.2" fill="#b8703f"/><rect x="20" y="17" width="5" height="8" rx="2.2" fill="#b8703f"/></svg><span class="logo-word">Halden</span><span class="logo-sub">AUDIO</span></a>
+   <p class="fblurb">Headphones designed in Oslo and tuned by ear. Get early access to new colours and firmware notes.</p>
+   <div class="news"><span>Email address</span><b>Subscribe</b></div></div>
+  <div class="fcol"><h6>SHOP</h6><a>Headphones</a><a>Earbuds</a><a>Speakers</a><a>Accessories</a><a>Gift cards</a></div>
+  <div class="fcol"><h6>SUPPORT</h6><a>Product help</a><a>Warranty</a><a>Returns</a><a>Order status</a><a>Contact us</a></div>
+  <div class="fcol"><h6>COMPANY</h6><a>About Halden</a><a>Journal</a><a>Careers</a><a>Sustainability</a><a>Press</a></div>
+ </div>
+ <div class="fbot"><span>© 2026 Halden Audio AS. All rights reserved.</span><div><span>Privacy</span><span>Terms</span><span>Cookie settings</span></div></div>
+</div></footer>
+</body>
+</html>

@@ -1,0 +1,984 @@
+[
+ {
+  "task_id": "3d-open-10",
+  "category": "3d_scene",
+  "mode": "open_ended",
+  "title": "Slide15: 3D sliding puzzle with seeded shuffles and solvability checks",
+  "prompt": "Build 'Slide15', a 3D version of the classic 15-puzzle in three.js.\n\nBoard: a wooden tray holding a 4 × 4 grid with fifteen chunky bevelled tiles numbered 1–15 (the number on each tile's top face, readable from the default camera) and one gap. Rows are numbered 0–3 from the far edge of the tray to the near edge and columns 0–3 from left to right. The solved board has tiles 1–15 in reading order and the gap at row 3, column 3; a fresh visit starts solved. The default camera looks down at the tray from the near side at about 50° elevation. Dragging on empty space around the tray orbits and the wheel zooms; a 'Top view' button (or the T key) snaps to a straight-down view.\n\nMoving:\n- Clicking a tile that shares a row or column with the gap slides it, and every tile between it and the gap, one cell toward the gap. Every tile that moves counts as one move, so a three-tile slide adds 3. Clicking any other tile only gives it a short shake.\n- Arrow keys move the tile next to the gap in the arrow's direction: ArrowLeft slides the tile right of the gap to the left, ArrowRight the tile left of it to the right, ArrowUp the tile in the row below the gap (row + 1) up into it, ArrowDown the tile in the row above it down. A key with no such tile does nothing.\n- Slides animate over about 150 ms; input that arrives during an animation is queued and applied in order.\n- Tiles that would move if clicked glow while hovered; other tiles do not.\n- 'Undo' (also Ctrl+Z) reverses the last click or key press as a whole and subtracts its moves.\n\nReadouts: 'Moves N'; 'Manhattan D', the sum over all tiles of the row distance plus the column distance to their solved cell; and 'Conflicts K', the number of pairs of tiles that are both in their solved row but in reversed order, plus the same count for columns. A 'Layout' text field always shows the current board as 16 numbers in reading order separated by spaces, with 0 for the gap.\n\nSeeded shuffle: a 'Seed' number input (default 7) and a 'Shuffle' button. Use this PRNG:\nfunction mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }\nWith rand = mulberry32(seed), start from the solved board and make 80 random moves. For each move, list the tiles that could slide into the gap in this order: the tile in the row above the gap, the row below it, the column left of it, the column right of it (skipping positions off the board and the tile that moved in the previous shuffle move), then slide the tile at index floor(rand() × list length). Show the result at once and reset Moves to 0.\n\nCustom boards: typing 16 numbers into the Layout field and pressing 'Load' (or Enter) loads that board with Moves 0. If the input is not the numbers 0–15 once each, show 'Enter the numbers 0–15 once each'; if the board can never be solved, show 'Unsolvable layout'. In both cases change nothing.\n\nWhen the board becomes solved after at least one move, show a 'Solved in N moves' banner ('Solved in 1 move' for one) and play a short wave animation across the tiles. The board, Moves and seed persist in localStorage and are restored on reload.\n\nStyle: a warm wood tray, cream tiles with dark numbers, soft lighting and shadows.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 720
+  },
+  "checks": {
+   "animation": false
+  },
+  "vendor": [
+   "three"
+  ],
+  "interaction_hints": "Start from a fresh page (clear localStorage with eval and reload if a board was restored). Use the Top view button so tiles are easy to click; locate tiles in a screenshot. Set the Seed input (type with its selector) to 7 and click Shuffle: Layout must read '0 2 6 11 3 13 5 7 14 1 12 9 8 15 4 10', Moves 0, Manhattan 36, Conflicts 1 (gap at row 0, column 0). Seed 42: '6 5 3 13 15 1 2 4 14 8 7 11 12 10 9 0', Manhattan 34, Conflicts 0. From the seed 7 board: click tile 11 (row 0, column 3) → '2 6 11 0 3 13 5 7 14 1 12 9 8 15 4 10', Moves 3, Manhattan 35, Conflicts 1; then click tile 10 (row 3, column 3) → '2 6 11 7 3 13 5 9 14 1 12 10 8 15 4 0', Moves 6, Manhattan 36; Undo (or Control+z) → back to Moves 3. Clicking tile 13 (row 1, column 1) on the seed 7 board changes nothing. Arrow keys from a fresh seed 7 shuffle: ArrowUp → '3 2 6 11 0 13 5 7 …', Moves 1, Manhattan 35, Conflicts 2; from seed 7 again ArrowLeft → '2 0 6 11 …', Manhattan 37; ArrowRight and ArrowDown do nothing. Load tests (type into the Layout field with its selector, then click Load or press Enter): '1 2 3 4 5 6 7 8 9 10 11 12 13 15 14 0' and '4 3 2 1 8 7 6 5 12 11 10 9 0 15 14 13' → Unsolvable layout, board unchanged; '1 2 3' → Enter the numbers 0–15 once each; '5 1 2 3 9 6 7 4 13 10 11 8 0 14 15 12' → loads, Manhattan 9, Conflicts 0; '1 2 3 4 5 6 7 8 9 10 11 12 0 13 14 15' → click tile 15 → Solved in 3 moves; '1 2 3 4 5 6 7 8 9 10 11 0 13 14 15 12' → ArrowUp → Solved in 1 move. Screenshot within about 80 ms of a click to catch the slide animation. Reload after a few moves to check persistence.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "A wooden tray holds a 4 × 4 grid of fifteen bevelled 3D tiles numbered 1–15 on their top faces plus one gap, solved on first visit with the gap at the near-right corner, seen from the near side at an angle with soft shadows."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Seed 7 + Shuffle gives exactly Layout '0 2 6 11 3 13 5 7 14 1 12 9 8 15 4 10' with the 3D tiles in those cells, Moves 0, Manhattan 36 and Conflicts 1; seed 42 gives '6 5 3 13 15 1 2 4 14 8 7 11 12 10 9 0', Manhattan 34, Conflicts 0."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Multi-tile slides: on the seed 7 board, clicking tile 11 slides 2, 6 and 11 left together (Layout '2 6 11 0 …', Moves 3, Manhattan 35), then clicking tile 10 slides 7, 9 and 10 up (Moves 6, Manhattan 36); clicking tile 13, which is not in the gap's row or column, changes nothing."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Arrow keys follow the rule: on the seed 7 board ArrowUp moves tile 3 up into the gap (Moves 1, Manhattan 35, Conflicts 2), ArrowLeft instead moves tile 2 left (Manhattan 37), and ArrowRight and ArrowDown do nothing."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Loading '1 2 3 4 5 6 7 8 9 10 11 12 13 15 14 0' or '4 3 2 1 8 7 6 5 12 11 10 9 0 15 14 13' shows 'Unsolvable layout' and leaves the board unchanged, '1 2 3' shows 'Enter the numbers 0–15 once each', and '5 1 2 3 9 6 7 4 13 10 11 8 0 14 15 12' loads with Manhattan 9 and Conflicts 0."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After loading '1 2 3 4 5 6 7 8 9 10 11 12 0 13 14 15', clicking tile 15 shows 'Solved in 3 moves' with a tile wave; after loading '1 2 3 4 5 6 7 8 9 10 11 0 13 14 15 12', ArrowUp shows 'Solved in 1 move'."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Undo (button or Ctrl+Z) reverses a three-tile slide in one step, restoring the Layout and lowering Moves by 3."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Slides visibly animate (a screenshot right after a click shows tiles between cells), and several quickly pressed arrow keys are all applied in order."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Hovering a tile in the gap's row or column makes it glow, while hovering a tile elsewhere does not."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After some moves a reload restores the same board, Moves and seed; 'Top view' shows the board straight down and dragging around the tray orbits the camera."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The tray is centred and fully visible, tile numbers are legible, and the controls and readouts do not overlap the tray or each other."
+   }
+  ]
+ },
+ {
+  "task_id": "3d-open-11",
+  "category": "3d_scene",
+  "mode": "open_ended",
+  "title": "Epicycle: planetary gear train with exact ratios and meshing teeth",
+  "prompt": "Build 'Epicycle', an interactive planetary gearbox in three.js for a mechanical engineering class. Students will check the numbers, so follow these rules exactly.\n\nGeometry (module m = 2 mm; 1 scene unit = 1 mm): a sun gear, N planet gears on a carrier and a ring gear with internal teeth, all with teeth modelled as real extruded tooth profiles, not textures. A gear with Z teeth has pitch radius m·Z/2, tip radius pitch + m and root radius pitch − 1.25·m; the ring's teeth point inward (tip radius pitch − m). The planets' centres sit at distance m·(Zs + Zp)/2 from the axis at equal angles. Every mesh, sun–planet and planet–ring, must interlock tooth-in-gap with no visible overlap, for every planet and at every moment. The carrier is a plate with pins through the planet centres. One tooth of each gear and one arm of the carrier are painted orange as markers. Default set: sun Zs = 24, planets Zp = 18, ring Zr = 60, N = 3.\n\nGear set: number inputs 'Sun teeth', 'Planet teeth', 'Ring teeth' and 'Planets' (2–6) with an 'Apply' button. Check a new set in this order and, on the first failure, show the message and keep the old gears:\n- any tooth count that is not a whole number from 8 to 150: 'Teeth must be whole numbers from 8 to 150';\n- Zr ≠ Zs + 2·Zp: 'Ring must have X teeth', with X = Zs + 2·Zp;\n- Zs + Zr not divisible by N: 'Planets cannot be evenly spaced';\n- the tip circles of neighbouring planets overlap: 'Planets collide'.\n\nDrive: a 'Held' selector with 'Ring' (input sun, output carrier; the default), 'Carrier' (input sun, output ring) and 'Sun' (input ring, output carrier), and an 'Input rpm' slider from −120 to 120 in steps of 5 (default 60; positive is counter-clockwise seen from the front). Speeds obey the Willis equation (ωs − ωc)/(ωr − ωc) = −Zr/Zs, and every part, including each planet spinning on its pin, must turn at its true speed and direction.\n\nReadouts: 'Ratio i = X.XXX' (input speed divided by output speed, signed, 3 decimals); the speeds of the sun, carrier, planets (their absolute spin) and ring in rpm with 2 decimals; and signed turn counters for the same four parts since the last reset, with 3 decimals.\n\nButtons: Play/Pause (playing on load); 'Step 1 input turn', which runs the animation until the input part has made exactly one more revolution and pauses exactly there (the counters must land exactly, whatever the frame rate); 'Reset', which puts every angle and counter back to 0; and 'Exploded view', which animates the ring, carrier and planets apart along the axis and back.\n\nPicking: clicking a gear highlights it and shows a label such as 'Planet 2 · 18 teeth · −12.34 rpm' (or 'Sun …', 'Ring …', 'Carrier …'); clicking empty space clears it. Dragging empty space orbits the camera, which starts facing the gears from the front, and the wheel zooms.\n\nStyle: brushed steel gears with visible tooth depth under good lighting, on a dark background.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 720
+  },
+  "checks": {
+   "animation": true
+  },
+  "vendor": [
+   "three"
+  ],
+  "interaction_hints": "Defaults (Held Ring, 60 rpm): Ratio i = 3.500; sun 60.00, carrier 17.14, planets −40.00, ring 0.00 rpm. Use the select action on the Held selector: Carrier → Ratio −2.500, ring −24.00, planets −80.00, carrier 0.00; Sun → Ratio 1.400, ring 60.00, carrier 42.86, planets 100.00, sun 0.00. Step test: Held Ring, click Reset, click Step 1 input turn, wait 2500 ms (one input turn takes 1 s at 60 rpm): counters sun 1.000, carrier 0.286, planet −0.667, ring 0.000; the carrier's orange arm has turned about 102.9° counter-clockwise and the sun's orange tooth is back where it started. Held Carrier step from Reset: ring −0.400, planet −1.333. Held Sun step: carrier 0.714, planet 1.667. Validation (type into the number inputs with their selectors, then click Apply): 24/18/62 → Ring must have 60 teeth; 26/17/60 with 3 planets → Planets cannot be evenly spaced; 12/30/72 with 4 planets → Planets collide; 12/30/72 with 3 planets → valid: Ratio 7.000, carrier 8.57, planets −12.00 (Held Ring). 24/18/60 with 6 planets is valid; with 5 it cannot be evenly spaced. Set the Input rpm slider with type on its selector (e.g. −60) or with eval (set .value and dispatch input and change events). Zoom in (scroll) and take screenshots at the sun–planet and planet–ring contacts, paused and at a few moments while running, to check that teeth interlock without overlap. Click a planet (find it in a screenshot) to see its label.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The gearbox shows a sun, three planets on a carrier with pins and an internal-tooth ring, all with real modelled teeth, and every sun–planet and planet–ring contact interlocks tooth-in-gap without visible overlap, both paused and while turning."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Default readouts (Held Ring, 60 rpm): 'Ratio i = 3.500', sun 60.00, carrier 17.14, planets −40.00 and ring 0.00 rpm, and the scene animates on load."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Held Carrier: Ratio −2.500, ring −24.00 rpm and planets −80.00 rpm; the planet centres stay still and the ring visibly turns opposite to the sun."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Held Sun: Ratio 1.400 with the ring driven at 60.00 rpm, carrier 42.86 rpm, planets 100.00 rpm and sun 0.00."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "From Reset with Held Ring, 'Step 1 input turn' stops with the counters at sun 1.000, carrier 0.286, planet −0.667 and ring 0.000; the sun's orange tooth is back at its start and the carrier's orange arm has turned about 103° counter-clockwise."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Validation: 24/18/62 shows 'Ring must have 60 teeth'; 26/17/60 with 3 planets 'Planets cannot be evenly spaced'; 12/30/72 with 4 planets 'Planets collide'; 12/30/72 with 3 planets rebuilds the gears with Ratio 7.000, carrier 8.57 rpm and planets −12.00 rpm."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Planets = 6 with 24/18/60 rebuilds six evenly spaced, still correctly meshing planets, and setting Input rpm to −60 reverses every part and flips every displayed sign."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Clicking a gear highlights it and shows its name, tooth count and rpm (a planet reads 18 teeth and −40.00 rpm by default); clicking empty space clears it."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Pause freezes all motion and counters and Play resumes; 'Exploded view' animates the ring, carrier and planets apart along the axis and back; dragging orbits the camera."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The whole gearbox is visible and centred at load, and the control panel and readouts do not overlap it or each other."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "The gears look machined: lit metal with specular highlights, visible tooth depth, and orange markers that make each part's rotation easy to follow."
+   }
+  ]
+ },
+ {
+  "task_id": "3d-open-12",
+  "category": "3d_scene",
+  "mode": "open_ended",
+  "title": "Qubic: 4×4×4 tic-tac-toe with 76 win lines and a rule-based opponent",
+  "prompt": "Build 'Qubic', three-dimensional tic-tac-toe on a 4 × 4 × 4 board, in three.js.\n\nBoard: four horizontal glass layers stacked vertically, each a 4 × 4 grid of cells. A cell is named by its column letter A–D (left to right), row number 1–4 (front to back) and layer L1–L4 (bottom to top), for example 'B3 L2'. X pieces are red crosses made of two bars and O pieces are blue tori, sitting on their cells. Hovering an empty cell shows a translucent preview of the current player's piece and the cell's name. A 'Spread' slider changes the vertical gap between layers, and layer buttons 'All', '1', '2', '3' and '4' show a single layer (the others fade to about 15% opacity) or all of them. Dragging empty space orbits the camera and the wheel zooms.\n\nRules: X moves first and the players alternate by clicking empty cells. A player wins by filling any of the 76 straight lines of four cells: rows, columns and vertical pillars, the diagonals of every horizontal and vertical plane, and the four space diagonals. The winning pieces glow, a bar is drawn through them, the status reads 'X wins' or 'O wins', and the board locks. A full board with no line is a 'Draw'.\n\nModes: 'vs Computer' (the default; the computer plays O and answers 400 ms after X's move) and 'Two players'. The computer follows this exact rule:\n1. If a line holds three O and one empty cell, play there.\n2. Otherwise, if a line holds three X and one empty cell, block it.\n3. Otherwise, score every empty cell: for each line through the cell, add 1 + 3 × (number of O in the line) if the line holds no X, and add 1 + 2 × (number of X in the line) if it holds no O. Play the highest score.\nIn every step, ties go to the lowest cell index, where index = 16 × (layer − 1) + 4 × (row − 1) + column (A = 0 … D = 3).\n\nPanel: whose turn it is; the move list ('1. X A1 L1 · O D1 L1', …); 'Open lines — X a · O b', where a counts the lines holding no O and b the lines holding no X; 'Threats — X c · O d', the lines holding three of that player's pieces and one empty cell; and a scoreboard of X wins, O wins and draws that persists in localStorage. 'Undo' (also Ctrl+Z) takes back the last move; in vs Computer mode it takes back the computer's reply together with your move. 'New game' (also N) clears the board and keeps the scoreboard.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 720
+  },
+  "checks": {
+   "animation": false
+  },
+  "vendor": [
+   "three"
+  ],
+  "interaction_hints": "Cells are small 3D targets: raise the Spread slider or use the layer buttons (e.g. show only layer 1) and hover to read the cell name before clicking; wait about 700 ms after each X move for the computer's reply. Fresh page (clear localStorage with eval and reload if needed): Open lines — X 76 · O 76. vs Computer: X A1 L1 → O D1 L1 (Open lines 69 · 69); X D4 L1 → O A4 L1 (63 · 63); X B2 L2 → O D4 L4 (58 · 57); X B2 L3 → O A1 L4 (54 · 52); X B2 L1 → O C3 L1, a block (Threats — X 1 · O 0, Open lines 50 · 50); X B2 L4 → X wins with the pillar B2 L1–L4, board locked, scoreboard X 1. Computer win, new game: X A2 L1 → O A1 L1; X A3 L1 → O B2 L2; X B1 L2 → O C3 L3 (Threats O 1); X C1 L2 → O D4 L4 and O wins along the space diagonal. Two players: X A1 L1, O A2 L1, X B2 L2, O A3 L1, X C3 L3 → Threats — X 1 · O 0, Open lines — X 69 · O 57; X D4 L4 → X wins along A1 L1, B2 L2, C3 L3, D4 L4. Also check a vertical-plane diagonal, e.g. X on A1 L1, A2 L2, A3 L3, A4 L4 (O elsewhere) wins. Undo in vs Computer after the first exchange must return to an empty board with Open lines 76 · 76. Reload to check the scoreboard persists.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Four stacked glass layers of 4 × 4 cells; X pieces are red two-bar crosses and O pieces blue tori sitting on their cells; hovering an empty cell shows a preview piece and a name such as 'B3 L2' that follows the naming rules."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "vs Computer: X A1 L1 is answered by O D1 L1 and X D4 L1 by O A4 L1, and the panel then reads 'Open lines — X 63 · O 63'."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Continuing with X B2 L2 (O D4 L4), X B2 L3 (O A1 L4) and X B2 L1, the computer blocks at C3 L1 and the panel shows 'Threats — X 1 · O 0' and 'Open lines — X 50 · O 50'; X B2 L4 then wins: 'X wins', the four B2 pieces glow with a bar through them and the board locks."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The computer takes a win when it has one: after X A2 L1, X A3 L1, X B1 L2 (answered by A1 L1, B2 L2, C3 L3), X C1 L2 is answered by O D4 L4 and the game ends 'O wins' along the space diagonal."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Two players: X A1 L1, O A2 L1, X B2 L2, O A3 L1, X C3 L3 shows 'Threats — X 1 · O 0' and 'Open lines — X 69 · O 57', and X D4 L4 then wins with that diagonal highlighted."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Other line types also win, such as a diagonal of a vertical plane (A1 L1, A2 L2, A3 L3, A4 L4), and moves are rejected once the board is locked."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Undo in vs Computer mode removes both the computer's reply and your move (pieces, move list and counts return to the previous state), and New game clears the board."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The scoreboard counts each result, survives a reload and is kept by New game."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Layer buttons show a single layer with the others faded and 'All' restores them; the Spread slider visibly changes the gap between layers; dragging orbits the camera."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "All four layers are in view at load with cells that can be told apart and clicked, and the panel does not overlap the board."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "The glass layers, pieces and winning bar are well lit and readable, with a consistent palette of red X and blue O and a clear turn indicator."
+   }
+  ]
+ },
+ {
+  "task_id": "3d-open-13",
+  "category": "3d_scene",
+  "mode": "open_ended",
+  "title": "Lattice Lab: crystal structure viewer from a CIF-style file",
+  "prompt": "Build 'Lattice Lab', a crystal structure viewer in three.js driven by the attached crystals.cif. The file holds five structures in a simplified CIF format: each block starts with data_<id>, gives the common name, the formula, the cell lengths a, b and c in ångströms (all cell angles are 90°), and then a loop_ listing every atom of one unit cell with its site label, element and fractional coordinates x, y, z (already expanded, all in [0, 1)). Copy the file next to your page and parse it at runtime; do not hard-code any structure.\n\nView:\n- A 'Structure' dropdown in file order (the first one loads at start) and 'Cells' inputs na, nb and nc from 1 to 3 (default 1 × 1 × 1). The a axis runs along +X, b along +Y (up) and c along +Z.\n- Show every atom image whose supercell coordinates u = x + i, v = y + j, w = z + k (i, j, k integers) satisfy 0 ≤ u ≤ na, 0 ≤ v ≤ nb and 0 ≤ w ≤ nc, with a tolerance of 1e-6, so corner, edge and face atoms appear as in textbook pictures.\n- Atoms are spheres with radii in Å and colours: Na 0.45 #ab5cf2, Cl 0.75 #1fd01f, Cs 0.80 #57178f, C 0.35 #4a4a4a, Sr 0.70 #2fb67a, Ti 0.40 #bfc2c7, O 0.45 #ff2a1a.\n- Thin lines outline every unit cell of the supercell, with the outer box brighter.\n- Bonds: let dmin be the shortest distance between any two atoms of the infinite crystal. Draw a grey stick between every two shown atoms that are at most 1.1 × dmin apart. A 'Bonds' toggle hides and shows them.\n\nInfo card: the name and the formula with subscript digits; the cell lengths ('a = 1.234 Å', plus 'c = …' when c differs from a); 'V = 12.34 Å³' for one unit cell; 'Z = n', the number of formula units per cell; the density 'ρ = 1.234 g/cm³' from the masses Na 22.990, Cl 35.453, Cs 132.905, C 12.011, Sr 87.62, Ti 47.867, O 15.999 and Avogadro's number 6.02214076e23; and 'Atoms shown N · Bonds shown M'.\n\nPicking: clicking an atom highlights it and shows its site label and element, its supercell fractional coordinates and Cartesian position in Å (3 decimals each), and 'CN n at d Å', where d is the distance to its nearest neighbour and n the number of atoms within 1.05 × d, both counted in the infinite crystal (not only among the shown atoms). Draw lines from it to those neighbours that are shown. Escape clears the selection.\n\nPlanes: inputs h, k and l (−3 to 3, not all zero) and a 'Planes' toggle that draws every plane of the (hkl) family crossing the supercell, i.e. the surfaces h·u + k·v + l·w = n for integers n, as translucent polygons clipped exactly to the supercell box. Show 'd(hkl) = 1.234 Å' (the interplanar spacing of this orthogonal cell) and 'On planes: N', the number of shown atoms lying on one of them (|h·u + k·v + l·w − n| < 1e-3).\n\nDragging orbits around the centre of the supercell and the wheel zooms; changing the structure or the cells re-frames the camera to fit. Use soft lighting that makes the spheres look glossy against a dark background.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 720
+  },
+  "checks": {
+   "animation": false
+  },
+  "vendor": [
+   "three"
+  ],
+  "assets": [
+   "crystals.cif"
+  ],
+  "interaction_hints": "The file is at /grader/task/crystals.cif (order: Rock salt, Caesium chloride, Diamond, Perovskite, Rutile). Switch structures with the select action on the Structure dropdown and set the Cells and h k l inputs with type on their selectors (press Enter or click any apply button the page offers). You may use eval to read the card text. Rock salt 1×1×1: a = 5.640 Å, V = 179.41 Å³, Z = 4, ρ = 2.164 g/cm³, Atoms shown 27 · Bonds shown 54; 2×2×2: 125 · 300; 3×1×1: 63 · 138; any atom CN 6 at 2.820 Å; (111) at 1×1×1: d(111) = 3.256 Å, On planes: 14. Caesium chloride: ρ = 3.989, V = 70.09, Z = 1, 9 · 8 at 1×1×1, Cs CN 8 at 3.571 Å. Diamond: Z = 8, ρ = 3.516, V = 45.38, 18 · 16 at 1×1×1, 95 · 128 at 2×2×2, CN 4 at 1.545 Å; (111) at 2×2×2: On planes: 63, d(111) = 2.059 Å. Perovskite: ρ = 5.117, V = 59.55, Z = 1, 15 · 6; Sr (cube corners) CN 12 at 2.761 Å; Ti (body centre) CN 6 at about 1.95 Å; O CN 2. Rutile: a = 4.594 Å, c = 2.959 Å, V = 62.45 Å³, Z = 2, ρ = 4.247, 15 · 14 at 1×1×1, 75 · 104 at 2×2×2; Ti CN 6 at 1.949 Å; O CN 3 at 1.949 Å; (110): d = 3.248 Å, On planes: 11; (101): d = 2.488 Å, On planes: 9. Corner atoms are easiest to click after zooming in; check CN on a corner atom as well as an interior one.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The file is parsed at runtime: the Structure dropdown lists Rock salt, Caesium chloride, Diamond, Perovskite and Rutile in file order, and Rock salt loads first as a 3 × 3 × 3 arrangement of alternating Na and Cl spheres inside an outlined cube, in the specified colours and relative sizes."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Rock salt 1 × 1 × 1 card: 'a = 5.640 Å', 'V = 179.41 Å³', 'Z = 4', 'ρ = 2.164 g/cm³' and 'Atoms shown 27 · Bonds shown 54'; at 2 × 2 × 2 it reads 'Atoms shown 125 · Bonds shown 300'."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Diamond: Z = 8 and ρ = 3.516 g/cm³, 18 atoms and 16 bonds at 1 × 1 × 1, 95 atoms and 128 bonds at 2 × 2 × 2, and picking a carbon reads 'CN 4 at 1.545 Å'."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Rutile is handled as a non-cubic cell: a = 4.594 Å and c = 2.959 Å, V = 62.45 Å³, Z = 2, ρ = 4.247 g/cm³, 'Atoms shown 15 · Bonds shown 14' at 1 × 1 × 1 (75 · 104 at 2 × 2 × 2), and the box is visibly shorter along c."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Coordination uses the infinite crystal, even for atoms on the box corners: Perovskite Sr reads 'CN 12 at 2.761 Å' and Ti 'CN 6'; Caesium chloride Cs 'CN 8 at 3.571 Å'; Rutile Ti 'CN 6 at 1.949 Å' and O 'CN 3 at 1.949 Å'."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The other cards are right: Caesium chloride ρ = 3.989 g/cm³ with 9 atoms and 8 bonds shown, and Perovskite ρ = 5.117 g/cm³ with 15 atoms and 6 bonds shown."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Planes: Rock salt (111) at 1 × 1 × 1 shows 'd(111) = 3.256 Å' and 'On planes: 14' with translucent planes clipped to the cube; Rutile (110) shows d = 3.248 Å and On planes: 11; Diamond (111) at 2 × 2 × 2 shows On planes: 63."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Picking highlights the atom, shows its site label, fractional and Cartesian coordinates, and draws lines to its shown neighbours; Escape clears it; the Bonds toggle hides and shows the sticks."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Cells 3 × 1 × 1 for Rock salt gives 'Atoms shown 63 · Bonds shown 138' and the camera re-frames to fit the longer box; dragging orbits and the wheel zooms."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The structure is centred and fully visible after every change, and the card, controls and pick panel do not overlap it or each other."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Spheres are smoothly shaded with specular highlights on a dark background, cell edges and bonds are crisp, and the planes are translucent without hiding the atoms."
+   }
+  ]
+ },
+ {
+  "task_id": "3d-open-14",
+  "category": "3d_scene",
+  "mode": "open_ended",
+  "title": "Arbor: 3D L-system plant generator with an exact turtle",
+  "prompt": "Build 'Arbor', a three.js generator for plants described by L-systems. Botany students will compare its numbers with their own, so implement the rewriting and the turtle exactly as specified.\n\nRewriting: starting from the axiom, apply all rules in parallel n times; symbols without a rule are copied unchanged. Rules are entered one per line in the form X=F[+X]F[-X]+X.\n\nTurtle: the state is a position P and three unit vectors H (heading), L (left) and U (up). It starts at the origin with H = (0, 1, 0), L = (−1, 0, 0) and U = (0, 0, 1); Y is up and the default camera looks from +Z, so +X is to the right. With the angle δ:\n- F draws a branch from P to P + s·H and moves there; f moves without drawing. The step is s = len × r^d, where d is the current bracket depth (the number of unclosed [).\n- + rotates H toward L by δ, so H becomes H·cos δ + L·sin δ and L becomes L·cos δ − H·sin δ; - (the ASCII minus sign) rotates by −δ.\n- & pitches down, rotating H toward −U by δ (H becomes H·cos δ − U·sin δ, U becomes U·cos δ + H·sin δ); ^ is the opposite.\n- / rolls right, rotating L toward U by δ (L becomes L·cos δ + U·sin δ, U becomes U·cos δ − L·sin δ); \\ is the opposite.\n- | turns around (H and L are negated); [ pushes the whole state and ] pops it.\n- L draws a leaf (a small green blade pointing along H) at P; any other symbol is ignored by the turtle.\nBranches are tapered cylinders of radius 0.04 × 0.7^d m, coloured from bark brown at depth 0 to green at depth 4 and above.\n\nPresets (a dropdown that fills in every field; Oak is shown on load):\n- Weed: axiom X; rules X=F[+X]F[-X]+X and F=FF; δ 20°, n 5, len 0.05 m, r 1.\n- Fern: axiom X; rules X=F-[[X]+X]+F[+FX]-X and F=FF; δ 22.5°, n 5, len 0.05 m, r 1.\n- Oak: axiom FA; rule A=[&FLA]////[&FLA]////[&FLA]; δ 30°, n 5, len 1 m, r 0.8.\nFields: Axiom, Rules, Angle, Iterations (0–8), Length and Ratio, with a 'Generate' button. If the rewritten string would be longer than 250,000 symbols, show 'Too many symbols' and keep the current plant.\n\nStats (metres with 2 decimals): 'Symbols N' (length of the final string), 'Segments S' (the number of F), 'Leaves K', 'Height H m' (the largest y of any branch end), 'Spread W m' (the largest horizontal distance √(x² + z²) of any branch end from the trunk axis) and 'Last tip (x, y, z)', the end of the last branch drawn in string order.\n\nAlso:\n- 'Grow' replays the drawing: branches appear in string order at a constant rate so that the whole plant takes 3 s, with a counter 'Drawn i / S'.\n- 'Wind' toggles a gentle sway in which branches bend more toward their tips.\n- Clicking a branch highlights it and shows 'Segment #k · depth d · length s m', where k is its 1-based position among the F symbols.\n- The camera re-frames to fit the plant after every Generate; dragging orbits and the wheel zooms. The plant stands on a ground disc with soft shadows.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 720
+  },
+  "checks": {
+   "animation": false
+  },
+  "vendor": [
+   "three"
+  ],
+  "interaction_hints": "Choose presets with the select action on the preset dropdown (then click Generate if the page needs it); set fields with type on their selectors. You may use eval to read the stats text. Oak (n 5): Symbols 3027, Segments 364, Leaves 363, Height 3.42 m, Spread 2.13 m, Last tip (0.50, 3.41, 0.77). Oak with Iterations 3: 327, 40, 39, 2.76 m, 1.47 m, (0.34, 2.76, 0.50). Weed (n 5): 1512, 422, 0, 3.04 m, 0.80 m, Last tip (−0.80, 2.78, 0.00). Fern (n 5): 6263, 1488, 0, 4.01 m, 1.79 m, Last tip (0.92, 2.72, 0.00). Fern with Iterations 8 → Too many symbols (the previous plant stays). Custom: Axiom F, Rules F=F[+F][-F], Angle 30, Iterations 4, Length 1, Ratio 0.6 → Symbols 321, Segments 81, Leaves 0, Height 2.20 m, Spread 0.94 m. Custom: Axiom F, Rules F=F[+F]F[-F]F, Angle 25.7, Iterations 3, Length 0.1, Ratio 1 → 311, 125, Height 2.70 m, Spread 0.51 m. Allow ±0.01 on metres. Click the base of the Oak trunk: Segment #1 · depth 0 · length 1.00 m. Click Grow and take screenshots at about 1 s and 2 s (partial plant, counter rising) and after 3.5 s. Toggle Wind and compare two screenshots 500 ms apart.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "On load the Oak preset is drawn: a trunk that splits into three branches at every level, tapered and coloured from brown to green, with leaves, standing on a ground disc with soft shadows."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Oak (n 5) reads Symbols 3027, Segments 364, Leaves 363, Height 3.42 m, Spread 2.13 m and Last tip (0.50, 3.41, 0.77); with Iterations 3 it reads 327, 40, 39, 2.76 m, 1.47 m and (0.34, 2.76, 0.50)."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Weed (n 5) reads Symbols 1512, Segments 422, Leaves 0, Height 3.04 m, Spread 0.80 m and Last tip (−0.80, 2.78, 0.00), and the drawing is a flat weed in the XY plane."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Fern (n 5) reads Symbols 6263, Segments 1488, Height 4.01 m, Spread 1.79 m and Last tip (0.92, 2.72, 0.00), drawn as the familiar curling fern."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Custom rules work: axiom F with F=F[+F][-F], angle 30, 4 iterations, length 1 and ratio 0.6 gives Symbols 321, Segments 81, Height 2.20 m and Spread 0.94 m, with branches visibly shrinking by 0.6 per bracket level."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Fern with Iterations 8 shows 'Too many symbols' and keeps the previous plant, and the page stays responsive."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Grow replays the plant branch by branch in string order over about 3 s with a rising 'Drawn i / S' counter."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Wind makes the plant sway with the tips moving more than the trunk, and turning it off stops the motion."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Clicking the base of the Oak trunk highlights it and shows 'Segment #1 · depth 0 · length 1.00 m'; clicking another branch shows its own number, depth and length."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "After every Generate the whole plant is framed in view, and the controls and stats do not overlap the plant or each other."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "The plants look organic: smoothly tapered, well-joined branches, visible leaves on Oak, and soft lighting with shadows on the ground."
+   }
+  ]
+ },
+ {
+  "task_id": "3d-open-15",
+  "category": "3d_scene",
+  "mode": "open_ended",
+  "title": "Groundtrack: satellite orbits, ground tracks and pass predictions",
+  "prompt": "Build 'Groundtrack', a three.js satellite tracker for a space operations course. Use a spherical Earth and circular orbits exactly as specified, because the numbers will be checked.\n\nConstants: Earth radius 6371 km, μ = 398600.4418 km³/s², sidereal day 86164.1 s. Scene scale: 1 unit = 1000 km.\n\nEarth: a sphere with a procedurally drawn texture (a deep blue ocean with a latitude/longitude graticule every 30°, the equator and the prime meridian drawn brighter), north pole up. The Earth turns eastward once per sidereal day: at time t its rotation angle is θ = 360° · t / 86164.1 s, and at t = 0 the prime meridian faces the inertial +x axis. The cities in the attached cities.csv (name, lat, lon in degrees; copy it next to your page and parse it at runtime) are labelled markers fixed on the turning globe.\n\nSatellites, all at their ascending node (argument of latitude u = 0) at t = 0:\n- ISS: altitude 420 km, inclination 51.64°, RAAN 0°\n- Sentinel: altitude 786 km, inclination 98.62°, RAAN 30°\n- Beacon: altitude 35786 km, inclination 0°, RAAN 0°\nWith orbit radius a = 6371 + altitude, the period is T = 2π√(a³/μ) and u = 360° · t / T. In inertial coordinates with z toward the north pole, the position is a · (cos Ω cos u − sin Ω sin u cos i, sin Ω cos u + cos Ω sin u cos i, sin u sin i). The sub-satellite latitude is asin(z / a) and the longitude is atan2(y, x) − θ, wrapped to −180°…180°. Draw each satellite as a small model with its orbit ring, which stays fixed in inertial space while the Earth turns under it.\n\nInterface:\n- A time bar: 'T+hh:mm:ss', Play/Pause, speed buttons '1×', '60×' (the default, playing on load) and '600×', and a 'Jump to minute' input with 'Go' that sets t and pauses.\n- Selecting a satellite (click it, or use a dropdown) shows its panel: 'Period 00.00 min', 'Speed 0.000 km/s' (v = √(μ/a)), 'Lat 00.00° N' and 'Lon 000.00° E' (with N/S and E/W, 2 decimals, updating live), 'Shift −00.00° per orbit' (the longitude change between consecutive ascending nodes, −360° · T / 86164.1 s, wrapped to −180°…180°), and 'In view:' listing each city that sees it at 10° elevation or more, with that elevation.\n- The selected satellite's ground track from t − T to t + T (sampled at least every 30 s) is drawn on the globe and on a 2D equirectangular map inset (360 × 180 px with the graticule, the cities and the satellite as a dot). On the map the track must break at the ±180° edge instead of drawing a line across the map.\n- Clicking a city (its marker or its row in a city list) shows its current elevation and range to the selected satellite and 'Next pass T+hh:mm:ss · max 00.0°': step forward from the current time in 10 s steps, up to 24 h, to the first sample with elevation ≥ 10°, keep stepping while it stays ≥ 10°, and report the largest sampled elevation. Show 'In view now' if the current elevation is already ≥ 10°, and 'No pass in 24 h' if none is found. Elevation is the angle above the city's local horizon on the spherical Earth.\n\nDragging orbits the camera around the Earth and the wheel zooms.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 720
+  },
+  "checks": {
+   "animation": false
+  },
+  "vendor": [
+   "three"
+  ],
+  "assets": [
+   "cities.csv"
+  ],
+  "interaction_hints": "The CSV is at /grader/task/cities.csv. Pause first; set minutes with the Jump to minute input (type with its selector) and Go; select satellites with the dropdown (select action) or by clicking; click cities via the city list. You may use eval to read panel text. Allow ±0.02 on lat/lon, ±1 in the last digit elsewhere. Panels: ISS Period 92.82 min, Speed 7.661 km/s, Shift −23.27°; Sentinel 100.43 min, 7.463 km/s, −25.18°; Beacon 1435.70 min, 3.075 km/s, Shift 0.09° (positive, with or without a plus sign). Minute 25: ISS 51.11° N, 94.86° E; Sentinel 81.37° N, 63.71° W. Minute 50: ISS 10.87° S, 176.21° E; Sentinel 0.76° N, 162.42° W. Minute 0: every satellite at 0.00° N; ISS 0.00° E, Sentinel 30.00° E, Beacon 0.00° E; Beacon stays near 0.00° E (0.09° E at minute 1440). In view at minute 0: Sentinel → Nairobi 40.3°; Beacon → Nairobi 47.3°, Paris 33.9°, Reykjavik 15.5°; ISS → none. Next pass from minute 0 (±10 s, ±0.2°): ISS Tokyo T+00:31:10 · max 65.8°; ISS Houston T+07:50:30 · max 58.1°; Sentinel Paris T+00:10:20 · max 33.0°; Sentinel Nairobi In view now; Beacon Quito No pass in 24 h. Look at the map inset for the track break at ±180° (ISS around minute 50 crosses 180° E) and compare two screenshots 1.5 s apart while playing to see the Earth turning under the fixed orbit rings.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "A globe with a 30° graticule, brighter equator and prime meridian, labelled city markers from the CSV, three satellites with orbit rings, and a 2D map inset with the ground track."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Panels read ISS 'Period 92.82 min', 'Speed 7.661 km/s', 'Shift −23.27° per orbit'; Sentinel 100.43 min, 7.463 km/s, −25.18°; Beacon 1435.70 min, 3.075 km/s and a shift of 0.09° (positive: a slow eastward drift), each within 1 in the last digit."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Jumping to minute 25 shows ISS at 51.11° N, 94.86° E and Sentinel at 81.37° N, 63.71° W; minute 50 shows ISS at 10.87° S, 176.21° E and Sentinel at 0.76° N, 162.42° W (±0.02°)."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Next pass from minute 0: ISS over Tokyo reads T+00:31:10 · max 65.8° and over Houston T+07:50:30 · max 58.1°; Sentinel over Paris reads T+00:10:20 · max 33.0° (±10 s, ±0.2°)."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At minute 0 'In view' lists only Nairobi (40.3°) for Sentinel and Nairobi 47.3°, Paris 33.9° and Reykjavik 15.5° for Beacon; Sentinel over Nairobi shows 'In view now' and Beacon over Quito 'No pass in 24 h'."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Beacon hovers over 0° N, 0° E: its longitude stays within 0.1° of 0 through minute 1440 and it stays over the same spot on the turning globe."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The map inset shows the ISS track as a sine-like curve between about 51.6° N and S and the Sentinel track reaching about 81.4°, shifted west on each orbit, and the track breaks cleanly at ±180° without a line across the map."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Time controls work: 60× plays on load, 1× and 600× change the rate of the T+ clock, Pause stops it, and Go jumps to the entered minute and pauses."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The Earth visibly turns under orbit rings that stay fixed, the globe's ground track and markers turn with it, and clicking a satellite or a city selects it; dragging orbits the camera."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The globe, map inset, time bar, satellite panel and city list fit in the 1280x720 frame without overlapping each other or hiding the Earth."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A polished mission-control look: a lit globe with a clear graticule, distinct satellite colours shared between the 3D view and the map, and legible monospaced numbers."
+   }
+  ]
+ },
+ {
+  "task_id": "3d-open-16",
+  "category": "3d_scene",
+  "mode": "open_ended",
+  "title": "Blockwright: voxel editor with flood fill, mirror mode and exact model stats",
+  "prompt": "Build 'Blockwright', a voxel editor in three.js.\n\nWorld: a 16 × 16 × 16 build volume of 1-unit cells with integer coordinates 0–15 (x east, y up, z south) above a ground grid. Voxels are cubes in an 8-colour palette, chosen by clicking a swatch or pressing 1–8: 1 Grass #5a9e4b, 2 Stone #9a9a9a, 3 Wood #8b5a2b, 4 Roof #b33a3a, 5 Water #3d7fd6, 6 Leaf #2f6b2f, 7 Sand #e0cf8f, 8 Snow #f4f4f4. The attached cottage.txt is a sample model in the export format below; copy it next to your page, load it on the first visit, and reload it with a 'Load sample' button. 'Clear' empties the volume.\n\nTools (buttons and keys): Add (A), Remove (R), Paint (P) and Fill (F). A click (press and release within 4 px) applies the tool to what is under the mouse, found by raycasting; dragging orbits the camera in every tool and the wheel zooms. View buttons 'Iso', 'Top' and 'Front'.\n- Add places a voxel of the current colour in the empty cell next to the clicked face, or in the clicked ground cell at y = 0; nothing happens outside the volume. A translucent ghost cube previews the cell while hovering.\n- Remove deletes the clicked voxel; Paint recolours it.\n- Fill recolours the clicked voxel and every voxel connected to it through shared faces by a chain of voxels of the same original colour.\n- 'Mirror X' (key M) repeats every add, remove, paint and fill at the mirrored cell x' = 15 − x (same y and z), as part of the same action.\n- Hovering shows 'Cursor (x, y, z) · Colour name' for the voxel under the mouse.\n- Undo and redo (Ctrl+Z and Ctrl+Y, plus buttons) work per action; a fill or a mirrored action is one step. Keep at least 50 steps.\n\nStats, always up to date: 'Voxels N · Faces F · Components C · Size W×H×D', where Faces counts voxel faces not shared with another voxel (faces resting on the ground count), Components counts groups of voxels joined through shared faces regardless of colour, and Size is the extent of the bounding box in cells (0×0×0 when empty), plus a table of voxel counts per colour.\n\nExport and import: 'Export' shows a text box whose first line is '# voxels N' followed by one line 'x y z c' per voxel (c = palette number), sorted by y, then z, then x. 'Import' reads text in the same format (lines starting with # are skipped) and replaces the model, but on the first bad line it shows 'Line K: bad format' (not four integers), 'Line K: out of range' (a coordinate outside 0–15 or a colour outside 1–8) or 'Line K: duplicate voxel', where K counts every line of the pasted text from 1, and imports nothing.\n\nThe model persists in localStorage and is restored on reload. Light the scene with soft shadows and a subtle outline or edge shading so neighbouring voxels of the same colour stay distinguishable.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 720
+  },
+  "checks": {
+   "animation": false
+  },
+  "vendor": [
+   "three"
+  ],
+  "assets": [
+   "cottage.txt"
+  ],
+  "interaction_hints": "The sample is /grader/task/cottage.txt (310 voxels): a grass platform with a pond, a stone cottage with a stepped red roof, a tree (wood trunk at x 11, z 4, y 1–3 under a leaf canopy), a snow cloud floating at y 10–11 and a 2-voxel sand bench at x 0. Start from a fresh page (clear localStorage with eval and reload if needed) or click Load sample. Sample stats: Voxels 310 · Faces 666 · Components 3 · Size 14×12×12; counts Grass 135, Stone 46, Wood 3, Roof 84, Water 9, Leaf 19, Sand 2, Snow 12. Hover to find cells (the Cursor readout names them). Fill tool with Snow (press 8, then F) on any roof voxel → Roof 0, Snow 96, Faces still 666. Load sample, Fill with Sand (7) on a grass voxel → Grass 0, Sand 137. Load sample, Remove the lowest trunk voxel (11, 1, 4) → Voxels 309 · Faces 664 · Components 4; Control+z restores 310 / 666 / 3. Mirror: Load sample, press M, choose Wood (3), Add on the top face of the grass voxel (3, 0, 12) → both (3, 1, 12) and (12, 1, 12) appear: Voxels 312 · Faces 674, Wood 5; one Control+z removes both. Export on the sample: first lines '# voxels 310', '2 0 2 1', '3 0 2 1'. Import (type into the import box with its selector, then click the import/apply button): '1 1 1 2' and '2 2 2 9' on two lines → Line 2: out of range, model unchanged; '0 0 0 3', '1 0 0 3', '5 5 5 8' → Voxels 3 · Faces 16 · Components 2 · Size 6×6×6. A click is a drag of 0 px: use click with x,y. Reload to check persistence.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The sample loads on the first visit from cottage.txt as a recognisable scene (grass platform with a pond, stone cottage with a stepped red roof, tree, floating snow cloud, sand bench) in the specified palette, with shading or outlines that separate neighbouring voxels."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Sample stats read 'Voxels 310 · Faces 666 · Components 3 · Size 14×12×12' with per-colour counts Grass 135, Stone 46, Wood 3, Roof 84, Water 9, Leaf 19, Sand 2 and Snow 12."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Fill follows same-colour connectivity: filling the roof with Snow gives Roof 0 and Snow 96 with Faces unchanged at 666, and filling the grass with Sand gives Grass 0 and Sand 137 (the separate bench and the pond are untouched)."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Removing the lowest trunk voxel (11, 1, 4) gives 'Voxels 309 · Faces 664 · Components 4' because the tree top now floats; Ctrl+Z restores 310, 666 and 3."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With Mirror X on, adding Wood on top of grass voxel (3, 0, 12) also creates (12, 1, 12): Voxels 312, Faces 674 and Wood 5, and a single undo removes both."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Add places voxels on the clicked face with a ghost preview, Remove and Paint act on the clicked voxel, the Cursor readout names the hovered cell and colour, and dragging orbits in every tool without editing."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Export of the sample begins with '# voxels 310', '2 0 2 1', '3 0 2 1' and lists every voxel sorted by y, then z, then x."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Import rejects '1 1 1 2' / '2 2 2 9' with 'Line 2: out of range' and changes nothing, and importing '0 0 0 3', '1 0 0 3', '5 5 5 8' gives 'Voxels 3 · Faces 16 · Components 2 · Size 6×6×6'."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Edits persist across a reload, redo re-applies an undone step, and 'Load sample' and 'Clear' work (Clear gives 0 voxels and Size 0×0×0)."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The build volume and model are fully in view at load, and the toolbar, palette, stats and export/import panels do not overlap the model or each other."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A clean editor look: soft shadows, a subtle ground grid, a clearly highlighted active tool and swatch, and legible stats."
+   }
+  ]
+ },
+ {
+  "task_id": "3d-open-17",
+  "category": "3d_scene",
+  "mode": "open_ended",
+  "title": "Flythrough: keyframed camera tour of a monolith garden",
+  "prompt": "Build 'Flythrough', a three.js camera-tour editor for a small monolith garden. The tour must follow the keyframes exactly, because a film crew will reuse the numbers.\n\nScene (metres, Y up): a round stone plaza of radius 16 m on a grassy ground, a central obelisk 8 m tall, and twelve monoliths M1–M12. For k = 0…11, monolith M(k+1) is h = 3 + (k mod 4) m tall, 1.2 m wide and 0.6 m deep, centred at (12·cos(30k°), h/2, −12·sin(30k°)) with its broad face toward the centre and its number carved or painted on that face. Late-afternoon sun with soft shadows and light fog.\n\nTour keyframes (time; camera position; look-at target; vertical fov):\n- K1 0.0 s; (0, 20, 34); (0, 2, 0); 50°\n- K2 2.5 s; (26, 8, 16); (0, 3, 0); 45°\n- K3 5.0 s; (10, 3, −14); (0, 4, 0); 40°\n- K4 6.0 s; (0, 2.5, −7); (−12, 3, 0); 35°\n- K5 9.0 s; (−20, 12, 12); (0, 1, 0); 55°\n- K6 12.0 s; (0, 40, 0.01); (0, 0, 0); 60°\nFor t between Ki and the next keyframe, let u = (t − ti) / (ti+1 − ti). The position is the standard uniform Catmull–Rom spline (tension 0.5) through the previous, current, next and next-but-one keyframe positions evaluated at u; where a neighbour does not exist (before the first or after the last keyframe), use that end keyframe itself. The target and fov are interpolated linearly in u. The tour lasts from the first to the last keyframe time.\n\nInterface:\n- A timeline along the bottom with a ruler, a diamond per keyframe labelled with its name at its time, and a playhead. Clicking or dragging on the timeline scrubs; a 'Time' number input (step 0.01 s) sets t exactly; Play/Pause (also Space); a 'Loop' toggle (on: wrap to the start; off: stop at the end); speeds 0.5×, 1× and 2×.\n- A live readout 'Cam (x, y, z) → (tx, ty, tz) · fov f' (2 decimals for coordinates, 1 for fov) and 'Nearest Mn · d m', the monolith whose centre is closest to the camera and its distance (2 decimals). Every monolith within 6 m of the camera glows.\n- A 320 × 200 overview inset in the bottom-right corner: an orthographic top-down view of the garden showing the tour path as a line, the keyframes as dots, and the tour camera's current position and view frustum, updating live.\n- A 'Free camera' toggle: the main view becomes an orbit camera that also shows the path, keyframe markers and the tour camera's frustum; toggling back returns to the tour view at the current time.\n- A keyframe list (time and position of each). Selecting a keyframe (its row or its diamond) and pressing Delete removes it, refusing with 'Need at least 2 keyframes' when only two remain. In Free camera mode, 'Add keyframe' inserts one at the current time from the free camera's position, target and fov, replacing any keyframe within 0.05 s of it. 'Export' shows the keyframes as JSON. Every change updates the path, the list and the timeline at once.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 720
+  },
+  "checks": {
+   "animation": false
+  },
+  "vendor": [
+   "three"
+  ],
+  "interaction_hints": "Pause if playing, then set t with the Time input (type with its selector; press Enter or Tab if needed) and read the readout (eval may read its text). Expected (±0.01, fov ±0.1): t 0.00 → Cam (0.00, 20.00, 34.00) → (0.00, 2.00, 0.00) · fov 50.0; t 1.00 → (10.54, 15.73, 28.67) → (0.00, 2.40, 0.00) · 48.0, Nearest M11 · 23.02 m; t 4.00 → (17.98, 4.34, −4.09) → (0.00, 3.60, 0.00) · 42.0, Nearest M1 · 7.78 m; t 5.40 → (6.05, 2.00, −14.44) → (−4.80, 3.60, 0.00) · 38.0, Nearest M3 · 4.08 m (only M3 glows); t 7.30 → (−10.10, 4.94, 2.05) → (−6.80, 2.13, 0.00) · 43.7, Nearest M7 · 3.71 m (M7 and M8 glow); t 10.50 → (−11.25, 26.59, 7.19) → (0.00, 0.50, 0.00) · 57.5. A naive single-curve implementation gives about (16.44, 4.07, −6.30) at t 4.00 and a reflected-end spline about (12.42, 14.86, 27.38) at t 1.00; both are wrong. Delete K3 (select its row or diamond, press Delete) → at t 4.00: (18.18, 4.40, 4.29) → (−5.14, 3.00, 0.00) · 40.7. Keep deleting until two remain to see the refusal message. Play from 0 and take screenshots about 1 s apart; with Loop on it must wrap after 12 s. Toggle Free camera and drag to orbit; add a keyframe there and confirm a new diamond and list row appear.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The garden matches the description: a round plaza, a central obelisk and twelve numbered monoliths on a 12 m circle whose heights cycle 3, 4, 5, 6 m starting with M1 at +X, lit by a low sun with soft shadows and light fog."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "At t = 1.00 the readout is Cam (10.54, 15.73, 28.67) → (0.00, 2.40, 0.00) · fov 48.0 and at t = 4.00 it is (17.98, 4.34, −4.09) → (0.00, 3.60, 0.00) · fov 42.0 (±0.01), and the rendered view matches the readout."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "At t = 5.40 the readout is (6.05, 2.00, −14.44) → (−4.80, 3.60, 0.00) · fov 38.0 with 'Nearest M3 · 4.08 m', and at t = 7.30 it is (−10.10, 4.94, 2.05) → (−6.80, 2.13, 0.00) · fov 43.7 with 'Nearest M7 · 3.71 m' (±0.01)."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At t = 10.50 the readout is (−11.25, 26.59, 7.19) → (0.00, 0.50, 0.00) · fov 57.5, and at t = 0 and t = 12 the camera sits exactly on K1 and K6."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Monoliths within 6 m of the camera glow: only M3 at t = 5.40, both M7 and M8 at t = 7.30, and none at t = 1.00."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Deleting K3 updates everything: at t = 4.00 the readout becomes (18.18, 4.40, 4.29) → (−5.14, 3.00, 0.00) · fov 40.7, the K3 diamond, list row and path segment disappear, and the last two keyframes cannot be deleted ('Need at least 2 keyframes')."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Playback runs in real time at 1× (the time readout grows by about 1 s per second), 2× and 0.5× change the rate, Loop wraps from 12 s to 0, and with Loop off playback stops at 12 s."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The overview inset shows the garden from above with the tour path, the keyframe dots and the tour camera's position and frustum moving as the time changes."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Free camera mode orbits by dragging and shows the path, markers and tour frustum in the main view; 'Add keyframe' there adds a diamond and a list row at the current time; 'Export' shows the keyframes as JSON."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The timeline, readouts, keyframe list and inset fit the 1280x720 frame without overlapping each other, and the diamonds sit at positions proportional to their times."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "The tour looks cinematic: smooth motion without jumps at keyframes, warm low-sun lighting with shadows and fog, and a clean, legible editor interface."
+   }
+  ]
+ },
+ {
+  "task_id": "3d-open-18",
+  "category": "3d_scene",
+  "mode": "open_ended",
+  "title": "Quake Cube: 3D earthquake explorer with linked histogram brushing",
+  "prompt": "Build 'Quake Cube', a three.js explorer for the attached quakes.csv: 240 earthquakes in a 100 km × 100 km study area, with columns id, day, x_km (east), y_km (north), depth_km and mag (mag is empty for events whose magnitude is unknown). Copy the CSV next to your page and parse it at runtime; do not hard-code values.\n\n3D view: a transparent box 100 km × 100 km across and 40 km deep, drawn with 2× vertical exaggeration, under a translucent ground surface with a 10 km grid, and axis labels every 20 km for x and y and every 10 km for depth. x_km runs along +X, y_km (north) along −Z, and depth points down. Each event is a sphere at its location with radius 0.6 + 0.5 × (mag − 1.5) km, coloured by depth from yellow at 0 km through orange and red to purple at 40 km; events without a magnitude are small grey cubes.\n\nLinked filters:\n- A histogram panel of the events that have a magnitude, in 0.5-wide bins from 1.5 to 5.5 (each bin includes its lower edge; 5.5 goes into the last bin), with the count above each bar. Dragging across the histogram brushes a contiguous range of whole bins and shows it as, for example, 'M 3.0–4.5'; clicking without dragging clears the brush. While a magnitude brush is active, events without a magnitude are excluded.\n- 'Depth from' and 'to' number inputs in km (inclusive; defaults 0 and 40).\n- A 'Region' tool, used in the Top view: drag a rectangle on the ground whose corners snap to multiples of 5 km; it is drawn as a translucent column through the box and reported as 'Region x 20–45 km · y 10–30 km' (bounds inclusive). 'Clear region' removes it.\nAll active filters combine. Events outside the selection fade to about 10% opacity, and each histogram bar shows its selected part over its total.\n\nSelection stats: 'Selected N of 240', 'Mean depth D km' (1 decimal), 'Largest M m (Q-123)' (ties go to the earlier row), and 'b-value B (n = K)' from Aki's maximum-likelihood estimate b = log10(e) / (mean magnitude − (2.0 − 0.05)) over the selected events with magnitude ≥ 2.0, with 2 decimals, or 'b-value — (n = K)' when K < 10.\n\nAlso:\n- Clicking an event highlights it and shows 'Q-042 · day 117.4 · M 3.4 · depth 12.6 km · x 48.3 · y 41.7'.\n- 'Replay' clears the view and brings the events back in day order over 12 s with a 'Day N' counter and a brief expanding ring for each new event.\n- Camera buttons 'Perspective' (the default, in which dragging orbits and the wheel zooms), 'Top' and 'South' (a side view from the south that shows the depth profile), with smooth transitions.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 720
+  },
+  "checks": {
+   "animation": false
+  },
+  "vendor": [
+   "three"
+  ],
+  "assets": [
+   "quakes.csv"
+  ],
+  "interaction_hints": "The CSV is at /grader/task/quakes.csv (Q-026 and Q-208 have no magnitude). You may use eval to read the stats text. No filters: Selected 240 of 240, Mean depth 14.5 km, Largest M 5.2 (Q-066), b-value 0.86 (n = 79); histogram bars 159, 50, 19, 7, 1, 0, 1, 1 for bins 1.5, 2.0, … 5.0. Brush by dragging across the histogram bars (find them in a screenshot): 3.0–4.5 → Selected 8, Mean depth 12.7 km, Largest M 3.6 (Q-038), b-value — (n = 8); 2.5–5.5 → Selected 29, Mean depth 15.8 km, Largest M 5.2 (Q-066), b-value 0.42 (n = 29). Depth from 10 to 20 (type into the inputs with their selectors; include events at exactly 10.0): Selected 65, Mean depth 15.0 km, b-value 0.59 (n = 21); combined with the 2.5–5.5 brush: Selected 10, Mean depth 15.2 km, b-value 0.32 (n = 10). Region (clear the brush, reset depth to 0–40, click Top, choose the Region tool and drag on the ground; adjust until the readout says x 60–85 km · y 10–40 km): Selected 62, Mean depth 5.6 km, Largest M 3.2 (Q-172), b-value 1.21 (n = 13); plus depth 0–5 (events at exactly 5.0 included): Selected 43, Mean depth 4.0 km, Largest M 2.9 (Q-132), b-value 1.74 (n = 10). The largest sphere is Q-066: click it for 'Q-066 · day 118.4 · M 5.2 · depth 17.2 km · x 48.3 · y 41.7'. Click Replay and take screenshots at about 3 s and 8 s (partial set, Day counter rising).",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The 3D view shows a transparent 100 × 100 km box with exaggerated depth, a gridded ground surface and labelled axes; events are depth-coloured spheres sized by magnitude, with the two magnitude-less events as grey cubes, and a dipping band of events plus a shallow cluster are visible."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Unfiltered stats read 'Selected 240 of 240', 'Mean depth 14.5 km', 'Largest M 5.2 (Q-066)' and 'b-value 0.86 (n = 79)', and the histogram bars read 159, 50, 19, 7, 1, 0, 1, 1 from the 1.5 bin to the 5.0 bin."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Brushing 3.0–4.5 gives 'Selected 8 of 240', 'Mean depth 12.7 km', 'Largest M 3.6 (Q-038)' and 'b-value — (n = 8)'; brushing 2.5–5.5 gives 29 selected, 15.8 km and 'b-value 0.42 (n = 29)'; non-selected events fade in the 3D view."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Depth 10–20 gives 'Selected 65 of 240', 'Mean depth 15.0 km' and 'b-value 0.59 (n = 21)', and combined with the 2.5–5.5 brush 'Selected 10 of 240', 'Mean depth 15.2 km' and 'b-value 0.32 (n = 10)'."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "A Region x 60–85 km · y 10–40 km drawn in the Top view (snapped to 5 km and shown as a translucent column) gives 'Selected 62 of 240', 'Mean depth 5.6 km', 'Largest M 3.2 (Q-172)' and 'b-value 1.21 (n = 13)'; adding depth 0–5 gives 43, 4.0 km, 'Largest M 2.9 (Q-132)' and 'b-value 1.74 (n = 10)'."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Histogram bars show their selected part over the total while filters are active, and clicking the histogram without dragging clears the brush."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Clicking the largest sphere highlights it and shows 'Q-066 · day 118.4 · M 5.2 · depth 17.2 km · x 48.3 · y 41.7'."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Replay brings the events back in day order over about 12 s with a rising Day counter and an expanding ring for each new event."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "'Top' and 'South' move the camera smoothly to a map view and a depth-profile view (where the dipping band is obvious), and in Perspective dragging orbits and the wheel zooms."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The box, histogram, filters and stats fit the 1280x720 frame without overlapping each other, and axis labels are legible."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "It reads as a polished scientific visualisation: a clear depth colour ramp with a legend, well-lit spheres, and consistent typography across the panels."
+   }
+  ]
+ },
+ {
+  "task_id": "3d-rep-03",
+  "category": "3d_scene",
+  "mode": "replication",
+  "title": "Recreate a studio product shot of material samples",
+  "prompt": "Recreate the attached render as a three.js scene at 1280x720: a studio product shot of material samples. A seamless light grey studio sweep (the floor curves smoothly up into a back wall, with no visible horizon line) fills the frame. On it:\n- front left: a polished gold sphere;\n- back centre: a low dark charcoal round plinth carrying a mirror-chrome torus knot (a 2,3 knot, tilted slightly);\n- back right: a matte terracotta vase turned on a lathe, with a wide belly, a narrow neck and a flared lip;\n- front centre: a clear glass ball that refracts the floor behind it;\n- front right: a stack of three rounded cubes that get smaller toward the top, each slightly twisted: mint green at the bottom, cream in the middle and coral on top;\n- a small matte black ring lying flat on the floor in front of the gold sphere.\nThe metals reflect a soft, neutral studio environment. A warm key light from the upper left front casts soft shadows toward the back right, and a cool rim light comes from the back right. The camera is a slightly elevated front view with a fairly long lens, so perspective is gentle. Match object positions, sizes, colours, materials, lighting and camera framing as closely as you can, and render a single still frame (no animation is needed).",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 720
+  },
+  "vendor": [
+   "three"
+  ],
+  "reference_images": [
+   "reference.png"
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The composition matches: all six objects are present at the same places in the frame (gold sphere front left, plinth with torus knot back centre, vase back right, glass ball front centre, block stack front right, ring in front of the gold sphere) at similar sizes."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The backdrop matches: a light grey seamless sweep whose floor curves up into the back wall with no hard horizon edge, filling the whole frame as in the target."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Materials match: a polished gold sphere and a mirror-chrome torus knot that visibly reflect a studio environment, a matte terracotta vase, and a transparent glass ball that refracts what is behind it."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The torus knot is a 2,3 knot of similar thickness, standing on a dark round plinth, tilted as in the target."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The vase silhouette matches: a wide rounded belly, a narrow neck and a flared lip, and it is the tallest object in the scene."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The block stack matches: three rounded cubes shrinking upward, mint green, cream and coral from bottom to top, each twisted a little relative to the one below."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Lighting matches: a warm key light from the upper left front with soft shadows falling toward the back right on the sweep, and a cool rim highlight on the right-hand edges."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Camera framing matches: a slightly elevated front view with a long lens (gentle perspective), objects at the same heights in the frame."
+   },
+   {
+    "id": "F9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The scene is built from three.js meshes and lights rendered to a WebGL canvas, not drawn in 2D or copied from the target image."
+   }
+  ]
+ },
+ {
+  "task_id": "3d-rep-04",
+  "category": "3d_scene",
+  "mode": "replication",
+  "title": "Recreate an isometric floating island diorama",
+  "prompt": "Recreate the attached render as a three.js scene at 1280x720: a low-poly diorama of a floating island, drawn with a true isometric orthographic camera (no perspective; the island's square top appears as a diamond) over a light-blue vertical sky gradient.\n- The top is a 10 × 10 grid of square tiles in two alternating greens (a checkerboard). A brown ploughed field with rows of yellow-green crops fills a 4 × 3 block at the back left, and a sandy path runs from the cottage toward the bridge.\n- A blue river enters from the right-hand edge, bends and ends in a 2 × 2 pond left of centre; where it leaves the island a waterfall pours down the right side. A small wooden bridge with rails crosses it.\n- Under the grass is a brown soil slab, then grey rock layers that step inward and end in a pointed rock tip.\n- A white windmill with a red conical cap and four cloth sails stands at the back right, and a cream cottage with a red pyramid roof, a chimney, a door and windows at the front left.\n- Round low-poly trees and two-tier conifers are scattered over the grass.\n- Three puffy white clouds and two small floating rocks drift around the island.\nEverything is flat-shaded, lit by a sun from the upper left that casts crisp shadows. Match object positions, sizes, colours, lighting and camera framing as closely as you can, and render a single still frame (no animation is needed).",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 720
+  },
+  "vendor": [
+   "three"
+  ],
+  "reference_images": [
+   "reference.png"
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The projection matches: a true isometric orthographic view (parallel edges stay parallel, the square top is a diamond whose left and right corners are level), with the island at the same size and position in the frame."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The top matches: a 10 × 10 checkerboard of two greens, the brown crop field in the back-left 4 × 3 block, the sandy path, and a river from the right edge bending into a 2 × 2 pond left of centre."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "A waterfall pours down the right side where the river leaves the island, and a wooden bridge with rails crosses the river."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The underside matches: a brown soil slab over grey rock layers stepping inward to a pointed tip, with a similar depth below the grass."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "A white windmill with a red conical cap and four sails stands at the back right, and a cream cottage with a red pyramid roof and chimney at the front left."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Round trees and two-tier conifers stand in similar places, and three white clouds and two floating rocks sit around the island as in the target."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Lighting and style match: flat-shaded low-poly faces, a sun from the upper left and crisp shadows cast by the windmill, cottage and trees onto the grass."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The background is a light-blue vertical gradient, darker at the top, as in the target."
+   },
+   {
+    "id": "F9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The scene is built from three.js meshes and lights rendered to a WebGL canvas, not drawn in 2D or copied from the target image."
+   }
+  ]
+ }
+]

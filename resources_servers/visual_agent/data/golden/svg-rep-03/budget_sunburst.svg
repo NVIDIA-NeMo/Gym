@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 820" width="1100" height="820">
+<defs>
+ <radialGradient id="hub" cx="0.5" cy="0.4" r="0.6"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#eef1f5"/></radialGradient>
+ <pattern id="dots" width="12" height="12" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.2" fill="#d4d9e1"/></pattern>
+ <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#1b2a3a" flood-opacity="0.18"/></filter>
+</defs>
+<rect width="1100" height="820" fill="#f7f5f0"/>
+<rect x="780" y="0" width="320" height="820" fill="url(#dots)"/>
+<g id="title" font-family="Lato, sans-serif">
+ <text x="40" y="58" font-size="30" font-weight="900" fill="#1f2d3d">Brookhaven 2026 budget</text>
+ <text x="40" y="86" font-size="16" fill="#5f6b7a">Operating spending by department and program, $ millions</text>
+</g>
+<g id="sunburst" filter="url(#shadow)">
+ <path id="dept-0" d="M394 256 A190 190 0 0 1 580.2 472.2 L483.1 458.7 A92 92 0 0 0 393 354 Z" fill="#c8414f"/>
+ <path d="M395 158 A288 288 0 0 1 636.6 294 L556.8 343.6 A194 194 0 0 0 394 252 Z" fill="#d9606c"/>
+ <path d="M639.7 299.1 A288 288 0 0 1 680 447.7 L586 447.2 A194 194 0 0 0 558.9 347.1 Z" fill="#e58690"/>
+ <path d="M679.9 453.8 A288 288 0 0 1 677.2 485.7 L584.1 472.8 A194 194 0 0 0 585.9 451.2 Z" fill="#f0b0b6"/>
+ <path id="dept-1" d="M579.6 476.1 A190 190 0 0 1 368.9 634.6 L380.8 537.3 A92 92 0 0 0 482.8 460.6 Z" fill="#1b7f8e"/>
+ <path d="M676.4 491.7 A288 288 0 0 1 461 725.6 L438.5 634.3 A194 194 0 0 0 583.5 476.8 Z" fill="#2f98a7"/>
+ <path d="M455.1 727 A288 288 0 0 1 404.5 733.7 L400.4 639.8 A194 194 0 0 0 434.5 635.3 Z" fill="#62b5c1"/>
+ <path d="M398.5 733.9 A288 288 0 0 1 357 731.9 L368.4 638.6 A194 194 0 0 0 396.4 640 Z" fill="#9ad0d8"/>
+ <path id="dept-2" d="M365 634.1 A190 190 0 0 1 204.4 476.1 L301.2 460.6 A92 92 0 0 0 378.9 537.1 Z" fill="#d99a2b"/>
+ <path d="M351 731.1 A288 288 0 0 1 202.7 663.1 L264.5 592.2 A194 194 0 0 0 364.4 638 Z" fill="#e5b04e"/>
+ <path d="M198.2 659.1 A288 288 0 0 1 129.5 564.4 L215.2 525.8 A194 194 0 0 0 261.5 589.5 Z" fill="#edc67d"/>
+ <path d="M127.1 558.9 A288 288 0 0 1 107.6 491.7 L200.5 476.8 A194 194 0 0 0 213.5 522.1 Z" fill="#f4dcab"/>
+ <path id="dept-3" d="M203.8 472.2 A190 190 0 0 1 259.6 309.7 L327.9 380 A92 92 0 0 0 300.9 458.7 Z" fill="#35608f"/>
+ <path d="M106.8 485.7 A288 288 0 0 1 120.2 350.8 L208.9 381.9 A194 194 0 0 0 199.9 472.8 Z" fill="#4d7aab"/>
+ <path d="M122.2 345.2 A288 288 0 0 1 160 275.3 L235.7 331 A194 194 0 0 0 210.3 378.1 Z" fill="#7b9dc4"/>
+ <path d="M163.7 270.5 A288 288 0 0 1 191.3 239.5 L256.8 306.9 A194 194 0 0 0 238.2 327.8 Z" fill="#aac0db"/>
+ <path id="dept-4" d="M262.5 307 A190 190 0 0 1 390 256 L391 354 A92 92 0 0 0 329.3 378.7 Z" fill="#5e9a5f"/>
+ <path d="M195.7 235.3 A288 288 0 0 1 304.7 171.6 L333.2 261.1 A194 194 0 0 0 259.7 304.1 Z" fill="#77b278"/>
+ <path d="M310.4 169.8 A288 288 0 0 1 351 160.9 L364.4 254 A194 194 0 0 0 337.1 259.9 Z" fill="#9ac99a"/>
+ <path d="M357 160.1 A288 288 0 0 1 389 158 L390 252 A194 194 0 0 0 368.4 253.4 Z" fill="#c0dfc0"/>
+</g>
+<circle cx="392" cy="446" r="86" fill="url(#hub)" stroke="#dfe4ea" stroke-width="2"/>
+<g font-family="Lato, sans-serif" text-anchor="middle"><text x="392" y="450" font-size="36" font-weight="900" fill="#1f2d3d">$1.90B</text><text x="392" y="474" font-size="13" fill="#5f6b7a" letter-spacing="2">TOTAL</text></g>
+<defs>
+ <path id="ia-0" d="M392 310 A136 136 0 0 1 526.5 466.2"/>
+ <path id="ib-0" d="M392 330 A116 116 0 0 1 506.7 463.2"/>
+ <path id="ia-1" d="M372.6 591.7 A147 147 0 0 0 537.4 467.8"/>
+ <path id="ib-1" d="M370 611.5 A167 167 0 0 0 557.2 470.8"/>
+ <path id="ia-2" d="M246.6 467.8 A147 147 0 0 0 372.6 591.7"/>
+ <path id="ib-2" d="M226.8 470.8 A167 167 0 0 0 370 611.5"/>
+ <path id="ia-3" d="M257.5 466.2 A136 136 0 0 1 298.2 347.5"/>
+ <path id="ib-3" d="M277.3 463.2 A116 116 0 0 1 312 362"/>
+ <path id="ia-4" d="M298.2 347.5 A136 136 0 0 1 392 310"/>
+ <path id="ib-4" d="M312 362 A116 116 0 0 1 392 330"/>
+</defs>
+<g id="dept-labels" font-family="Lato, sans-serif" fill="#ffffff" text-anchor="middle">
+ <text font-size="14" font-weight="700"><textPath href="#ia-0" startOffset="50%">Public Safety</textPath></text>
+ <text font-size="12" font-weight="400" fill-opacity="0.9"><textPath href="#ib-0" startOffset="50%">$520M · 27.4%</textPath></text>
+ <text font-size="14" font-weight="700"><textPath href="#ia-1" startOffset="50%">Education</textPath></text>
+ <text font-size="12" font-weight="400" fill-opacity="0.9"><textPath href="#ib-1" startOffset="50%">$470M · 24.7%</textPath></text>
+ <text font-size="14" font-weight="700"><textPath href="#ia-2" startOffset="50%">Infrastructure</textPath></text>
+ <text font-size="12" font-weight="400" fill-opacity="0.9"><textPath href="#ib-2" startOffset="50%">$390M · 20.5%</textPath></text>
+ <text font-size="14" font-weight="700"><textPath href="#ia-3" startOffset="50%">Health &amp; Social</textPath></text>
+ <text font-size="12" font-weight="400" fill-opacity="0.9"><textPath href="#ib-3" startOffset="50%">$290M · 15.3%</textPath></text>
+ <text font-size="14" font-weight="700"><textPath href="#ia-4" startOffset="50%">Parks &amp; Culture</textPath></text>
+ <text font-size="12" font-weight="400" fill-opacity="0.9"><textPath href="#ib-4" startOffset="50%">$230M · 12.1%</textPath></text>
+</g>
+<g id="program-labels" font-family="Lato, sans-serif" font-size="13" fill="#2f3b4a">
+ <polyline points="534.7,192.4 541.1,181.1 704,181.1" fill="none" stroke="#c8414f" stroke-width="1.5"/>
+ <text x="710" y="185.6" text-anchor="start"><tspan font-weight="700">Police</tspan> <tspan fill="#6b7686">310</tspan></text>
+ <polyline points="672.9,369.9 685.4,366.5 704,366.5" fill="none" stroke="#c8414f" stroke-width="1.5"/>
+ <text x="710" y="371" text-anchor="start"><tspan font-weight="700">Fire</tspan> <tspan fill="#6b7686">170</tspan></text>
+ <polyline points="682,470 695,471.1 704,471.1" fill="none" stroke="#c8414f" stroke-width="1.5"/>
+ <text x="710" y="475.6" text-anchor="start"><tspan font-weight="700">Emergency</tspan> <tspan fill="#6b7686">40</tspan></text>
+ <polyline points="606.1,643.1 615.7,651.9 704,651.9" fill="none" stroke="#1b7f8e" stroke-width="1.5"/>
+ <text x="710" y="656.4" text-anchor="start"><tspan font-weight="700">Schools</tspan> <tspan fill="#6b7686">360</tspan></text>
+ <polyline points="430.4,734.5 432.1,747.3 704,747.3" fill="none" stroke="#1b7f8e" stroke-width="1.5"/>
+ <text x="710" y="751.8" text-anchor="start"><tspan font-weight="700">Libraries</tspan> <tspan fill="#6b7686">60</tspan></text>
+ <polyline points="377.6,736.6 376.9,749.6 80,749.6" fill="none" stroke="#1b7f8e" stroke-width="1.5"/>
+ <text x="74" y="754.1" text-anchor="end"><tspan font-weight="700">Adult ed</tspan> <tspan fill="#6b7686">50</tspan></text>
+ <polyline points="270.7,710.5 265.3,722.3 80,722.3" fill="none" stroke="#d99a2b" stroke-width="1.5"/>
+ <text x="74" y="726.8" text-anchor="end"><tspan font-weight="700">Roads</tspan> <tspan fill="#6b7686">180</tspan></text>
+ <polyline points="156.6,617 146.1,624.7 80,624.7" fill="none" stroke="#d99a2b" stroke-width="1.5"/>
+ <text x="74" y="629.2" text-anchor="end"><tspan font-weight="700">Water</tspan> <tspan fill="#6b7686">130</tspan></text>
+ <polyline points="112.4,526.7 99.9,530.3 80,530.3" fill="none" stroke="#d99a2b" stroke-width="1.5"/>
+ <text x="74" y="534.8" text-anchor="end"><tspan font-weight="700">Transit</tspan> <tspan fill="#6b7686">80</tspan></text>
+ <polyline points="102.4,417.2 89.5,415.9 80,415.9" fill="none" stroke="#35608f" stroke-width="1.5"/>
+ <text x="74" y="420.4" text-anchor="end"><tspan font-weight="700">Clinics</tspan> <tspan fill="#6b7686">150</tspan></text>
+ <polyline points="136.1,307.5 124.6,301.3 80,301.3" fill="none" stroke="#35608f" stroke-width="1.5"/>
+ <text x="74" y="305.8" text-anchor="end"><tspan font-weight="700">Housing</tspan> <tspan fill="#6b7686">90</tspan></text>
+ <polyline points="174.7,252.5 165,243.8 80,243.8" fill="none" stroke="#35608f" stroke-width="1.5"/>
+ <text x="74" y="248.3" text-anchor="end"><tspan font-weight="700">Seniors</tspan> <tspan fill="#6b7686">50</tspan></text>
+ <polyline points="245.1,194.8 238.6,183.6 80,183.6" fill="none" stroke="#5e9a5f" stroke-width="1.5"/>
+ <text x="74" y="188.1" text-anchor="end"><tspan font-weight="700">Parks</tspan> <tspan fill="#6b7686">140</tspan></text>
+ <polyline points="329.9,161.7 327.2,161.7 80,161.7" fill="none" stroke="#5e9a5f" stroke-width="1.5"/>
+ <text x="74" y="166.2" text-anchor="end"><tspan font-weight="700">Museums</tspan> <tspan fill="#6b7686">50</tspan></text>
+ <polyline points="372.8,155.6 371.9,142.7 80,142.7" fill="none" stroke="#5e9a5f" stroke-width="1.5"/>
+ <text x="74" y="147.2" text-anchor="end"><tspan font-weight="700">Events</tspan> <tspan fill="#6b7686">40</tspan></text>
+</g>
+<g id="table" font-family="Lato, sans-serif">
+ <rect x="800" y="120" width="270" height="660" rx="14" fill="#ffffff" stroke="#e3e6eb"/>
+ <text x="820" y="156" font-size="15" font-weight="900" fill="#1f2d3d" letter-spacing="1">DEPARTMENTS</text>
+ <rect x="820" y="177" width="16" height="16" rx="4" fill="#c8414f"/>
+ <text x="846" y="190" font-size="15" font-weight="700" fill="#1f2d3d">Public Safety</text>
+ <text x="1050" y="190" font-size="15" font-weight="700" fill="#1f2d3d" text-anchor="end">520</text>
+ <rect x="846" y="200" width="204" height="6" rx="3" fill="#edf0f3"/><rect x="846" y="200" width="204" height="6" rx="3" fill="#c8414f"/>
+ <circle cx="852" cy="222" r="4" fill="#d9606c"/><text x="864" y="226" font-size="13" fill="#4a5563">Police</text><text x="1050" y="226" font-size="13" fill="#4a5563" text-anchor="end">310</text>
+ <circle cx="852" cy="242" r="4" fill="#e58690"/><text x="864" y="246" font-size="13" fill="#4a5563">Fire</text><text x="1050" y="246" font-size="13" fill="#4a5563" text-anchor="end">170</text>
+ <circle cx="852" cy="262" r="4" fill="#f0b0b6"/><text x="864" y="266" font-size="13" fill="#4a5563">Emergency</text><text x="1050" y="266" font-size="13" fill="#4a5563" text-anchor="end">40</text>
+ <rect x="820" y="295" width="16" height="16" rx="4" fill="#1b7f8e"/>
+ <text x="846" y="308" font-size="15" font-weight="700" fill="#1f2d3d">Education</text>
+ <text x="1050" y="308" font-size="15" font-weight="700" fill="#1f2d3d" text-anchor="end">470</text>
+ <rect x="846" y="318" width="204" height="6" rx="3" fill="#edf0f3"/><rect x="846" y="318" width="184.4" height="6" rx="3" fill="#1b7f8e"/>
+ <circle cx="852" cy="340" r="4" fill="#2f98a7"/><text x="864" y="344" font-size="13" fill="#4a5563">Schools</text><text x="1050" y="344" font-size="13" fill="#4a5563" text-anchor="end">360</text>
+ <circle cx="852" cy="360" r="4" fill="#62b5c1"/><text x="864" y="364" font-size="13" fill="#4a5563">Libraries</text><text x="1050" y="364" font-size="13" fill="#4a5563" text-anchor="end">60</text>
+ <circle cx="852" cy="380" r="4" fill="#9ad0d8"/><text x="864" y="384" font-size="13" fill="#4a5563">Adult ed</text><text x="1050" y="384" font-size="13" fill="#4a5563" text-anchor="end">50</text>
+ <rect x="820" y="413" width="16" height="16" rx="4" fill="#d99a2b"/>
+ <text x="846" y="426" font-size="15" font-weight="700" fill="#1f2d3d">Infrastructure</text>
+ <text x="1050" y="426" font-size="15" font-weight="700" fill="#1f2d3d" text-anchor="end">390</text>
+ <rect x="846" y="436" width="204" height="6" rx="3" fill="#edf0f3"/><rect x="846" y="436" width="153" height="6" rx="3" fill="#d99a2b"/>
+ <circle cx="852" cy="458" r="4" fill="#e5b04e"/><text x="864" y="462" font-size="13" fill="#4a5563">Roads</text><text x="1050" y="462" font-size="13" fill="#4a5563" text-anchor="end">180</text>
+ <circle cx="852" cy="478" r="4" fill="#edc67d"/><text x="864" y="482" font-size="13" fill="#4a5563">Water</text><text x="1050" y="482" font-size="13" fill="#4a5563" text-anchor="end">130</text>
+ <circle cx="852" cy="498" r="4" fill="#f4dcab"/><text x="864" y="502" font-size="13" fill="#4a5563">Transit</text><text x="1050" y="502" font-size="13" fill="#4a5563" text-anchor="end">80</text>
+ <rect x="820" y="531" width="16" height="16" rx="4" fill="#35608f"/>
+ <text x="846" y="544" font-size="15" font-weight="700" fill="#1f2d3d">Health &amp; Social</text>
+ <text x="1050" y="544" font-size="15" font-weight="700" fill="#1f2d3d" text-anchor="end">290</text>
+ <rect x="846" y="554" width="204" height="6" rx="3" fill="#edf0f3"/><rect x="846" y="554" width="113.8" height="6" rx="3" fill="#35608f"/>
+ <circle cx="852" cy="576" r="4" fill="#4d7aab"/><text x="864" y="580" font-size="13" fill="#4a5563">Clinics</text><text x="1050" y="580" font-size="13" fill="#4a5563" text-anchor="end">150</text>
+ <circle cx="852" cy="596" r="4" fill="#7b9dc4"/><text x="864" y="600" font-size="13" fill="#4a5563">Housing</text><text x="1050" y="600" font-size="13" fill="#4a5563" text-anchor="end">90</text>
+ <circle cx="852" cy="616" r="4" fill="#aac0db"/><text x="864" y="620" font-size="13" fill="#4a5563">Seniors</text><text x="1050" y="620" font-size="13" fill="#4a5563" text-anchor="end">50</text>
+ <rect x="820" y="649" width="16" height="16" rx="4" fill="#5e9a5f"/>
+ <text x="846" y="662" font-size="15" font-weight="700" fill="#1f2d3d">Parks &amp; Culture</text>
+ <text x="1050" y="662" font-size="15" font-weight="700" fill="#1f2d3d" text-anchor="end">230</text>
+ <rect x="846" y="672" width="204" height="6" rx="3" fill="#edf0f3"/><rect x="846" y="672" width="90.2" height="6" rx="3" fill="#5e9a5f"/>
+ <circle cx="852" cy="694" r="4" fill="#77b278"/><text x="864" y="698" font-size="13" fill="#4a5563">Parks</text><text x="1050" y="698" font-size="13" fill="#4a5563" text-anchor="end">140</text>
+ <circle cx="852" cy="714" r="4" fill="#9ac99a"/><text x="864" y="718" font-size="13" fill="#4a5563">Museums</text><text x="1050" y="718" font-size="13" fill="#4a5563" text-anchor="end">50</text>
+ <circle cx="852" cy="734" r="4" fill="#c0dfc0"/><text x="864" y="738" font-size="13" fill="#4a5563">Events</text><text x="1050" y="738" font-size="13" fill="#4a5563" text-anchor="end">40</text>
+ <line x1="820" y1="762" x2="1050" y2="762" stroke="#d6dbe1"/>
+ <text x="820" y="784" font-size="15" font-weight="900" fill="#1f2d3d">Total</text><text x="1050" y="784" font-size="15" font-weight="900" fill="#1f2d3d" text-anchor="end">1,900</text>
+</g>
+<text x="40" y="796" font-family="Lato, sans-serif" font-size="12" fill="#8a94a3">Source: Brookhaven Office of Budget &amp; Management, adopted budget FY2026</text>
+</svg>

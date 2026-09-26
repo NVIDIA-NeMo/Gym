@@ -1,0 +1,43 @@
+campaign_id,month,channel,campaign,spend_usd,clicks,orders,revenue_usd,new_customers
+FW-001,2026-01,Paid Search,Brand terms,20100,14244,676,81197,260
+FW-002,2026-01,Paid Search,Tents and shelters,20890,15440,663,78934,247
+FW-003,2026-01,Paid Social,Trail stories video,12120,13479,222,31274,120
+FW-004,2026-01,Paid Social,Retargeting carousel,14750,14134,394,52901,233
+FW-005,2026-01,Affiliate,Gear review partners,10770,8840,289,36393,114
+FW-006,2026-01,Email,Weekly field notes,2130,6485,175,21531,16
+FW-007,2026-01,Display,Prospecting banners,13000,23303,189,22582,118
+FW-008,2026-02,Paid Search,Brand terms,19270,14591,844,106993,329
+FW-009,2026-02,Paid Search,Tents and shelters,24260,16512,790,108622,277
+FW-010,2026-02,Paid Social,Trail stories video,22380,21865,303,41966,173
+FW-011,2026-02,Paid Social,Retargeting carousel,29870,33285,312,43418,170
+FW-012,2026-02,Affiliate,Gear review partners,8330,7209,202,28112,91
+FW-013,2026-02,Email,Weekly field notes,3570,11241,270,36361,25
+FW-014,2026-02,Display,Prospecting banners,12160,19507,207,27195,156
+FW-015,2026-03,Paid Search,Brand terms,19460,13805,757,110444,315
+FW-016,2026-03,Paid Search,Tents and shelters,24830,17507,999,118534,375
+FW-017,2026-03,Paid Social,Trail stories video,17700,22173,339,47276,184
+FW-018,2026-03,Paid Social,Retargeting carousel,19450,19022,516,62092,310
+FW-019,2026-03,Affiliate,Gear review partners,10400,8628,409,58111,168
+FW-020,2026-03,Email,Weekly field notes,3330,9953,244,35266,20
+FW-021,2026-03,Display,Prospecting banners,11110,21957,136,17940,101
+FW-022,2026-04,Paid Search,Brand terms,27220,20665,788,101112,305
+FW-023,2026-04,Paid Search,Tents and shelters,45780,33754,1926,260555,771
+FW-024,2026-04,Paid Social,Trail stories video,17010,17057,501,71368,333
+FW-025,2026-04,Paid Social,Retargeting carousel,25350,31274,604,81997,320
+FW-026,2026-04,Affiliate,Gear review partners,7320,7405,223,28417,85
+FW-027,2026-04,Email,Weekly field notes,2800,10601,204,26129,16
+FW-028,2026-04,Display,Prospecting banners,21830,44369,356,44497,245
+FW-029,2026-05,Paid Search,Brand terms,33160,22235,930,135638,350
+FW-030,2026-05,Paid Search,Tents and shelters,36720,30886,1146,146259,405
+FW-031,2026-05,Paid Social,Trail stories video,39970,50699,774,111983,476
+FW-032,2026-05,Paid Social,Retargeting carousel,21360,27056,570,75629,398
+FW-033,2026-05,Affiliate,Gear review partners,16000,15668,648,83059,257
+FW-034,2026-05,Email,Weekly field notes,5010,15410,469,59652,39
+FW-035,2026-05,Display,Prospecting banners,23240,38212,406,57090,320
+FW-036,2026-06,Paid Search,Brand terms,42190,31087,1442,184539,471
+FW-037,2026-06,Paid Search,Tents and shelters,22030,17589,726,99715,314
+FW-038,2026-06,Paid Social,Trail stories video,28130,26671,833,120549,487
+FW-039,2026-06,Paid Social,Retargeting carousel,22240,26594,524,64856,332
+FW-040,2026-06,Affiliate,Gear review partners,15580,14251,634,86406,304
+FW-041,2026-06,Email,Weekly field notes,3150,9351,286,39980,28
+FW-042,2026-06,Display,Prospecting banners,17390,29095,215,27434,169

@@ -1,0 +1,290 @@
+{
+ "recipes": [
+  {
+   "id": "oats",
+   "name": "Overnight oats",
+   "servings": 2,
+   "kcal_per_serving": 420,
+   "tags": [
+    "breakfast",
+    "vegetarian"
+   ],
+   "ingredients": [
+    {
+     "qty": 160,
+     "unit": "g",
+     "name": "rolled oats",
+     "aisle": "Pantry"
+    },
+    {
+     "qty": 300,
+     "unit": "ml",
+     "name": "milk",
+     "aisle": "Dairy"
+    },
+    {
+     "qty": 150,
+     "unit": "g",
+     "name": "greek yogurt",
+     "aisle": "Dairy"
+    },
+    {
+     "qty": 2,
+     "unit": "tbsp",
+     "name": "honey",
+     "aisle": "Pantry"
+    },
+    {
+     "qty": 125,
+     "unit": "g",
+     "name": "blueberries",
+     "aisle": "Produce"
+    }
+   ]
+  },
+  {
+   "id": "shakshuka",
+   "name": "Shakshuka",
+   "servings": 4,
+   "kcal_per_serving": 310,
+   "tags": [
+    "breakfast",
+    "vegetarian"
+   ],
+   "ingredients": [
+    {
+     "qty": 8,
+     "unit": "piece",
+     "name": "eggs",
+     "aisle": "Dairy"
+    },
+    {
+     "qty": 800,
+     "unit": "g",
+     "name": "canned tomatoes",
+     "aisle": "Pantry"
+    },
+    {
+     "qty": 1,
+     "unit": "piece",
+     "name": "onion",
+     "aisle": "Produce"
+    },
+    {
+     "qty": 2,
+     "unit": "piece",
+     "name": "red pepper",
+     "aisle": "Produce"
+    },
+    {
+     "qty": 2,
+     "unit": "tbsp",
+     "name": "olive oil",
+     "aisle": "Pantry"
+    },
+    {
+     "qty": 1,
+     "unit": "tsp",
+     "name": "ground cumin",
+     "aisle": "Pantry"
+    },
+    {
+     "qty": 100,
+     "unit": "g",
+     "name": "feta",
+     "aisle": "Dairy"
+    }
+   ]
+  },
+  {
+   "id": "chicken",
+   "name": "Lemon herb chicken",
+   "servings": 4,
+   "kcal_per_serving": 560,
+   "tags": [
+    "dinner"
+   ],
+   "ingredients": [
+    {
+     "qty": 1,
+     "unit": "kg",
+     "name": "chicken thighs",
+     "aisle": "Meat & Fish"
+    },
+    {
+     "qty": 2,
+     "unit": "piece",
+     "name": "lemon",
+     "aisle": "Produce"
+    },
+    {
+     "qty": 3,
+     "unit": "tbsp",
+     "name": "olive oil",
+     "aisle": "Pantry"
+    },
+    {
+     "qty": 4,
+     "unit": "piece",
+     "name": "garlic clove",
+     "aisle": "Produce"
+    },
+    {
+     "qty": 800,
+     "unit": "g",
+     "name": "potatoes",
+     "aisle": "Produce"
+    }
+   ]
+  },
+  {
+   "id": "lentil",
+   "name": "Red lentil soup",
+   "servings": 6,
+   "kcal_per_serving": 290,
+   "tags": [
+    "lunch",
+    "vegan"
+   ],
+   "ingredients": [
+    {
+     "qty": 400,
+     "unit": "g",
+     "name": "red lentils",
+     "aisle": "Pantry"
+    },
+    {
+     "qty": 1.5,
+     "unit": "l",
+     "name": "vegetable stock",
+     "aisle": "Pantry"
+    },
+    {
+     "qty": 2,
+     "unit": "piece",
+     "name": "onion",
+     "aisle": "Produce"
+    },
+    {
+     "qty": 300,
+     "unit": "g",
+     "name": "carrots",
+     "aisle": "Produce"
+    },
+    {
+     "qty": 2,
+     "unit": "tsp",
+     "name": "ground cumin",
+     "aisle": "Pantry"
+    },
+    {
+     "qty": 2,
+     "unit": "tbsp",
+     "name": "olive oil",
+     "aisle": "Pantry"
+    },
+    {
+     "qty": 1,
+     "unit": "piece",
+     "name": "lemon",
+     "aisle": "Produce"
+    }
+   ]
+  },
+  {
+   "id": "salmon",
+   "name": "Salmon rice bowl",
+   "servings": 2,
+   "kcal_per_serving": 640,
+   "tags": [
+    "dinner"
+   ],
+   "ingredients": [
+    {
+     "qty": 300,
+     "unit": "g",
+     "name": "salmon fillet",
+     "aisle": "Meat & Fish"
+    },
+    {
+     "qty": 150,
+     "unit": "g",
+     "name": "jasmine rice",
+     "aisle": "Pantry"
+    },
+    {
+     "qty": 3,
+     "unit": "tbsp",
+     "name": "soy sauce",
+     "aisle": "Pantry"
+    },
+    {
+     "qty": 1,
+     "unit": "piece",
+     "name": "cucumber",
+     "aisle": "Produce"
+    },
+    {
+     "qty": 1,
+     "unit": "piece",
+     "name": "avocado",
+     "aisle": "Produce"
+    },
+    {
+     "qty": 1,
+     "unit": "tbsp",
+     "name": "sesame seeds",
+     "aisle": "Pantry"
+    }
+   ]
+  },
+  {
+   "id": "pancakes",
+   "name": "Banana pancakes",
+   "servings": 3,
+   "kcal_per_serving": 380,
+   "tags": [
+    "breakfast",
+    "vegetarian"
+   ],
+   "ingredients": [
+    {
+     "qty": 200,
+     "unit": "g",
+     "name": "flour",
+     "aisle": "Pantry"
+    },
+    {
+     "qty": 1,
+     "unit": "cup",
+     "name": "milk",
+     "aisle": "Dairy"
+    },
+    {
+     "qty": 2,
+     "unit": "piece",
+     "name": "eggs",
+     "aisle": "Dairy"
+    },
+    {
+     "qty": 2,
+     "unit": "piece",
+     "name": "banana",
+     "aisle": "Produce"
+    },
+    {
+     "qty": 30,
+     "unit": "g",
+     "name": "butter",
+     "aisle": "Dairy"
+    },
+    {
+     "qty": 2,
+     "unit": "tsp",
+     "name": "baking powder",
+     "aisle": "Pantry"
+    }
+   ]
+  }
+ ]
+}

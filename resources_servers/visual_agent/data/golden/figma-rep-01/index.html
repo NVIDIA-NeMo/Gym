@@ -1,0 +1,872 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ledgerline — Invoices</title>
+<style>html,body{margin:0;padding:0;background:#ffffff}.frame{position:relative}#frame-0{width:1280px;height:1148px}@media (max-width:834.98px){#frame-0{display:none}}#frame-1{width:390px;height:1872px}@media (min-width:835px){#frame-1{display:none}}</style>
+</head>
+<body>
+  <div class="frame" id="frame-0">
+    <div data-name="Desktop" style="position:absolute;left:0px;top:0px;width:1280px;height:1148px;box-sizing:border-box;background:linear-gradient(rgba(245,247,250,1.000),rgba(245,247,250,1.000));overflow:hidden">
+      <div data-name="Sidebar" style="position:absolute;left:0px;top:0px;width:248px;height:1148px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000))">
+        <div data-name="Logo" style="position:absolute;left:24px;top:22px;width:139px;height:32px;box-sizing:border-box">
+          <div data-name="Logo mark" style="position:absolute;left:0px;top:0px;width:32px;height:32px;box-sizing:border-box;background:linear-gradient(135.0deg, rgba(59,108,246,1.000) 0.0%, rgba(28,63,174,1.000) 100.0%);border-radius:8.32px">
+            <div data-name="Stroke vertical" style="position:absolute;left:9.92px;top:8px;width:5.12px;height:16px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:1.6px">
+            </div>
+            <div data-name="Stroke base" style="position:absolute;left:9.92px;top:19.2px;width:12.8px;height:4.8px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:1.6px">
+            </div>
+          </div>
+          <div data-name="Wordmark" style="position:absolute;left:42px;top:0px;width:97px;height:32px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:18px;font-weight:700;white-space:pre-wrap;margin:0;line-height:32px;letter-spacing:-0.3px;color:rgba(16,24,40,1.000)"><span>Ledgerline</span></div>
+        </div>
+        <div data-name="Section label / Menu" style="position:absolute;left:24px;top:84px;width:41px;height:15px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:11px;font-weight:600;white-space:pre-wrap;margin:0;line-height:15px;letter-spacing:0.6px;text-transform:uppercase;color:rgba(152,162,179,1.000)"><span>Menu</span></div>
+        <div data-name="Nav item / Dashboard" style="position:absolute;left:12px;top:106px;width:224px;height:40px;box-sizing:border-box;border-radius:8px">
+          <div data-name="Icon / grid" style="position:absolute;left:12px;top:10px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Tile 1" style="position:absolute;left:3px;top:3px;width:6px;height:6px;box-sizing:border-box;border-radius:1.5px;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+            <div data-name="Tile 2" style="position:absolute;left:11px;top:3px;width:6px;height:6px;box-sizing:border-box;border-radius:1.5px;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+            <div data-name="Tile 3" style="position:absolute;left:3px;top:11px;width:6px;height:6px;box-sizing:border-box;border-radius:1.5px;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+            <div data-name="Tile 4" style="position:absolute;left:11px;top:11px;width:6px;height:6px;box-sizing:border-box;border-radius:1.5px;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+          </div>
+          <div data-name="Label" style="position:absolute;left:44px;top:0px;width:79px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(52,64,84,1.000)"><span>Dashboard</span></div>
+        </div>
+        <div data-name="Nav item / Invoices (active)" style="position:absolute;left:12px;top:150px;width:224px;height:40px;box-sizing:border-box;background:linear-gradient(rgba(238,243,255,1.000),rgba(238,243,255,1.000));border-radius:8px">
+          <div data-name="Icon / doc" style="position:absolute;left:12px;top:10px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Page" style="position:absolute;left:4px;top:2px;width:12px;height:16px;box-sizing:border-box;border-radius:2px;box-shadow:inset 0 0 0 1.75px rgba(36,81,214,1.000)">
+            </div>
+            <div data-name="Line 1" style="position:absolute;left:7px;top:7px;width:6px;height:1.6px;box-sizing:border-box;background:linear-gradient(rgba(36,81,214,1.000),rgba(36,81,214,1.000));border-radius:1px">
+            </div>
+            <div data-name="Line 2" style="position:absolute;left:7px;top:10.5px;width:6px;height:1.6px;box-sizing:border-box;background:linear-gradient(rgba(36,81,214,1.000),rgba(36,81,214,1.000));border-radius:1px">
+            </div>
+            <div data-name="Line 3" style="position:absolute;left:7px;top:14px;width:4px;height:1.6px;box-sizing:border-box;background:linear-gradient(rgba(36,81,214,1.000),rgba(36,81,214,1.000));border-radius:1px">
+            </div>
+          </div>
+          <div data-name="Label" style="position:absolute;left:44px;top:0px;width:63px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(28,63,174,1.000)"><span>Invoices</span></div>
+          <div data-name="Count" style="position:absolute;left:188px;top:9px;width:34px;height:22px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:11px;box-shadow:inset 0 0 0 1px rgba(214,226,255,1.000)">
+            <div data-name="Label" style="position:absolute;left:8px;top:0px;width:18px;height:22px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:22px;color:rgba(36,81,214,1.000)"><span>10</span></div>
+          </div>
+        </div>
+        <div data-name="Nav item / Clients" style="position:absolute;left:12px;top:194px;width:224px;height:40px;box-sizing:border-box;border-radius:8px">
+          <div data-name="Icon / users" style="position:absolute;left:12px;top:10px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Head A" style="position:absolute;left:3.5px;top:3.5px;width:6px;height:6px;box-sizing:border-box;border-radius:50%;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+            <div data-name="Body A" style="position:absolute;left:1.5px;top:11px;width:10px;height:6px;box-sizing:border-box;border-radius:5px 5px 1.5px 1.5px;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+            <div data-name="Head B" style="position:absolute;left:11px;top:4.5px;width:5px;height:5px;box-sizing:border-box;border-radius:50%;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+            <div data-name="Body B" style="position:absolute;left:13px;top:11px;width:5.5px;height:6px;box-sizing:border-box;border-radius:1px 4px 1.5px 1px;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+          </div>
+          <div data-name="Label" style="position:absolute;left:44px;top:0px;width:52px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(52,64,84,1.000)"><span>Clients</span></div>
+        </div>
+        <div data-name="Nav item / Payments" style="position:absolute;left:12px;top:238px;width:224px;height:40px;box-sizing:border-box;border-radius:8px">
+          <div data-name="Icon / card" style="position:absolute;left:12px;top:10px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Card" style="position:absolute;left:2px;top:4px;width:16px;height:12px;box-sizing:border-box;border-radius:2px;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+            <div data-name="Stripe" style="position:absolute;left:2px;top:7.5px;width:16px;height:2px;box-sizing:border-box;background:linear-gradient(rgba(102,112,133,1.000),rgba(102,112,133,1.000))">
+            </div>
+          </div>
+          <div data-name="Label" style="position:absolute;left:44px;top:0px;width:72px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(52,64,84,1.000)"><span>Payments</span></div>
+        </div>
+        <div data-name="Nav item / Expenses" style="position:absolute;left:12px;top:282px;width:224px;height:40px;box-sizing:border-box;border-radius:8px">
+          <div data-name="Icon / receipt" style="position:absolute;left:12px;top:10px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Paper" style="position:absolute;left:4px;top:2px;width:12px;height:16px;box-sizing:border-box;border-radius:2px 2px 0px 0px;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+            <div data-name="Line 1" style="position:absolute;left:7px;top:6.5px;width:6px;height:1.6px;box-sizing:border-box;background:linear-gradient(rgba(102,112,133,1.000),rgba(102,112,133,1.000));border-radius:1px">
+            </div>
+            <div data-name="Line 2" style="position:absolute;left:7px;top:10px;width:6px;height:1.6px;box-sizing:border-box;background:linear-gradient(rgba(102,112,133,1.000),rgba(102,112,133,1.000));border-radius:1px">
+            </div>
+          </div>
+          <div data-name="Label" style="position:absolute;left:44px;top:0px;width:71px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(52,64,84,1.000)"><span>Expenses</span></div>
+        </div>
+        <div data-name="Nav item / Reports" style="position:absolute;left:12px;top:326px;width:224px;height:40px;box-sizing:border-box;border-radius:8px">
+          <div data-name="Icon / chart" style="position:absolute;left:12px;top:10px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Bar 1" style="position:absolute;left:3px;top:10px;width:3.5px;height:7px;box-sizing:border-box;background:linear-gradient(rgba(102,112,133,1.000),rgba(102,112,133,1.000));border-radius:1px">
+            </div>
+            <div data-name="Bar 2" style="position:absolute;left:8.25px;top:5px;width:3.5px;height:12px;box-sizing:border-box;background:linear-gradient(rgba(102,112,133,1.000),rgba(102,112,133,1.000));border-radius:1px">
+            </div>
+            <div data-name="Bar 3" style="position:absolute;left:13.5px;top:8px;width:3.5px;height:9px;box-sizing:border-box;background:linear-gradient(rgba(102,112,133,1.000),rgba(102,112,133,1.000));border-radius:1px">
+            </div>
+          </div>
+          <div data-name="Label" style="position:absolute;left:44px;top:0px;width:58px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(52,64,84,1.000)"><span>Reports</span></div>
+        </div>
+        <div data-name="Section label / Workspace" style="position:absolute;left:24px;top:390px;width:83px;height:15px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:11px;font-weight:600;white-space:pre-wrap;margin:0;line-height:15px;letter-spacing:0.6px;text-transform:uppercase;color:rgba(152,162,179,1.000)"><span>Workspace</span></div>
+        <div data-name="Nav item / Team" style="position:absolute;left:12px;top:412px;width:224px;height:40px;box-sizing:border-box;border-radius:8px">
+          <div data-name="Icon / users" style="position:absolute;left:12px;top:10px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Head A" style="position:absolute;left:3.5px;top:3.5px;width:6px;height:6px;box-sizing:border-box;border-radius:50%;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+            <div data-name="Body A" style="position:absolute;left:1.5px;top:11px;width:10px;height:6px;box-sizing:border-box;border-radius:5px 5px 1.5px 1.5px;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+            <div data-name="Head B" style="position:absolute;left:11px;top:4.5px;width:5px;height:5px;box-sizing:border-box;border-radius:50%;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+            <div data-name="Body B" style="position:absolute;left:13px;top:11px;width:5.5px;height:6px;box-sizing:border-box;border-radius:1px 4px 1.5px 1px;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+          </div>
+          <div data-name="Label" style="position:absolute;left:44px;top:0px;width:43px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(52,64,84,1.000)"><span>Team</span></div>
+        </div>
+        <div data-name="Nav item / Billing" style="position:absolute;left:12px;top:456px;width:224px;height:40px;box-sizing:border-box;border-radius:8px">
+          <div data-name="Icon / wallet" style="position:absolute;left:12px;top:10px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Body" style="position:absolute;left:2.5px;top:4.5px;width:15px;height:12px;box-sizing:border-box;border-radius:2.5px;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+            <div data-name="Clasp" style="position:absolute;left:12px;top:8.5px;width:5.5px;height:4px;box-sizing:border-box;border-radius:1.5px;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+          </div>
+          <div data-name="Label" style="position:absolute;left:44px;top:0px;width:46px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(52,64,84,1.000)"><span>Billing</span></div>
+        </div>
+        <div data-name="Nav item / Settings" style="position:absolute;left:12px;top:500px;width:224px;height:40px;box-sizing:border-box;border-radius:8px">
+          <div data-name="Icon / settings" style="position:absolute;left:12px;top:10px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Ring" style="position:absolute;left:2.5px;top:2.5px;width:15px;height:15px;box-sizing:border-box;border-radius:50%;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+            <div data-name="Hub" style="position:absolute;left:7px;top:7px;width:6px;height:6px;box-sizing:border-box;border-radius:50%;box-shadow:inset 0 0 0 1.75px rgba(102,112,133,1.000)">
+            </div>
+          </div>
+          <div data-name="Label" style="position:absolute;left:44px;top:0px;width:61px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(52,64,84,1.000)"><span>Settings</span></div>
+        </div>
+        <div data-name="Plan card" style="position:absolute;left:16px;top:936px;width:216px;height:116px;box-sizing:border-box;background:linear-gradient(rgba(238,243,255,1.000),rgba(238,243,255,1.000));border-radius:12px">
+          <div data-name="Title" style="position:absolute;left:16px;top:16px;width:61px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Pro plan</span></div>
+          <div data-name="Body" style="position:absolute;left:16px;top:40px;width:153px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>7 of 10 team seats used</span></div>
+          <div data-name="Seats track" style="position:absolute;left:16px;top:68px;width:184px;height:8px;box-sizing:border-box;background:linear-gradient(rgba(214,226,255,1.000),rgba(214,226,255,1.000));border-radius:4px">
+          </div>
+          <div data-name="Seats fill" style="position:absolute;left:16px;top:68px;width:129px;height:8px;box-sizing:border-box;background:linear-gradient(rgba(36,81,214,1.000),rgba(36,81,214,1.000));border-radius:4px">
+          </div>
+          <div data-name="Link" style="position:absolute;left:16px;top:86px;width:103px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:600;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(36,81,214,1.000)"><span>Manage plan →</span></div>
+        </div>
+        <div data-name="Divider" style="position:absolute;left:16px;top:1068px;width:216px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        <div data-name="User" style="position:absolute;left:16px;top:1084px;width:216px;height:44px;box-sizing:border-box">
+          <div data-name="Avatar" style="position:absolute;left:0px;top:4px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(135.0deg, rgba(253,162,155,1.000) 0.0%, rgba(249,112,102,1.000) 100.0%);border-radius:18px">
+            <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:36px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(255,255,255,1.000)"><span>NA</span></div>
+          </div>
+          <div data-name="Name" style="position:absolute;left:48px;top:4px;width:94px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Nora Alvarez</span></div>
+          <div data-name="Role" style="position:absolute;left:48px;top:24px;width:78px;height:16px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:400;white-space:pre-wrap;margin:0;line-height:16px;color:rgba(102,112,133,1.000)"><span>Finance lead</span></div>
+          <div data-name="Icon / chev-right" style="position:absolute;left:192px;top:12px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Glyph" style="position:absolute;left:0px;top:0px;width:20px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:20px;font-weight:500;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(152,162,179,1.000)"><span>›</span></div>
+          </div>
+        </div>
+        <div data-name="Border" style="position:absolute;left:247px;top:0px;width:1px;height:1148px;background:rgba(228,231,236,1.000)"></div>
+      </div>
+      <div data-name="Top bar" style="position:absolute;left:248px;top:0px;width:1032px;height:64px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000))">
+        <div data-name="Search" style="position:absolute;left:32px;top:12px;width:360px;height:40px;box-sizing:border-box;background:linear-gradient(rgba(249,250,251,1.000),rgba(249,250,251,1.000));border-radius:8px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000)">
+          <div data-name="Placeholder" style="position:absolute;left:40px;top:0px;width:176px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(152,162,179,1.000)"><span>Search invoices, clients…</span></div>
+          <div data-name="Trailing" style="position:absolute;left:295px;top:0px;width:25px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(152,162,179,1.000)"><span>⌘K</span></div>
+        </div>
+        <div data-name="Search icon" style="position:absolute;left:44px;top:22px;width:20px;height:20px;box-sizing:border-box">
+          <div data-name="Lens" style="position:absolute;left:2.5px;top:2.5px;width:11.5px;height:11.5px;box-sizing:border-box;border-radius:50%;box-shadow:inset 0 0 0 1.75px rgba(152,162,179,1.000)">
+          </div>
+          <div data-name="Handle 1" style="position:absolute;left:12.2px;top:12.2px;width:2.4px;height:2.4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:1.1px">
+          </div>
+          <div data-name="Handle 2" style="position:absolute;left:13.7px;top:13.7px;width:2.4px;height:2.4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:1.1px">
+          </div>
+          <div data-name="Handle 3" style="position:absolute;left:15.2px;top:15.2px;width:2.4px;height:2.4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:1.1px">
+          </div>
+        </div>
+        <div data-name="Icon button / Help" style="position:absolute;left:876px;top:12px;width:40px;height:40px;box-sizing:border-box;border-radius:8px">
+          <div data-name="Icon / help" style="position:absolute;left:10px;top:10px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Ring" style="position:absolute;left:2.5px;top:2.5px;width:15px;height:15px;box-sizing:border-box;border-radius:50%;box-shadow:inset 0 0 0 1.75px rgba(71,84,103,1.000)">
+            </div>
+            <div data-name="Mark" style="position:absolute;left:0px;top:0px;width:20px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:11px;font-weight:700;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(71,84,103,1.000)"><span>?</span></div>
+          </div>
+        </div>
+        <div data-name="Icon button / Notifications" style="position:absolute;left:920px;top:12px;width:40px;height:40px;box-sizing:border-box;border-radius:8px">
+          <div data-name="Icon / bell" style="position:absolute;left:10px;top:10px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Bell" style="position:absolute;left:4px;top:2.5px;width:12px;height:12.5px;box-sizing:border-box;border-radius:6px 6px 1.5px 1.5px;box-shadow:inset 0 0 0 1.75px rgba(71,84,103,1.000)">
+            </div>
+            <div data-name="Rim" style="position:absolute;left:2.5px;top:14px;width:15px;height:1.75px;box-sizing:border-box;background:linear-gradient(rgba(71,84,103,1.000),rgba(71,84,103,1.000));border-radius:1px">
+            </div>
+            <div data-name="Clapper" style="position:absolute;left:8px;top:16px;width:4px;height:3px;box-sizing:border-box;background:linear-gradient(rgba(71,84,103,1.000),rgba(71,84,103,1.000));border-radius:50%">
+            </div>
+          </div>
+          <div data-name="Unread dot" style="position:absolute;left:24px;top:9px;width:8px;height:8px;box-sizing:border-box;background:linear-gradient(rgba(240,68,56,1.000),rgba(240,68,56,1.000));border-radius:50%;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,1.000)">
+          </div>
+        </div>
+        <div data-name="Divider" style="position:absolute;left:972px;top:20px;width:1px;height:24px;background:rgba(228,231,236,1.000)"></div>
+        <div data-name="Avatar" style="position:absolute;left:984px;top:14px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(135.0deg, rgba(253,162,155,1.000) 0.0%, rgba(249,112,102,1.000) 100.0%);border-radius:18px">
+          <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:36px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(255,255,255,1.000)"><span>NA</span></div>
+        </div>
+        <div data-name="Border" style="position:absolute;left:0px;top:63px;width:1032px;height:1px;background:rgba(228,231,236,1.000)"></div>
+      </div>
+      <div data-name="Breadcrumb" style="position:absolute;left:280px;top:92px;width:115px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:500;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>Billing  /  Invoices</span></div>
+      <div data-name="Title" style="position:absolute;left:280px;top:114px;width:126px;height:38px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:30px;font-weight:700;white-space:pre-wrap;margin:0;line-height:38px;letter-spacing:-0.6px;color:rgba(16,24,40,1.000)"><span>Invoices</span></div>
+      <div data-name="Subtitle" style="position:absolute;left:280px;top:156px;width:368px;height:22px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:15px;font-weight:400;white-space:pre-wrap;margin:0;line-height:22px;color:rgba(102,112,133,1.000)"><span>Create, send and track invoices for Halden Studio.</span></div>
+      <div data-name="Button / Export CSV" style="position:absolute;left:960px;top:116px;width:132px;height:40px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:8px;box-shadow:inset 0 0 0 1px rgba(208,213,221,1.000),0px 1px 2px 0px rgba(16,24,40,0.050)">
+        <div data-name="Icon" style="position:absolute;left:11.5px;top:0px;width:18px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:15px;font-weight:500;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(52,64,84,1.000)"><span>↓</span></div>
+        <div data-name="Label" style="position:absolute;left:37.5px;top:0px;width:83px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(52,64,84,1.000)"><span>Export CSV</span></div>
+      </div>
+      <div data-name="Button / New invoice" style="position:absolute;left:1104px;top:116px;width:144px;height:40px;box-sizing:border-box;background:linear-gradient(rgba(36,81,214,1.000),rgba(36,81,214,1.000));border-radius:8px;box-shadow:0px 1px 2px 0px rgba(16,24,40,0.100)">
+        <div data-name="Icon" style="position:absolute;left:15px;top:0px;width:17px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:18px;font-weight:500;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(255,255,255,1.000)"><span>+</span></div>
+        <div data-name="Label" style="position:absolute;left:40px;top:0px;width:89px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:40px;color:rgba(255,255,255,1.000)"><span>New invoice</span></div>
+      </div>
+      <div data-name="KPI / Outstanding" style="position:absolute;left:280px;top:208px;width:230px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Label" style="position:absolute;left:20px;top:20px;width:166px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:500;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>Outstanding</span></div>
+        <div data-name="Value" style="position:absolute;left:20px;top:44px;width:149px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:26px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;letter-spacing:-0.4px;color:rgba(16,24,40,1.000)"><span>$21,746.50</span></div>
+        <div data-name="Note" style="position:absolute;left:20px;top:82px;width:190px;height:17px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:17px;color:rgba(102,112,133,1.000)"><span>5 open invoices</span></div>
+        <div data-name="Icon tile" style="position:absolute;left:178px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(238,243,255,1.000),rgba(238,243,255,1.000));border-radius:10px">
+          <div data-name="Icon / wallet" style="position:absolute;left:8px;top:8px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Body" style="position:absolute;left:2.5px;top:4.5px;width:15px;height:12px;box-sizing:border-box;border-radius:2.5px;box-shadow:inset 0 0 0 1.75px rgba(36,81,214,1.000)">
+            </div>
+            <div data-name="Clasp" style="position:absolute;left:12px;top:8.5px;width:5.5px;height:4px;box-sizing:border-box;border-radius:1.5px;box-shadow:inset 0 0 0 1.75px rgba(36,81,214,1.000)">
+            </div>
+          </div>
+        </div>
+      </div>
+      <div data-name="KPI / Overdue" style="position:absolute;left:526px;top:208px;width:230px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Label" style="position:absolute;left:20px;top:20px;width:166px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:500;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>Overdue</span></div>
+        <div data-name="Value" style="position:absolute;left:20px;top:44px;width:149px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:26px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;letter-spacing:-0.4px;color:rgba(16,24,40,1.000)"><span>$10,260.75</span></div>
+        <div data-name="Note" style="position:absolute;left:20px;top:82px;width:190px;height:17px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:17px;color:rgba(180,35,24,1.000)"><span>2 invoices · oldest 12 days</span></div>
+        <div data-name="Icon tile" style="position:absolute;left:178px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(254,243,242,1.000),rgba(254,243,242,1.000));border-radius:10px">
+          <div data-name="Icon / clock" style="position:absolute;left:8px;top:8px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Face" style="position:absolute;left:2.5px;top:2.5px;width:15px;height:15px;box-sizing:border-box;border-radius:50%;box-shadow:inset 0 0 0 1.75px rgba(217,45,32,1.000)">
+            </div>
+            <div data-name="Hand H" style="position:absolute;left:9.1px;top:5.5px;width:1.8px;height:5.2px;box-sizing:border-box;background:linear-gradient(rgba(217,45,32,1.000),rgba(217,45,32,1.000));border-radius:1px">
+            </div>
+            <div data-name="Hand M" style="position:absolute;left:9.1px;top:9.1px;width:4.5px;height:1.8px;box-sizing:border-box;background:linear-gradient(rgba(217,45,32,1.000),rgba(217,45,32,1.000));border-radius:1px">
+            </div>
+          </div>
+        </div>
+      </div>
+      <div data-name="KPI / Collected in September" style="position:absolute;left:772px;top:208px;width:230px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Label" style="position:absolute;left:20px;top:20px;width:166px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:500;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>Collected in September</span></div>
+        <div data-name="Value" style="position:absolute;left:20px;top:44px;width:152px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:26px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;letter-spacing:-0.4px;color:rgba(16,24,40,1.000)"><span>$44,195.00</span></div>
+        <div data-name="Note" style="position:absolute;left:20px;top:82px;width:190px;height:17px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:17px;color:rgba(6,118,71,1.000)"><span>▲ 18.2% vs August</span></div>
+        <div data-name="Icon tile" style="position:absolute;left:178px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(236,253,243,1.000),rgba(236,253,243,1.000));border-radius:10px">
+          <div data-name="Icon / chart" style="position:absolute;left:8px;top:8px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Bar 1" style="position:absolute;left:3px;top:10px;width:3.5px;height:7px;box-sizing:border-box;background:linear-gradient(rgba(7,148,85,1.000),rgba(7,148,85,1.000));border-radius:1px">
+            </div>
+            <div data-name="Bar 2" style="position:absolute;left:8.25px;top:5px;width:3.5px;height:12px;box-sizing:border-box;background:linear-gradient(rgba(7,148,85,1.000),rgba(7,148,85,1.000));border-radius:1px">
+            </div>
+            <div data-name="Bar 3" style="position:absolute;left:13.5px;top:8px;width:3.5px;height:9px;box-sizing:border-box;background:linear-gradient(rgba(7,148,85,1.000),rgba(7,148,85,1.000));border-radius:1px">
+            </div>
+          </div>
+        </div>
+      </div>
+      <div data-name="KPI / Avg. days to pay" style="position:absolute;left:1018px;top:208px;width:230px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Label" style="position:absolute;left:20px;top:20px;width:166px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:500;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>Avg. days to pay</span></div>
+        <div data-name="Value" style="position:absolute;left:20px;top:44px;width:125px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:26px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;letter-spacing:-0.4px;color:rgba(16,24,40,1.000)"><span>14.6 days</span></div>
+        <div data-name="Note" style="position:absolute;left:20px;top:82px;width:190px;height:17px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:17px;color:rgba(6,118,71,1.000)"><span>▼ 2.1 days vs August</span></div>
+        <div data-name="Icon tile" style="position:absolute;left:178px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(255,246,237,1.000),rgba(255,246,237,1.000));border-radius:10px">
+          <div data-name="Icon / calendar" style="position:absolute;left:8px;top:8px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Body" style="position:absolute;left:2.5px;top:4px;width:15px;height:13.5px;box-sizing:border-box;border-radius:2.5px;box-shadow:inset 0 0 0 1.75px rgba(224,79,22,1.000)">
+            </div>
+            <div data-name="Header" style="position:absolute;left:2.5px;top:4px;width:15px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(224,79,22,1.000),rgba(224,79,22,1.000));border-radius:2.5px 2.5px 0px 0px">
+            </div>
+            <div data-name="Ring L" style="position:absolute;left:6px;top:2px;width:1.8px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(224,79,22,1.000),rgba(224,79,22,1.000));border-radius:1px">
+            </div>
+            <div data-name="Ring R" style="position:absolute;left:12.2px;top:2px;width:1.8px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(224,79,22,1.000),rgba(224,79,22,1.000));border-radius:1px">
+            </div>
+          </div>
+        </div>
+      </div>
+      <div data-name="Invoices table" style="position:absolute;left:280px;top:344px;width:968px;height:764px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.050)">
+        <div data-name="Tab / All (active)" style="position:absolute;left:20px;top:4px;width:58px;height:56px;box-sizing:border-box">
+          <div data-name="Label" style="position:absolute;left:0px;top:0px;width:22px;height:56px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:56px;color:rgba(36,81,214,1.000)"><span>All</span></div>
+          <div data-name="Count" style="position:absolute;left:28px;top:18px;width:30px;height:20px;box-sizing:border-box;background:linear-gradient(rgba(238,243,255,1.000),rgba(238,243,255,1.000));border-radius:10px">
+            <div data-name="Label" style="position:absolute;left:0px;top:0px;width:30px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(36,81,214,1.000)"><span>10</span></div>
+          </div>
+          <div data-name="Underline" style="position:absolute;left:0px;top:54px;width:58px;height:2px;box-sizing:border-box;background:linear-gradient(rgba(36,81,214,1.000),rgba(36,81,214,1.000))">
+          </div>
+        </div>
+        <div data-name="Tab / Paid" style="position:absolute;left:102px;top:4px;width:66px;height:56px;box-sizing:border-box">
+          <div data-name="Label" style="position:absolute;left:0px;top:0px;width:35px;height:56px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:56px;color:rgba(102,112,133,1.000)"><span>Paid</span></div>
+          <div data-name="Count" style="position:absolute;left:41px;top:18px;width:25px;height:20px;box-sizing:border-box;background:linear-gradient(rgba(242,244,247,1.000),rgba(242,244,247,1.000));border-radius:10px">
+            <div data-name="Label" style="position:absolute;left:0px;top:0px;width:25px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(71,84,103,1.000)"><span>4</span></div>
+          </div>
+        </div>
+        <div data-name="Tab / Pending" style="position:absolute;left:192px;top:4px;width:91px;height:56px;box-sizing:border-box">
+          <div data-name="Label" style="position:absolute;left:0px;top:0px;width:61px;height:56px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:56px;color:rgba(102,112,133,1.000)"><span>Pending</span></div>
+          <div data-name="Count" style="position:absolute;left:67px;top:18px;width:24px;height:20px;box-sizing:border-box;background:linear-gradient(rgba(242,244,247,1.000),rgba(242,244,247,1.000));border-radius:10px">
+            <div data-name="Label" style="position:absolute;left:0px;top:0px;width:24px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(71,84,103,1.000)"><span>3</span></div>
+          </div>
+        </div>
+        <div data-name="Tab / Overdue" style="position:absolute;left:307px;top:4px;width:94px;height:56px;box-sizing:border-box">
+          <div data-name="Label" style="position:absolute;left:0px;top:0px;width:64px;height:56px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:56px;color:rgba(102,112,133,1.000)"><span>Overdue</span></div>
+          <div data-name="Count" style="position:absolute;left:70px;top:18px;width:24px;height:20px;box-sizing:border-box;background:linear-gradient(rgba(242,244,247,1.000),rgba(242,244,247,1.000));border-radius:10px">
+            <div data-name="Label" style="position:absolute;left:0px;top:0px;width:24px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(71,84,103,1.000)"><span>2</span></div>
+          </div>
+        </div>
+        <div data-name="Tab / Draft" style="position:absolute;left:425px;top:4px;width:67px;height:56px;box-sizing:border-box">
+          <div data-name="Label" style="position:absolute;left:0px;top:0px;width:39px;height:56px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:56px;color:rgba(102,112,133,1.000)"><span>Draft</span></div>
+          <div data-name="Count" style="position:absolute;left:45px;top:18px;width:22px;height:20px;box-sizing:border-box;background:linear-gradient(rgba(242,244,247,1.000),rgba(242,244,247,1.000));border-radius:10px">
+            <div data-name="Label" style="position:absolute;left:0px;top:0px;width:22px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(71,84,103,1.000)"><span>1</span></div>
+          </div>
+        </div>
+        <div data-name="Client filter" style="position:absolute;left:708px;top:14px;width:240px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:8px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000)">
+          <div data-name="Placeholder" style="position:absolute;left:36px;top:0px;width:104px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(152,162,179,1.000)"><span>Filter by client…</span></div>
+        </div>
+        <div data-name="Filter icon" style="position:absolute;left:720px;top:22px;width:18px;height:18px;box-sizing:border-box">
+          <div data-name="Lens" style="position:absolute;left:2.25px;top:2.25px;width:10.35px;height:10.35px;box-sizing:border-box;border-radius:50%;box-shadow:inset 0 0 0 1.75px rgba(152,162,179,1.000)">
+          </div>
+          <div data-name="Handle 1" style="position:absolute;left:10.98px;top:10.98px;width:2.16px;height:2.16px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:0.99px">
+          </div>
+          <div data-name="Handle 2" style="position:absolute;left:12.33px;top:12.33px;width:2.16px;height:2.16px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:0.99px">
+          </div>
+          <div data-name="Handle 3" style="position:absolute;left:13.68px;top:13.68px;width:2.16px;height:2.16px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:0.99px">
+          </div>
+        </div>
+        <div data-name="Tabs divider" style="position:absolute;left:0px;top:60px;width:968px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        <div data-name="Table header" style="position:absolute;left:0px;top:60px;width:968px;height:44px;box-sizing:border-box;background:linear-gradient(rgba(249,250,251,1.000),rgba(249,250,251,1.000))">
+          <div data-name="Select all" style="position:absolute;left:20px;top:13px;width:18px;height:18px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:5px;box-shadow:inset 0 0 0 1.5px rgba(203,213,225,1.000)">
+          </div>
+          <div data-name="Invoice" style="position:absolute;left:56px;top:0px;width:48px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>Invoice</span></div>
+          <div data-name="Client" style="position:absolute;left:172px;top:0px;width:39px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>Client</span></div>
+          <div data-name="Client sort" style="position:absolute;left:213px;top:0px;width:15px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(152,162,179,1.000)"><span>↕</span></div>
+          <div data-name="Issued" style="position:absolute;left:452px;top:0px;width:44px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(36,81,214,1.000)"><span>Issued</span></div>
+          <div data-name="Issued sort (descending)" style="position:absolute;left:498px;top:0px;width:16px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(36,81,214,1.000)"><span>↓</span></div>
+          <div data-name="Due date" style="position:absolute;left:574px;top:0px;width:57px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>Due date</span></div>
+          <div data-name="Due sort" style="position:absolute;left:633px;top:0px;width:15px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(152,162,179,1.000)"><span>↕</span></div>
+          <div data-name="Amount sort" style="position:absolute;left:735px;top:0px;width:15px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(152,162,179,1.000)"><span>↕</span></div>
+          <div data-name="Amount" style="position:absolute;left:749px;top:0px;width:51px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>Amount</span></div>
+          <div data-name="Status" style="position:absolute;left:828px;top:0px;width:42px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>Status</span></div>
+          <div data-name="Bottom border" style="position:absolute;left:0px;top:43px;width:968px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        </div>
+        <div data-name="Row / INV-2048" style="position:absolute;left:0px;top:104px;width:968px;height:60px;box-sizing:border-box">
+          <div data-name="Select" style="position:absolute;left:20px;top:21px;width:18px;height:18px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:5px;box-shadow:inset 0 0 0 1.5px rgba(203,213,225,1.000)">
+          </div>
+          <div data-name="Invoice number" style="position:absolute;left:56px;top:0px;width:73px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>INV-2048</span></div>
+          <div data-name="Client logo" style="position:absolute;left:172px;top:14px;width:32px;height:32px;box-sizing:border-box;background:linear-gradient(rgba(122,90,248,1.000),rgba(122,90,248,1.000));border-radius:8px">
+            <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:32px;height:32px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:32px;color:rgba(255,255,255,1.000)"><span>BS</span></div>
+          </div>
+          <div data-name="Client name" style="position:absolute;left:216px;top:11px;width:117px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Brightline Studio</span></div>
+          <div data-name="Client email" style="position:absolute;left:216px;top:31px;width:124px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>ap@brightline.studio</span></div>
+          <div data-name="Issued" style="position:absolute;left:452px;top:0px;width:93px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Sep 18, 2026</span></div>
+          <div data-name="Due" style="position:absolute;left:574px;top:0px;width:90px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Oct 18, 2026</span></div>
+          <div data-name="Amount" style="position:absolute;left:721px;top:0px;width:79px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>$4,800.00</span></div>
+          <div data-name="Status" style="position:absolute;left:828px;top:18px;width:83px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(255,250,235,1.000),rgba(255,250,235,1.000));border-radius:12px">
+            <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(247,144,9,1.000),rgba(247,144,9,1.000));border-radius:50%">
+            </div>
+            <div data-name="Label" style="position:absolute;left:21px;top:0px;width:53px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(181,71,8,1.000)"><span>Pending</span></div>
+          </div>
+          <div data-name="Row actions" style="position:absolute;left:920px;top:14px;width:32px;height:32px;box-sizing:border-box;border-radius:8px">
+            <div data-name="More" style="position:absolute;left:8px;top:14px;width:18px;height:4px;box-sizing:border-box">
+              <div data-name="Dot 1" style="position:absolute;left:0px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 2" style="position:absolute;left:7px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 3" style="position:absolute;left:14px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+            </div>
+          </div>
+          <div data-name="Row divider" style="position:absolute;left:0px;top:59px;width:968px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        </div>
+        <div data-name="Row / INV-2047" style="position:absolute;left:0px;top:164px;width:968px;height:60px;box-sizing:border-box">
+          <div data-name="Select" style="position:absolute;left:20px;top:21px;width:18px;height:18px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:5px;box-shadow:inset 0 0 0 1.5px rgba(203,213,225,1.000)">
+          </div>
+          <div data-name="Invoice number" style="position:absolute;left:56px;top:0px;width:72px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>INV-2047</span></div>
+          <div data-name="Client logo" style="position:absolute;left:172px;top:14px;width:32px;height:32px;box-sizing:border-box;background:linear-gradient(rgba(14,147,132,1.000),rgba(14,147,132,1.000));border-radius:8px">
+            <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:32px;height:32px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:32px;color:rgba(255,255,255,1.000)"><span>KL</span></div>
+          </div>
+          <div data-name="Client name" style="position:absolute;left:216px;top:11px;width:89px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Kestrel Labs</span></div>
+          <div data-name="Client email" style="position:absolute;left:216px;top:31px;width:127px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>billing@kestrellabs.io</span></div>
+          <div data-name="Issued" style="position:absolute;left:452px;top:0px;width:92px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Sep 15, 2026</span></div>
+          <div data-name="Due" style="position:absolute;left:574px;top:0px;width:90px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Oct 15, 2026</span></div>
+          <div data-name="Amount" style="position:absolute;left:716px;top:0px;width:84px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>$12,450.00</span></div>
+          <div data-name="Status" style="position:absolute;left:828px;top:18px;width:60px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(236,253,243,1.000),rgba(236,253,243,1.000));border-radius:12px">
+            <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(23,178,106,1.000),rgba(23,178,106,1.000));border-radius:50%">
+            </div>
+            <div data-name="Label" style="position:absolute;left:21px;top:0px;width:30px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(6,118,71,1.000)"><span>Paid</span></div>
+          </div>
+          <div data-name="Row actions" style="position:absolute;left:920px;top:14px;width:32px;height:32px;box-sizing:border-box;border-radius:8px">
+            <div data-name="More" style="position:absolute;left:8px;top:14px;width:18px;height:4px;box-sizing:border-box">
+              <div data-name="Dot 1" style="position:absolute;left:0px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 2" style="position:absolute;left:7px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 3" style="position:absolute;left:14px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+            </div>
+          </div>
+          <div data-name="Row divider" style="position:absolute;left:0px;top:59px;width:968px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        </div>
+        <div data-name="Row / INV-2046" style="position:absolute;left:0px;top:224px;width:968px;height:60px;box-sizing:border-box">
+          <div data-name="Select" style="position:absolute;left:20px;top:21px;width:18px;height:18px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:5px;box-shadow:inset 0 0 0 1.5px rgba(203,213,225,1.000)">
+          </div>
+          <div data-name="Invoice number" style="position:absolute;left:56px;top:0px;width:73px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>INV-2046</span></div>
+          <div data-name="Client logo" style="position:absolute;left:172px;top:14px;width:32px;height:32px;box-sizing:border-box;background:linear-gradient(rgba(224,79,22,1.000),rgba(224,79,22,1.000));border-radius:8px">
+            <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:32px;height:32px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:32px;color:rgba(255,255,255,1.000)"><span>OD</span></div>
+          </div>
+          <div data-name="Client name" style="position:absolute;left:216px;top:11px;width:114px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Oakridge Dental</span></div>
+          <div data-name="Client email" style="position:absolute;left:216px;top:31px;width:165px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>office@oakridgedental.com</span></div>
+          <div data-name="Issued" style="position:absolute;left:452px;top:0px;width:93px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Sep 12, 2026</span></div>
+          <div data-name="Due" style="position:absolute;left:574px;top:0px;width:96px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Sep 26, 2026</span></div>
+          <div data-name="Amount" style="position:absolute;left:727px;top:0px;width:73px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>$1,275.50</span></div>
+          <div data-name="Status" style="position:absolute;left:828px;top:18px;width:83px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(255,250,235,1.000),rgba(255,250,235,1.000));border-radius:12px">
+            <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(247,144,9,1.000),rgba(247,144,9,1.000));border-radius:50%">
+            </div>
+            <div data-name="Label" style="position:absolute;left:21px;top:0px;width:53px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(181,71,8,1.000)"><span>Pending</span></div>
+          </div>
+          <div data-name="Row actions" style="position:absolute;left:920px;top:14px;width:32px;height:32px;box-sizing:border-box;border-radius:8px">
+            <div data-name="More" style="position:absolute;left:8px;top:14px;width:18px;height:4px;box-sizing:border-box">
+              <div data-name="Dot 1" style="position:absolute;left:0px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 2" style="position:absolute;left:7px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 3" style="position:absolute;left:14px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+            </div>
+          </div>
+          <div data-name="Row divider" style="position:absolute;left:0px;top:59px;width:968px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        </div>
+        <div data-name="Row / INV-2045" style="position:absolute;left:0px;top:284px;width:968px;height:60px;box-sizing:border-box">
+          <div data-name="Select" style="position:absolute;left:20px;top:21px;width:18px;height:18px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:5px;box-shadow:inset 0 0 0 1.5px rgba(203,213,225,1.000)">
+          </div>
+          <div data-name="Invoice number" style="position:absolute;left:56px;top:0px;width:73px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>INV-2045</span></div>
+          <div data-name="Client logo" style="position:absolute;left:172px;top:14px;width:32px;height:32px;box-sizing:border-box;background:linear-gradient(rgba(46,144,250,1.000),rgba(46,144,250,1.000));border-radius:8px">
+            <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:32px;height:32px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:32px;color:rgba(255,255,255,1.000)"><span>NT</span></div>
+          </div>
+          <div data-name="Client name" style="position:absolute;left:216px;top:11px;width:133px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Northwind Traders</span></div>
+          <div data-name="Client email" style="position:absolute;left:216px;top:31px;width:135px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>finance@northwind.co</span></div>
+          <div data-name="Issued" style="position:absolute;left:452px;top:0px;width:87px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Sep 9, 2026</span></div>
+          <div data-name="Due" style="position:absolute;left:574px;top:0px;width:96px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(180,35,24,1.000)"><span>Sep 23, 2026</span></div>
+          <div data-name="Amount" style="position:absolute;left:723px;top:0px;width:77px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>$7,920.00</span></div>
+          <div data-name="Status" style="position:absolute;left:828px;top:18px;width:86px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(254,243,242,1.000),rgba(254,243,242,1.000));border-radius:12px">
+            <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(240,68,56,1.000),rgba(240,68,56,1.000));border-radius:50%">
+            </div>
+            <div data-name="Label" style="position:absolute;left:21px;top:0px;width:56px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(180,35,24,1.000)"><span>Overdue</span></div>
+          </div>
+          <div data-name="Row actions" style="position:absolute;left:920px;top:14px;width:32px;height:32px;box-sizing:border-box;border-radius:8px">
+            <div data-name="More" style="position:absolute;left:8px;top:14px;width:18px;height:4px;box-sizing:border-box">
+              <div data-name="Dot 1" style="position:absolute;left:0px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 2" style="position:absolute;left:7px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 3" style="position:absolute;left:14px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+            </div>
+          </div>
+          <div data-name="Row divider" style="position:absolute;left:0px;top:59px;width:968px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        </div>
+        <div data-name="Row / INV-2044" style="position:absolute;left:0px;top:344px;width:968px;height:60px;box-sizing:border-box">
+          <div data-name="Select" style="position:absolute;left:20px;top:21px;width:18px;height:18px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:5px;box-shadow:inset 0 0 0 1.5px rgba(203,213,225,1.000)">
+          </div>
+          <div data-name="Invoice number" style="position:absolute;left:56px;top:0px;width:74px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>INV-2044</span></div>
+          <div data-name="Client logo" style="position:absolute;left:172px;top:14px;width:32px;height:32px;box-sizing:border-box;background:linear-gradient(rgba(102,198,28,1.000),rgba(102,198,28,1.000));border-radius:8px">
+            <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:32px;height:32px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:32px;color:rgba(255,255,255,1.000)"><span>JC</span></div>
+          </div>
+          <div data-name="Client name" style="position:absolute;left:216px;top:11px;width:97px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Juniper &amp; Co.</span></div>
+          <div data-name="Client email" style="position:absolute;left:216px;top:31px;width:101px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>hello@juniper.co</span></div>
+          <div data-name="Issued" style="position:absolute;left:452px;top:0px;width:87px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Sep 5, 2026</span></div>
+          <div data-name="Due" style="position:absolute;left:574px;top:0px;width:84px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Oct 5, 2026</span></div>
+          <div data-name="Amount" style="position:absolute;left:725px;top:0px;width:75px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>$3,150.00</span></div>
+          <div data-name="Status" style="position:absolute;left:828px;top:18px;width:60px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(236,253,243,1.000),rgba(236,253,243,1.000));border-radius:12px">
+            <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(23,178,106,1.000),rgba(23,178,106,1.000));border-radius:50%">
+            </div>
+            <div data-name="Label" style="position:absolute;left:21px;top:0px;width:30px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(6,118,71,1.000)"><span>Paid</span></div>
+          </div>
+          <div data-name="Row actions" style="position:absolute;left:920px;top:14px;width:32px;height:32px;box-sizing:border-box;border-radius:8px">
+            <div data-name="More" style="position:absolute;left:8px;top:14px;width:18px;height:4px;box-sizing:border-box">
+              <div data-name="Dot 1" style="position:absolute;left:0px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 2" style="position:absolute;left:7px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 3" style="position:absolute;left:14px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+            </div>
+          </div>
+          <div data-name="Row divider" style="position:absolute;left:0px;top:59px;width:968px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        </div>
+        <div data-name="Row / INV-2043" style="position:absolute;left:0px;top:404px;width:968px;height:60px;box-sizing:border-box">
+          <div data-name="Select" style="position:absolute;left:20px;top:21px;width:18px;height:18px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:5px;box-shadow:inset 0 0 0 1.5px rgba(203,213,225,1.000)">
+          </div>
+          <div data-name="Invoice number" style="position:absolute;left:56px;top:0px;width:73px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>INV-2043</span></div>
+          <div data-name="Client logo" style="position:absolute;left:172px;top:14px;width:32px;height:32px;box-sizing:border-box;background:linear-gradient(rgba(238,70,188,1.000),rgba(238,70,188,1.000));border-radius:8px">
+            <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:32px;height:32px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:32px;color:rgba(255,255,255,1.000)"><span>HH</span></div>
+          </div>
+          <div data-name="Client name" style="position:absolute;left:216px;top:11px;width:108px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Halcyon Health</span></div>
+          <div data-name="Client email" style="position:absolute;left:216px;top:31px;width:135px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>ap@halcyonhealth.org</span></div>
+          <div data-name="Issued" style="position:absolute;left:452px;top:0px;width:87px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Sep 2, 2026</span></div>
+          <div data-name="Due" style="position:absolute;left:574px;top:0px;width:84px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Oct 2, 2026</span></div>
+          <div data-name="Amount" style="position:absolute;left:715px;top:0px;width:85px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>$18,600.00</span></div>
+          <div data-name="Status" style="position:absolute;left:828px;top:18px;width:60px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(236,253,243,1.000),rgba(236,253,243,1.000));border-radius:12px">
+            <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(23,178,106,1.000),rgba(23,178,106,1.000));border-radius:50%">
+            </div>
+            <div data-name="Label" style="position:absolute;left:21px;top:0px;width:30px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(6,118,71,1.000)"><span>Paid</span></div>
+          </div>
+          <div data-name="Row actions" style="position:absolute;left:920px;top:14px;width:32px;height:32px;box-sizing:border-box;border-radius:8px">
+            <div data-name="More" style="position:absolute;left:8px;top:14px;width:18px;height:4px;box-sizing:border-box">
+              <div data-name="Dot 1" style="position:absolute;left:0px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 2" style="position:absolute;left:7px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 3" style="position:absolute;left:14px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+            </div>
+          </div>
+          <div data-name="Row divider" style="position:absolute;left:0px;top:59px;width:968px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        </div>
+        <div data-name="Row / INV-2042" style="position:absolute;left:0px;top:464px;width:968px;height:60px;box-sizing:border-box">
+          <div data-name="Select" style="position:absolute;left:20px;top:21px;width:18px;height:18px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:5px;box-shadow:inset 0 0 0 1.5px rgba(203,213,225,1.000)">
+          </div>
+          <div data-name="Invoice number" style="position:absolute;left:56px;top:0px;width:73px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>INV-2042</span></div>
+          <div data-name="Client logo" style="position:absolute;left:172px;top:14px;width:32px;height:32px;box-sizing:border-box;background:linear-gradient(rgba(21,183,158,1.000),rgba(21,183,158,1.000));border-radius:8px">
+            <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:32px;height:32px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:32px;color:rgba(255,255,255,1.000)"><span>PR</span></div>
+          </div>
+          <div data-name="Client name" style="position:absolute;left:216px;top:11px;width:115px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Pinecrest Realty</span></div>
+          <div data-name="Client email" style="position:absolute;left:216px;top:31px;width:152px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>accounts@pinecrest.com</span></div>
+          <div data-name="Issued" style="position:absolute;left:452px;top:0px;width:97px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Aug 29, 2026</span></div>
+          <div data-name="Due" style="position:absolute;left:574px;top:0px;width:93px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(180,35,24,1.000)"><span>Sep 12, 2026</span></div>
+          <div data-name="Amount" style="position:absolute;left:723px;top:0px;width:77px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>$2,340.75</span></div>
+          <div data-name="Status" style="position:absolute;left:828px;top:18px;width:86px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(254,243,242,1.000),rgba(254,243,242,1.000));border-radius:12px">
+            <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(240,68,56,1.000),rgba(240,68,56,1.000));border-radius:50%">
+            </div>
+            <div data-name="Label" style="position:absolute;left:21px;top:0px;width:56px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(180,35,24,1.000)"><span>Overdue</span></div>
+          </div>
+          <div data-name="Row actions" style="position:absolute;left:920px;top:14px;width:32px;height:32px;box-sizing:border-box;border-radius:8px">
+            <div data-name="More" style="position:absolute;left:8px;top:14px;width:18px;height:4px;box-sizing:border-box">
+              <div data-name="Dot 1" style="position:absolute;left:0px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 2" style="position:absolute;left:7px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 3" style="position:absolute;left:14px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+            </div>
+          </div>
+          <div data-name="Row divider" style="position:absolute;left:0px;top:59px;width:968px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        </div>
+        <div data-name="Row / INV-2041" style="position:absolute;left:0px;top:524px;width:968px;height:60px;box-sizing:border-box">
+          <div data-name="Select" style="position:absolute;left:20px;top:21px;width:18px;height:18px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:5px;box-shadow:inset 0 0 0 1.5px rgba(203,213,225,1.000)">
+          </div>
+          <div data-name="Invoice number" style="position:absolute;left:56px;top:0px;width:70px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>INV-2041</span></div>
+          <div data-name="Client logo" style="position:absolute;left:172px;top:14px;width:32px;height:32px;box-sizing:border-box;background:linear-gradient(rgba(220,104,3,1.000),rgba(220,104,3,1.000));border-radius:8px">
+            <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:32px;height:32px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:32px;color:rgba(255,255,255,1.000)"><span>MC</span></div>
+          </div>
+          <div data-name="Client name" style="position:absolute;left:216px;top:11px;width:104px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Mosaic Coffee</span></div>
+          <div data-name="Client email" style="position:absolute;left:216px;top:31px;width:160px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>owner@mosaiccoffee.com</span></div>
+          <div data-name="Issued" style="position:absolute;left:452px;top:0px;width:97px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Aug 26, 2026</span></div>
+          <div data-name="Due" style="position:absolute;left:574px;top:0px;width:95px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Sep 25, 2026</span></div>
+          <div data-name="Amount" style="position:absolute;left:735px;top:0px;width:65px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>$860.00</span></div>
+          <div data-name="Status" style="position:absolute;left:828px;top:18px;width:64px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(242,244,247,1.000),rgba(242,244,247,1.000));border-radius:12px">
+            <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+            </div>
+            <div data-name="Label" style="position:absolute;left:21px;top:0px;width:34px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(52,64,84,1.000)"><span>Draft</span></div>
+          </div>
+          <div data-name="Row actions" style="position:absolute;left:920px;top:14px;width:32px;height:32px;box-sizing:border-box;border-radius:8px">
+            <div data-name="More" style="position:absolute;left:8px;top:14px;width:18px;height:4px;box-sizing:border-box">
+              <div data-name="Dot 1" style="position:absolute;left:0px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 2" style="position:absolute;left:7px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 3" style="position:absolute;left:14px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+            </div>
+          </div>
+          <div data-name="Row divider" style="position:absolute;left:0px;top:59px;width:968px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        </div>
+        <div data-name="Row / INV-2040" style="position:absolute;left:0px;top:584px;width:968px;height:60px;box-sizing:border-box">
+          <div data-name="Select" style="position:absolute;left:20px;top:21px;width:18px;height:18px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:5px;box-shadow:inset 0 0 0 1.5px rgba(203,213,225,1.000)">
+          </div>
+          <div data-name="Invoice number" style="position:absolute;left:56px;top:0px;width:74px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>INV-2040</span></div>
+          <div data-name="Client logo" style="position:absolute;left:172px;top:14px;width:32px;height:32px;box-sizing:border-box;background:linear-gradient(rgba(97,114,243,1.000),rgba(97,114,243,1.000));border-radius:8px">
+            <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:32px;height:32px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:32px;color:rgba(255,255,255,1.000)"><span>TW</span></div>
+          </div>
+          <div data-name="Client name" style="position:absolute;left:216px;top:11px;width:127px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Tidal Wave Media</span></div>
+          <div data-name="Client email" style="position:absolute;left:216px;top:31px;width:131px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>pay@tidalwave.media</span></div>
+          <div data-name="Issued" style="position:absolute;left:452px;top:0px;width:96px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Aug 22, 2026</span></div>
+          <div data-name="Due" style="position:absolute;left:574px;top:0px;width:93px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Sep 21, 2026</span></div>
+          <div data-name="Amount" style="position:absolute;left:722px;top:0px;width:78px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>$9,995.00</span></div>
+          <div data-name="Status" style="position:absolute;left:828px;top:18px;width:60px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(236,253,243,1.000),rgba(236,253,243,1.000));border-radius:12px">
+            <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(23,178,106,1.000),rgba(23,178,106,1.000));border-radius:50%">
+            </div>
+            <div data-name="Label" style="position:absolute;left:21px;top:0px;width:30px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(6,118,71,1.000)"><span>Paid</span></div>
+          </div>
+          <div data-name="Row actions" style="position:absolute;left:920px;top:14px;width:32px;height:32px;box-sizing:border-box;border-radius:8px">
+            <div data-name="More" style="position:absolute;left:8px;top:14px;width:18px;height:4px;box-sizing:border-box">
+              <div data-name="Dot 1" style="position:absolute;left:0px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 2" style="position:absolute;left:7px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 3" style="position:absolute;left:14px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+            </div>
+          </div>
+          <div data-name="Row divider" style="position:absolute;left:0px;top:59px;width:968px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        </div>
+        <div data-name="Row / INV-2039" style="position:absolute;left:0px;top:644px;width:968px;height:60px;box-sizing:border-box">
+          <div data-name="Select" style="position:absolute;left:20px;top:21px;width:18px;height:18px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:5px;box-shadow:inset 0 0 0 1.5px rgba(203,213,225,1.000)">
+          </div>
+          <div data-name="Invoice number" style="position:absolute;left:56px;top:0px;width:73px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>INV-2039</span></div>
+          <div data-name="Client logo" style="position:absolute;left:172px;top:14px;width:32px;height:32px;box-sizing:border-box;background:linear-gradient(rgba(78,91,166,1.000),rgba(78,91,166,1.000));border-radius:8px">
+            <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:32px;height:32px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:32px;color:rgba(255,255,255,1.000)"><span>SL</span></div>
+          </div>
+          <div data-name="Client name" style="position:absolute;left:216px;top:11px;width:97px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Summit Legal</span></div>
+          <div data-name="Client email" style="position:absolute;left:216px;top:31px;width:143px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>billing@summitlegal.law</span></div>
+          <div data-name="Issued" style="position:absolute;left:452px;top:0px;width:94px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Aug 19, 2026</span></div>
+          <div data-name="Due" style="position:absolute;left:574px;top:0px;width:84px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(52,64,84,1.000)"><span>Oct 3, 2026</span></div>
+          <div data-name="Amount" style="position:absolute;left:726px;top:0px;width:74px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(16,24,40,1.000)"><span>$5,410.25</span></div>
+          <div data-name="Status" style="position:absolute;left:828px;top:18px;width:83px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(255,250,235,1.000),rgba(255,250,235,1.000));border-radius:12px">
+            <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(247,144,9,1.000),rgba(247,144,9,1.000));border-radius:50%">
+            </div>
+            <div data-name="Label" style="position:absolute;left:21px;top:0px;width:53px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(181,71,8,1.000)"><span>Pending</span></div>
+          </div>
+          <div data-name="Row actions" style="position:absolute;left:920px;top:14px;width:32px;height:32px;box-sizing:border-box;border-radius:8px">
+            <div data-name="More" style="position:absolute;left:8px;top:14px;width:18px;height:4px;box-sizing:border-box">
+              <div data-name="Dot 1" style="position:absolute;left:0px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 2" style="position:absolute;left:7px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+              <div data-name="Dot 3" style="position:absolute;left:14px;top:0px;width:4px;height:4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+              </div>
+            </div>
+          </div>
+        </div>
+        <div data-name="Footer divider" style="position:absolute;left:0px;top:704px;width:968px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        <div data-name="Table footer" style="position:absolute;left:0px;top:704px;width:968px;height:60px;box-sizing:border-box">
+          <div data-name="Summary" style="position:absolute;left:20px;top:0px;width:168px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:500;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(102,112,133,1.000)"><span>Showing 10 of 10 invoices</span></div>
+          <div data-name="Previous (disabled)" style="position:absolute;left:760px;top:12px;width:92px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:8px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000)">
+            <div data-name="Label" style="position:absolute;left:15.5px;top:0px;width:61px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:600;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(152,162,179,1.000)"><span>Previous</span></div>
+          </div>
+          <div data-name="Next (disabled)" style="position:absolute;left:860px;top:12px;width:88px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:8px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000)">
+            <div data-name="Label" style="position:absolute;left:26.5px;top:0px;width:35px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:600;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(152,162,179,1.000)"><span>Next</span></div>
+          </div>
+          <div data-name="Page" style="position:absolute;left:673px;top:0px;width:71px;height:60px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:500;white-space:pre-wrap;margin:0;line-height:60px;color:rgba(102,112,133,1.000)"><span>Page 1 of 1</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="frame" id="frame-1">
+    <div data-name="Mobile" style="position:absolute;left:0px;top:0px;width:390px;height:1872px;box-sizing:border-box;background:linear-gradient(rgba(245,247,250,1.000),rgba(245,247,250,1.000));overflow:hidden">
+      <div data-name="App bar" style="position:absolute;left:0px;top:0px;width:390px;height:56px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000))">
+        <div data-name="Menu button" style="position:absolute;left:8px;top:8px;width:40px;height:40px;box-sizing:border-box;border-radius:8px">
+          <div data-name="Icon / menu" style="position:absolute;left:10px;top:10px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Bar 1" style="position:absolute;left:2.5px;top:4.5px;width:15px;height:1.75px;box-sizing:border-box;background:linear-gradient(rgba(52,64,84,1.000),rgba(52,64,84,1.000));border-radius:1px">
+            </div>
+            <div data-name="Bar 2" style="position:absolute;left:2.5px;top:9.25px;width:15px;height:1.75px;box-sizing:border-box;background:linear-gradient(rgba(52,64,84,1.000),rgba(52,64,84,1.000));border-radius:1px">
+            </div>
+            <div data-name="Bar 3" style="position:absolute;left:2.5px;top:14px;width:15px;height:1.75px;box-sizing:border-box;background:linear-gradient(rgba(52,64,84,1.000),rgba(52,64,84,1.000));border-radius:1px">
+            </div>
+          </div>
+        </div>
+        <div data-name="Logo" style="position:absolute;left:52px;top:14px;width:129px;height:28px;box-sizing:border-box">
+          <div data-name="Logo mark" style="position:absolute;left:0px;top:0px;width:28px;height:28px;box-sizing:border-box;background:linear-gradient(135.0deg, rgba(59,108,246,1.000) 0.0%, rgba(28,63,174,1.000) 100.0%);border-radius:7.28px">
+            <div data-name="Stroke vertical" style="position:absolute;left:8.68px;top:7px;width:4.48px;height:14px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:1.4px">
+            </div>
+            <div data-name="Stroke base" style="position:absolute;left:8.68px;top:16.8px;width:11.2px;height:4.2px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:1.4px">
+            </div>
+          </div>
+          <div data-name="Wordmark" style="position:absolute;left:38px;top:0px;width:91px;height:28px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:17px;font-weight:700;white-space:pre-wrap;margin:0;line-height:28px;letter-spacing:-0.3px;color:rgba(16,24,40,1.000)"><span>Ledgerline</span></div>
+        </div>
+        <div data-name="Icon button / Notifications" style="position:absolute;left:294px;top:8px;width:40px;height:40px;box-sizing:border-box;border-radius:8px">
+          <div data-name="Icon / bell" style="position:absolute;left:10px;top:10px;width:20px;height:20px;box-sizing:border-box">
+            <div data-name="Bell" style="position:absolute;left:4px;top:2.5px;width:12px;height:12.5px;box-sizing:border-box;border-radius:6px 6px 1.5px 1.5px;box-shadow:inset 0 0 0 1.75px rgba(71,84,103,1.000)">
+            </div>
+            <div data-name="Rim" style="position:absolute;left:2.5px;top:14px;width:15px;height:1.75px;box-sizing:border-box;background:linear-gradient(rgba(71,84,103,1.000),rgba(71,84,103,1.000));border-radius:1px">
+            </div>
+            <div data-name="Clapper" style="position:absolute;left:8px;top:16px;width:4px;height:3px;box-sizing:border-box;background:linear-gradient(rgba(71,84,103,1.000),rgba(71,84,103,1.000));border-radius:50%">
+            </div>
+          </div>
+          <div data-name="Unread dot" style="position:absolute;left:24px;top:9px;width:8px;height:8px;box-sizing:border-box;background:linear-gradient(rgba(240,68,56,1.000),rgba(240,68,56,1.000));border-radius:50%;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,1.000)">
+          </div>
+        </div>
+        <div data-name="Avatar" style="position:absolute;left:342px;top:12px;width:32px;height:32px;box-sizing:border-box;background:linear-gradient(135.0deg, rgba(253,162,155,1.000) 0.0%, rgba(249,112,102,1.000) 100.0%);border-radius:16px">
+          <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:32px;height:32px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:32px;color:rgba(255,255,255,1.000)"><span>NA</span></div>
+        </div>
+        <div data-name="Border" style="position:absolute;left:0px;top:55px;width:390px;height:1px;background:rgba(228,231,236,1.000)"></div>
+      </div>
+      <div data-name="Breadcrumb" style="position:absolute;left:16px;top:76px;width:106px;height:17px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:17px;color:rgba(102,112,133,1.000)"><span>Billing  /  Invoices</span></div>
+      <div data-name="Title" style="position:absolute;left:16px;top:96px;width:110px;height:34px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:26px;font-weight:700;white-space:pre-wrap;margin:0;line-height:34px;letter-spacing:-0.5px;color:rgba(16,24,40,1.000)"><span>Invoices</span></div>
+      <div data-name="Subtitle" style="position:absolute;left:16px;top:134px;width:241px;height:40px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(102,112,133,1.000)"><span>Create, send and track invoices for
+Halden Studio.</span></div>
+      <div data-name="Button / Export CSV" style="position:absolute;left:16px;top:188px;width:118px;height:44px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:8px;box-shadow:inset 0 0 0 1px rgba(208,213,221,1.000)">
+        <div data-name="Icon" style="position:absolute;left:21px;top:0px;width:18px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:15px;font-weight:500;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(52,64,84,1.000)"><span>↓</span></div>
+        <div data-name="Label" style="position:absolute;left:47px;top:0px;width:50px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(52,64,84,1.000)"><span>Export</span></div>
+      </div>
+      <div data-name="Button / New invoice" style="position:absolute;left:146px;top:188px;width:228px;height:44px;box-sizing:border-box;background:linear-gradient(rgba(36,81,214,1.000),rgba(36,81,214,1.000));border-radius:8px">
+        <div data-name="Icon" style="position:absolute;left:57px;top:0px;width:17px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:18px;font-weight:500;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(255,255,255,1.000)"><span>+</span></div>
+        <div data-name="Label" style="position:absolute;left:82px;top:0px;width:89px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:600;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(255,255,255,1.000)"><span>New invoice</span></div>
+      </div>
+      <div data-name="KPI / Outstanding" style="position:absolute;left:16px;top:248px;width:173px;height:96px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Label" style="position:absolute;left:16px;top:16px;width:141px;height:17px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:17px;color:rgba(102,112,133,1.000)"><span>Outstanding</span></div>
+        <div data-name="Value" style="position:absolute;left:16px;top:38px;width:114px;height:28px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:20px;font-weight:700;white-space:pre-wrap;margin:0;line-height:28px;letter-spacing:-0.4px;color:rgba(16,24,40,1.000)"><span>$21,746.50</span></div>
+        <div data-name="Note" style="position:absolute;left:16px;top:68px;width:149px;height:17px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:17px;color:rgba(102,112,133,1.000)"><span>5 open invoices</span></div>
+      </div>
+      <div data-name="KPI / Overdue" style="position:absolute;left:201px;top:248px;width:173px;height:96px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Label" style="position:absolute;left:16px;top:16px;width:141px;height:17px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:17px;color:rgba(102,112,133,1.000)"><span>Overdue</span></div>
+        <div data-name="Value" style="position:absolute;left:16px;top:38px;width:114px;height:28px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:20px;font-weight:700;white-space:pre-wrap;margin:0;line-height:28px;letter-spacing:-0.4px;color:rgba(16,24,40,1.000)"><span>$10,260.75</span></div>
+        <div data-name="Note" style="position:absolute;left:16px;top:68px;width:149px;height:17px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:17px;color:rgba(180,35,24,1.000)"><span>Oldest 12 days</span></div>
+      </div>
+      <div data-name="KPI / Collected (Sep)" style="position:absolute;left:16px;top:356px;width:173px;height:96px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Label" style="position:absolute;left:16px;top:16px;width:141px;height:17px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:17px;color:rgba(102,112,133,1.000)"><span>Collected (Sep)</span></div>
+        <div data-name="Value" style="position:absolute;left:16px;top:38px;width:117px;height:28px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:20px;font-weight:700;white-space:pre-wrap;margin:0;line-height:28px;letter-spacing:-0.4px;color:rgba(16,24,40,1.000)"><span>$44,195.00</span></div>
+        <div data-name="Note" style="position:absolute;left:16px;top:68px;width:149px;height:17px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:17px;color:rgba(6,118,71,1.000)"><span>▲ 18.2% vs Aug</span></div>
+      </div>
+      <div data-name="KPI / Avg. days to pay" style="position:absolute;left:201px;top:356px;width:173px;height:96px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Label" style="position:absolute;left:16px;top:16px;width:141px;height:17px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:17px;color:rgba(102,112,133,1.000)"><span>Avg. days to pay</span></div>
+        <div data-name="Value" style="position:absolute;left:16px;top:38px;width:97px;height:28px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:20px;font-weight:700;white-space:pre-wrap;margin:0;line-height:28px;letter-spacing:-0.4px;color:rgba(16,24,40,1.000)"><span>14.6 days</span></div>
+        <div data-name="Note" style="position:absolute;left:16px;top:68px;width:149px;height:17px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:500;white-space:pre-wrap;margin:0;line-height:17px;color:rgba(6,118,71,1.000)"><span>▼ 2.1 days vs Aug</span></div>
+      </div>
+      <div data-name="Status select" style="position:absolute;left:16px;top:472px;width:173px;height:44px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:8px;box-shadow:inset 0 0 0 1px rgba(208,213,221,1.000)">
+        <div data-name="Value" style="position:absolute;left:12px;top:0px;width:113px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(15,23,42,1.000)"><span>All statuses (10)</span></div>
+        <div data-name="Trailing" style="position:absolute;left:144px;top:0px;width:17px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:16px;font-weight:500;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>⌄</span></div>
+      </div>
+      <div data-name="Sort select" style="position:absolute;left:201px;top:472px;width:173px;height:44px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:8px;box-shadow:inset 0 0 0 1px rgba(208,213,221,1.000)">
+        <div data-name="Value" style="position:absolute;left:12px;top:0px;width:87px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:500;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(15,23,42,1.000)"><span>Newest first</span></div>
+        <div data-name="Trailing" style="position:absolute;left:144px;top:0px;width:17px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:16px;font-weight:500;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>⌄</span></div>
+      </div>
+      <div data-name="Client filter" style="position:absolute;left:16px;top:528px;width:358px;height:44px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:8px;box-shadow:inset 0 0 0 1px rgba(208,213,221,1.000)">
+        <div data-name="Placeholder" style="position:absolute;left:40px;top:0px;width:112px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:14px;font-weight:400;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(152,162,179,1.000)"><span>Filter by client…</span></div>
+      </div>
+      <div data-name="Filter icon" style="position:absolute;left:28px;top:540px;width:20px;height:20px;box-sizing:border-box">
+        <div data-name="Lens" style="position:absolute;left:2.5px;top:2.5px;width:11.5px;height:11.5px;box-sizing:border-box;border-radius:50%;box-shadow:inset 0 0 0 1.75px rgba(152,162,179,1.000)">
+        </div>
+        <div data-name="Handle 1" style="position:absolute;left:12.2px;top:12.2px;width:2.4px;height:2.4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:1.1px">
+        </div>
+        <div data-name="Handle 2" style="position:absolute;left:13.7px;top:13.7px;width:2.4px;height:2.4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:1.1px">
+        </div>
+        <div data-name="Handle 3" style="position:absolute;left:15.2px;top:15.2px;width:2.4px;height:2.4px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:1.1px">
+        </div>
+      </div>
+      <div data-name="Invoice card / INV-2048" style="position:absolute;left:16px;top:588px;width:358px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Client logo" style="position:absolute;left:16px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(122,90,248,1.000),rgba(122,90,248,1.000));border-radius:8px">
+          <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:36px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(255,255,255,1.000)"><span>BS</span></div>
+        </div>
+        <div data-name="Client name" style="position:absolute;left:64px;top:15px;width:127px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:15px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Brightline Studio</span></div>
+        <div data-name="Meta" style="position:absolute;left:64px;top:37px;width:164px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>INV-2048 · Issued Sep 18</span></div>
+        <div data-name="Amount" style="position:absolute;left:240px;top:15px;width:86px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:15px;font-weight:700;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>$4,800.00</span></div>
+        <div data-name="Divider" style="position:absolute;left:16px;top:68px;width:326px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        <div data-name="Due" style="position:absolute;left:16px;top:68px;width:113px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>Due Oct 18, 2026</span></div>
+        <div data-name="Status" style="position:absolute;left:243px;top:78px;width:83px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(255,250,235,1.000),rgba(255,250,235,1.000));border-radius:12px">
+          <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(247,144,9,1.000),rgba(247,144,9,1.000));border-radius:50%">
+          </div>
+          <div data-name="Label" style="position:absolute;left:21px;top:0px;width:53px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(181,71,8,1.000)"><span>Pending</span></div>
+        </div>
+      </div>
+      <div data-name="Invoice card / INV-2047" style="position:absolute;left:16px;top:712px;width:358px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Client logo" style="position:absolute;left:16px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(14,147,132,1.000),rgba(14,147,132,1.000));border-radius:8px">
+          <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:36px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(255,255,255,1.000)"><span>KL</span></div>
+        </div>
+        <div data-name="Client name" style="position:absolute;left:64px;top:15px;width:96px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:15px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Kestrel Labs</span></div>
+        <div data-name="Meta" style="position:absolute;left:64px;top:37px;width:163px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>INV-2047 · Issued Sep 15</span></div>
+        <div data-name="Amount" style="position:absolute;left:234px;top:15px;width:92px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:15px;font-weight:700;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>$12,450.00</span></div>
+        <div data-name="Divider" style="position:absolute;left:16px;top:68px;width:326px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        <div data-name="Due" style="position:absolute;left:16px;top:68px;width:113px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>Due Oct 15, 2026</span></div>
+        <div data-name="Status" style="position:absolute;left:266px;top:78px;width:60px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(236,253,243,1.000),rgba(236,253,243,1.000));border-radius:12px">
+          <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(23,178,106,1.000),rgba(23,178,106,1.000));border-radius:50%">
+          </div>
+          <div data-name="Label" style="position:absolute;left:21px;top:0px;width:30px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(6,118,71,1.000)"><span>Paid</span></div>
+        </div>
+      </div>
+      <div data-name="Invoice card / INV-2046" style="position:absolute;left:16px;top:836px;width:358px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Client logo" style="position:absolute;left:16px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(224,79,22,1.000),rgba(224,79,22,1.000));border-radius:8px">
+          <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:36px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(255,255,255,1.000)"><span>OD</span></div>
+        </div>
+        <div data-name="Client name" style="position:absolute;left:64px;top:15px;width:124px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:15px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Oakridge Dental</span></div>
+        <div data-name="Meta" style="position:absolute;left:64px;top:37px;width:164px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>INV-2046 · Issued Sep 12</span></div>
+        <div data-name="Amount" style="position:absolute;left:247px;top:15px;width:79px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:15px;font-weight:700;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>$1,275.50</span></div>
+        <div data-name="Divider" style="position:absolute;left:16px;top:68px;width:326px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        <div data-name="Due" style="position:absolute;left:16px;top:68px;width:118px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>Due Sep 26, 2026</span></div>
+        <div data-name="Status" style="position:absolute;left:243px;top:78px;width:83px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(255,250,235,1.000),rgba(255,250,235,1.000));border-radius:12px">
+          <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(247,144,9,1.000),rgba(247,144,9,1.000));border-radius:50%">
+          </div>
+          <div data-name="Label" style="position:absolute;left:21px;top:0px;width:53px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(181,71,8,1.000)"><span>Pending</span></div>
+        </div>
+      </div>
+      <div data-name="Invoice card / INV-2045" style="position:absolute;left:16px;top:960px;width:358px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Client logo" style="position:absolute;left:16px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(46,144,250,1.000),rgba(46,144,250,1.000));border-radius:8px">
+          <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:36px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(255,255,255,1.000)"><span>NT</span></div>
+        </div>
+        <div data-name="Client name" style="position:absolute;left:64px;top:15px;width:144px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:15px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Northwind Traders</span></div>
+        <div data-name="Meta" style="position:absolute;left:64px;top:37px;width:159px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>INV-2045 · Issued Sep 9</span></div>
+        <div data-name="Amount" style="position:absolute;left:242px;top:15px;width:84px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:15px;font-weight:700;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>$7,920.00</span></div>
+        <div data-name="Divider" style="position:absolute;left:16px;top:68px;width:326px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        <div data-name="Due" style="position:absolute;left:16px;top:68px;width:119px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:500;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(180,35,24,1.000)"><span>Due Sep 23, 2026</span></div>
+        <div data-name="Status" style="position:absolute;left:240px;top:78px;width:86px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(254,243,242,1.000),rgba(254,243,242,1.000));border-radius:12px">
+          <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(240,68,56,1.000),rgba(240,68,56,1.000));border-radius:50%">
+          </div>
+          <div data-name="Label" style="position:absolute;left:21px;top:0px;width:56px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(180,35,24,1.000)"><span>Overdue</span></div>
+        </div>
+      </div>
+      <div data-name="Invoice card / INV-2044" style="position:absolute;left:16px;top:1084px;width:358px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Client logo" style="position:absolute;left:16px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(102,198,28,1.000),rgba(102,198,28,1.000));border-radius:8px">
+          <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:36px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(255,255,255,1.000)"><span>JC</span></div>
+        </div>
+        <div data-name="Client name" style="position:absolute;left:64px;top:15px;width:104px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:15px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Juniper &amp; Co.</span></div>
+        <div data-name="Meta" style="position:absolute;left:64px;top:37px;width:159px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>INV-2044 · Issued Sep 5</span></div>
+        <div data-name="Amount" style="position:absolute;left:244px;top:15px;width:82px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:15px;font-weight:700;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>$3,150.00</span></div>
+        <div data-name="Divider" style="position:absolute;left:16px;top:68px;width:326px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        <div data-name="Due" style="position:absolute;left:16px;top:68px;width:107px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>Due Oct 5, 2026</span></div>
+        <div data-name="Status" style="position:absolute;left:266px;top:78px;width:60px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(236,253,243,1.000),rgba(236,253,243,1.000));border-radius:12px">
+          <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(23,178,106,1.000),rgba(23,178,106,1.000));border-radius:50%">
+          </div>
+          <div data-name="Label" style="position:absolute;left:21px;top:0px;width:30px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(6,118,71,1.000)"><span>Paid</span></div>
+        </div>
+      </div>
+      <div data-name="Invoice card / INV-2043" style="position:absolute;left:16px;top:1208px;width:358px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Client logo" style="position:absolute;left:16px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(238,70,188,1.000),rgba(238,70,188,1.000));border-radius:8px">
+          <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:36px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(255,255,255,1.000)"><span>HH</span></div>
+        </div>
+        <div data-name="Client name" style="position:absolute;left:64px;top:15px;width:117px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:15px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Halcyon Health</span></div>
+        <div data-name="Meta" style="position:absolute;left:64px;top:37px;width:159px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>INV-2043 · Issued Sep 2</span></div>
+        <div data-name="Amount" style="position:absolute;left:234px;top:15px;width:92px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:15px;font-weight:700;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>$18,600.00</span></div>
+        <div data-name="Divider" style="position:absolute;left:16px;top:68px;width:326px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        <div data-name="Due" style="position:absolute;left:16px;top:68px;width:108px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>Due Oct 2, 2026</span></div>
+        <div data-name="Status" style="position:absolute;left:266px;top:78px;width:60px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(236,253,243,1.000),rgba(236,253,243,1.000));border-radius:12px">
+          <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(23,178,106,1.000),rgba(23,178,106,1.000));border-radius:50%">
+          </div>
+          <div data-name="Label" style="position:absolute;left:21px;top:0px;width:30px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(6,118,71,1.000)"><span>Paid</span></div>
+        </div>
+      </div>
+      <div data-name="Invoice card / INV-2042" style="position:absolute;left:16px;top:1332px;width:358px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Client logo" style="position:absolute;left:16px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(21,183,158,1.000),rgba(21,183,158,1.000));border-radius:8px">
+          <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:36px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(255,255,255,1.000)"><span>PR</span></div>
+        </div>
+        <div data-name="Client name" style="position:absolute;left:64px;top:15px;width:125px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:15px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Pinecrest Realty</span></div>
+        <div data-name="Meta" style="position:absolute;left:64px;top:37px;width:168px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>INV-2042 · Issued Aug 29</span></div>
+        <div data-name="Amount" style="position:absolute;left:243px;top:15px;width:83px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:15px;font-weight:700;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>$2,340.75</span></div>
+        <div data-name="Divider" style="position:absolute;left:16px;top:68px;width:326px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        <div data-name="Due" style="position:absolute;left:16px;top:68px;width:116px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:500;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(180,35,24,1.000)"><span>Due Sep 12, 2026</span></div>
+        <div data-name="Status" style="position:absolute;left:240px;top:78px;width:86px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(254,243,242,1.000),rgba(254,243,242,1.000));border-radius:12px">
+          <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(240,68,56,1.000),rgba(240,68,56,1.000));border-radius:50%">
+          </div>
+          <div data-name="Label" style="position:absolute;left:21px;top:0px;width:56px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(180,35,24,1.000)"><span>Overdue</span></div>
+        </div>
+      </div>
+      <div data-name="Invoice card / INV-2041" style="position:absolute;left:16px;top:1456px;width:358px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Client logo" style="position:absolute;left:16px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(220,104,3,1.000),rgba(220,104,3,1.000));border-radius:8px">
+          <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:36px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(255,255,255,1.000)"><span>MC</span></div>
+        </div>
+        <div data-name="Client name" style="position:absolute;left:64px;top:15px;width:112px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:15px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Mosaic Coffee</span></div>
+        <div data-name="Meta" style="position:absolute;left:64px;top:37px;width:165px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>INV-2041 · Issued Aug 26</span></div>
+        <div data-name="Amount" style="position:absolute;left:256px;top:15px;width:70px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:15px;font-weight:700;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>$860.00</span></div>
+        <div data-name="Divider" style="position:absolute;left:16px;top:68px;width:326px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        <div data-name="Due" style="position:absolute;left:16px;top:68px;width:118px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>Due Sep 25, 2026</span></div>
+        <div data-name="Status" style="position:absolute;left:262px;top:78px;width:64px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(242,244,247,1.000),rgba(242,244,247,1.000));border-radius:12px">
+          <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(152,162,179,1.000),rgba(152,162,179,1.000));border-radius:50%">
+          </div>
+          <div data-name="Label" style="position:absolute;left:21px;top:0px;width:34px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(52,64,84,1.000)"><span>Draft</span></div>
+        </div>
+      </div>
+      <div data-name="Invoice card / INV-2040" style="position:absolute;left:16px;top:1580px;width:358px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Client logo" style="position:absolute;left:16px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(97,114,243,1.000),rgba(97,114,243,1.000));border-radius:8px">
+          <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:36px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(255,255,255,1.000)"><span>TW</span></div>
+        </div>
+        <div data-name="Client name" style="position:absolute;left:64px;top:15px;width:137px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:15px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Tidal Wave Media</span></div>
+        <div data-name="Meta" style="position:absolute;left:64px;top:37px;width:168px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>INV-2040 · Issued Aug 22</span></div>
+        <div data-name="Amount" style="position:absolute;left:241px;top:15px;width:85px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:15px;font-weight:700;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>$9,995.00</span></div>
+        <div data-name="Divider" style="position:absolute;left:16px;top:68px;width:326px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        <div data-name="Due" style="position:absolute;left:16px;top:68px;width:115px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>Due Sep 21, 2026</span></div>
+        <div data-name="Status" style="position:absolute;left:266px;top:78px;width:60px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(236,253,243,1.000),rgba(236,253,243,1.000));border-radius:12px">
+          <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(23,178,106,1.000),rgba(23,178,106,1.000));border-radius:50%">
+          </div>
+          <div data-name="Label" style="position:absolute;left:21px;top:0px;width:30px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(6,118,71,1.000)"><span>Paid</span></div>
+        </div>
+      </div>
+      <div data-name="Invoice card / INV-2039" style="position:absolute;left:16px;top:1704px;width:358px;height:112px;box-sizing:border-box;background:linear-gradient(rgba(255,255,255,1.000),rgba(255,255,255,1.000));border-radius:12px;box-shadow:inset 0 0 0 1px rgba(228,231,236,1.000),0px 1px 2px 0px rgba(16,24,40,0.040)">
+        <div data-name="Client logo" style="position:absolute;left:16px;top:16px;width:36px;height:36px;box-sizing:border-box;background:linear-gradient(rgba(78,91,166,1.000),rgba(78,91,166,1.000));border-radius:8px">
+          <div data-name="Initials" style="position:absolute;left:0px;top:0px;width:36px;height:36px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:12px;font-weight:700;white-space:pre-wrap;margin:0;line-height:36px;color:rgba(255,255,255,1.000)"><span>SL</span></div>
+        </div>
+        <div data-name="Client name" style="position:absolute;left:64px;top:15px;width:105px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:15px;font-weight:600;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>Summit Legal</span></div>
+        <div data-name="Meta" style="position:absolute;left:64px;top:37px;width:165px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>INV-2039 · Issued Aug 19</span></div>
+        <div data-name="Amount" style="position:absolute;left:245px;top:15px;width:81px;height:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-end;text-align:right;font-family:'Inter', sans-serif;font-size:15px;font-weight:700;white-space:pre-wrap;margin:0;line-height:20px;color:rgba(16,24,40,1.000)"><span>$5,410.25</span></div>
+        <div data-name="Divider" style="position:absolute;left:16px;top:68px;width:326px;height:1px;background:rgba(234,236,240,1.000)"></div>
+        <div data-name="Due" style="position:absolute;left:16px;top:68px;width:108px;height:44px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:13px;font-weight:400;white-space:pre-wrap;margin:0;line-height:44px;color:rgba(102,112,133,1.000)"><span>Due Oct 3, 2026</span></div>
+        <div data-name="Status" style="position:absolute;left:243px;top:78px;width:83px;height:24px;box-sizing:border-box;background:linear-gradient(rgba(255,250,235,1.000),rgba(255,250,235,1.000));border-radius:12px">
+          <div data-name="Dot" style="position:absolute;left:9px;top:9px;width:6px;height:6px;box-sizing:border-box;background:linear-gradient(rgba(247,144,9,1.000),rgba(247,144,9,1.000));border-radius:50%">
+          </div>
+          <div data-name="Label" style="position:absolute;left:21px;top:0px;width:53px;height:24px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;text-align:left;font-family:'Inter', sans-serif;font-size:12px;font-weight:600;white-space:pre-wrap;margin:0;line-height:24px;color:rgba(181,71,8,1.000)"><span>Pending</span></div>
+        </div>
+      </div>
+      <div data-name="Summary" style="position:absolute;left:111px;top:1832px;width:168px;height:18px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;align-items:center;text-align:center;font-family:'Inter', sans-serif;font-size:13px;font-weight:500;white-space:pre-wrap;margin:0;line-height:18px;color:rgba(102,112,133,1.000)"><span>Showing 10 of 10 invoices</span></div>
+    </div>
+  </div>
+</body>
+</html>

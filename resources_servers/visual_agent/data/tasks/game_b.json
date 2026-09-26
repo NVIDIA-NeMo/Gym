@@ -1,0 +1,1046 @@
+[
+ {
+  "task_id": "game-open-13",
+  "category": "game",
+  "mode": "open_ended",
+  "title": "Coil: portal Snake with seeded apples, border gaps, gold apples, step mode, replays and a top-5 table",
+  "prompt": "Build a modern Snake game called Coil on a canvas: a dark slate board with a faint checker, a lime snake with a darker outline whose head has eyes facing the direction of travel, red apples, a shining gold apple, grey rocks, and two pairs of glowing portal rings (A cyan, B magenta). Keep drawing light (no per-pixel effects, at most a few particles) so it runs smoothly on a laptop without a GPU.\n\nThe arena is 24 columns x 18 rows (row 1 on top, column 1 on the left) and is exactly this map ('#' rock, '.' floor, 'A' and 'B' portals):\n###########..###########\n#......................#\n#..A................B..#\n#......................#\n#.....####....####.....#\n#......................#\n#......................#\n#..........##..........#\n...........##...........\n#..........##..........#\n#......................#\n#......................#\n#.....####....####.....#\n#......................#\n#......................#\n#..B................A..#\n#......................#\n###########..###########\n\nSnake: it starts with its head at row 9, column 6 and its body at columns 5 and 4, facing right, and waits for the first direction key (arrow keys or WASD). It moves one cell per step. A key that would reverse it onto its neck is ignored, and up to two turns pressed between steps are queued. Stepping onto a portal puts the head on the other portal of the same color, keeping its direction; the body follows through. Leaving the map through a gap in the border re-enters on the opposite side. Hitting a rock or its own body ends the game, but moving into the cell the tail is leaving on that same step is allowed.\n\nApples: randomness comes from mulberry32(seed), with a Seed field (default 1) and ?seed=N in the URL.\nfunction mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}}\nTo place an item, list the free floor cells (not rock, portal, snake or another item) in reading order (row 1 left to right, then row 2 …) and take index floor(rand() x count). One red apple is always on the board: the first is placed when a game is set up, and each next one right after the step that ate the previous one (so the new head, and the tail, which stays put when eating, count as snake). Red apple number k scores 10 x (1 + floor((k - 1) / 5)): 10 each for apples 1-5, 20 for 6-10 and so on. Right after the replacement for every 5th red apple is placed, a gold apple is placed too: it scores 50, adds 3 segments (the tail stays put for 3 steps) and vanishes after 40 steps, blinking during its last 10.\n\nSpeed: min(14, 6 + 0.5 x red apples eaten) steps per second, shown in the HUD as 'Speed 6.0'.\n\nStep mode (a checkbox, the T key or ?step=1) is for practice: the snake moves exactly one step per direction key press and never on its own; everything else, including the gold apple's 40 steps, works the same.\n\nHUD: Score, Length, Apples (red apples eaten), Speed and Best. P pauses ('PAUSED') and R restarts with the same seed. Game over shows 'GAME OVER' with the cause ('Hit a rock' or 'Hit yourself'), the score and length, and a 'Watch replay' button that replays the whole game from its first step at 10 steps per second from the recorded key presses, ending on the same final state. Keep a TOP 5 (name, score, length, seed) in localStorage; a finished game that makes the table asks for a name. Step-mode games are practice: show 'PRACTICE' in the HUD and never record them.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "animation": false
+  },
+  "interaction_hints": "Each interact call opens a fresh page. Use --entry 'index.html?seed=253&step=1' (step mode: exactly one step per key press; use press actions with delay_ms 80). Rows/columns are 1-based as in the map. All facts below were computed with the stated rules. Seed 253: the first apple is at row 7 col 9 on every fresh page. Notation U2 = ArrowUp twice, R3 = ArrowRight three times, etc. From the start U2 R3 eats it: Score 10, Length 4, Apples 1, next apple at row 9 col 18. Tail rule: continue with D1 L1 U1 R1 D1 L1 U1 R1 (the 4-segment snake circles a 2x2 square, the head entering the cell the tail leaves): still alive, Score 10. Self hit (fresh page): U2 R3 R9 D2 (2nd apple; next at row 9 col 23) then L1 U1 R1 -> 'Hit yourself', Score 20. Full line (fresh page): U2 R3 | R9 D2 | R5 (apple 3, next at row 9 col 1) | R2 (the head leaves through the row 9 gap on the right and re-enters at col 1: apple 4, next at row 9 col 3) | R2 (apple 5: next red at row 3 col 23 and a gold apple at row 4 col 9) | U5 R6 (gold, +50) | R13 U1 R1 (apple 6, worth 20): Score 120, Length 12, Apples 6, 'Speed 9.0'. Gold expiry (fresh page): U2 R3 R9 D2 R5 R2 R2 then D2 R8 D1 L8 D2 R10 D2 L7 (40 steps after the gold appears): it blinks during the last 10 and is gone after the 40th. Rock: fresh page, press ArrowRight 6 times -> 'Hit a rock' on the 6th press (head at col 11). Reverse: fresh page, ArrowLeft does nothing. Portal: fresh page, U6 L2 -> the head enters portal A at row 3 col 4 and appears on its partner at row 16 col 21 while the body is still at row 3 cols 5-6; one more ArrowLeft -> head at row 16 col 20. Replay: after a game over click 'Watch replay', screenshot at ~1 s and at the end: same final state. Real time: plain ?seed=253, press ArrowDown, screenshots at ~0.5 s and ~1 s: about 3 and 6 cells travelled, 'Speed 6.0'; quick turns: press ArrowUp, wait 40, press ArrowRight within one step: both turns are taken. TOP 5: plain ?seed=253, press ArrowUp, wait ~250 ms (adjust 200-400 so the snake climbs exactly two rows), press ArrowRight: it eats the apple (10) and runs into the rock at row 7 col 24 -> GAME OVER, type a name, submit, reload action, check the TOP 5; a step-mode game shows 'PRACTICE' and is never recorded. Pause: p, two screenshots 500 ms apart unchanged.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The arena matches the given 24x18 map: border gaps at row 9 and columns 12-13, the four rock bars and the centre block, cyan A portals at row 3 col 4 and row 16 col 21, magenta B portals at row 3 col 21 and row 16 col 4, and the snake starting on row 9 columns 4-6 facing right."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With ?seed=253 the first apple is at row 7 col 9 on every fresh page, and in step mode U2 R3 eats it (Score 10, Length 4) with the next apple at row 9 col 18."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The full seed 253 hint line reproduces exactly: apples at row 9 cols 23, 1 and 3 across the row 9 border gap, a gold apple at row 4 col 9 with the 5th apple, and after the 6th apple Score 120, Length 12, Apples 6 and 'Speed 9.0'."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Portals work: in step mode U6 L2 puts the head on row 16 col 21 with the body still near row 3, and one more ArrowLeft moves it to row 16 col 20."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The tail rule holds: after the first apple the 4-segment snake circles a 2x2 square for eight steps without dying, while after the second apple L1 U1 R1 ends with 'Hit yourself'."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "ArrowRight six times from the start ends with 'Hit a rock' on the 6th press, and a reversing key (ArrowLeft at the start) is ignored."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The gold apple scores 50 and adds 3 segments, and when left alone it blinks during its last 10 steps and disappears after 40 steps."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "In real time the snake moves about 6 cells per second at the start with 'Speed 6.0', two quick turns are both taken, and P pauses with 'PAUSED'."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Game over shows 'GAME OVER' with the cause, score and length, and 'Watch replay' replays the game at about 10 steps per second to the same final state."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "A real-time game that scores asks for a name and appears in the TOP 5 with score, length and seed after a reload, while step-mode games show 'PRACTICE' and are never recorded."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A clean, cohesive look a game artist would accept: square cells on a subtle checker, an outlined snake with eyes facing its direction, distinct red and shining gold apples, glowing cyan and magenta portals, and a HUD that never overlaps the 1280x800 arena."
+   }
+  ]
+ },
+ {
+  "task_id": "game-open-14",
+  "category": "game",
+  "mode": "open_ended",
+  "title": "Drop Four: Connect Four with an exact minimax computer, position codes, threat markers and records",
+  "prompt": "Build a Connect Four game called Drop Four: a glossy blue 7 x 6 board with round holes, red and yellow discs that fall into place with a short bounce, Inter or Roboto type, and a side panel. Columns are numbered 1-7 from the left and rows 1-6 from the bottom.\n\nPlay: Red always moves first. Drop a disc by clicking a column, pressing 1-7, or moving a hover marker with Left/Right and pressing Enter, Space or Down. A full column refuses the drop with a small shake. Four or more in a row horizontally, vertically or diagonally wins: ring the winning discs, dim the rest and show 'Red wins!' or 'Yellow wins!'; a full board without a win is 'Draw'. After the end no more discs can be dropped. The panel shows whose turn it is and the move number.\n\nPosition code: the panel always shows the game so far as column digits in move order (e.g. 4453). Pasting a code and pressing 'Load' replays it on an empty board; a code with a character other than 1-7, a drop into a full column, or moves after a win shows 'Invalid code' and keeps the current game.\n\nComputer: choose 'Two players' or 'vs Computer' (you play Red or Yellow) and Easy, Medium or Hard. The computer runs minimax with alpha-beta pruning to a fixed depth: Easy 2, Medium 4, Hard 6 plies, its own move being ply 1. It tries columns in the order 4, 3, 5, 2, 6, 1, 7 and keeps the first best move. A win at ply n scores 100000 - n for the computer, a loss at ply n scores -(100000 - n), and a full board scores 0. At the depth limit a position is scored from the computer's side: for each of the 69 windows of four cells in a line, +5 if it holds 3 of its discs and 1 empty cell, +2 for 2 of its discs and 2 empty, and -4 for 3 opponent discs and 1 empty; plus 3 for each of its discs in column 4. It moves about 400 ms after you (at once when a loaded code leaves it to move), shows 'Thinking…' meanwhile, and answers within 2 seconds even on Hard.\n\nMore: 'Hint' rings the column the Hard computer would choose for the side to move. 'Show threats' draws a small ring of the matching color in every empty cell where Red or Yellow would complete four, even if that cell cannot be played yet. Undo takes back one move (vs the computer, your move and its reply). A session scoreboard counts Red wins, Yellow wins and draws, and your wins, draws and losses against each computer level are kept in localStorage.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "animation": false
+  },
+  "interaction_hints": "Each interact call opens a fresh page; set mode, color and level first, then type a code into the code field and click Load. All facts were computed with the stated search (alpha-beta and plain minimax agree). Wins (Two players): 1212121 -> 'Red wins!' with column 1 rows 1-4 ringed; 12233434544 -> 'Red wins!' on the diagonal col1 row1, col2 row2, col3 row3, col4 row4; 1223344345 -> 'Yellow wins!' on the bottom row columns 2-5; 562515647266514373662152213723734735174441 (42 moves) -> 'Draw'. After a win, clicking a column does nothing. Invalid: 48, 1111111 (seventh disc in column 1) and 12121212 (a move after Red's win) each show 'Invalid code' and leave the board unchanged. Block: vs Computer, you Red, load 11223 -> the computer (Yellow) plays column 4 on Easy, Medium and Hard. Opening: vs Computer, you Yellow, New game -> every level opens in column 4. Level test: vs Computer, you Red, load 241431516 (Yellow to move) on a fresh page per level: Easy plays 4, Medium plays 5, Hard plays 3 (Hard's root values: column 3 and column 1 are forced wins at ply 5; column 3 comes first in the order). After Hard's 3, whatever column Red plays, Hard Yellow wins within its next two moves (e.g. Red 1 -> Yellow 2 wins; Red 2 -> Yellow 1, Red 4, Yellow 2 wins). Hint: Two players, load 241431516, click Hint -> column 3. Threats: Two players, load 11523213371, toggle Show threats -> exactly one ring, yellow, at column 4 row 2 (column 4 is still empty); none for Red. Keyboard: press 5 -> a disc in column 5; ArrowLeft/Right move the marker and Enter drops. Full column: 111111 then click column 1 -> shake. Undo vs the computer: drop, wait 1000, Undo -> both discs gone. Timing: Hard replies in under ~2 s (screenshot during 'Thinking…'). Records: finish a game vs the computer, reload action, the per-level record persists.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "A 7x6 blue board with round holes and red and yellow discs, plus a panel with the turn and move number, the position code with Load, mode/color/level choices, Hint, Show threats, Undo, New game and a session scoreboard."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Discs drop to the lowest free cell with a bounce by click, digit keys and the Left/Right marker with Enter, and a full column shakes and refuses the drop."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Results are exact with the four discs ringed and the rest dimmed: 1212121 and the diagonal 12233434544 give 'Red wins!', 1223344345 gives 'Yellow wins!', the 42-move hint code gives 'Draw', and the board then accepts no drops."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The position code tracks every move, and Load rejects 48, 1111111 and 12121212 with 'Invalid code' while keeping the current game."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "vs Computer as Red, loading 11223 makes the computer block in column 4 at every level, and as Yellow every level opens in column 4."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The levels follow the stated search exactly: after loading 241431516 as Red, the computer plays column 4 on Easy, column 5 on Medium and column 3 on Hard."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "After Hard's column 3 in that position the computer wins within its next two moves whatever Red plays, and Hint on 241431516 marks column 3."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Show threats on 11523213371 marks exactly one cell, a yellow ring at column 4 row 2, even though column 4 is still empty."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The computer shows 'Thinking…' and replies within about 2 s even on Hard, and Undo vs the computer removes both your move and its reply."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The session scoreboard counts wins and draws, and the per-level record against the computer survives a reload."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A polished look a designer would accept: glossy discs with a highlight, a blue board with depth, a smooth drop-and-bounce, clear win highlighting, and board and panel side by side in 1280x800 without overlap."
+   }
+  ]
+ },
+ {
+  "task_id": "game-open-15",
+  "category": "game",
+  "mode": "open_ended",
+  "title": "Flipside: Othello with flip previews, passes, transcripts and a two-level computer with a weight table",
+  "prompt": "Build an Othello (Reversi) game called Flipside: a deep green felt 8 x 8 board with thin dark lines and four small star points, column letters a-h across the top and row numbers 1-8 down the left side (a1 is the top-left square, as in Othello transcripts), glossy black and white discs that flip with a quick 3D turn, and a side panel in Inter or Roboto.\n\nRules: white starts on d4 and e5, black on d5 and e4, and Black moves first. A move must outflank: the new disc flips every straight line (in all 8 directions) of opponent discs closed off by another disc of the mover, and a square that would flip nothing is illegal. Legal squares show small dots (they can be turned off in Settings), and hovering a legal square previews the discs it would flip with their count. A side with no legal move must pass: show 'Black has no moves – pass' (or White) and the other side moves again. When neither side can move, the game ends with the result and the final count, black first: 'Black wins 40–24', 'White wins 13–51' or 'Draw 32–32'. Show live disc counts, whose turn it is and the move list.\n\nTranscript: the panel shows the game as squares in order (e.g. f5d6c3), passes omitted. 'Load' replays a pasted transcript from the start; if a move in it is illegal, show 'Invalid transcript at move N' and keep the current game. Undo and Redo step through the moves (vs the computer, Undo takes back your move and its reply).\n\nComputer: 'Two players' or 'vs Computer' (you play Black or White) at two levels.\n- Level 1 plays the move that flips the most discs; ties go to the first square in reading order (a1, b1 … h1, a2 … h8).\n- Level 2 searches 4 plies with alpha-beta (its own move is ply 1, and a forced pass counts as a ply) and keeps the first best move in reading order. A position at the depth limit is scored for the computer as the sum of the square weights below for its discs minus the weights for the opponent's discs, plus 5 x (its number of legal moves - the opponent's); a finished game scores 1000 x (its discs - the opponent's discs).\n100 -20 10 5 5 10 -20 100\n-20 -50 -2 -2 -2 -2 -50 -20\n10 -2 -1 -1 -1 -1 -2 10\n5 -2 -1 -1 -1 -1 -2 5\n5 -2 -1 -1 -1 -1 -2 5\n10 -2 -1 -1 -1 -1 -2 10\n-20 -50 -2 -2 -2 -2 -50 -20\n100 -20 10 5 5 10 -20 100\nThe computer replies about 500 ms after your move, and at once when a loaded transcript leaves it to move. 'Hint' marks the Level 2 choice for the side to move. Keep a record of wins, draws and losses against each level in localStorage.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "animation": false
+  },
+  "interaction_hints": "Each interact call opens a fresh page. Squares: a-h are columns left to right, 1-8 rows top to bottom (get the board rectangle with eval getBoundingClientRect). All facts were computed with the stated rules and search. Start: Black's dots are exactly d3, c4, f5, e6; hovering d3 previews 1 flip. Two players, click f5 -> e5 turns black (4-1) and White's dots are f4, d6, f6. Pass: Two players, load f5f6c4g5h5h4f7h6 -> 'Black has no moves – pass' and White is to move again, with only c5 and e7 legal (count 8-4). Wipeout: load d3c3b3d2e1d6d7e3f4 -> the game ends at once with 'Black wins 13–0'. Draw: load f5f6c4g5h5f4g7c5g6f7c6h4e6d6f8b5a5b4b3e7f3f2d7h6f1a2b2b6c7e8g4e2d3d2c2d1d8e3c3c8e1a4b8g8a6a1a3a7c1b1h3b7h8h7g3g1g2h1h2a8 (60 moves, one pass) -> 'Draw 32–32'. Invalid: load f5f5 -> 'Invalid transcript at move 2', board unchanged. Level 1: vs Computer as Black, Level 1, click f5 -> the computer plays f4 (every reply flips 1; f4 is first in reading order); vs Computer as White, Level 1, load f5f6e6f4 -> the computer (Black) plays c3 at once. Level 2: as Black, click f5 -> the computer plays d6 (root values f4 -14, d6 -7, f6 -19); as White, load f5f6e6f4 -> it plays e3 at once. Hint: Two players, load f5d6c3d3c4 (White to move), click Hint -> b3; load f5f6e6f4 and Hint -> e3. Undo/Redo: a few moves, Undo twice, Redo once, compare the board with the transcript. Record: vs Computer as Black (either level), load d3c3b3d2e1d6d7e3 (Black to move), click f4 -> 'Black wins 13–0'; reload action, the record shows the win.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The board shows a-h across the top and 1-8 down the side with a1 top-left and the standard start (white d4 and e5, black d5 and e4), plus live disc counts, the turn, the transcript with Load, Undo/Redo, mode, color and level choices and Hint."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Legal moves are exact: Black starts with dots on d3, c4, f5 and e6 only, after f5 White's dots are f4, d6 and f6, and hovering a legal square previews its flips with the count."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "A move flips exactly the outflanked lines with a flip animation, and clicking an illegal square changes nothing."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Loading f5f6c4g5h5h4f7h6 shows 'Black has no moves – pass' and White moves again with only c5 and e7 legal."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Loading d3c3b3d2e1d6d7e3f4 ends the game at once with 'Black wins 13–0', and the 60-move hint transcript ends with 'Draw 32–32'."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The transcript always matches the moves played, and loading f5f5 shows 'Invalid transcript at move 2' while keeping the current game."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Level 1 follows its rule: as Black, after f5 the computer plays f4, and as White, loading f5f6e6f4 makes the computer play c3 at once."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Level 2 follows the search: as Black, after f5 the computer plays d6; as White, loading f5f6e6f4 makes it play e3; and Hint after f5d6c3d3c4 marks b3."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Undo and Redo walk through the moves (a pair vs the computer), and the record of wins, draws and losses per level survives a reload."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Board and side panel fit side by side in 1280x800 with square cells, discs centered in them and coordinates aligned to their rows and columns."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A cohesive felt-table look a designer would accept: glossy discs with soft shadows, a smooth flip animation, subtle legal-move dots and a clear, well-aligned side panel."
+   }
+  ]
+ },
+ {
+  "task_id": "game-open-16",
+  "category": "game",
+  "mode": "open_ended",
+  "title": "Kingrow: American checkers with compulsory multi-jumps, crowning, PDN positions and a searching computer",
+  "prompt": "Build American checkers (English draughts) called Kingrow: a warm wooden 8 x 8 board, charcoal Black pieces and ivory White pieces drawn as round discs with a rim and a soft shadow, kings marked with a gold crown, and a side panel in Inter or Roboto.\n\nBoard and notation: rows 1-8 run top to bottom and play uses the dark squares only: columns 2, 4, 6, 8 on odd rows and 1, 3, 5, 7 on even rows. Number them 1-32 in reading order (1-4 on row 1, 5-8 on row 2 … 29-32 on row 8) and show the numbers small in a corner of each dark square. Black starts on 1-12 and moves first, going down the board; White starts on 21-32 and moves up. The board always shows White at the bottom.\n\nRules: a man steps diagonally forward to an empty square; a king steps diagonally in any of the four directions. A capture jumps a diagonally adjacent enemy piece onto the empty square right behind it and removes it. Capturing is compulsory: when any capture exists the side to move must capture (any capture; there is no rule to take the most), and a capturing piece keeps jumping while it can, choosing its route at branches. A man that reaches the far row is crowned and its move ends there, even if it could jump on. A side with no pieces or no legal move loses ('Black wins' / 'White wins'). The third time the same position occurs with the same side to move, the game is a 'Draw by repetition'.\n\nInteraction: click a piece to show its legal landing squares (when a capture is compulsory, other pieces only shake), then click the landing square; in a multi-jump click each landing square in turn. Dragging also works. Highlight the last move. The move list uses standard notation numbered per full move: '11-15' for a move, '15x22' for a capture and '27x18x9' for a multi-jump (e.g. '1. 11-15 22-18 2. 15x22'). A 'Position' box always shows the position in PDN FEN form, e.g. 'B:W21,22,K30:B1,2,K14' (side to move, then White's and Black's squares, K marking kings), and loads a pasted one; bad text shows 'Invalid position' and keeps the game, and a loaded position that is already decided shows its result at once.\n\nComputer: 'Two players' or 'vs Computer' (you choose Black or White) with Easy (2 plies) and Hard (6 plies). It uses minimax with alpha-beta, a whole multi-jump being one ply. A position at the depth limit scores 100 per man and 160 per king, the computer's minus the opponent's; a side to move with no legal move has lost, scoring 100000 - ply for the winner (negative when the computer is the loser). Moves are tried in order of their starting square, then their landing squares, and the first best is kept. It replies about 500 ms after your move, and at once when a loaded position leaves it to move. Also: Undo (vs the computer, your move and its reply), New game, captured-piece counts, and a record of results against each level in localStorage.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "animation": false
+  },
+  "interaction_hints": "Each interact call opens a fresh page. Square s is on row ceil(s/4); dark squares are columns 2,4,6,8 on odd rows and 1,3,5,7 on even rows (get the board rectangle with eval). Paste positions into the Position box. All facts were checked with a rules engine and the stated search. Start: Black's legal moves are exactly 9-13, 9-14, 10-14, 10-15, 11-15, 11-16, 12-16. Forced capture: Two players, 11-15 then 22-18: only the man on 15 can move and its only target is 22 (15x22); the list reads '1. 11-15 22-18 2. 15x22'. Branching double jump: load 'B:W14,22,23:B1,9' -> the only moves are 9x18x25 and 9x18x27 (click 18, then 25 or 27); both white men jumped disappear. Crowning stops a jump: load 'B:W5,26,27:B1,22' -> Black must play 22x31, the man is crowned on 31 and the move ends with the white man on 27 still there (White then has 27-23 or 27-24); then check the new king can move backwards. No moves: load 'B:W8,11:B4' -> 'White wins' at once. Repetition: load 'B:WK29:BK4', play 4-8, 29-25, 8-4, 25-29, 4-8, 29-25, 8-4, 25-29 -> 'Draw by repetition' after the 8th move. Computer: vs Computer, you Black, Hard, load 'W:W13,22,24,25,26,27,28,29,30,32:B1,3,4,5,6,7,11,12,14,16' (White to move) -> the computer plays 24-19 at once (root values: 24-19 +200, others 0 or -100); your only move is 16x23; the computer answers 27x18x9x2, capturing three men and crowning on 2. Same position on Easy -> 24-20. Start as White vs Hard -> the computer opens 9-13 (all moves tie; first in order). Invalid: paste 'hello' -> 'Invalid position'. Undo vs the computer removes a pair. Record: vs Computer, you Black, load 'B:W18:B14' and play 14x23 -> 'Black wins'; reload action, the record shows the win.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "An 8x8 board playing on dark squares numbered 1-32 as described, Black on 1-12 at the top and White on 21-32 at the bottom, with a move list, a Position box, mode/color/level choices, Undo and New game."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "From the start Black has exactly the seven moves 9-13, 9-14, 10-14, 10-15, 11-15, 11-16 and 12-16, shown as targets when pieces are clicked, and men never move backwards."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Captures are compulsory: after 11-15 22-18 only the man on 15 can move and it must play 15x22, and the list reads '1. 11-15 22-18 2. 15x22'."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Multi-jumps: in 'B:W14,22,23:B1,9' the man on 9 must jump twice and may choose 9x18x25 or 9x18x27, written that way, removing both jumped men."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Crowning ends the move: in 'B:W5,26,27:B1,22' Black plays 22x31, the piece is crowned on 31 and stops with the white man on 27 still on the board, and kings then move and capture backwards."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Endings: loading 'B:W8,11:B4' shows 'White wins' at once, taking the last enemy piece wins, and the king shuffle from 'B:WK29:BK4' ends in 'Draw by repetition' after 8 moves."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The Hard computer follows the search: as Black, loading 'W:W13,22,24,25,26,27,28,29,30,32:B1,3,4,5,6,7,11,12,14,16' makes it play 24-19 at once, and after your forced 16x23 it replies 27x18x9x2, crowning on 2."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The Easy computer plays 24-20 in that same position, and the Hard computer opens 9-13 when you play White."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The Position box shows the current PDN FEN, loads valid positions including kings and rejects junk with 'Invalid position'; Undo vs the computer takes back a pair, and the per-level record survives a reload."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The board with its small square numbers, the move list and the controls fit in 1280x800 without overlap, and the move list scrolls when it grows."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A warm wooden board a game artist would accept: discs with a rim and shadow, clear gold crowns on kings, and visible selection, target and last-move highlights."
+   }
+  ]
+ },
+ {
+  "task_id": "game-open-17",
+  "category": "game",
+  "mode": "open_ended",
+  "title": "Broadside: Battleship with seeded fleets, a hunt-and-target computer, water marking and stats",
+  "prompt": "Build a Battleship game called Broadside against the computer: two 10 x 10 sea grids side by side (your fleet on the left, enemy waters on the right) with rows A-J from the top and columns 1-10, a navy-and-steel naval look, ships drawn as rounded grey hulls, white pegs for misses and red bursts for hits, Inter or Roboto type. Cells are named like C7 (row letter, then column).\n\nFleet: Carrier 5, Battleship 4, Cruiser 3, Submarine 3, Destroyer 2. Ships lie horizontally or vertically and may not overlap or touch, not even diagonally.\n\nSetup: drag ships from a dock onto your grid (R or a right click rotates the ship being placed; an invalid spot shows a red preview and refuses the drop) or press 'Random'. 'Clear' empties your grid, and 'Start battle' is enabled only when all five ships are placed.\n\nRandomness: a Seed field (default 1; ?seed=N also works) and mulberry32:\nfunction mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}}\nRandom placement places the ships in fleet order; for each ship, list every valid spot (first all horizontal spots in reading order of their left end, then all vertical spots in reading order of their top end) and take index floor(rand() x count). The enemy fleet uses mulberry32(seed). Your 'Random' button uses one mulberry32(seed + 1) stream per game: each press places a whole new fleet from the next values. The computer's shots use mulberry32(seed + 2).\n\nBattle: you fire first by clicking an enemy cell, then the computer fires once about 600 ms later; turns simply alternate (a hit earns no extra shot). Cells already fired at, or known to be water, cannot be targeted. When a ship is sunk, announce it ('You sank the Cruiser!' / 'Enemy sank your Destroyer!'), outline it, and mark every cell around it as water on that grid; neither side ever fires there.\n\nComputer on Normal: with no hits on unsunk ships it hunts: from the untried cells whose row number plus column number is even (A1, A3, B2 …; all untried cells once none of those are left) it takes index floor(rand() x count) in reading order. After a hit it targets that ship: with one unsunk hit it tries the neighbours in the order up, right, down, left; with two or more hits in a line it fires just past one end, trying above the top hit (vertical line) or right of the rightmost hit (horizontal line) first and the other end second. Cells already tried or marked as water are always skipped. On Easy it takes any untried cell at random from the same stream, without targeting.\n\nPanels: both fleets' status (names crossed out when sunk) and your shots, hits and accuracy (e.g. 'Accuracy 64%'). The end shows 'Victory!' or 'Defeat' with the number of shots you fired, reveals the enemy ships that were left, and offers 'Play again'. Keep stats (games, wins, best accuracy) in localStorage.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "animation": false
+  },
+  "interaction_hints": "Each interact call opens a fresh page (seed 1 is the default; ?seed=1 also works). Get the two grid rectangles with eval to click cells. All facts were computed with the stated algorithms. Enemy fleet (seed 1): Battleship A1-A4, Carrier B6-F6, Cruiser C2-E2, Submarine H9-J9, Destroyer I5-J5. Your Random press #1: Carrier C9-G9, Battleship H1-H4, Cruiser D5-D7, Submarine J3-J5, Destroyer F7-G7; press #2: Carrier B6-F6, Battleship B4-E4, Cruiser J4-J6, Submarine F8-H8, Destroyer C1-C2. The Normal computer's shots against Random #1, in order: H4 hit, G4, H5, I4, H3 hit, H2 hit, H1 (sinks Battleship), A3, D10, A7, H6, E3, E5, B6, C5, F2, B10, A9, H8, E7, I9, J4 hit, J5 hit, J6, J3 (sinks Submarine), C9 hit, B9, C10, D9 hit, E9 hit, F9 hit, G9 (sinks Carrier, 32nd shot), F4, C1, F6, D4, I7, D2, A1, J8, B4, J10, E1, C3, D6 hit, C6, D7 hit, D5 (sinks Cruiser), A5, B2, G7 hit, F7 (sinks Destroyer, 52nd shot). Victory: Random once, Start battle, then click A1 A2 A3 A4 B6 C6 D6 E6 F6 C2 D2 E2 H9 I9 J9 I5 J5 with ~900 ms waits: 'Victory!' after 17 shots, accuracy 100%; after A4, cells A5 and B1-B5 show as water; the computer's 16 shots on your grid match the list. Defeat: Random once, Start, then fire at these 52 water cells in order (~900 ms apart): G1-G10, B1-B5, B7-B10, H1-H8, H10, F1-F5, F7-F10, A5-A10, J1-J4, J6-J8, J10, C1 -> after the computer's 52nd shot 'Defeat' and the enemy ships are revealed. Easy (Settings): Random once, Start, fire anywhere: its first shots are H3 (hit), A4, E6, A9, H8, E9 (hit) - no follow-up after the H3 hit. Setup: drag a ship next to another (touching) -> refused with a red preview; R rotates; Start disabled until 5 ships placed. Stats: after a game, reload action, games/wins/best accuracy persist.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Two labelled 10x10 grids (rows A-J, columns 1-10), a dock with the five named ships, Random, Clear and Start battle, a Seed field defaulting to 1, and status panels for both fleets."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Ships can be dragged onto the grid and rotated with R, overlapping or touching placements are refused with a red preview, and Start battle stays disabled until all five ships are placed."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With seed 1 the first Random press places Carrier C9-G9, Battleship H1-H4, Cruiser D5-D7, Submarine J3-J5, Destroyer F7-G7, and the second press gives the second fleet in the hints, identically on every fresh page."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The seed 1 enemy fleet is exactly as in the hints: firing at its 17 cells wins with 'Victory!' after 17 shots and accuracy 100%, and water around each sunk ship is marked and cannot be targeted."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The Normal computer's first 16 shots against Random fleet 1 are exactly H4, G4, H5, I4, H3, H2, H1 (sinking the Battleship), A3, D10, A7, H6, E3, E5, B6, C5, F2."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Firing only at water, the Normal computer sinks the Carrier with its 32nd shot at G9 and the whole fleet with its 52nd at F7, and the game ends with 'Defeat' and the enemy ships revealed."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Sinks are announced by name ('You sank the Battleship!' / 'Enemy sank your Battleship!') and crossed out in the status panels, and hits and misses are clearly marked on both grids."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Turns alternate one shot each with the computer firing about 0.6 s after you, and cells already fired at cannot be clicked again."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The Easy computer's first shots with seed 1 against Random fleet 1 are H3, A4, E6, A9, H8, E9, with no follow-up after a hit."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Shots, hits and accuracy update live, and games, wins and best accuracy survive a reload."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A cohesive naval look a designer would accept: two aligned grids with clear labels, rounded ship hulls, distinct miss pegs and hit bursts, and all panels within 1280x800 without overlap."
+   }
+  ]
+ },
+ {
+  "task_id": "game-open-18",
+  "category": "game",
+  "mode": "open_ended",
+  "title": "Jade Pairs: Mahjong solitaire with seeded deals, the free-tile rule, hints, shuffles and two layouts",
+  "prompt": "Build a Mahjong solitaire game called Jade Pairs: ivory tiles with rounded corners and a visible edge on the lower right so stacked layers read as 3D (each higher layer drawn a little up and to the left), on a dark jade table with Inter or Roboto type. Tiles come in two suits of nine: Dots 1-9 (colored circles in the usual pip patterns) and Bamboo 1-9 (green sticks), each with its number in a corner; their codes are D1-D9 and B1-B9. Build the tiles as DOM elements (CSS or inline SVG) carrying data-layer, data-row and data-col attributes (1-based, as in the maps below) so our test scripts can target them.\n\nLayouts ('#' = tile; layer 1 is the bottom, and a tile on layer L+1 sits exactly on the tile at the same row and column of layer L):\nPagoda, 72 tiles on a 6 x 10 grid. Layer 1:\n##########\n.########.\n##########\n##########\n.########.\n##########\nLayer 2: rows 3-4, columns 3-8. Layer 3: rows 3-4, columns 5-6.\nPocket, 16 tiles on a 3 x 4 grid. Layer 1: all 12 cells. Layer 2: row 2, columns 2-3. Layer 3: row 2, columns 2-3.\n\nDeal: a layout with N tiles uses the first N / 4 kinds of D1 … D9, B1 … B9, four of each, listed in that order (D1 D1 D1 D1 D2 …). Shuffle the list with Fisher-Yates using mulberry32(deal number) (for i from the last index down to 1, j = floor(rand() x (i + 1)), swap), then deal it onto the positions in order: layer 1 in reading order, then layer 2, then layer 3. A 'Deal #' field (default 1), a layout picker and ?deal=N&layout=pocket choose the deal.\nfunction mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}}\n\nRules: a tile is free when no tile lies on it and its left or right neighbour on the same layer is missing. Click a free tile to select it, then a free tile of the same kind to remove both. Clicking the selected tile again deselects it, clicking a free tile of another kind selects that one instead, and clicking a blocked tile gives a short shake and changes nothing.\n\nHUD: Tiles left, 'Pairs available: N' (the number of pairs of free tiles of the same kind; three free D5s make 3), score (+10 per pair), a timer, Undo (Z; unlimited, puts pairs back with their points), Hint (H) and Shuffle. Hint highlights the pair whose first tile comes earliest in dealing order, with its earliest partner, and costs 5 points. When tiles remain but no pair is available, show 'No more moves' with Shuffle and Undo buttons. Shuffle (at most 3 per game) takes the remaining tiles' kinds in dealing order, shuffles them with Fisher-Yates using the same random stream continuing after the deal, puts them back in dealing order, and clears the undo history. Removing every tile shows 'Cleared!' with the time and score; keep best times per layout in localStorage.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "animation": false
+  },
+  "interaction_hints": "Each interact call opens a fresh page. Target tiles with selectors like [data-layer='1'][data-row='2'][data-col='2']; below, (l,r,c) means layer, row, column. All facts were computed with the stated algorithm. Pagoda deal 1 (default): layer 1 row 1 reads D6 D9 B8 D9 B8 B1 B4 D7 B9 D7, row 2 (cols 2-9) D4 D9 B5 B3 B2 D4 D3 B1; layer 2 row 3 B6 D4 D6 D3 D8 D8, row 4 B7 D7 B3 B2 D5 B8; layer 3 is B8 B1 over D1 B3 (rows 3-4, cols 5-6). The start has 20 free tiles, 'Tiles left 72' and 'Pairs available: 10'. Hint -> the D4 pair (1,2,2) and (1,5,9), score -5. Blocked: click (1,1,2) -> shake, nothing selected; click (2,3,4) (neighbours on both sides) -> shake. Pair: click (1,2,2) then (1,5,9) -> both removed, +10. Undo (z) -> they return. Deselect: click (1,1,1), click it again. Pocket deal 4 (?deal=4&layout=pocket): layer 1 rows D3 D3 D4 D3 / D4 D2 D2 D4 / D3 D1 D2 D1, layer 2 D1 D1, layer 3 D2 D4; 8 free tiles, 'Pairs available: 6'. Clicking these pairs in order clears it: (1,1,1)+(1,1,4), (1,1,2)+(1,3,1), (1,1,3)+(1,2,1), (1,2,4)+(3,2,3), (1,3,2)+(1,3,4), (1,3,3)+(3,2,2), (2,2,2)+(2,2,3), (1,2,2)+(1,2,3) -> 'Cleared!' with score 80; reload and check the best time for Pocket. Stuck: Pocket deal 3 (?deal=3&layout=pocket) starts D4 D4 D3 D2 / D4 D3 D1 D1 / D1 D2 D2 D3, layer 2 D4 D2, layer 3 D1 D3; take the hint pair four times (press h, click the two highlighted tiles; they are D4 (1,1,1)+(1,2,1), D1 (1,2,4)+(1,3,1), D2 (1,1,4)+(1,3,2), D3 (1,1,3)+(1,3,4)) -> 8 tiles left, 'No more moves'. Shuffle -> kinds become (1,1,2) D4, (1,2,2) D2, (1,2,3) D2, (1,3,3) D1, (2,2,2) D3, (2,2,3) D4, (3,2,2) D1, (3,2,3) D3, and 'Pairs available: 1' (D1 at (1,3,3) and (3,2,2)). Following the hint 36 times also clears Pagoda deal 1 (optional, long).",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The Pagoda layout has 72 tiles on three layers exactly as mapped (56, 12 and 4) with higher layers visibly raised, and every tile shows its suit and number (Dots pips, Bamboo sticks)."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Pagoda deal 1 matches the hint facts: layer 1 row 1 reads D6 D9 B8 D9 B8 B1 B4 D7 B9 D7, layer 3 is B8 B1 over D1 B3, and the start shows 72 tiles and 'Pairs available: 10', identically on a fresh page."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The free rule is enforced: tiles with both side neighbours or a tile on top shake and cannot be selected, while two free tiles of the same kind are removed for +10."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Hint on Pagoda deal 1 highlights the D4 tiles at (1,2,2) and (1,5,9) and costs 5 points, and clicking a selected tile again deselects it."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Pocket deal 4 shows the listed tiles with 'Pairs available: 6', and removing the eight listed pairs in order ends with 'Cleared!', the time and score 80."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "On Pocket deal 3, taking the hint pair four times leaves 8 tiles with 'No more moves', and Shuffle then gives exactly the listed kinds with 'Pairs available: 1'."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Undo puts removed pairs back with their points and counters, any number of times."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The timer runs, the best time per layout is saved after a clear and survives a reload, and Deal # and ?deal=N&layout=pocket select deals."
+   },
+   {
+    "id": "R9",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The Pagoda layout is centered and fully visible in 1280x800 with readable tiles, and the HUD never overlaps the tiles."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A cohesive jade-and-ivory look a designer would accept: tiles with a consistent 3D edge and shadow, clean pip and bamboo art, and a clear selection glow and hint highlight."
+   }
+  ]
+ },
+ {
+  "task_id": "game-open-19",
+  "category": "game",
+  "mode": "open_ended",
+  "title": "Orbit Guard: Space Invaders with a speeding formation, eroding bunkers, a mystery-ship table and waves",
+  "prompt": "Build a Space Invaders-style arcade game called Orbit Guard with a faithful retro look: a black sky with a few static stars, pixel-art aliens drawn from small bitmaps in three shapes with two animation frames each (squid, crab, octopus), a green laser base, green bunkers, a red mystery ship and a blocky monospace font. Keep drawing cheap (no per-pixel effects) so it runs smoothly without a GPU.\n\nWorld: 224 x 256 units, scaled up by a whole number with crisp pixels and centered on the page.\n\nFormation: 5 rows x 11 columns of aliens in 16-unit cells, the top-left cell at (24, 56) on wave 1: row 1 squids worth 30, rows 2-3 crabs worth 20, rows 4-5 octopuses worth 10. The whole formation steps 2 units sideways at a time, switching animation frame on every step, one step every (15 x aliens alive + 20) ms: 845 ms with 55 aliens, 35 ms with one. When a step would take any alien beyond x = 8 or x = 216, the formation instead drops 8 units and reverses.\n\nPlayer: the base starts centered at x = 112 on the line y = 216, moves 80 units/s with Left/Right or A/D, and fires with Space; only one of its shots can be in the air, climbing at 300 units/s.\n\nAlien fire: every 0.9 s, if fewer than 3 alien shots are in the air, the lowest alien of a living column fires; the column is the floor(rand() x living columns)-th from the left, with rand from mulberry32(wave number). Alien shots fall at 120 units/s, and a player shot that meets an alien shot cancels both.\nfunction mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}}\n\nBunkers: four 22 x 16 bunkers with an arch cut out, left edges at x = 32, 80, 128 and 176 and tops at y = 184. Every shot that hits a bunker erases a ragged chunk about 6 units wide there, and aliens erase whatever they overlap. Bunkers are rebuilt for each wave.\n\nMystery ship: every 25 s while at least 8 aliens remain, it crosses at y = 40 at 60 units/s, entering from alternate sides. Its value depends on the shots you have fired this wave, counting the one that hits it: [100, 50, 50, 100, 150, 100, 100, 50, 300, 100, 100, 100, 50, 150, 100][shots mod 15], so the 23rd shot scores 300. Show the value where it was hit.\n\nFlow: 3 lives and one extra life at 1500 points. A hit plays a short explosion and the base respawns after 1.5 s. Clearing a wave shows 'WAVE 2' (3, 4 …) and restarts the formation 8 units lower than the previous wave (at most 32 units lower, then back to the start height), with fresh bunkers. The game ends with 'GAME OVER' when the lives run out or an alien reaches the base line. HUD: SCORE, HI-SCORE, lives and wave. The title screen shows 'Press Enter', the point table and a TOP 5 (3-letter initials, score, wave) saved in localStorage; P pauses.\n\nQA debug mode with ?debug=1 in the URL: I toggles invincibility, K destroys every alien except the bottom-left one, U launches the mystery ship right away from the left edge, and the HUD adds 'Shots n' and 'Step n ms'.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "animation": false
+  },
+  "interaction_hints": "Each interact call opens a fresh page; use --entry 'index.html?debug=1' for the debug keys (press Enter to start). Title: screenshot 'Press Enter', the point table and TOP 5. Formation: after Enter, screenshot: 55 aliens in 5 rows of 11 (squids on top, two crab rows, two octopus rows), 4 arched bunkers, HUD 'Step 845 ms'; two screenshots ~850 ms apart show a small sideways step and the other animation frame; screenshots every 5 s show the formation reaching a side, dropping and reversing. Points: keep the base still and press Space; the first alien hit in a bottom row adds 10 (row 2-3 hits add 20, top row 30). One shot: press Space 5 times with delay_ms 60, screenshot: a single player shot in the air. Speed-up: press k -> one alien left (bottom-left), 'Step 35 ms', it zips across; shoot it (move under it) -> 'WAVE 2' with the new formation starting 8 units lower than wave 1 (compare the top row's height with the first screenshot) and intact bunkers. Mystery ship (300): fresh debug page, Enter, press i (invincible), then Space 22 times with delay_ms 900 without moving (the shots hit aliens; HUD 'Shots 22'), press k (clears the sky except the lone bottom-left alien), press u, wait ~1450 ms, press Space, screenshots over the next 1 s: the ship (centre moving from about x -8 at 60 units/s) meets the shot above the base at x 112 and '300' appears; if it misses, retry on a fresh page adjusting the wait between 1200 and 1700 ms. First-shot value: fresh debug page, Enter, press k, u, wait ~1450, Space -> '50' (table index 1). Bunkers: shoot the same spot of a bunker 3-4 times: a hole grows through it. Alien fire: without invincibility, wait: alien shots fall (never more than 3), a hit plays an explosion, lives drop, the base respawns; eventually 'GAME OVER', type 3 initials, Enter, reload action, check the TOP 5 on the title. Extra life: with i on, keep shooting the formation (wave 1 is worth 990 in total, so 1500 comes during wave 2) and check that the lives go up by exactly one. Pause: p, two screenshots 500 ms apart unchanged.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The title shows 'Press Enter', the point table and a TOP 5, and the game shows 55 aliens in 5 rows of 11 (squids on top, two crab rows, two octopus rows) with two animation frames, four arched bunkers and a HUD with score, hi-score, lives and wave."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The formation steps sideways, drops and reverses at the edges, and its step time follows 15 x alive + 20 ms: 'Step 845 ms' at the start and 'Step 35 ms' after debug K leaves one alien, which visibly zips across."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The base moves with the arrows or A/D, only one player shot can be in the air, and aliens score 10, 20 and 30 by type."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Aliens fire back (never more than 3 shots at once); a hit plays an explosion, costs a life and the base respawns, and shots that meet cancel."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Shots and aliens erode the bunkers in small chunks so holes grow with repeated hits, and the bunkers are whole again on the next wave."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The mystery ship crosses the top, and hitting it shows and scores the table value for the wave's shot count: 300 with the 23rd shot (and 50 with the first)."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Clearing a wave shows 'WAVE 2' and the new formation starts 8 units lower than wave 1's."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Reaching 1500 points gives exactly one extra life, and losing the last life shows 'GAME OVER'."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After GAME OVER three initials can be entered and the TOP 5 survives a reload, and P pauses and resumes."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The 224x256 world is scaled up crisply (no blur), centered and fully visible in 1280x800, with the HUD never covering the play area."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A faithful retro arcade look a game artist would accept: pixel-art aliens in three shapes, a green base and bunkers, a red mystery ship, crisp monospace text and smooth motion without stutter."
+   }
+  ]
+ },
+ {
+  "task_id": "game-open-20",
+  "category": "game",
+  "mode": "open_ended",
+  "title": "Pop Garden: hex-grid bubble shooter with bank shots, seeded colors, cluster drops, stones and pressure",
+  "prompt": "Build a bubble shooter called Pop Garden on a canvas: a soft pastel garden backdrop, glossy bubbles with a highlight in six colors (R red, Y yellow, G green, B blue, P purple, C cyan) plus grey stones (X), a launcher with an aiming arrow and a dotted guide line up to the first wall bounce, and rounded friendly type. Keep drawing light so it stays smooth without a GPU.\n\nGeometry, in units (scale the field to fit the page): the field is 480 wide and 640 tall. Bubbles have a diameter of 40 and sit on a hex grid: odd rows (1, 3 …) hold 12 cells with centers at x = 20, 60 … 460, even rows hold 11 cells at x = 40, 80 … 440, and row r's centers are at y = 20 + 34.64 x (r - 1) below the ceiling. The launcher is at (240, 600).\n\nAiming and shots: Left/Right turn the aim 1 degree per press (90 is straight up; limits 15 and 165) and 90 degrees per second when held; the mouse also aims and a click fires; Space fires. A shot flies at 900 units/s and bounces off the side walls (its center reflects at x = 20 and x = 460). It stops as soon as its center comes within 36 units of a board bubble's center or reaches the row 1 line, and snaps to the nearest empty grid cell.\n\nMatching: if the snapped bubble joins a connected group of 3 or more of its color (each cell has up to six neighbours), the whole group pops for 10 points per bubble, the shot included; then every bubble no longer connected to row 1 falls for 20 points each. Stones never pop but fall when cut off.\n\nColors: bubbles come from mulberry32(level number): each new bubble is the color at index floor(rand() x n) of the n colors still on the board, listed in the order R, Y, G, B, P, C (stones excluded). A level draws the current bubble, then the next; after each shot has fully settled (pops and falls done), the next becomes current and one new next is drawn. X swaps current and next.\nfunction mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}}\n\nPressure: after every 5 shots in a row that pop nothing, the whole board moves down one row (34.64 units); show the countdown as five dots. If a bubble settles with its center below y = 520, the game ends with 'GAME OVER'. Clearing the board shows 'LEVEL CLEAR' with a bonus of max(0, 1000 - 20 x shots fired in the level) and unlocks the next level.\n\nLevels (row 1 first; '.' is empty):\nLevel 1 'Meadow'\nRRYYGGBBPPRR\nRYYGGBBPPRY\nYYGGBBPPRRYY\nGGBBY....RR\n.....BBYY...\nLevel 2 'Hedge'\nBBGGCCPPYYRR\nBGGCCPPYYRR\nCCPPYYRRBBGG\nCPPYYRRBBGG\nGGRRCCBBYYPP\n.G..C..Y..P\nLevel 3 'Stone Wall'\nRRXXBBGGXXYY\nRXPPBGGPPXY\nPPRRXXXXYYBB\nPRRCCCCCYYB\n..X......X..\n\nHUD: level, score, shots and best score; a level select for unlocked levels; best score and unlocks are kept in localStorage; P pauses.\n\nQA debug mode with ?debug=1 in the URL: keys 1-3 jump to that level, and C removes every bubble except the two leftmost of row 1 and makes the current bubble their color.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "animation": false
+  },
+  "interaction_hints": "Each interact call opens a fresh page; start level 1 (from the level select or Play). All facts were computed with the stated geometry and checked to give the same cells for contact distances from 32 to 40. Level 1 starts with a blue current bubble and a red next one on every fresh page. Shot 1: Space at 90 degrees -> the blue snaps to row 6 col 6 under the blue pair at row 5 cols 6-7, pops 3 blues (30) and the two yellows at row 5 cols 8-9 fall (40): score 70; current red, next green. Shot 2: ArrowRight 22 times (68 degrees), Space -> the red lands at row 5 col 11 and pops the 8-bubble red cluster (rows 1-4 on the right, shot included) and the yellows at row 2 col 11 and row 3 cols 11-12 fall: score 210; current green, next purple. Shot 3: Space again at 68 degrees -> the green flies to the ceiling at row 1 col 12, nothing pops, one of the five pressure dots goes, score 210. Shot 4: ArrowLeft 22 times (back to 90), Space -> the purple snaps at row 4 col 6 and pops 7 purples (the diagonal P band): score 280; next shows yellow. Swap: fresh page, press x -> current red, next blue. Bank shot: aim at 35 or 145 degrees and watch the ball and guide line reflect off the wall. Pressure: fresh page, fire 5 shots that pop nothing (e.g. aim at 20 degrees with different colors) -> the board shifts down one row; keep missing -> 'GAME OVER'. Level clear: --entry 'index.html?debug=1', start level 1, press c (only two reds at row 1 cols 1-2, current red), ArrowLeft 17 times (107 degrees), Space -> 'LEVEL CLEAR' with a bonus of 980 (1000 - 20 x 1 shot). Stones: debug, press 3: level 3 starts with current purple and next red; press x (current red), ArrowLeft 24 times (114 degrees), Space -> the red snaps at row 5 col 2, pops the 4 reds at rows 3-4 (5 with the shot) and the grey stone at row 5 col 3 falls: score 70. Reload action: best score and unlocked level 2 persist. Pause: p, two screenshots 500 ms apart unchanged.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Level 1 'Meadow' matches the given map on a 12/11 hex grid with glossy bubbles in the six colors, and the launcher shows an arrow, a dotted guide line and the current and next bubbles."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Level 1 starts with a blue current and red next bubble on every fresh page, and a straight-up shot snaps under the blue pair, pops 3 blues and drops the 2 hanging yellows for a score of exactly 70."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The hint sequence reproduces exactly: 22 Right presses and Space pop the red cluster for a total of 210 with green current next, the green shot sticks at the top right with no pop, and the purple straight shot brings the score to 280."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Aim turns 1 degree per key press within 15-165 degrees, the mouse aims and clicks fire, and the guide line follows the aim up to the first wall bounce."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Shots bounce off the side walls at the mirrored angle and snap into the nearest empty cell on the hex grid without overlapping other bubbles."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "X swaps the current and next bubble (red current, blue next on a fresh level 1)."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After 5 shots in a row that pop nothing the board moves down one row with the five-dot countdown showing it coming, and a bubble settling below the danger line ends with 'GAME OVER'."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Clearing a level shows 'LEVEL CLEAR' with the bonus max(0, 1000 - 20 x shots) (980 after the one-shot debug clear), and level 3's grey stones never pop but fall when cut off."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Best score and unlocked levels survive a reload, and P pauses."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The 480x640 field is centered and fully visible in 1280x800, bubbles sit exactly on the hex grid, and the HUD never covers the field."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A soft, cohesive garden look a game artist would accept: glossy bubbles with highlights, a smooth shot flight, pop bursts and falling bubbles without stutter."
+   }
+  ]
+ },
+ {
+  "task_id": "game-open-21",
+  "category": "game",
+  "mode": "open_ended",
+  "title": "Inkgrid: nonograms with drag painting, line-logic hints, checks, saved progress and an editor with a uniqueness solver",
+  "prompt": "Build a nonogram (picross) game called Inkgrid with a calm paper-and-ink look: an off-white page, a crisp grid with a thicker line every 5 cells, near-black filled cells, soft grey X marks, clue numbers in Inter or Roboto, and one gentle accent color for highlights. Build each grid from DOM cells carrying data-row and data-col attributes (1-based) so our test scripts can target them.\n\nBuilt-in puzzles ('#' filled, '.' empty, row 1 on top; derive the clues from these):\n1 'Heart' 5 x 5\n.#.#.\n#####\n#####\n.###.\n..#..\n2 'Sailboat' 10 x 10\n....#.....\n....##....\n....###...\n....####..\n....#####.\n....#.....\n##########\n.########.\n..######..\n#.#.#.#.#.\n3 'Cat' 15 x 15\n..#.........#..\n.###.......###.\n.####.....####.\n.#############.\n###############\n##..#######..##\n##..#######..##\n###############\n#######.#######\n######...######\n###############\n.#############.\n..###########..\n....#######....\n......###......\n\nGrid: row clues on the left (read left to right) and column clues on top (read top to bottom), with a single 0 for an empty line. Left click or drag fills, right click or drag marks X, and clicking a cell that already holds that mark clears it; a drag stays in the row or column where it started and applies the same action to every cell it passes. Arrow keys move a cursor, Space fills and X marks. The pointer's row and column are highlighted, and a line's clue numbers turn grey as soon as its filled cells match the clue.\n\nHint: look at rows top to bottom, then columns left to right; in the first line where line logic decides an undecided cell (neither filled nor X) - the cell is filled in every arrangement of the line's clue that agrees with the fills and Xs already in that line, or empty in every one - fill or X the first such cell and flash that line. If any fill or X contradicts the solution, the hint instead outlines the first wrong cell in reading order in red. 'Check' counts and outlines every wrong cell. Undo and Redo (Ctrl+Z / Ctrl+Y) cover every change, hints included.\n\nWinning: when the filled cells equal the solution (Xs do not matter), show 'Solved!' with the time and reveal the picture (grid lines and Xs fade away). A puzzle list shows each puzzle's size, a solved tick and its best time. Boards in progress, solved ticks and best times survive a reload (localStorage).\n\nEditor: pick a width and height from 5 to 15, draw cells and watch the clues update live. 'Check uniqueness' searches every grid that fits the clues (stopping at two) and reports 'Unique solution' or 'Multiple solutions'. 'Save' adds the puzzle to 'My puzzles' so it can be played, and 'Export code' / 'Import code' use a text code like '5x5:.#.#./#####/#####/.###./..#..'.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "animation": false
+  },
+  "interaction_hints": "Each interact call opens a fresh page. Target cells with selectors like [data-row='2'][data-col='1'] (button 'right' for X). All facts were computed with a line solver and a backtracking counter. Clues: Heart rows 1 1 / 5 / 5 / 3 / 1 and columns 2 / 4 / 4 / 4 / 2. Sailboat rows 1 / 2 / 3 / 4 / 5 / 1 / 10 / 8 / 6 / 1 1 1 1 1 and columns 1 1 / 2 / 4 / 3 / 10 / 4 3 / 3 4 / 2 3 / 1 2 1 / 1. Cat rows 1 1 / 3 3 / 4 4 / 13 / 15 / 2 7 2 / 2 7 2 / 15 / 7 7 / 6 6 / 15 / 13 / 11 / 7 / 3 and columns 7 / 11 / 5 6 / 4 6 / 12 / 11 / 6 5 / 5 5 / 6 5 / 11 / 12 / 4 6 / 5 6 / 11 / 7. All three are unique and solvable by line logic. First hints on empty boards: Heart fills row 2 col 1; Sailboat fills row 7 col 1; Cat fills row 4 col 3; on Heart a second Hint fills row 2 col 2. Wrong cell: Heart, click row 1 col 1, then Hint -> row 1 col 1 outlined in red (no new fill). Drag: drag from row 2 col 1 to row 2 col 5 -> the whole row fills and its clue greys; a drag that wanders down stays in row 2. Win: fill Heart's 16 cells (row 1 cols 2 and 4; rows 2-3 all; row 4 cols 2-4; row 5 col 3) -> 'Solved!' with a time; back in the list Heart is ticked with a best time; reload action -> still there. Progress: fill a few Sailboat cells, reload -> restored. Check: fill two wrong cells, click Check -> 2 outlined. Undo/Redo: Ctrl+Z twice, Ctrl+Y once. Editor 5x5: fill only row 1 col 1 and row 2 col 2 -> clues 1 / 1 / 0 / 0 / 0 and 1 / 1 / 0 / 0 / 0, Check uniqueness -> 'Multiple solutions'; clear, fill row 3 and column 3 (a plus) -> 'Unique solution'. Save it, play it from My puzzles, Export code then Import the same code into a cleared editor -> same grid.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "A puzzle list offers Heart 5x5, Sailboat 10x10 and Cat 15x15 with sizes, solved ticks and best times, and each grid shows row clues on the left and column clues on top with thicker lines every 5 cells."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The clues are exactly right: Heart rows 1 1 / 5 / 5 / 3 / 1 and columns 2 / 4 / 4 / 4 / 2, Sailboat's last row 1 1 1 1 1 and column 6 '4 3', and Cat row 6 '2 7 2' and column 3 '5 6'."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Left click or drag fills, right click or drag marks X, a drag stays in its starting row or column, and clicking a cell with the same mark clears it."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "A line's clue numbers turn grey as soon as its fills match the clue, and the pointer's row and column are highlighted."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Hint follows the line-logic order: on empty boards it fills Heart row 2 col 1, Sailboat row 7 col 1 and Cat row 4 col 3, and with a wrong fill at Heart row 1 col 1 it outlines that cell in red instead."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Check counts and outlines the wrong cells, and Undo/Redo (Ctrl+Z / Ctrl+Y) reverse and replay fills, Xs and hints."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Filling exactly the Heart solution shows 'Solved!' with the time and reveals the picture, and the list then shows Heart ticked with a best time that survives a reload."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "An unfinished board is restored after a reload."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The editor updates clues live, and 'Check uniqueness' reports 'Multiple solutions' for a 5x5 with only row 1 col 1 and row 2 col 2 filled and 'Unique solution' for the 5x5 plus of row 3 and column 3."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "An editor puzzle can be saved to My puzzles and played, and Export code then Import code restores the same grid."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The 15x15 Cat grid with its clues fits in 1280x800 with square cells and clues aligned to their rows and columns."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A calm, cohesive paper-and-ink look a designer would accept: crisp grid lines, clear fill and X states, readable clue numbers and a satisfying solve reveal."
+   }
+  ]
+ },
+ {
+  "task_id": "game-open-22",
+  "category": "game",
+  "mode": "open_ended",
+  "title": "Grid Nine: Sudoku with notes, auto-candidates, technique-named hints, a mistake limit and a validating importer",
+  "prompt": "Build a Sudoku game called Grid Nine with a crisp editorial look: white cells, thin grey cell lines and thick 3x3 box lines, givens in bold near-black, your entries in blue, small grey notes, and Inter or Roboto with tabular digits. Build the grid from DOM cells carrying data-row and data-col attributes (1-based) so our test scripts can target them.\n\nPuzzles (81 characters in reading order; 0 or '.' is empty):\nEasy 530070000600195000098000060800060003400803001700020006060000280000419005000080079\nMedium 4..2...8.....7..9319....5.2..61.5.........9...5..43.......26..424.....3.7..4.....\nHard 800000000003600000070090200050007000000045700000100030001000068008500010090000400\n\nEntry: select a cell by clicking or with the arrow keys; 1-9 places a digit (keys or an on-screen pad) and Backspace, Delete or 0 clears it; givens are locked. Notes mode (N key or a pencil toggle) toggles small candidate digits laid out 3 x 3 in the cell instead. 'Auto notes' fills every empty cell with its candidates (the digits not yet in its row, column or box). Placing a digit removes it from the notes of every cell in the same row, column and box. Highlight the selected cell's row, column and box and every cell holding the same digit. A digit that repeats in a row, column or box turns red, together with the cell it clashes with. The pad shows how many of each digit are still missing and greys out a digit once all nine are placed.\n\nHint (H or a button) names the technique and fills the cell. It first looks for a naked single: the first empty cell in reading order with exactly one candidate ('Naked single: r5c5 = 5'). Otherwise it looks for a hidden single, checking rows 1-9, then columns 1-9, then boxes 1-9 (boxes in reading order), and in the first unit that has one, the smallest digit that fits in only one of its cells ('Hidden single: 6 in column 1 → r2c1'). Candidates always come from the placed digits, not from your notes. If neither exists, show 'No single found – try notes'.\n\nMistakes: a digit that differs from the solution counts as a mistake ('Mistakes 1/3'); the third one ends the game with 'Game over' unless 'Mistake limit' is switched off in Settings. Undo and Redo (Ctrl+Z / Ctrl+Y) cover digits and notes. A timer runs, with a pause button that hides the grid. Completing the grid shows 'Solved in m:ss'. Best times per difficulty and the game in progress survive a reload (localStorage).\n\nImport: paste 81 characters and press 'Import'. Show 'Needs 81 cells' for a wrong length; 'Duplicate 5 in row 1' (or column 3, box 7 …; check rows, then columns, then boxes, and report the first clash) for clashing givens; otherwise solve it and show 'No solution' or 'Multiple solutions', or start it as a Custom puzzle when the solution is unique.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "animation": false
+  },
+  "interaction_hints": "Each interact call opens a fresh page. Target cells with selectors like [data-row='5'][data-col='5']. All facts were computed with a solver. Easy's solution: 534678912672195348198342567859761423426853791713924856961537284287419635345286179. Hints on Easy: 'Naked single: r5c5 = 5', then r5c2 = 2, then r5c8 = 9. Medium has no naked single at the start and no hidden single in any row: hints are 'Hidden single: 6 in column 1 → r2c1', then 5 in column 1 at r7c1, then 6 in column 2 at r9c2. Hard (Inkala's puzzle) -> 'No single found – try notes'. Auto notes on Easy: r1c3 shows 1 2 4, r1c4 shows 2 6, r9c1 shows 1 2 3; then place 4 at r1c3 (correct): 4 disappears from the notes of r1c6, r1c7, r1c8, r1c9, r2c2, r2c3, r7c3 and r9c3. Mistake: Easy, type 1 at r1c3 (wrong, but no clash) -> 'Mistakes 1/3'; type 5 at r1c3 -> it turns red together with r1c1; three wrong digits -> 'Game over'. Import (paste into the import box): '123' -> 'Needs 81 cells'; Easy with r1c3 = 5 (535070000600195000098000060800060003400803001700020006060000280000419005000080079) -> 'Duplicate 5 in row 1'; Easy with r1c3 = 1 (531070000600195000098000060800060003400803001700020006060000280000419005000080079) -> 'No solution'; Easy without its r3c3 given (530070000600195000090000060800060003400803001700020006060000280000419005000080079) -> 'Multiple solutions'. Solve: type the Easy solution into the empty cells (reading order) -> 'Solved in m:ss'; reload action -> best time shown. Progress: place a few digits, reload -> restored. Undo/Redo: Ctrl+Z / Ctrl+Y over a digit and a note. Pause hides the grid and stops the timer (two screenshots 1.5 s apart).",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Easy, Medium and Hard load exactly the given puzzles with bold locked givens, and the page has a 1-9 pad with remaining counts, a Notes toggle, Auto notes, Hint, Undo/Redo, a timer, a mistakes counter and Import."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Cells are selected by click and arrow keys and filled by keys and the pad, the row, column, box and same digits are highlighted, and givens cannot be changed."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Auto notes on Easy gives exactly 1 2 4 at r1c3, 2 6 at r1c4 and 1 2 3 at r9c1, and placing a digit removes it from its peers' notes."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Hints on Easy follow the stated order: 'Naked single: r5c5 = 5', then r5c2 = 2, then r5c8 = 9."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Medium's first hints are hidden singles found by columns: 6 at r2c1 and 5 at r7c1 in column 1, then 6 at r9c2 in column 2, and Hard shows 'No single found – try notes'."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "A repeated digit turns red with the cell it clashes with, and wrong digits count 'Mistakes 1/3' with the third ending the game unless the limit is off."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Import rejects '123' with 'Needs 81 cells', Easy with a 5 at r1c3 with 'Duplicate 5 in row 1', Easy with a 1 at r1c3 with 'No solution' and Easy without its r3c3 given with 'Multiple solutions'."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Entering the Easy solution shows 'Solved in m:ss', and the best time and an unfinished game in progress survive a reload."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Undo and Redo (Ctrl+Z / Ctrl+Y) cover digits and notes, and pause hides the grid and stops the timer."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The 9x9 grid is square with thicker 3x3 box lines, notes sit in a 3x3 pattern inside cells, and grid, pad and panel fit in 1280x800 without overlap."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A crisp, readable look a designer would accept: givens, entries and notes clearly distinct, subtle highlight colors and a consistent type scale."
+   }
+  ]
+ },
+ {
+  "task_id": "game-open-23",
+  "category": "game",
+  "mode": "open_ended",
+  "title": "River Hop: Frogger with exact lane patterns, diving turtles, home bays, flies, a timer and faster levels",
+  "prompt": "Build a Frogger-style arcade game called River Hop on a canvas with a bright retro look: a purple median and start strip, a dark road with dashed lane lines, a deep blue river with brown logs and red-shelled turtles, a green hedge with five home bays at the top, a green frog seen from above that faces the way it hops, and chunky pixel-style text. Keep drawing light (simple shapes, no per-pixel effects) so it runs smoothly without a GPU.\n\nField: 13 columns x 13 rows of 48 px cells (row 1 on top). Row 1 is the hedge with home bays at columns 1, 4, 7, 10 and 13; rows 2-6 are river, row 7 the median, rows 8-12 road and row 13 the start. The frog starts at row 13, column 7.\n\nLanes: each lane repeats its pattern forever ('.' is a gap; each other letter is one cell of an object: L log, T turtle, D diving turtle, K truck, C car, B bulldozer) and scrolls smoothly at the given speed in cells per second; when a level starts, column 1 shows the pattern's first character.\nRow 2 logs, moving right at 1.5: LLLL...LLLL....\nRow 3 turtles, moving left at 2: TT...DD...TT...\nRow 4 logs, moving right at 2.5: LLLLLL......\nRow 5 logs, moving right at 1: LLL...LLL....\nRow 6 turtles, moving left at 1.5: DDD..TTT..TTT....\nRow 8 trucks, moving left at 1.2: KK......KK.....\nRow 9 cars, moving right at 2.4: C.....C.......\nRow 10 cars, moving left at 1.6: C...C........\nRow 11 bulldozers, moving right at 1: B...B...B.......\nRow 12 cars, moving left at 2: C....C.....\nDiving turtles repeat a 5 s cycle: 3 s surfaced, 0.5 s sinking (half under, still safe), 1 s under water (the frog drowns), 0.5 s rising (safe).\n\nFrog: arrow keys or WASD hop exactly one cell (a 120 ms hop; keys during a hop are ignored), and it cannot leave the field sideways or downwards. On a log or turtle it drifts with it, so it can end up between columns; being carried off the side kills it. Landing in water or on a fully sunk turtle, touching a vehicle, or landing on the hedge or in a filled bay kills it. A bay is entered when the frog lands on row 1 with its center within half a cell of the bay's center.\n\nTimer and score: each frog has 30 s, shown as a shrinking bar; running out kills it. Score 10 for each hop onto a row this frog has not reached before, and 50 per frog home plus 10 per whole second left. Every 7 s a fly appears for 4 s in an empty bay chosen as index floor(rand() x empty bays), with rand from mulberry32(level); a frog reaching the fly's bay gets 200 more. Filling all five bays scores 1000 and starts the next level with empty bays and every lane 25 percent faster than before.\nfunction mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}}\n\nLives: 3, shown as frog icons; a death plays a short splat or splash and the next frog starts at row 13. Losing the last one shows 'GAME OVER' and a TOP 5 (3-letter initials, score, level) saved in localStorage. A title screen starts with Enter; P pauses. HUD: score, hi-score, lives, level and the timer bar.\n\nQA debug mode with ?debug=1 in the URL: F freezes or unfreezes every lane and the turtle cycle, I toggles invincibility (no deaths, but logs still carry the frog), N fills the bays at columns 1, 4, 10 and 13, and T sets the current frog's timer to 3 s.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "animation": false
+  },
+  "interaction_hints": "Each interact call opens a fresh page; use --entry 'index.html?debug=1' and press Enter to start. Lanes: press f right after Enter and screenshot: compare each lane with its pattern (it may have shifted a cell or two since the start) and unfreeze with f; screenshots 1 s apart show row 4 moving fastest in the river and row 5 slowest, logs to the right, turtles to the left, rows 8, 10, 12 to the left and rows 9, 11 to the right. Scoring rule: Enter, press f and i, then ArrowUp (row 12, score 10), ArrowDown, ArrowUp (back on row 12: still 10), ArrowUp (row 11: 20). Walls: ArrowLeft 8 times from the start -> the frog stops at column 1. Road death: plain page (no debug keys pressed), Enter, ArrowUp, wait up to 6 s with screenshots every 500 ms: a row 12 car runs the frog over, splat, lives 3 -> 2, a new frog at row 13 col 7. Riding: debug, Enter, press i (invincible), hop up onto a row 6 turtle group (the frog drifts left with it) and then onto a row 5 log (it drifts right); press i again and stay: carried off the right edge, the frog dies. Drowning: without i, hop from the median into row 6 when no turtle is above -> splash. Diving: stand on a D group in row 6 (with i off) for 5 s -> it sinks and the frog drowns. Home bay: debug, Enter, press f, i, n (bays 1, 4, 10, 13 filled), then ArrowUp 12 times (delay_ms 200): the frog reaches bay 7 -> +50, +10 per whole second left, +1000, 'LEVEL 2' with empty bays; unfreeze and compare lane speed with level 1 (about 25 percent faster). Fly: watch the bays for ~10 s: a fly shows in an empty bay for ~4 s (with f, i, n pressed, reaching it adds 200). Timer: debug, Enter, press t -> the bar nearly empties and after 3 s the frog dies. Game over: plain page, stand on row 12 until three frogs are lost (or hop into the river) -> 'GAME OVER', type initials, Enter, reload action, TOP 5 on the title. Pause: p, two screenshots 500 ms apart unchanged.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The 13x13 field has the hedge with five bays at columns 1, 4, 7, 10 and 13, five river lanes, a median, five road lanes and a start strip, with the frog starting at row 13 column 7."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Each lane matches its pattern, object type and direction: logs moving right in rows 2, 4 and 5, turtles moving left in rows 3 and 6, vehicles moving left in rows 8, 10 and 12 and right in rows 9 and 11, with row 4 visibly the fastest river lane and row 5 the slowest."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Each key press hops exactly one cell and the frog cannot leave the field; 10 points come only for rows this frog has not reached before (Up, Down, Up from the start leaves 10, one more Up makes 20)."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Deaths work: a vehicle kills the frog, open water drowns it, and being carried off the side on a log kills it; each costs a life with a splat or splash and the next frog starts at row 13."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The frog rides logs and turtles, drifting with them between columns."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Diving turtles run the 5 s cycle (surfaced, half under, fully under, rising) and a frog on them when fully under drowns."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Reaching bay 7 after debug N adds 50, 10 per whole second left and 1000 for the fifth bay, then 'LEVEL 2' starts with empty bays and lanes about 25 percent faster."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "A fly appears in an empty bay for about 4 s and reaching it adds 200."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The 30 s timer bar shrinks and running out (debug T) kills the frog; losing the last life shows 'GAME OVER', initials enter a TOP 5 that survives a reload, and P pauses."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The 624x624 field is centered and fully visible in 1280x800 with the score, lives, level and timer bar around it without overlap."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A bright, cohesive retro look a game artist would accept: readable logs, turtles and vehicles, a frog that faces its hop direction with a hop animation, and clear splat and splash effects."
+   }
+  ]
+ },
+ {
+  "task_id": "game-open-24",
+  "category": "game",
+  "mode": "open_ended",
+  "title": "Star Forge: idle clicker with exact cost curves, upgrades, number formatting, prestige cores and offline earnings",
+  "prompt": "Build an idle clicker game called Star Forge with a deep-space look: a big glowing asteroid in the middle that pulses when clicked and shows a floating '+1', a generator shop on the right with simple drawn icons, an upgrades strip, and a stats panel; Inter or Roboto with tabular numbers.\n\nEconomy (ore):\n- Clicking the asteroid gives 1 ore (times the core bonus below).\n- Generators (base cost / ore per second each): Drone 15 / 0.1, Miner 100 / 1, Smelter 1,100 / 8, Freighter 12,000 / 47, Station 130,000 / 260, Ring World 1,400,000 / 1,400. The next unit costs ceil(base x 1.15^owned). A buy mode switch offers x1, x10 and Max: x10 costs the sum of the next ten unit prices, and Max buys units one by one while affordable. Buy buttons show the cost and are disabled, with the cost in red, when you cannot pay. A generator row stays hidden as '???' until your ore has at some point reached half its base cost (Drones are always shown).\n- Upgrades: each generator has three upgrades that each double its output, unlocked at 10, 25 and 50 owned and costing 50, 500 and 5,000 times its base cost. 'Resonant Pick' (unlocked once 1,000 ore has been mined in total, cost 5,000) makes each click also add 5 percent of your ore per second.\n- Production is continuous (update at least 10 times per second). The header shows ore and ore per second.\n\nNumbers: below 1,000 show at most one decimal ('16', '3.4'); from 1,000 up show three significant digits, rounded down, with a K, M, B or T suffix ('1.01K', '3.28K', '45.6M'). Costs use the same format.\n\nPrestige: 'Collapse' becomes available once this run has mined 1,000,000 ore in total. It resets ore, generators and upgrades and grants floor(sqrt(ore mined this run / 1,000,000)) cores; each core adds 10 percent to all production and clicks. Show the cores you have and how many a collapse would give now.\n\nSaving: autosave to localStorage every 5 s and after every purchase. On load, add offline earnings of 50 percent of the saved ore per second for the time away (at most 8 hours) and show 'While you were away (1h 0m): +11.5K ore'. 'Export save' shows a text code, 'Import save' loads one ('Invalid save' for bad input), and 'Reset' asks for confirmation first.\n\nStats panel: ore mined this run and all time, total clicks and time played.\n\nQA debug mode with ?debug=1 in the URL: the game clock is frozen so numbers stay exact (passive production only happens through the buttons below and offline earnings), and a debug bar offers '+1K ore' and '+1M ore' (both count as mined), '+60 s' (adds 60 seconds of production at once) and 'Away 1h' (moves the save's timestamp one hour back and reloads).",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "animation": false
+  },
+  "interaction_hints": "Each interact call opens a fresh page (start from a clean state: if a save exists, use Reset first or eval localStorage.clear() then reload). Use --entry 'index.html?debug=1' for exact numbers. All facts were computed with the stated formulas. Clicks: 15 clicks -> ore 15; buy a Drone -> ore 0, next Drone 18; Drone prices run 15, 18, 20, 23, 27, 31, 35, 40, 46, 53 (x10 from zero costs 308). Scenario (debug, fresh): '+1K ore' -> 1,000 shown as '1.00K' (Smelter row revealed since 550 was reached, Freighter still '???'); mode Max, buy Drones -> 17 Drones, ore '16', '1.7' per second, next Drone '162', x10 price '3.28K'; the first Drone upgrade (unlocked at 10 owned) costs 750. '+1K ore' -> '1.01K'; buy the Drone upgrade -> ore 266, '3.4' per second; '+60 s' -> ore 470; Max on Miners -> 3 Miners (100 + 115 + 133), ore 122, '6.4' per second; 'Away 1h' -> after the reload 'While you were away (1h 0m): +11.5K ore' (0.5 x 6.4 x 3600 = 11,520) and ore '11.6K' (11,642). Resonant Pick shows once 1,000 has been mined (cost 5,000). Prestige (debug, fresh): '+1M ore' four times -> Collapse available, offering 2 cores (floor(sqrt(4))); collapse -> ore 0, no generators or upgrades, 2 cores; a click then adds 1.2 ore ('+1.2'). Disabled: with 16 ore and buy mode x1, the Miner button (100) is disabled with a red cost. Save: Export save, copy the code, Reset (confirm), Import the code -> the same generators and ore; import 'hello' -> 'Invalid save'. Plain page (no debug): ore per second actually accumulates over time and a reload keeps progress.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The page shows the clickable asteroid, ore and ore per second, the six generators with later ones as '???' until revealed, the x1/x10/Max switch, upgrades, Collapse with core info, a stats panel and Export/Import/Reset."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Clicking adds 1 ore with a floating '+1', and Drone prices run 15, 18, 20, 23, 27 as Drones are bought, with x10 from zero costing 308."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With debug '+1K ore' and Max, Drones buys exactly 17, leaving '16' ore at '1.7' per second, with the next Drone at '162' and x10 at '3.28K'."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The first Drone upgrade appears at 10 owned for 750; buying it after another '+1K ore' leaves 266 ore and doubles Drones to '3.4' per second, and '+60 s' then brings ore to exactly 470."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Max on Miners then buys 3 (100, 115, 133), leaving 122 ore at '6.4' per second."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "'Away 1h' shows 'While you were away (1h 0m): +11.5K ore' and the ore then reads '11.6K' (half of an hour's production added)."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Number formatting follows the rules: at most one decimal below 1,000 and three significant digits rounded down with K/M suffixes above ('1.01K' for 1,016)."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Four '+1M ore' presses enable Collapse offering 2 cores; collapsing resets ore, generators and upgrades, keeps 2 cores, and a click then gives 1.2 ore."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Unaffordable buttons are disabled with red costs, generator rows unlock at half their base cost (Smelter after 550 ore, Freighter still hidden at 1,000), and Resonant Pick unlocks at 1,000 ore mined."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Progress survives a reload, Export then Import restores the same state, an invalid code shows 'Invalid save', and Reset asks for confirmation."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A polished space look a designer would accept: a glowing asteroid with click feedback, a tidy shop with icons, tabular numbers that do not jitter, and consistent spacing within 1280x800."
+   }
+  ]
+ }
+]

@@ -1,0 +1,146 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 1340" width="900" height="1340" font-family="Inter, sans-serif">
+<defs>
+ <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#bfe3f5"/><stop offset="1" stop-color="#fdf6ec"/></linearGradient>
+ <linearGradient id="road" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3d4a5c"/><stop offset="1" stop-color="#232a36"/></linearGradient>
+ <radialGradient id="sun" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#ffd166"/><stop offset="0.6" stop-color="#ffd166" stop-opacity="0.6"/><stop offset="1" stop-color="#ffd166" stop-opacity="0"/></radialGradient>
+ <pattern id="dots" width="14" height="14" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.3" fill="#14213d" opacity="0.08"/></pattern>
+ <filter id="shadow" x="-10%" y="-10%" width="120%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#14213d" flood-opacity="0.18"/></filter>
+ <path id="arcR" d="M 700 335 A 165 165 0 0 1 700 665"/>
+ <path id="arcL" d="M 200 905 A 165 165 0 0 1 200 575"/>
+</defs>
+<rect width="900" height="1340" fill="#fdf6ec"/>
+<rect width="900" height="1340" fill="url(#dots)"/>
+<rect width="900" height="220" fill="url(#sky)"/>
+<circle cx="760" cy="80" r="70" fill="url(#sun)"/><circle cx="760" cy="80" r="26" fill="#ffd166"/>
+<g transform="translate(150 70) scale(1.0)" fill="#ffffff" opacity="0.9"><ellipse cx="0" cy="0" rx="46" ry="16"/><circle cx="-16" cy="-10" r="18"/><circle cx="12" cy="-14" r="22"/></g>
+<g transform="translate(812 158) scale(0.75)" fill="#ffffff" opacity="0.9"><ellipse cx="0" cy="0" rx="46" ry="16"/><circle cx="-16" cy="-10" r="18"/><circle cx="12" cy="-14" r="22"/></g>
+<text x="450" y="92" font-size="16" font-weight="700" fill="#e76f51" text-anchor="middle" letter-spacing="8">KESTREL FIELD</text>
+<text x="450" y="150" font-size="52" font-weight="900" fill="#14213d" text-anchor="middle" letter-spacing="-1">100 Years of Flight</text>
+<text x="450" y="182" font-size="16" fill="#44506a" text-anchor="middle">From a grass strip to a regional hub · 1926–2026</text>
+<path d="M 40 380 H 700 A 120 120 0 0 1 700 620 H 200 A 120 120 0 0 0 200 860 H 760" fill="none" stroke="#e9e1d3" stroke-width="58" stroke-linecap="round"/>
+<path d="M 40 380 H 700 A 120 120 0 0 1 700 620 H 200 A 120 120 0 0 0 200 860 H 760" fill="none" stroke="url(#road)" stroke-width="46" stroke-linecap="butt"/>
+<path d="M 40 380 H 700 A 120 120 0 0 1 700 620 H 200 A 120 120 0 0 0 200 860 H 760" fill="none" stroke="#ffd166" stroke-width="3" stroke-dasharray="16 12"/>
+<g transform="translate(772 820)"><line x1="0" y1="0" x2="0" y2="64" stroke="#14213d" stroke-width="3"/><rect x="0" y="0" width="36" height="24" fill="#ffffff" stroke="#14213d" stroke-width="1.5"/><rect x="0" y="0" width="9" height="8" fill="#14213d"/><rect x="18" y="0" width="9" height="8" fill="#14213d"/><rect x="9" y="8" width="9" height="8" fill="#14213d"/><rect x="27" y="8" width="9" height="8" fill="#14213d"/><rect x="0" y="16" width="9" height="8" fill="#14213d"/><rect x="18" y="16" width="9" height="8" fill="#14213d"/></g>
+<text x="790" y="910" font-size="11" font-weight="800" fill="#14213d" text-anchor="middle" letter-spacing="1">NEXT 100</text>
+<text font-size="13" font-weight="800" fill="#e76f51" letter-spacing="4"><textPath href="#arcR" startOffset="50%" text-anchor="middle">THE JET AGE · 1958–1999</textPath></text>
+<text font-size="13" font-weight="800" fill="#6a4c93" letter-spacing="4"><textPath href="#arcL" startOffset="50%" text-anchor="middle">THE DIGITAL AGE · 2000–2026</textPath></text>
+<text x="44" y="438" font-size="13" font-weight="800" fill="#2a9d8f" letter-spacing="4">THE PROPELLER AGE · 1926–1957</text>
+<line x1="160" y1="294" x2="160" y2="350" stroke="#2a9d8f" stroke-width="2" stroke-dasharray="3 3"/>
+<g filter="url(#shadow)"><rect x="68" y="210" width="184" height="84" rx="10" fill="#ffffff"/></g>
+<path d="M68 220 a10 10 0 0 1 10 -10 H242 a10 10 0 0 1 10 10 V216 H68 Z" fill="#2a9d8f"/>
+<text x="82" y="243" font-size="20" font-weight="900" fill="#2a9d8f">1926</text>
+<text x="142" y="242" font-size="13" font-weight="800" fill="#14213d">First airstrip</text>
+<text x="82" y="264" font-size="11.5" fill="#44506a">A grass strip and two</text>
+<text x="82" y="280" font-size="11.5" fill="#44506a">hangars open on the moor</text>
+<circle cx="160" cy="380" r="28" fill="#2a9d8f" stroke="#ffffff" stroke-width="4"/>
+<g fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="146" y1="374" x2="174" y2="374"/><line x1="146" y1="383" x2="174" y2="383"/><line x1="154" y1="374" x2="154" y2="383"/><line x1="166" y1="374" x2="166" y2="383"/><path d="M156 383 L158 392 H162 L164 383"/></g>
+<line x1="375" y1="294" x2="375" y2="350" stroke="#2a9d8f" stroke-width="2" stroke-dasharray="3 3"/>
+<g filter="url(#shadow)"><rect x="283" y="210" width="184" height="84" rx="10" fill="#ffffff"/></g>
+<path d="M283 220 a10 10 0 0 1 10 -10 H457 a10 10 0 0 1 10 10 V216 H283 Z" fill="#2a9d8f"/>
+<text x="297" y="243" font-size="20" font-weight="900" fill="#2a9d8f">1938</text>
+<text x="357" y="242" font-size="13" font-weight="800" fill="#14213d">Terminal opens</text>
+<text x="297" y="264" font-size="11.5" fill="#44506a">Art-deco terminal with</text>
+<text x="297" y="280" font-size="11.5" fill="#44506a">its own weather station</text>
+<circle cx="375" cy="380" r="28" fill="#2a9d8f" stroke="#ffffff" stroke-width="4"/>
+<g fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M361 390 V378 L375 368 L389 378 V390 Z"/><path d="M370 390 V382 H380 V390"/></g>
+<line x1="590" y1="294" x2="590" y2="350" stroke="#2a9d8f" stroke-width="2" stroke-dasharray="3 3"/>
+<g filter="url(#shadow)"><rect x="498" y="210" width="184" height="84" rx="10" fill="#ffffff"/></g>
+<path d="M498 220 a10 10 0 0 1 10 -10 H672 a10 10 0 0 1 10 10 V216 H498 Z" fill="#2a9d8f"/>
+<text x="512" y="243" font-size="20" font-weight="900" fill="#2a9d8f">1952</text>
+<text x="572" y="242" font-size="13" font-weight="800" fill="#14213d">Control tower</text>
+<text x="512" y="264" font-size="11.5" fill="#44506a">Radar and a 24-metre</text>
+<text x="512" y="280" font-size="11.5" fill="#44506a">tower guide traffic</text>
+<circle cx="590" cy="380" r="28" fill="#2a9d8f" stroke="#ffffff" stroke-width="4"/>
+<g fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M586 393 V378 M594 393 V378"/><path d="M580 378 H600 L597 369 H583 Z"/><line x1="581" y1="393" x2="599" y2="393"/></g>
+<line x1="620" y1="534" x2="620" y2="590" stroke="#e76f51" stroke-width="2" stroke-dasharray="3 3"/>
+<g filter="url(#shadow)"><rect x="528" y="450" width="184" height="84" rx="10" fill="#ffffff"/></g>
+<path d="M528 460 a10 10 0 0 1 10 -10 H702 a10 10 0 0 1 10 10 V456 H528 Z" fill="#e76f51"/>
+<text x="542" y="483" font-size="20" font-weight="900" fill="#e76f51">1969</text>
+<text x="602" y="482" font-size="13" font-weight="800" fill="#14213d">First jet service</text>
+<text x="542" y="504" font-size="11.5" fill="#44506a">Daily jets to the</text>
+<text x="542" y="520" font-size="11.5" fill="#44506a">capital in 55 minutes</text>
+<circle cx="620" cy="620" r="28" fill="#e76f51" stroke="#ffffff" stroke-width="4"/>
+<g fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M620 606 C623 610 623 628 620 633 C617 628 617 610 620 606 Z"/><path d="M618 618 L605 625 M622 618 L635 625 M618 630 L613 633 M622 630 L627 633"/></g>
+<line x1="420" y1="534" x2="420" y2="590" stroke="#e76f51" stroke-width="2" stroke-dasharray="3 3"/>
+<g filter="url(#shadow)"><rect x="328" y="450" width="184" height="84" rx="10" fill="#ffffff"/></g>
+<path d="M328 460 a10 10 0 0 1 10 -10 H502 a10 10 0 0 1 10 10 V456 H328 Z" fill="#e76f51"/>
+<text x="342" y="483" font-size="20" font-weight="900" fill="#e76f51">1983</text>
+<text x="402" y="482" font-size="13" font-weight="800" fill="#14213d">Runway 2</text>
+<text x="342" y="504" font-size="11.5" fill="#44506a">A second, 2.8 km</text>
+<text x="342" y="520" font-size="11.5" fill="#44506a">runway opens to the east</text>
+<circle cx="420" cy="620" r="28" fill="#e76f51" stroke="#ffffff" stroke-width="4"/>
+<g fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M414 606 H426 L432 634 H408 Z"/><path d="M420 611 V615 M420 620 V624 M420 628 V631"/></g>
+<line x1="220" y1="534" x2="220" y2="590" stroke="#e76f51" stroke-width="2" stroke-dasharray="3 3"/>
+<g filter="url(#shadow)"><rect x="128" y="450" width="184" height="84" rx="10" fill="#ffffff"/></g>
+<path d="M128 460 a10 10 0 0 1 10 -10 H302 a10 10 0 0 1 10 10 V456 H128 Z" fill="#e76f51"/>
+<text x="142" y="483" font-size="20" font-weight="900" fill="#e76f51">1997</text>
+<text x="202" y="482" font-size="13" font-weight="800" fill="#14213d">Cargo hub</text>
+<text x="142" y="504" font-size="11.5" fill="#44506a">Overnight freight for</text>
+<text x="142" y="520" font-size="11.5" fill="#44506a">the whole region</text>
+<circle cx="220" cy="620" r="28" fill="#e76f51" stroke="#ffffff" stroke-width="4"/>
+<g fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="208" y="609" width="24" height="22" rx="2"/><path d="M208 617 H232 M217 609 V617 M223 609 V617"/></g>
+<line x1="330" y1="774" x2="330" y2="830" stroke="#6a4c93" stroke-width="2" stroke-dasharray="3 3"/>
+<g filter="url(#shadow)"><rect x="238" y="690" width="184" height="84" rx="10" fill="#ffffff"/></g>
+<path d="M238 700 a10 10 0 0 1 10 -10 H412 a10 10 0 0 1 10 10 V696 H238 Z" fill="#6a4c93"/>
+<text x="252" y="723" font-size="20" font-weight="900" fill="#6a4c93">2011</text>
+<text x="312" y="722" font-size="13" font-weight="800" fill="#14213d">Solar farm</text>
+<text x="252" y="744" font-size="11.5" fill="#44506a">40 hectares of panels</text>
+<text x="252" y="760" font-size="11.5" fill="#44506a">power the terminals</text>
+<circle cx="330" cy="860" r="28" fill="#6a4c93" stroke="#ffffff" stroke-width="4"/>
+<g fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="330" cy="860" r="5.5"/><line x1="339.0" y1="860.0" x2="345.0" y2="860.0"/><line x1="336.4" y1="866.4" x2="340.6" y2="870.6"/><line x1="330.0" y1="869.0" x2="330.0" y2="875.0"/><line x1="323.6" y1="866.4" x2="319.4" y2="870.6"/><line x1="321.0" y1="860.0" x2="315.0" y2="860.0"/><line x1="323.6" y1="853.6" x2="319.4" y2="849.4"/><line x1="330.0" y1="851.0" x2="330.0" y2="845.0"/><line x1="336.4" y1="853.6" x2="340.6" y2="849.4"/></g>
+<line x1="580" y1="774" x2="580" y2="830" stroke="#6a4c93" stroke-width="2" stroke-dasharray="3 3"/>
+<g filter="url(#shadow)"><rect x="488" y="690" width="184" height="84" rx="10" fill="#ffffff"/></g>
+<path d="M488 700 a10 10 0 0 1 10 -10 H662 a10 10 0 0 1 10 10 V696 H488 Z" fill="#6a4c93"/>
+<text x="502" y="723" font-size="20" font-weight="900" fill="#6a4c93">2026</text>
+<text x="562" y="722" font-size="13" font-weight="800" fill="#14213d">Centenary</text>
+<text x="502" y="744" font-size="11.5" fill="#44506a">4.2 million passengers</text>
+<text x="502" y="760" font-size="11.5" fill="#44506a">and 38 destinations</text>
+<circle cx="580" cy="860" r="28" fill="#6a4c93" stroke="#ffffff" stroke-width="4"/>
+<polygon points="580.0,847.0 583.2,855.6 592.4,856.0 585.2,861.7 587.6,870.5 580.0,865.5 572.4,870.5 574.8,861.7 567.6,856.0 576.8,855.6" fill="#ffffff"/>
+<text x="450" y="988" font-size="13" font-weight="800" fill="#14213d" text-anchor="middle" letter-spacing="4">KESTREL FIELD IN 2025</text>
+<circle cx="190" cy="1060" r="50" fill="none" stroke="#e9e1d3" stroke-width="14"/>
+<circle cx="190" cy="1060" r="50" fill="none" stroke="#2a9d8f" stroke-width="14" stroke-dasharray="273.32 314.16" stroke-linecap="round" transform="rotate(-90 190 1060)"/>
+<text x="190" y="1070" font-size="28" font-weight="900" fill="#14213d" text-anchor="middle">87%</text>
+<text x="190" y="1134" font-size="12.5" font-weight="600" fill="#44506a" text-anchor="middle">On-time departures</text>
+<circle cx="450" cy="1060" r="50" fill="none" stroke="#e9e1d3" stroke-width="14"/>
+<circle cx="450" cy="1060" r="50" fill="none" stroke="#e76f51" stroke-width="14" stroke-dasharray="201.06 314.16" stroke-linecap="round" transform="rotate(-90 450 1060)"/>
+<text x="450" y="1070" font-size="28" font-weight="900" fill="#14213d" text-anchor="middle">64%</text>
+<text x="450" y="1134" font-size="12.5" font-weight="600" fill="#44506a" text-anchor="middle">Renewable electricity</text>
+<circle cx="710" cy="1060" r="50" fill="none" stroke="#e9e1d3" stroke-width="14"/>
+<circle cx="710" cy="1060" r="50" fill="none" stroke="#6a4c93" stroke-width="14" stroke-dasharray="248.19 314.16" stroke-linecap="round" transform="rotate(-90 710 1060)"/>
+<text x="710" y="1070" font-size="28" font-weight="900" fill="#14213d" text-anchor="middle">79%</text>
+<text x="710" y="1134" font-size="12.5" font-weight="600" fill="#44506a" text-anchor="middle">Seats filled</text>
+<text x="110" y="1178" font-size="12.5" font-weight="800" fill="#14213d">Passengers per year, millions</text>
+<rect x="120" y="1275.8" width="44" height="0.2" rx="3" fill="#2a9d8f"/>
+<text x="142" y="1270.8" font-size="10.5" font-weight="700" fill="#14213d" text-anchor="middle">0.01</text>
+<text x="142" y="1291" font-size="10.5" fill="#44506a" text-anchor="middle">1930s</text>
+<rect x="188" y="1275.3" width="44" height="0.7" rx="3" fill="#2a9d8f"/>
+<text x="210" y="1270.3" font-size="10.5" font-weight="700" fill="#14213d" text-anchor="middle">0.04</text>
+<text x="210" y="1291" font-size="10.5" fill="#44506a" text-anchor="middle">1940s</text>
+<rect x="256" y="1272.4" width="44" height="3.6" rx="3" fill="#2a9d8f"/>
+<text x="278" y="1267.4" font-size="10.5" font-weight="700" fill="#14213d" text-anchor="middle">0.2</text>
+<text x="278" y="1291" font-size="10.5" fill="#44506a" text-anchor="middle">1950s</text>
+<rect x="324" y="1265.2" width="44" height="10.8" rx="3" fill="#e76f51"/>
+<text x="346" y="1260.2" font-size="10.5" font-weight="700" fill="#14213d" text-anchor="middle">0.6</text>
+<text x="346" y="1291" font-size="10.5" fill="#44506a" text-anchor="middle">1960s</text>
+<rect x="392" y="1256.2" width="44" height="19.8" rx="3" fill="#e76f51"/>
+<text x="414" y="1251.2" font-size="10.5" font-weight="700" fill="#14213d" text-anchor="middle">1.1</text>
+<text x="414" y="1291" font-size="10.5" fill="#44506a" text-anchor="middle">1970s</text>
+<rect x="460" y="1247.2" width="44" height="28.8" rx="3" fill="#e76f51"/>
+<text x="482" y="1242.2" font-size="10.5" font-weight="700" fill="#14213d" text-anchor="middle">1.6</text>
+<text x="482" y="1291" font-size="10.5" fill="#44506a" text-anchor="middle">1980s</text>
+<rect x="528" y="1234.6" width="44" height="41.4" rx="3" fill="#e76f51"/>
+<text x="550" y="1229.6" font-size="10.5" font-weight="700" fill="#14213d" text-anchor="middle">2.3</text>
+<text x="550" y="1291" font-size="10.5" fill="#44506a" text-anchor="middle">1990s</text>
+<rect x="596" y="1223.8" width="44" height="52.2" rx="3" fill="#6a4c93"/>
+<text x="618" y="1218.8" font-size="10.5" font-weight="700" fill="#14213d" text-anchor="middle">2.9</text>
+<text x="618" y="1291" font-size="10.5" fill="#44506a" text-anchor="middle">2000s</text>
+<rect x="664" y="1211.2" width="44" height="64.8" rx="3" fill="#6a4c93"/>
+<text x="686" y="1206.2" font-size="10.5" font-weight="700" fill="#14213d" text-anchor="middle">3.6</text>
+<text x="686" y="1291" font-size="10.5" fill="#44506a" text-anchor="middle">2010s</text>
+<rect x="732" y="1200.4" width="44" height="75.6" rx="3" fill="#6a4c93"/>
+<text x="754" y="1195.4" font-size="10.5" font-weight="700" fill="#14213d" text-anchor="middle">4.2</text>
+<text x="754" y="1291" font-size="10.5" fill="#44506a" text-anchor="middle">2020s</text>
+<line x1="110" y1="1276" x2="800" y2="1276" stroke="#14213d" stroke-width="1.2"/>
+<text x="450" y="1324" font-size="10.5" fill="#7b8499" text-anchor="middle">Source: Kestrel Field Archives · Design: Studio Meridian</text>
+</svg>

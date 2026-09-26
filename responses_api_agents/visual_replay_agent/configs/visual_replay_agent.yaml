@@ -1,0 +1,21 @@
+# Replay agent for the visual agent environment (see ../app.py): grades prepared artifacts through
+# the normal /verify pipeline instead of running a model. Used for verifier calibration.
+visual_replay_agent:
+  responses_api_agents:
+    visual_replay_agent:
+      entrypoint: app.py
+      num_workers: 4
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Unused (no OpenCode run), required by the base config.
+      opencode_version: 1.17.11
+      opencode_max_context_window: 262144
+      sandbox_timeout: 3600
+      sandbox_provider: sandbox
+      sandbox_config: {}
+      output_dir: /workspace/output
+      datasets: []

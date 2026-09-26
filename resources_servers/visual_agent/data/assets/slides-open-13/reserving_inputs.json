@@ -1,0 +1,21 @@
+{
+  "line": "Commercial Auto Liability",
+  "valuation_date": "2025-12-31",
+  "earned_premium_usd_k": {
+    "2019": 41397,
+    "2020": 45356,
+    "2021": 48515,
+    "2022": 52564,
+    "2023": 55279,
+    "2024": 60163,
+    "2025": 64329
+  },
+  "selected_tail_factor_84_to_ultimate": 1.015,
+  "tail_factor_scenarios": [
+    1.0,
+    1.015,
+    1.03
+  ],
+  "carried_unpaid_reserve_usd_k": 75500.0,
+  "plan_loss_ratio": 0.68
+}

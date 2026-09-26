@@ -1,0 +1,5562 @@
+{
+ "name": "Plotline — Onboarding step 2",
+ "schemaVersion": 0,
+ "document": {
+  "id": "0:0",
+  "name": "Document",
+  "type": "DOCUMENT",
+  "children": [
+   {
+    "id": "0:1",
+    "name": "Page 1",
+    "type": "CANVAS",
+    "backgroundColor": {
+     "r": 0.96,
+     "g": 0.96,
+     "b": 0.96,
+     "a": 1
+    },
+    "children": [
+     {
+      "id": "1:1",
+      "name": "Desktop",
+      "type": "FRAME",
+      "absoluteBoundingBox": {
+       "x": 0,
+       "y": 0,
+       "width": 1280,
+       "height": 912
+      },
+      "fills": [
+       {
+        "type": "SOLID",
+        "color": {
+         "r": 1.0,
+         "g": 1.0,
+         "b": 1.0,
+         "a": 1.0
+        }
+       }
+      ],
+      "strokes": [],
+      "clipsContent": true,
+      "children": [
+       {
+        "id": "1:2",
+        "name": "Progress panel",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 0,
+         "y": 0,
+         "width": 440,
+         "height": 912
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.105882,
+           "g": 0.121569,
+           "b": 0.231373,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [],
+        "clipsContent": true,
+        "children": [
+         {
+          "id": "1:3",
+          "name": "Glow top",
+          "type": "ELLIPSE",
+          "absoluteBoundingBox": {
+           "x": 250,
+           "y": -120,
+           "width": 320,
+           "height": 320
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.941176,
+             "g": 0.392157,
+             "b": 0.235294,
+             "a": 0.1
+            }
+           }
+          ],
+          "strokes": []
+         },
+         {
+          "id": "1:4",
+          "name": "Glow bottom",
+          "type": "ELLIPSE",
+          "absoluteBoundingBox": {
+           "x": -140,
+           "y": 620,
+           "width": 360,
+           "height": 360
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.419608,
+             "g": 0.45098,
+             "b": 1.0,
+             "a": 0.1
+            }
+           }
+          ],
+          "strokes": []
+         },
+         {
+          "id": "1:5",
+          "name": "Logo",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 48,
+           "y": 44,
+           "width": 140.0,
+           "height": 34.0
+          },
+          "fills": [],
+          "strokes": [],
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:6",
+            "name": "Logo mark",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 48,
+             "y": 44,
+             "width": 34.0,
+             "height": 34.0
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.941176,
+               "g": 0.392157,
+               "b": 0.235294,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [],
+            "cornerRadius": 9.0,
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:7",
+              "name": "Stem",
+              "type": "RECTANGLE",
+              "absoluteBoundingBox": {
+               "x": 58.0,
+               "y": 52.0,
+               "width": 5.0,
+               "height": 18.0
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 1.0,
+                 "g": 1.0,
+                 "b": 1.0,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokes": [],
+              "cornerRadius": 2.5
+             },
+             {
+              "id": "1:8",
+              "name": "Bowl",
+              "type": "RECTANGLE",
+              "absoluteBoundingBox": {
+               "x": 58.0,
+               "y": 52.0,
+               "width": 15.0,
+               "height": 11.0
+              },
+              "fills": [],
+              "strokes": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 1.0,
+                 "g": 1.0,
+                 "b": 1.0,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokeWeight": 4.5,
+              "strokeAlign": "INSIDE",
+              "cornerRadius": 5.5
+             }
+            ]
+           },
+           {
+            "id": "1:9",
+            "name": "Wordmark",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 92.0,
+             "y": 44,
+             "width": 82,
+             "height": 34.0
+            },
+            "characters": "Plotline",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 800,
+             "fontSize": 22.0,
+             "lineHeightPx": 34.0,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 1.0,
+               "g": 1.0,
+               "b": 1.0,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:10",
+          "name": "Heading",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 48,
+           "y": 124,
+           "width": 317,
+           "height": 76
+          },
+          "characters": "Set up your workspace\nin four quick steps",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 800,
+           "fontSize": 30,
+           "lineHeightPx": 38,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:11",
+          "name": "Subheading",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 48,
+           "y": 210,
+           "width": 255,
+           "height": 46
+          },
+          "characters": "It takes about three minutes. You can\nchange everything later in Settings.",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 400,
+           "fontSize": 15,
+           "lineHeightPx": 23,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.721569,
+             "g": 0.741176,
+             "b": 0.839216,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:12",
+          "name": "Step 1 / Create your account (done)",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 48,
+           "y": 292,
+           "width": 330,
+           "height": 76
+          },
+          "fills": [],
+          "strokes": [],
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:13",
+            "name": "Indicator (done)",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 48,
+             "y": 292,
+             "width": 32,
+             "height": 32
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.941176,
+               "g": 0.392157,
+               "b": 0.235294,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [],
+            "cornerRadius": 16,
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:14",
+              "name": "Tick",
+              "type": "TEXT",
+              "absoluteBoundingBox": {
+               "x": 48,
+               "y": 292,
+               "width": 32,
+               "height": 32
+              },
+              "characters": "✓",
+              "style": {
+               "fontFamily": "Inter",
+               "fontWeight": 700,
+               "fontSize": 16,
+               "lineHeightPx": 32,
+               "textAlignHorizontal": "CENTER",
+               "textAlignVertical": "CENTER"
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 1.0,
+                 "g": 1.0,
+                 "b": 1.0,
+                 "a": 1.0
+                }
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": "1:15",
+            "name": "Title",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 96,
+             "y": 292,
+             "width": 152,
+             "height": 22
+            },
+            "characters": "Create your account",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 16,
+             "lineHeightPx": 22,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 1.0,
+               "g": 1.0,
+               "b": 1.0,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:16",
+            "name": "Description",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 96,
+             "y": 316,
+             "width": 172,
+             "height": 20
+            },
+            "characters": "Name, email and password",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 400,
+             "fontSize": 14,
+             "lineHeightPx": 20,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.603922,
+               "g": 0.627451,
+               "b": 0.74902,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:17",
+            "name": "Connector",
+            "type": "RECTANGLE",
+            "absoluteBoundingBox": {
+             "x": 63,
+             "y": 332,
+             "width": 2,
+             "height": 36
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.941176,
+               "g": 0.392157,
+               "b": 0.235294,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [],
+            "cornerRadius": 1
+           }
+          ]
+         },
+         {
+          "id": "1:18",
+          "name": "Step 2 / Set up your workspace (current)",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 48,
+           "y": 376,
+           "width": 330,
+           "height": 76
+          },
+          "fills": [],
+          "strokes": [],
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:19",
+            "name": "Indicator (current)",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 48,
+             "y": 376,
+             "width": 32,
+             "height": 32
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.105882,
+               "g": 0.121569,
+               "b": 0.231373,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.941176,
+               "g": 0.392157,
+               "b": 0.235294,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokeWeight": 2,
+            "strokeAlign": "INSIDE",
+            "cornerRadius": 16,
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:20",
+              "name": "Inner dot",
+              "type": "ELLIPSE",
+              "absoluteBoundingBox": {
+               "x": 59,
+               "y": 387,
+               "width": 10,
+               "height": 10
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.941176,
+                 "g": 0.392157,
+                 "b": 0.235294,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokes": []
+             }
+            ]
+           },
+           {
+            "id": "1:21",
+            "name": "Title",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 96,
+             "y": 376,
+             "width": 170,
+             "height": 22
+            },
+            "characters": "Set up your workspace",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 16,
+             "lineHeightPx": 22,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 1.0,
+               "g": 1.0,
+               "b": 1.0,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:22",
+            "name": "Description",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 96,
+             "y": 400,
+             "width": 173,
+             "height": 20
+            },
+            "characters": "Name it and pick your URL",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 400,
+             "fontSize": 14,
+             "lineHeightPx": 20,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.603922,
+               "g": 0.627451,
+               "b": 0.74902,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:23",
+            "name": "Connector",
+            "type": "RECTANGLE",
+            "absoluteBoundingBox": {
+             "x": 63,
+             "y": 416,
+             "width": 2,
+             "height": 36
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.227451,
+               "g": 0.247059,
+               "b": 0.388235,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [],
+            "cornerRadius": 1
+           }
+          ]
+         },
+         {
+          "id": "1:24",
+          "name": "Step 3 / Invite your teammates",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 48,
+           "y": 460,
+           "width": 330,
+           "height": 76
+          },
+          "fills": [],
+          "strokes": [],
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:25",
+            "name": "Indicator",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 48,
+             "y": 460,
+             "width": 32,
+             "height": 32
+            },
+            "fills": [],
+            "strokes": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.290196,
+               "g": 0.313725,
+               "b": 0.458824,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokeWeight": 1.5,
+            "strokeAlign": "INSIDE",
+            "cornerRadius": 16,
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:26",
+              "name": "Number",
+              "type": "TEXT",
+              "absoluteBoundingBox": {
+               "x": 48,
+               "y": 460,
+               "width": 32,
+               "height": 32
+              },
+              "characters": "3",
+              "style": {
+               "fontFamily": "Lato",
+               "fontWeight": 700,
+               "fontSize": 14,
+               "lineHeightPx": 32,
+               "textAlignHorizontal": "CENTER",
+               "textAlignVertical": "CENTER"
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.603922,
+                 "g": 0.627451,
+                 "b": 0.74902,
+                 "a": 1.0
+                }
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": "1:27",
+            "name": "Title",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 96,
+             "y": 460,
+             "width": 168,
+             "height": 22
+            },
+            "characters": "Invite your teammates",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 16,
+             "lineHeightPx": 22,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.788235,
+               "g": 0.803922,
+               "b": 0.878431,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:28",
+            "name": "Description",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 96,
+             "y": 484,
+             "width": 193,
+             "height": 20
+            },
+            "characters": "Bring your collaborators along",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 400,
+             "fontSize": 14,
+             "lineHeightPx": 20,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.603922,
+               "g": 0.627451,
+               "b": 0.74902,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:29",
+            "name": "Connector",
+            "type": "RECTANGLE",
+            "absoluteBoundingBox": {
+             "x": 63,
+             "y": 500,
+             "width": 2,
+             "height": 36
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.227451,
+               "g": 0.247059,
+               "b": 0.388235,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [],
+            "cornerRadius": 1
+           }
+          ]
+         },
+         {
+          "id": "1:30",
+          "name": "Step 4 / Choose a plan",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 48,
+           "y": 544,
+           "width": 330,
+           "height": 76
+          },
+          "fills": [],
+          "strokes": [],
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:31",
+            "name": "Indicator",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 48,
+             "y": 544,
+             "width": 32,
+             "height": 32
+            },
+            "fills": [],
+            "strokes": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.290196,
+               "g": 0.313725,
+               "b": 0.458824,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokeWeight": 1.5,
+            "strokeAlign": "INSIDE",
+            "cornerRadius": 16,
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:32",
+              "name": "Number",
+              "type": "TEXT",
+              "absoluteBoundingBox": {
+               "x": 48,
+               "y": 544,
+               "width": 32,
+               "height": 32
+              },
+              "characters": "4",
+              "style": {
+               "fontFamily": "Lato",
+               "fontWeight": 700,
+               "fontSize": 14,
+               "lineHeightPx": 32,
+               "textAlignHorizontal": "CENTER",
+               "textAlignVertical": "CENTER"
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.603922,
+                 "g": 0.627451,
+                 "b": 0.74902,
+                 "a": 1.0
+                }
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": "1:33",
+            "name": "Title",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 96,
+             "y": 544,
+             "width": 106,
+             "height": 22
+            },
+            "characters": "Choose a plan",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 16,
+             "lineHeightPx": 22,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.788235,
+               "g": 0.803922,
+               "b": 0.878431,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:34",
+            "name": "Description",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 96,
+             "y": 568,
+             "width": 176,
+             "height": 20
+            },
+            "characters": "Start free, upgrade anytime",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 400,
+             "fontSize": 14,
+             "lineHeightPx": 20,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.603922,
+               "g": 0.627451,
+               "b": 0.74902,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:35",
+          "name": "Testimonial",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 48,
+           "y": 680,
+           "width": 344,
+           "height": 184
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 0.06
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 0.1
+            }
+           }
+          ],
+          "strokeWeight": 1,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 16,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:36",
+            "name": "Stars",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 72,
+             "y": 702,
+             "width": 84,
+             "height": 18
+            },
+            "characters": "★★★★★",
+            "style": {
+             "fontFamily": "Inter",
+             "fontWeight": 400,
+             "fontSize": 14,
+             "lineHeightPx": 18,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP",
+             "letterSpacing": 1
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 1.0,
+               "g": 0.709804,
+               "b": 0.278431,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:37",
+            "name": "Quote",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 72,
+             "y": 730,
+             "width": 283,
+             "height": 46
+            },
+            "characters": "“Plotline cut our weekly planning meeting\nfrom an hour to fifteen minutes.”",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 400,
+             "fontSize": 15,
+             "lineHeightPx": 23,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP",
+             "italic": true
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 1.0,
+               "g": 1.0,
+               "b": 1.0,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:38",
+            "name": "Avatar",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 72,
+             "y": 796,
+             "width": 40,
+             "height": 40
+            },
+            "fills": [
+             {
+              "type": "GRADIENT_LINEAR",
+              "gradientHandlePositions": [
+               {
+                "x": 0,
+                "y": 0
+               },
+               {
+                "x": 1,
+                "y": 1
+               },
+               {
+                "x": 0,
+                "y": 1
+               }
+              ],
+              "gradientStops": [
+               {
+                "position": 0,
+                "color": {
+                 "r": 0.545098,
+                 "g": 0.576471,
+                 "b": 1.0,
+                 "a": 1.0
+                }
+               },
+               {
+                "position": 1,
+                "color": {
+                 "r": 0.356863,
+                 "g": 0.388235,
+                 "b": 0.839216,
+                 "a": 1.0
+                }
+               }
+              ]
+             }
+            ],
+            "strokes": [],
+            "cornerRadius": 20.0,
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:39",
+              "name": "Initials",
+              "type": "TEXT",
+              "absoluteBoundingBox": {
+               "x": 72,
+               "y": 796,
+               "width": 40,
+               "height": 40
+              },
+              "characters": "DW",
+              "style": {
+               "fontFamily": "Lato",
+               "fontWeight": 600,
+               "fontSize": 14,
+               "lineHeightPx": 40,
+               "textAlignHorizontal": "CENTER",
+               "textAlignVertical": "CENTER"
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 1.0,
+                 "g": 1.0,
+                 "b": 1.0,
+                 "a": 1.0
+                }
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": "1:40",
+            "name": "Name",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 124,
+             "y": 796,
+             "width": 101,
+             "height": 20
+            },
+            "characters": "Dana Whitfield",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 14,
+             "lineHeightPx": 20,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 1.0,
+               "g": 1.0,
+               "b": 1.0,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:41",
+            "name": "Role",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 124,
+             "y": 816,
+             "width": 185,
+             "height": 20
+            },
+            "characters": "Head of Operations, Brightside",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 400,
+             "fontSize": 13,
+             "lineHeightPx": 20,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.603922,
+               "g": 0.627451,
+               "b": 0.74902,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": "1:42",
+        "name": "Form area",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 440,
+         "y": 0,
+         "width": 840,
+         "height": 912
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1.0,
+           "g": 1.0,
+           "b": 1.0,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [],
+        "clipsContent": false,
+        "children": [
+         {
+          "id": "1:43",
+          "name": "Help text",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1020,
+           "y": 40,
+           "width": 104,
+           "height": 20
+          },
+          "characters": "Having trouble?",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 400,
+           "fontSize": 14,
+           "lineHeightPx": 20,
+           "textAlignHorizontal": "RIGHT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.419608,
+             "g": 0.439216,
+             "b": 0.521569,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:44",
+          "name": "Help link",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1124,
+           "y": 40,
+           "width": 108,
+           "height": 20
+          },
+          "characters": "Contact support",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 700,
+           "fontSize": 14,
+           "lineHeightPx": 20,
+           "textAlignHorizontal": "RIGHT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.85098,
+             "g": 0.317647,
+             "b": 0.168627,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:45",
+          "name": "Eyebrow",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 560,
+           "y": 104,
+           "width": 89,
+           "height": 16
+          },
+          "characters": "Step 2 of 4",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 800,
+           "fontSize": 12,
+           "lineHeightPx": 16,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP",
+           "letterSpacing": 1.4,
+           "textCase": "UPPER"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.85098,
+             "g": 0.317647,
+             "b": 0.168627,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:46",
+          "name": "Title",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 560,
+           "y": 126,
+           "width": 353,
+           "height": 42
+          },
+          "characters": "Set up your workspace",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 800,
+           "fontSize": 34,
+           "lineHeightPx": 42,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP",
+           "letterSpacing": -0.3
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.121569,
+             "g": 0.133333,
+             "b": 0.2,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:47",
+          "name": "Body",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 560,
+           "y": 176,
+           "width": 493,
+           "height": 48
+          },
+          "characters": "Your workspace is where your team plans roadmaps, shares updates\nand tracks progress together.",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 400,
+           "fontSize": 16,
+           "lineHeightPx": 24,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.419608,
+             "g": 0.439216,
+             "b": 0.521569,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:48",
+          "name": "Workspace name label",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 560,
+           "y": 244,
+           "width": 115,
+           "height": 20
+          },
+          "characters": "Workspace name",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 700,
+           "fontSize": 14,
+           "lineHeightPx": 20,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.121569,
+             "g": 0.133333,
+             "b": 0.2,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:49",
+          "name": "Workspace name field",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 560,
+           "y": 270,
+           "width": 600,
+           "height": 48
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.941176,
+             "g": 0.392157,
+             "b": 0.235294,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 2,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 10,
+          "effects": [
+           {
+            "type": "DROP_SHADOW",
+            "color": {
+             "r": 0.941176,
+             "g": 0.392157,
+             "b": 0.235294,
+             "a": 0.14
+            },
+            "offset": {
+             "x": 0,
+             "y": 0
+            },
+            "radius": 0,
+            "spread": 4,
+            "visible": true,
+            "blendMode": "NORMAL"
+           }
+          ],
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:50",
+            "name": "Value",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 572,
+             "y": 270,
+             "width": 116,
+             "height": 48
+            },
+            "characters": "Acme Design Co",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 400,
+             "fontSize": 15,
+             "lineHeightPx": 48,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.058824,
+               "g": 0.090196,
+               "b": 0.164706,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:51",
+          "name": "Workspace URL label",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 560,
+           "y": 338,
+           "width": 107,
+           "height": 20
+          },
+          "characters": "Workspace URL",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 700,
+           "fontSize": 14,
+           "lineHeightPx": 20,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.121569,
+             "g": 0.133333,
+             "b": 0.2,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:52",
+          "name": "Workspace URL field",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 560,
+           "y": 364,
+           "width": 600,
+           "height": 48
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.87451,
+             "g": 0.886275,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 1.5,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 10,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:53",
+            "name": "Prefix background",
+            "type": "RECTANGLE",
+            "absoluteBoundingBox": {
+             "x": 560,
+             "y": 364,
+             "width": 124,
+             "height": 48
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.960784,
+               "g": 0.964706,
+               "b": 0.980392,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [],
+            "rectangleCornerRadii": [
+             10,
+             0,
+             0,
+             10
+            ]
+           },
+           {
+            "id": "1:54",
+            "name": "Prefix",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 574,
+             "y": 364,
+             "width": 90,
+             "height": 48
+            },
+            "characters": "plotline.app/",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 400,
+             "fontSize": 15,
+             "lineHeightPx": 48,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.419608,
+               "g": 0.439216,
+               "b": 0.521569,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:55",
+            "name": "Prefix divider",
+            "type": "LINE",
+            "absoluteBoundingBox": {
+             "x": 684,
+             "y": 364,
+             "width": 0,
+             "height": 48
+            },
+            "fills": [],
+            "strokes": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.87451,
+               "g": 0.886275,
+               "b": 0.92549,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokeWeight": 1,
+            "strokeAlign": "INSIDE"
+           },
+           {
+            "id": "1:56",
+            "name": "Value",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 698,
+             "y": 364,
+             "width": 111,
+             "height": 48
+            },
+            "characters": "acme-design-co",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 400,
+             "fontSize": 15,
+             "lineHeightPx": 48,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.121569,
+               "g": 0.133333,
+               "b": 0.2,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:57",
+            "name": "Availability",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 1076,
+             "y": 364,
+             "width": 70,
+             "height": 48
+            },
+            "characters": "✓ Available",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 13,
+             "lineHeightPx": 48,
+             "textAlignHorizontal": "RIGHT",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.070588,
+               "g": 0.501961,
+               "b": 0.360784,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:58",
+          "name": "URL hint",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 560,
+           "y": 418,
+           "width": 273,
+           "height": 18
+          },
+          "characters": "Lowercase letters, numbers and hyphens only.",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 400,
+           "fontSize": 13,
+           "lineHeightPx": 18,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.419608,
+             "g": 0.439216,
+             "b": 0.521569,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:59",
+          "name": "Team size label",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 560,
+           "y": 458,
+           "width": 146,
+           "height": 20
+          },
+          "characters": "How big is your team?",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 700,
+           "fontSize": 14,
+           "lineHeightPx": 20,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.121569,
+             "g": 0.133333,
+             "b": 0.2,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:60",
+          "name": "Team size / 1–10",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 560.0,
+           "y": 484,
+           "width": 141.0,
+           "height": 44
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.87451,
+             "g": 0.886275,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 1.5,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 10,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:61",
+            "name": "Label",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 560.0,
+             "y": 484,
+             "width": 141.0,
+             "height": 44
+            },
+            "characters": "1–10",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 15,
+             "lineHeightPx": 44,
+             "textAlignHorizontal": "CENTER",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.239216,
+               "g": 0.254902,
+               "b": 0.333333,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:62",
+          "name": "Team size / 11–50 (selected)",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 713.0,
+           "y": 484,
+           "width": 141.0,
+           "height": 44
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 0.945098,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.941176,
+             "g": 0.392157,
+             "b": 0.235294,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 2,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 10,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:63",
+            "name": "Label",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 713.0,
+             "y": 484,
+             "width": 141.0,
+             "height": 44
+            },
+            "characters": "11–50",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 15,
+             "lineHeightPx": 44,
+             "textAlignHorizontal": "CENTER",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.85098,
+               "g": 0.317647,
+               "b": 0.168627,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:64",
+          "name": "Team size / 51–200",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 866.0,
+           "y": 484,
+           "width": 141.0,
+           "height": 44
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.87451,
+             "g": 0.886275,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 1.5,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 10,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:65",
+            "name": "Label",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 866.0,
+             "y": 484,
+             "width": 141.0,
+             "height": 44
+            },
+            "characters": "51–200",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 15,
+             "lineHeightPx": 44,
+             "textAlignHorizontal": "CENTER",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.239216,
+               "g": 0.254902,
+               "b": 0.333333,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:66",
+          "name": "Team size / 201+",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 1019.0,
+           "y": 484,
+           "width": 141.0,
+           "height": 44
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.87451,
+             "g": 0.886275,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 1.5,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 10,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:67",
+            "name": "Label",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 1019.0,
+             "y": 484,
+             "width": 141.0,
+             "height": 44
+            },
+            "characters": "201+",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 15,
+             "lineHeightPx": 44,
+             "textAlignHorizontal": "CENTER",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.239216,
+               "g": 0.254902,
+               "b": 0.333333,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:68",
+          "name": "Use case label",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 560,
+           "y": 552,
+           "width": 199,
+           "height": 20
+          },
+          "characters": "What will you use Plotline for?",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 700,
+           "fontSize": 14,
+           "lineHeightPx": 20,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.121569,
+             "g": 0.133333,
+             "b": 0.2,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:69",
+          "name": "Use case label hint",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 761,
+           "y": 552,
+           "width": 136,
+           "height": 20
+          },
+          "characters": " (select all that apply)",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 400,
+           "fontSize": 14,
+           "lineHeightPx": 20,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.419608,
+             "g": 0.439216,
+             "b": 0.521569,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:70",
+          "name": "Use case / Product roadmaps (selected)",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 560.0,
+           "y": 578,
+           "width": 192.0,
+           "height": 144
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 0.945098,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.941176,
+             "g": 0.392157,
+             "b": 0.235294,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 2,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 12,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:71",
+            "name": "Icon tile",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 576.0,
+             "y": 594,
+             "width": 40,
+             "height": 40
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.992157,
+               "g": 0.905882,
+               "b": 0.87451,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [],
+            "cornerRadius": 10,
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:72",
+              "name": "Icon / chart",
+              "type": "FRAME",
+              "absoluteBoundingBox": {
+               "x": 586.0,
+               "y": 604,
+               "width": 20,
+               "height": 20
+              },
+              "fills": [],
+              "strokes": [],
+              "clipsContent": false,
+              "children": [
+               {
+                "id": "1:73",
+                "name": "Bar 1",
+                "type": "RECTANGLE",
+                "absoluteBoundingBox": {
+                 "x": 589.0,
+                 "y": 614.0,
+                 "width": 3.5,
+                 "height": 7.0
+                },
+                "fills": [
+                 {
+                  "type": "SOLID",
+                  "color": {
+                   "r": 0.85098,
+                   "g": 0.317647,
+                   "b": 0.168627,
+                   "a": 1.0
+                  }
+                 }
+                ],
+                "strokes": [],
+                "cornerRadius": 1
+               },
+               {
+                "id": "1:74",
+                "name": "Bar 2",
+                "type": "RECTANGLE",
+                "absoluteBoundingBox": {
+                 "x": 594.25,
+                 "y": 609.0,
+                 "width": 3.5,
+                 "height": 12.0
+                },
+                "fills": [
+                 {
+                  "type": "SOLID",
+                  "color": {
+                   "r": 0.85098,
+                   "g": 0.317647,
+                   "b": 0.168627,
+                   "a": 1.0
+                  }
+                 }
+                ],
+                "strokes": [],
+                "cornerRadius": 1
+               },
+               {
+                "id": "1:75",
+                "name": "Bar 3",
+                "type": "RECTANGLE",
+                "absoluteBoundingBox": {
+                 "x": 599.5,
+                 "y": 612.0,
+                 "width": 3.5,
+                 "height": 9.0
+                },
+                "fills": [
+                 {
+                  "type": "SOLID",
+                  "color": {
+                   "r": 0.85098,
+                   "g": 0.317647,
+                   "b": 0.168627,
+                   "a": 1.0
+                  }
+                 }
+                ],
+                "strokes": [],
+                "cornerRadius": 1
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": "1:76",
+            "name": "Title",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 576.0,
+             "y": 648,
+             "width": 130,
+             "height": 22
+            },
+            "characters": "Product roadmaps",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 15,
+             "lineHeightPx": 22,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.121569,
+               "g": 0.133333,
+               "b": 0.2,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:77",
+            "name": "Description",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 576.0,
+             "y": 672,
+             "width": 105,
+             "height": 36
+            },
+            "characters": "Plan releases and\nshare timelines",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 400,
+             "fontSize": 13,
+             "lineHeightPx": 18,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.419608,
+               "g": 0.439216,
+               "b": 0.521569,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:78",
+            "name": "Check",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 714.0,
+             "y": 594,
+             "width": 22,
+             "height": 22
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.941176,
+               "g": 0.392157,
+               "b": 0.235294,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [],
+            "cornerRadius": 11,
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:79",
+              "name": "Tick",
+              "type": "TEXT",
+              "absoluteBoundingBox": {
+               "x": 714.0,
+               "y": 594,
+               "width": 22,
+               "height": 22
+              },
+              "characters": "✓",
+              "style": {
+               "fontFamily": "Inter",
+               "fontWeight": 700,
+               "fontSize": 13,
+               "lineHeightPx": 22,
+               "textAlignHorizontal": "CENTER",
+               "textAlignVertical": "CENTER"
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 1.0,
+                 "g": 1.0,
+                 "b": 1.0,
+                 "a": 1.0
+                }
+               }
+              ]
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:80",
+          "name": "Use case / Marketing campaigns",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 764.0,
+           "y": 578,
+           "width": 192.0,
+           "height": 144
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.87451,
+             "g": 0.886275,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 1.5,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 12,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:81",
+            "name": "Icon tile",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 780.0,
+             "y": 594,
+             "width": 40,
+             "height": 40
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.901961,
+               "g": 0.933333,
+               "b": 0.988235,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [],
+            "cornerRadius": 10,
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:82",
+              "name": "Icon / flag",
+              "type": "FRAME",
+              "absoluteBoundingBox": {
+               "x": 790.0,
+               "y": 604,
+               "width": 20,
+               "height": 20
+              },
+              "fills": [],
+              "strokes": [],
+              "clipsContent": false,
+              "children": [
+               {
+                "id": "1:83",
+                "name": "Pole",
+                "type": "RECTANGLE",
+                "absoluteBoundingBox": {
+                 "x": 794.0,
+                 "y": 606.5,
+                 "width": 1.8,
+                 "height": 15.0
+                },
+                "fills": [
+                 {
+                  "type": "SOLID",
+                  "color": {
+                   "r": 0.184314,
+                   "g": 0.356863,
+                   "b": 0.827451,
+                   "a": 1.0
+                  }
+                 }
+                ],
+                "strokes": [],
+                "cornerRadius": 1
+               },
+               {
+                "id": "1:84",
+                "name": "Flag",
+                "type": "RECTANGLE",
+                "absoluteBoundingBox": {
+                 "x": 795.5,
+                 "y": 607.0,
+                 "width": 10.5,
+                 "height": 7.5
+                },
+                "fills": [],
+                "strokes": [
+                 {
+                  "type": "SOLID",
+                  "color": {
+                   "r": 0.184314,
+                   "g": 0.356863,
+                   "b": 0.827451,
+                   "a": 1.0
+                  }
+                 }
+                ],
+                "strokeWeight": 1.75,
+                "strokeAlign": "INSIDE",
+                "rectangleCornerRadii": [
+                 0,
+                 2.0,
+                 2.0,
+                 0
+                ]
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": "1:85",
+            "name": "Title",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 780.0,
+             "y": 648,
+             "width": 151,
+             "height": 22
+            },
+            "characters": "Marketing campaigns",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 15,
+             "lineHeightPx": 22,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.121569,
+               "g": 0.133333,
+               "b": 0.2,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:86",
+            "name": "Description",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 780.0,
+             "y": 672,
+             "width": 124,
+             "height": 36
+            },
+            "characters": "Coordinate launches\nand content",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 400,
+             "fontSize": 13,
+             "lineHeightPx": 18,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.419608,
+               "g": 0.439216,
+               "b": 0.521569,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:87",
+            "name": "Check (empty)",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 918.0,
+             "y": 594,
+             "width": 22,
+             "height": 22
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 1.0,
+               "g": 1.0,
+               "b": 1.0,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.87451,
+               "g": 0.886275,
+               "b": 0.92549,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokeWeight": 1.5,
+            "strokeAlign": "INSIDE",
+            "cornerRadius": 11,
+            "clipsContent": false,
+            "children": []
+           }
+          ]
+         },
+         {
+          "id": "1:88",
+          "name": "Use case / Client projects",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 968.0,
+           "y": 578,
+           "width": 192.0,
+           "height": 144
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.87451,
+             "g": 0.886275,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 1.5,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 12,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:89",
+            "name": "Icon tile",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 984.0,
+             "y": 594,
+             "width": 40,
+             "height": 40
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.890196,
+               "g": 0.960784,
+               "b": 0.92549,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [],
+            "cornerRadius": 10,
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:90",
+              "name": "Icon / users",
+              "type": "FRAME",
+              "absoluteBoundingBox": {
+               "x": 994.0,
+               "y": 604,
+               "width": 20,
+               "height": 20
+              },
+              "fills": [],
+              "strokes": [],
+              "clipsContent": false,
+              "children": [
+               {
+                "id": "1:91",
+                "name": "Head A",
+                "type": "ELLIPSE",
+                "absoluteBoundingBox": {
+                 "x": 997.5,
+                 "y": 607.5,
+                 "width": 6.0,
+                 "height": 6.0
+                },
+                "fills": [],
+                "strokes": [
+                 {
+                  "type": "SOLID",
+                  "color": {
+                   "r": 0.070588,
+                   "g": 0.501961,
+                   "b": 0.360784,
+                   "a": 1.0
+                  }
+                 }
+                ],
+                "strokeWeight": 1.75,
+                "strokeAlign": "INSIDE"
+               },
+               {
+                "id": "1:92",
+                "name": "Body A",
+                "type": "RECTANGLE",
+                "absoluteBoundingBox": {
+                 "x": 995.5,
+                 "y": 615.0,
+                 "width": 10.0,
+                 "height": 6.0
+                },
+                "fills": [],
+                "strokes": [
+                 {
+                  "type": "SOLID",
+                  "color": {
+                   "r": 0.070588,
+                   "g": 0.501961,
+                   "b": 0.360784,
+                   "a": 1.0
+                  }
+                 }
+                ],
+                "strokeWeight": 1.75,
+                "strokeAlign": "INSIDE",
+                "rectangleCornerRadii": [
+                 5.0,
+                 5.0,
+                 1.5,
+                 1.5
+                ]
+               },
+               {
+                "id": "1:93",
+                "name": "Head B",
+                "type": "ELLIPSE",
+                "absoluteBoundingBox": {
+                 "x": 1005.0,
+                 "y": 608.5,
+                 "width": 5.0,
+                 "height": 5.0
+                },
+                "fills": [],
+                "strokes": [
+                 {
+                  "type": "SOLID",
+                  "color": {
+                   "r": 0.070588,
+                   "g": 0.501961,
+                   "b": 0.360784,
+                   "a": 1.0
+                  }
+                 }
+                ],
+                "strokeWeight": 1.75,
+                "strokeAlign": "INSIDE"
+               },
+               {
+                "id": "1:94",
+                "name": "Body B",
+                "type": "RECTANGLE",
+                "absoluteBoundingBox": {
+                 "x": 1007.0,
+                 "y": 615.0,
+                 "width": 5.5,
+                 "height": 6.0
+                },
+                "fills": [],
+                "strokes": [
+                 {
+                  "type": "SOLID",
+                  "color": {
+                   "r": 0.070588,
+                   "g": 0.501961,
+                   "b": 0.360784,
+                   "a": 1.0
+                  }
+                 }
+                ],
+                "strokeWeight": 1.75,
+                "strokeAlign": "INSIDE",
+                "rectangleCornerRadii": [
+                 1.0,
+                 4.0,
+                 1.5,
+                 1.0
+                ]
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": "1:95",
+            "name": "Title",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 984.0,
+             "y": 648,
+             "width": 104,
+             "height": 22
+            },
+            "characters": "Client projects",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 15,
+             "lineHeightPx": 22,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.121569,
+               "g": 0.133333,
+               "b": 0.2,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:96",
+            "name": "Description",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 984.0,
+             "y": 672,
+             "width": 110,
+             "height": 36
+            },
+            "characters": "Track deliverables\nfor every client",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 400,
+             "fontSize": 13,
+             "lineHeightPx": 18,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.419608,
+               "g": 0.439216,
+               "b": 0.521569,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:97",
+            "name": "Check (empty)",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 1122.0,
+             "y": 594,
+             "width": 22,
+             "height": 22
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 1.0,
+               "g": 1.0,
+               "b": 1.0,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.87451,
+               "g": 0.886275,
+               "b": 0.92549,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokeWeight": 1.5,
+            "strokeAlign": "INSIDE",
+            "cornerRadius": 11,
+            "clipsContent": false,
+            "children": []
+           }
+          ]
+         },
+         {
+          "id": "1:98",
+          "name": "Auto-join checkbox",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 560,
+           "y": 742,
+           "width": 600,
+           "height": 24
+          },
+          "fills": [],
+          "strokes": [],
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:99",
+            "name": "Box",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 560,
+             "y": 745,
+             "width": 18,
+             "height": 18
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.941176,
+               "g": 0.392157,
+               "b": 0.235294,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [],
+            "cornerRadius": 5,
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:100",
+              "name": "Check",
+              "type": "TEXT",
+              "absoluteBoundingBox": {
+               "x": 560,
+               "y": 745,
+               "width": 18,
+               "height": 18
+              },
+              "characters": "✓",
+              "style": {
+               "fontFamily": "Inter",
+               "fontWeight": 700,
+               "fontSize": 13,
+               "lineHeightPx": 18,
+               "textAlignHorizontal": "CENTER",
+               "textAlignVertical": "CENTER"
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 1.0,
+                 "g": 1.0,
+                 "b": 1.0,
+                 "a": 1.0
+                }
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": "1:101",
+            "name": "Label",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 588,
+             "y": 742,
+             "width": 393,
+             "height": 24
+            },
+            "characters": "Let anyone with an @acmedesign.co email join this workspace",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 400,
+             "fontSize": 14,
+             "lineHeightPx": 24,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "TOP"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.239216,
+               "g": 0.254902,
+               "b": 0.333333,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:102",
+          "name": "Footer divider",
+          "type": "LINE",
+          "absoluteBoundingBox": {
+           "x": 560,
+           "y": 790,
+           "width": 600,
+           "height": 0
+          },
+          "fills": [],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.87451,
+             "g": 0.886275,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 1,
+          "strokeAlign": "INSIDE"
+         },
+         {
+          "id": "1:103",
+          "name": "Button / Back",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 560,
+           "y": 814,
+           "width": 104,
+           "height": 48
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.87451,
+             "g": 0.886275,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 1.5,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 10,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:104",
+            "name": "Icon",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 579.5,
+             "y": 814,
+             "width": 19,
+             "height": 48
+            },
+            "characters": "←",
+            "style": {
+             "fontFamily": "Inter",
+             "fontWeight": 500,
+             "fontSize": 15,
+             "lineHeightPx": 48,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.239216,
+               "g": 0.254902,
+               "b": 0.333333,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:105",
+            "name": "Label",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 606.5,
+             "y": 814,
+             "width": 38,
+             "height": 48
+            },
+            "characters": "Back",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 15,
+             "lineHeightPx": 48,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.239216,
+               "g": 0.254902,
+               "b": 0.333333,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:106",
+          "name": "Button / Continue",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 992,
+           "y": 814,
+           "width": 168,
+           "height": 48
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.941176,
+             "g": 0.392157,
+             "b": 0.235294,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [],
+          "cornerRadius": 10,
+          "effects": [
+           {
+            "type": "DROP_SHADOW",
+            "color": {
+             "r": 0.941176,
+             "g": 0.392157,
+             "b": 0.235294,
+             "a": 0.28
+            },
+            "offset": {
+             "x": 0,
+             "y": 4
+            },
+            "radius": 12,
+            "spread": 0,
+            "visible": true,
+            "blendMode": "NORMAL"
+           }
+          ],
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:107",
+            "name": "Label",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 1042.5,
+             "y": 814,
+             "width": 67,
+             "height": 48
+            },
+            "characters": "Continue",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 15,
+             "lineHeightPx": 48,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 1.0,
+               "g": 1.0,
+               "b": 1.0,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "id": "1:108",
+      "name": "Mobile",
+      "type": "FRAME",
+      "absoluteBoundingBox": {
+       "x": 1400,
+       "y": 0,
+       "width": 390,
+       "height": 1084
+      },
+      "fills": [
+       {
+        "type": "SOLID",
+        "color": {
+         "r": 1.0,
+         "g": 1.0,
+         "b": 1.0,
+         "a": 1.0
+        }
+       }
+      ],
+      "strokes": [],
+      "clipsContent": true,
+      "children": [
+       {
+        "id": "1:109",
+        "name": "App bar",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 1400,
+         "y": 0,
+         "width": 390,
+         "height": 56
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1.0,
+           "g": 1.0,
+           "b": 1.0,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [],
+        "clipsContent": false,
+        "children": [
+         {
+          "id": "1:110",
+          "name": "Back button",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 1408,
+           "y": 8,
+           "width": 40,
+           "height": 40
+          },
+          "fills": [],
+          "strokes": [],
+          "cornerRadius": 20,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:111",
+            "name": "Icon / chev-left",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 1414,
+             "y": 14,
+             "width": 28,
+             "height": 28
+            },
+            "fills": [],
+            "strokes": [],
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:112",
+              "name": "Glyph",
+              "type": "TEXT",
+              "absoluteBoundingBox": {
+               "x": 1414,
+               "y": 14,
+               "width": 28,
+               "height": 28
+              },
+              "characters": "‹",
+              "style": {
+               "fontFamily": "Inter",
+               "fontWeight": 500,
+               "fontSize": 28.0,
+               "lineHeightPx": 28,
+               "textAlignHorizontal": "CENTER",
+               "textAlignVertical": "CENTER"
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.121569,
+                 "g": 0.133333,
+                 "b": 0.2,
+                 "a": 1.0
+                }
+               }
+              ]
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:113",
+          "name": "Logo",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 1452,
+           "y": 13,
+           "width": 123.2,
+           "height": 29.92
+          },
+          "fills": [],
+          "strokes": [],
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:114",
+            "name": "Logo mark",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 1452,
+             "y": 13,
+             "width": 29.92,
+             "height": 29.92
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.941176,
+               "g": 0.392157,
+               "b": 0.235294,
+               "a": 1.0
+              }
+             }
+            ],
+            "strokes": [],
+            "cornerRadius": 7.92,
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:115",
+              "name": "Stem",
+              "type": "RECTANGLE",
+              "absoluteBoundingBox": {
+               "x": 1460.8,
+               "y": 20.04,
+               "width": 4.4,
+               "height": 15.84
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 1.0,
+                 "g": 1.0,
+                 "b": 1.0,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokes": [],
+              "cornerRadius": 2.2
+             },
+             {
+              "id": "1:116",
+              "name": "Bowl",
+              "type": "RECTANGLE",
+              "absoluteBoundingBox": {
+               "x": 1460.8,
+               "y": 20.04,
+               "width": 13.2,
+               "height": 9.68
+              },
+              "fills": [],
+              "strokes": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 1.0,
+                 "g": 1.0,
+                 "b": 1.0,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokeWeight": 3.96,
+              "strokeAlign": "INSIDE",
+              "cornerRadius": 4.84
+             }
+            ]
+           },
+           {
+            "id": "1:117",
+            "name": "Wordmark",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 1490.72,
+             "y": 13,
+             "width": 73,
+             "height": 29.92
+            },
+            "characters": "Plotline",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 800,
+             "fontSize": 19.36,
+             "lineHeightPx": 29.92,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.121569,
+               "g": 0.133333,
+               "b": 0.2,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:118",
+          "name": "Step count",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1705,
+           "y": 0,
+           "width": 69,
+           "height": 56
+          },
+          "characters": "Step 2 of 4",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 700,
+           "fontSize": 13,
+           "lineHeightPx": 56,
+           "textAlignHorizontal": "RIGHT",
+           "textAlignVertical": "CENTER"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.419608,
+             "g": 0.439216,
+             "b": 0.521569,
+             "a": 1.0
+            }
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": "1:119",
+        "name": "Progress segment 1 (complete)",
+        "type": "RECTANGLE",
+        "absoluteBoundingBox": {
+         "x": 1416.0,
+         "y": 60,
+         "width": 85.0,
+         "height": 4
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.941176,
+           "g": 0.392157,
+           "b": 0.235294,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [],
+        "cornerRadius": 2
+       },
+       {
+        "id": "1:120",
+        "name": "Progress segment 2 (complete)",
+        "type": "RECTANGLE",
+        "absoluteBoundingBox": {
+         "x": 1507.0,
+         "y": 60,
+         "width": 85.0,
+         "height": 4
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.941176,
+           "g": 0.392157,
+           "b": 0.235294,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [],
+        "cornerRadius": 2
+       },
+       {
+        "id": "1:121",
+        "name": "Progress segment 3",
+        "type": "RECTANGLE",
+        "absoluteBoundingBox": {
+         "x": 1598.0,
+         "y": 60,
+         "width": 85.0,
+         "height": 4
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.901961,
+           "g": 0.909804,
+           "b": 0.941176,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [],
+        "cornerRadius": 2
+       },
+       {
+        "id": "1:122",
+        "name": "Progress segment 4",
+        "type": "RECTANGLE",
+        "absoluteBoundingBox": {
+         "x": 1689.0,
+         "y": 60,
+         "width": 85.0,
+         "height": 4
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.901961,
+           "g": 0.909804,
+           "b": 0.941176,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [],
+        "cornerRadius": 2
+       },
+       {
+        "id": "1:123",
+        "name": "Next step",
+        "type": "TEXT",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 74,
+         "width": 157,
+         "height": 18
+        },
+        "characters": "Next: Invite your teammates",
+        "style": {
+         "fontFamily": "Lato",
+         "fontWeight": 400,
+         "fontSize": 12,
+         "lineHeightPx": 18,
+         "textAlignHorizontal": "LEFT",
+         "textAlignVertical": "TOP"
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.419608,
+           "g": 0.439216,
+           "b": 0.521569,
+           "a": 1.0
+          }
+         }
+        ]
+       },
+       {
+        "id": "1:124",
+        "name": "Title",
+        "type": "TEXT",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 108,
+         "width": 271,
+         "height": 34
+        },
+        "characters": "Set up your workspace",
+        "style": {
+         "fontFamily": "Lato",
+         "fontWeight": 800,
+         "fontSize": 26,
+         "lineHeightPx": 34,
+         "textAlignHorizontal": "LEFT",
+         "textAlignVertical": "TOP",
+         "letterSpacing": -0.2
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.121569,
+           "g": 0.133333,
+           "b": 0.2,
+           "a": 1.0
+          }
+         }
+        ]
+       },
+       {
+        "id": "1:125",
+        "name": "Body",
+        "type": "TEXT",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 148,
+         "width": 284,
+         "height": 66
+        },
+        "characters": "Your workspace is where your team plans\nroadmaps, shares updates and tracks\nprogress together.",
+        "style": {
+         "fontFamily": "Lato",
+         "fontWeight": 400,
+         "fontSize": 15,
+         "lineHeightPx": 22,
+         "textAlignHorizontal": "LEFT",
+         "textAlignVertical": "TOP"
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.419608,
+           "g": 0.439216,
+           "b": 0.521569,
+           "a": 1.0
+          }
+         }
+        ]
+       },
+       {
+        "id": "1:126",
+        "name": "Workspace name label",
+        "type": "TEXT",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 232,
+         "width": 115,
+         "height": 20
+        },
+        "characters": "Workspace name",
+        "style": {
+         "fontFamily": "Lato",
+         "fontWeight": 700,
+         "fontSize": 14,
+         "lineHeightPx": 20,
+         "textAlignHorizontal": "LEFT",
+         "textAlignVertical": "TOP"
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.121569,
+           "g": 0.133333,
+           "b": 0.2,
+           "a": 1.0
+          }
+         }
+        ]
+       },
+       {
+        "id": "1:127",
+        "name": "Workspace name field",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 258,
+         "width": 358,
+         "height": 48
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1.0,
+           "g": 1.0,
+           "b": 1.0,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.941176,
+           "g": 0.392157,
+           "b": 0.235294,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokeWeight": 2,
+        "strokeAlign": "INSIDE",
+        "cornerRadius": 10,
+        "effects": [
+         {
+          "type": "DROP_SHADOW",
+          "color": {
+           "r": 0.941176,
+           "g": 0.392157,
+           "b": 0.235294,
+           "a": 0.14
+          },
+          "offset": {
+           "x": 0,
+           "y": 0
+          },
+          "radius": 0,
+          "spread": 4,
+          "visible": true,
+          "blendMode": "NORMAL"
+         }
+        ],
+        "clipsContent": false,
+        "children": [
+         {
+          "id": "1:128",
+          "name": "Value",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1428,
+           "y": 258,
+           "width": 116,
+           "height": 48
+          },
+          "characters": "Acme Design Co",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 400,
+           "fontSize": 15,
+           "lineHeightPx": 48,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "CENTER"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.058824,
+             "g": 0.090196,
+             "b": 0.164706,
+             "a": 1.0
+            }
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": "1:129",
+        "name": "Workspace URL label",
+        "type": "TEXT",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 326,
+         "width": 107,
+         "height": 20
+        },
+        "characters": "Workspace URL",
+        "style": {
+         "fontFamily": "Lato",
+         "fontWeight": 700,
+         "fontSize": 14,
+         "lineHeightPx": 20,
+         "textAlignHorizontal": "LEFT",
+         "textAlignVertical": "TOP"
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.121569,
+           "g": 0.133333,
+           "b": 0.2,
+           "a": 1.0
+          }
+         }
+        ]
+       },
+       {
+        "id": "1:130",
+        "name": "Workspace URL field",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 352,
+         "width": 358,
+         "height": 48
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1.0,
+           "g": 1.0,
+           "b": 1.0,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.87451,
+           "g": 0.886275,
+           "b": 0.92549,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokeWeight": 1.5,
+        "strokeAlign": "INSIDE",
+        "cornerRadius": 10,
+        "clipsContent": false,
+        "children": [
+         {
+          "id": "1:131",
+          "name": "Prefix background",
+          "type": "RECTANGLE",
+          "absoluteBoundingBox": {
+           "x": 1416,
+           "y": 352,
+           "width": 116,
+           "height": 48
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.960784,
+             "g": 0.964706,
+             "b": 0.980392,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [],
+          "rectangleCornerRadii": [
+           10,
+           0,
+           0,
+           10
+          ]
+         },
+         {
+          "id": "1:132",
+          "name": "Prefix",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1430,
+           "y": 352,
+           "width": 90,
+           "height": 48
+          },
+          "characters": "plotline.app/",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 400,
+           "fontSize": 15,
+           "lineHeightPx": 48,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "CENTER"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.419608,
+             "g": 0.439216,
+             "b": 0.521569,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:133",
+          "name": "Prefix divider",
+          "type": "LINE",
+          "absoluteBoundingBox": {
+           "x": 1532,
+           "y": 352,
+           "width": 0,
+           "height": 48
+          },
+          "fills": [],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.87451,
+             "g": 0.886275,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 1,
+          "strokeAlign": "INSIDE"
+         },
+         {
+          "id": "1:134",
+          "name": "Value",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1546,
+           "y": 352,
+           "width": 111,
+           "height": 48
+          },
+          "characters": "acme-design-co",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 400,
+           "fontSize": 15,
+           "lineHeightPx": 48,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "CENTER"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.121569,
+             "g": 0.133333,
+             "b": 0.2,
+             "a": 1.0
+            }
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": "1:135",
+        "name": "Availability",
+        "type": "TEXT",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 408,
+         "width": 70,
+         "height": 18
+        },
+        "characters": "✓ Available",
+        "style": {
+         "fontFamily": "Lato",
+         "fontWeight": 700,
+         "fontSize": 13,
+         "lineHeightPx": 18,
+         "textAlignHorizontal": "LEFT",
+         "textAlignVertical": "TOP"
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.070588,
+           "g": 0.501961,
+           "b": 0.360784,
+           "a": 1.0
+          }
+         }
+        ]
+       },
+       {
+        "id": "1:136",
+        "name": "URL hint",
+        "type": "TEXT",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 428,
+         "width": 273,
+         "height": 18
+        },
+        "characters": "Lowercase letters, numbers and hyphens only.",
+        "style": {
+         "fontFamily": "Lato",
+         "fontWeight": 400,
+         "fontSize": 13,
+         "lineHeightPx": 18,
+         "textAlignHorizontal": "LEFT",
+         "textAlignVertical": "TOP"
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.419608,
+           "g": 0.439216,
+           "b": 0.521569,
+           "a": 1.0
+          }
+         }
+        ]
+       },
+       {
+        "id": "1:137",
+        "name": "Team size label",
+        "type": "TEXT",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 470,
+         "width": 146,
+         "height": 20
+        },
+        "characters": "How big is your team?",
+        "style": {
+         "fontFamily": "Lato",
+         "fontWeight": 700,
+         "fontSize": 14,
+         "lineHeightPx": 20,
+         "textAlignHorizontal": "LEFT",
+         "textAlignVertical": "TOP"
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.121569,
+           "g": 0.133333,
+           "b": 0.2,
+           "a": 1.0
+          }
+         }
+        ]
+       },
+       {
+        "id": "1:138",
+        "name": "Team size / 1–10",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 1416.0,
+         "y": 496,
+         "width": 173.0,
+         "height": 44
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1.0,
+           "g": 1.0,
+           "b": 1.0,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.87451,
+           "g": 0.886275,
+           "b": 0.92549,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokeWeight": 1.5,
+        "strokeAlign": "INSIDE",
+        "cornerRadius": 10,
+        "clipsContent": false,
+        "children": [
+         {
+          "id": "1:139",
+          "name": "Label",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1416.0,
+           "y": 496,
+           "width": 173.0,
+           "height": 44
+          },
+          "characters": "1–10",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 700,
+           "fontSize": 15,
+           "lineHeightPx": 44,
+           "textAlignHorizontal": "CENTER",
+           "textAlignVertical": "CENTER"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.239216,
+             "g": 0.254902,
+             "b": 0.333333,
+             "a": 1.0
+            }
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": "1:140",
+        "name": "Team size / 11–50 (selected)",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 1601.0,
+         "y": 496,
+         "width": 173.0,
+         "height": 44
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1.0,
+           "g": 0.945098,
+           "b": 0.92549,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.941176,
+           "g": 0.392157,
+           "b": 0.235294,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokeWeight": 2,
+        "strokeAlign": "INSIDE",
+        "cornerRadius": 10,
+        "clipsContent": false,
+        "children": [
+         {
+          "id": "1:141",
+          "name": "Label",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1601.0,
+           "y": 496,
+           "width": 173.0,
+           "height": 44
+          },
+          "characters": "11–50",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 700,
+           "fontSize": 15,
+           "lineHeightPx": 44,
+           "textAlignHorizontal": "CENTER",
+           "textAlignVertical": "CENTER"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.85098,
+             "g": 0.317647,
+             "b": 0.168627,
+             "a": 1.0
+            }
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": "1:142",
+        "name": "Team size / 51–200",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 1416.0,
+         "y": 552,
+         "width": 173.0,
+         "height": 44
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1.0,
+           "g": 1.0,
+           "b": 1.0,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.87451,
+           "g": 0.886275,
+           "b": 0.92549,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokeWeight": 1.5,
+        "strokeAlign": "INSIDE",
+        "cornerRadius": 10,
+        "clipsContent": false,
+        "children": [
+         {
+          "id": "1:143",
+          "name": "Label",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1416.0,
+           "y": 552,
+           "width": 173.0,
+           "height": 44
+          },
+          "characters": "51–200",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 700,
+           "fontSize": 15,
+           "lineHeightPx": 44,
+           "textAlignHorizontal": "CENTER",
+           "textAlignVertical": "CENTER"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.239216,
+             "g": 0.254902,
+             "b": 0.333333,
+             "a": 1.0
+            }
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": "1:144",
+        "name": "Team size / 201+",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 1601.0,
+         "y": 552,
+         "width": 173.0,
+         "height": 44
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1.0,
+           "g": 1.0,
+           "b": 1.0,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.87451,
+           "g": 0.886275,
+           "b": 0.92549,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokeWeight": 1.5,
+        "strokeAlign": "INSIDE",
+        "cornerRadius": 10,
+        "clipsContent": false,
+        "children": [
+         {
+          "id": "1:145",
+          "name": "Label",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1601.0,
+           "y": 552,
+           "width": 173.0,
+           "height": 44
+          },
+          "characters": "201+",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 700,
+           "fontSize": 15,
+           "lineHeightPx": 44,
+           "textAlignHorizontal": "CENTER",
+           "textAlignVertical": "CENTER"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.239216,
+             "g": 0.254902,
+             "b": 0.333333,
+             "a": 1.0
+            }
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": "1:146",
+        "name": "Use case label",
+        "type": "TEXT",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 620,
+         "width": 199,
+         "height": 20
+        },
+        "characters": "What will you use Plotline for?",
+        "style": {
+         "fontFamily": "Lato",
+         "fontWeight": 700,
+         "fontSize": 14,
+         "lineHeightPx": 20,
+         "textAlignHorizontal": "LEFT",
+         "textAlignVertical": "TOP"
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.121569,
+           "g": 0.133333,
+           "b": 0.2,
+           "a": 1.0
+          }
+         }
+        ]
+       },
+       {
+        "id": "1:147",
+        "name": "Use case hint",
+        "type": "TEXT",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 640,
+         "width": 118,
+         "height": 18
+        },
+        "characters": "Select all that apply",
+        "style": {
+         "fontFamily": "Lato",
+         "fontWeight": 400,
+         "fontSize": 13,
+         "lineHeightPx": 18,
+         "textAlignHorizontal": "LEFT",
+         "textAlignVertical": "TOP"
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.419608,
+           "g": 0.439216,
+           "b": 0.521569,
+           "a": 1.0
+          }
+         }
+        ]
+       },
+       {
+        "id": "1:148",
+        "name": "Use case / Product roadmaps (selected)",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 668,
+         "width": 358,
+         "height": 76
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1.0,
+           "g": 0.945098,
+           "b": 0.92549,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.941176,
+           "g": 0.392157,
+           "b": 0.235294,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokeWeight": 2,
+        "strokeAlign": "INSIDE",
+        "cornerRadius": 12,
+        "clipsContent": false,
+        "children": [
+         {
+          "id": "1:149",
+          "name": "Icon tile",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 1432,
+           "y": 686.0,
+           "width": 40,
+           "height": 40
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.992157,
+             "g": 0.905882,
+             "b": 0.87451,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [],
+          "cornerRadius": 10,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:150",
+            "name": "Icon / chart",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 1442,
+             "y": 696.0,
+             "width": 20,
+             "height": 20
+            },
+            "fills": [],
+            "strokes": [],
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:151",
+              "name": "Bar 1",
+              "type": "RECTANGLE",
+              "absoluteBoundingBox": {
+               "x": 1445.0,
+               "y": 706.0,
+               "width": 3.5,
+               "height": 7.0
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.85098,
+                 "g": 0.317647,
+                 "b": 0.168627,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokes": [],
+              "cornerRadius": 1
+             },
+             {
+              "id": "1:152",
+              "name": "Bar 2",
+              "type": "RECTANGLE",
+              "absoluteBoundingBox": {
+               "x": 1450.25,
+               "y": 701.0,
+               "width": 3.5,
+               "height": 12.0
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.85098,
+                 "g": 0.317647,
+                 "b": 0.168627,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokes": [],
+              "cornerRadius": 1
+             },
+             {
+              "id": "1:153",
+              "name": "Bar 3",
+              "type": "RECTANGLE",
+              "absoluteBoundingBox": {
+               "x": 1455.5,
+               "y": 704.0,
+               "width": 3.5,
+               "height": 9.0
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.85098,
+                 "g": 0.317647,
+                 "b": 0.168627,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokes": [],
+              "cornerRadius": 1
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:154",
+          "name": "Title",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1484,
+           "y": 684,
+           "width": 130,
+           "height": 22
+          },
+          "characters": "Product roadmaps",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 700,
+           "fontSize": 15,
+           "lineHeightPx": 22,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.121569,
+             "g": 0.133333,
+             "b": 0.2,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:155",
+          "name": "Description",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1484,
+           "y": 706,
+           "width": 195,
+           "height": 20
+          },
+          "characters": "Plan releases and share timelines",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 400,
+           "fontSize": 13,
+           "lineHeightPx": 20,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.419608,
+             "g": 0.439216,
+             "b": 0.521569,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:156",
+          "name": "Check",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 1736,
+           "y": 695.0,
+           "width": 22,
+           "height": 22
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.941176,
+             "g": 0.392157,
+             "b": 0.235294,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [],
+          "cornerRadius": 11,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:157",
+            "name": "Tick",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 1736,
+             "y": 695.0,
+             "width": 22,
+             "height": 22
+            },
+            "characters": "✓",
+            "style": {
+             "fontFamily": "Inter",
+             "fontWeight": 700,
+             "fontSize": 13,
+             "lineHeightPx": 22,
+             "textAlignHorizontal": "CENTER",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 1.0,
+               "g": 1.0,
+               "b": 1.0,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": "1:158",
+        "name": "Use case / Marketing campaigns",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 756,
+         "width": 358,
+         "height": 76
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1.0,
+           "g": 1.0,
+           "b": 1.0,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.87451,
+           "g": 0.886275,
+           "b": 0.92549,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokeWeight": 1.5,
+        "strokeAlign": "INSIDE",
+        "cornerRadius": 12,
+        "clipsContent": false,
+        "children": [
+         {
+          "id": "1:159",
+          "name": "Icon tile",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 1432,
+           "y": 774.0,
+           "width": 40,
+           "height": 40
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.901961,
+             "g": 0.933333,
+             "b": 0.988235,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [],
+          "cornerRadius": 10,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:160",
+            "name": "Icon / flag",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 1442,
+             "y": 784.0,
+             "width": 20,
+             "height": 20
+            },
+            "fills": [],
+            "strokes": [],
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:161",
+              "name": "Pole",
+              "type": "RECTANGLE",
+              "absoluteBoundingBox": {
+               "x": 1446.0,
+               "y": 786.5,
+               "width": 1.8,
+               "height": 15.0
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.184314,
+                 "g": 0.356863,
+                 "b": 0.827451,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokes": [],
+              "cornerRadius": 1
+             },
+             {
+              "id": "1:162",
+              "name": "Flag",
+              "type": "RECTANGLE",
+              "absoluteBoundingBox": {
+               "x": 1447.5,
+               "y": 787.0,
+               "width": 10.5,
+               "height": 7.5
+              },
+              "fills": [],
+              "strokes": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.184314,
+                 "g": 0.356863,
+                 "b": 0.827451,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokeWeight": 1.75,
+              "strokeAlign": "INSIDE",
+              "rectangleCornerRadii": [
+               0,
+               2.0,
+               2.0,
+               0
+              ]
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:163",
+          "name": "Title",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1484,
+           "y": 772,
+           "width": 151,
+           "height": 22
+          },
+          "characters": "Marketing campaigns",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 700,
+           "fontSize": 15,
+           "lineHeightPx": 22,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.121569,
+             "g": 0.133333,
+             "b": 0.2,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:164",
+          "name": "Description",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1484,
+           "y": 794,
+           "width": 197,
+           "height": 20
+          },
+          "characters": "Coordinate launches and content",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 400,
+           "fontSize": 13,
+           "lineHeightPx": 20,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.419608,
+             "g": 0.439216,
+             "b": 0.521569,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:165",
+          "name": "Check (empty)",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 1736,
+           "y": 783.0,
+           "width": 22,
+           "height": 22
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.87451,
+             "g": 0.886275,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 1.5,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 11,
+          "clipsContent": false,
+          "children": []
+         }
+        ]
+       },
+       {
+        "id": "1:166",
+        "name": "Use case / Client projects",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 844,
+         "width": 358,
+         "height": 76
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1.0,
+           "g": 1.0,
+           "b": 1.0,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.87451,
+           "g": 0.886275,
+           "b": 0.92549,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokeWeight": 1.5,
+        "strokeAlign": "INSIDE",
+        "cornerRadius": 12,
+        "clipsContent": false,
+        "children": [
+         {
+          "id": "1:167",
+          "name": "Icon tile",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 1432,
+           "y": 862.0,
+           "width": 40,
+           "height": 40
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.890196,
+             "g": 0.960784,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [],
+          "cornerRadius": 10,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:168",
+            "name": "Icon / users",
+            "type": "FRAME",
+            "absoluteBoundingBox": {
+             "x": 1442,
+             "y": 872.0,
+             "width": 20,
+             "height": 20
+            },
+            "fills": [],
+            "strokes": [],
+            "clipsContent": false,
+            "children": [
+             {
+              "id": "1:169",
+              "name": "Head A",
+              "type": "ELLIPSE",
+              "absoluteBoundingBox": {
+               "x": 1445.5,
+               "y": 875.5,
+               "width": 6.0,
+               "height": 6.0
+              },
+              "fills": [],
+              "strokes": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.070588,
+                 "g": 0.501961,
+                 "b": 0.360784,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokeWeight": 1.75,
+              "strokeAlign": "INSIDE"
+             },
+             {
+              "id": "1:170",
+              "name": "Body A",
+              "type": "RECTANGLE",
+              "absoluteBoundingBox": {
+               "x": 1443.5,
+               "y": 883.0,
+               "width": 10.0,
+               "height": 6.0
+              },
+              "fills": [],
+              "strokes": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.070588,
+                 "g": 0.501961,
+                 "b": 0.360784,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokeWeight": 1.75,
+              "strokeAlign": "INSIDE",
+              "rectangleCornerRadii": [
+               5.0,
+               5.0,
+               1.5,
+               1.5
+              ]
+             },
+             {
+              "id": "1:171",
+              "name": "Head B",
+              "type": "ELLIPSE",
+              "absoluteBoundingBox": {
+               "x": 1453.0,
+               "y": 876.5,
+               "width": 5.0,
+               "height": 5.0
+              },
+              "fills": [],
+              "strokes": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.070588,
+                 "g": 0.501961,
+                 "b": 0.360784,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokeWeight": 1.75,
+              "strokeAlign": "INSIDE"
+             },
+             {
+              "id": "1:172",
+              "name": "Body B",
+              "type": "RECTANGLE",
+              "absoluteBoundingBox": {
+               "x": 1455.0,
+               "y": 883.0,
+               "width": 5.5,
+               "height": 6.0
+              },
+              "fills": [],
+              "strokes": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.070588,
+                 "g": 0.501961,
+                 "b": 0.360784,
+                 "a": 1.0
+                }
+               }
+              ],
+              "strokeWeight": 1.75,
+              "strokeAlign": "INSIDE",
+              "rectangleCornerRadii": [
+               1.0,
+               4.0,
+               1.5,
+               1.0
+              ]
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:173",
+          "name": "Title",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1484,
+           "y": 860,
+           "width": 104,
+           "height": 22
+          },
+          "characters": "Client projects",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 700,
+           "fontSize": 15,
+           "lineHeightPx": 22,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.121569,
+             "g": 0.133333,
+             "b": 0.2,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:174",
+          "name": "Description",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1484,
+           "y": 882,
+           "width": 201,
+           "height": 20
+          },
+          "characters": "Track deliverables for every client",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 400,
+           "fontSize": 13,
+           "lineHeightPx": 20,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.419608,
+             "g": 0.439216,
+             "b": 0.521569,
+             "a": 1.0
+            }
+           }
+          ]
+         },
+         {
+          "id": "1:175",
+          "name": "Check (empty)",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 1736,
+           "y": 871.0,
+           "width": 22,
+           "height": 22
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.87451,
+             "g": 0.886275,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 1.5,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 11,
+          "clipsContent": false,
+          "children": []
+         }
+        ]
+       },
+       {
+        "id": "1:176",
+        "name": "Auto-join checkbox",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 1416,
+         "y": 936,
+         "width": 358,
+         "height": 44
+        },
+        "fills": [],
+        "strokes": [],
+        "clipsContent": false,
+        "children": [
+         {
+          "id": "1:177",
+          "name": "Box",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 1416,
+           "y": 939,
+           "width": 18,
+           "height": 18
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.941176,
+             "g": 0.392157,
+             "b": 0.235294,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [],
+          "cornerRadius": 5,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:178",
+            "name": "Check",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 1416,
+             "y": 939,
+             "width": 18,
+             "height": 18
+            },
+            "characters": "✓",
+            "style": {
+             "fontFamily": "Inter",
+             "fontWeight": 700,
+             "fontSize": 13,
+             "lineHeightPx": 18,
+             "textAlignHorizontal": "CENTER",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 1.0,
+               "g": 1.0,
+               "b": 1.0,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:179",
+          "name": "Label",
+          "type": "TEXT",
+          "absoluteBoundingBox": {
+           "x": 1444,
+           "y": 936,
+           "width": 269,
+           "height": 44
+          },
+          "characters": "Let anyone with an @acmedesign.co email\njoin this workspace",
+          "style": {
+           "fontFamily": "Lato",
+           "fontWeight": 400,
+           "fontSize": 14,
+           "lineHeightPx": 22,
+           "textAlignHorizontal": "LEFT",
+           "textAlignVertical": "TOP"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.239216,
+             "g": 0.254902,
+             "b": 0.333333,
+             "a": 1.0
+            }
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": "1:180",
+        "name": "Action bar (fixed)",
+        "type": "FRAME",
+        "absoluteBoundingBox": {
+         "x": 1400,
+         "y": 1004,
+         "width": 390,
+         "height": 80
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1.0,
+           "g": 1.0,
+           "b": 1.0,
+           "a": 1.0
+          }
+         }
+        ],
+        "strokes": [],
+        "effects": [
+         {
+          "type": "DROP_SHADOW",
+          "color": {
+           "r": 0.121569,
+           "g": 0.133333,
+           "b": 0.2,
+           "a": 0.06
+          },
+          "offset": {
+           "x": 0,
+           "y": -4
+          },
+          "radius": 12,
+          "spread": 0,
+          "visible": true,
+          "blendMode": "NORMAL"
+         }
+        ],
+        "clipsContent": false,
+        "children": [
+         {
+          "id": "1:181",
+          "name": "Border",
+          "type": "LINE",
+          "absoluteBoundingBox": {
+           "x": 1400,
+           "y": 1004,
+           "width": 390,
+           "height": 0
+          },
+          "fills": [],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.87451,
+             "g": 0.886275,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 1,
+          "strokeAlign": "INSIDE"
+         },
+         {
+          "id": "1:182",
+          "name": "Button / Back",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 1416,
+           "y": 1020,
+           "width": 104,
+           "height": 48
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1.0,
+             "g": 1.0,
+             "b": 1.0,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.87451,
+             "g": 0.886275,
+             "b": 0.92549,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokeWeight": 1.5,
+          "strokeAlign": "INSIDE",
+          "cornerRadius": 10,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:183",
+            "name": "Icon",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 1435.5,
+             "y": 1020,
+             "width": 19,
+             "height": 48
+            },
+            "characters": "←",
+            "style": {
+             "fontFamily": "Inter",
+             "fontWeight": 500,
+             "fontSize": 15,
+             "lineHeightPx": 48,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.239216,
+               "g": 0.254902,
+               "b": 0.333333,
+               "a": 1.0
+              }
+             }
+            ]
+           },
+           {
+            "id": "1:184",
+            "name": "Label",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 1462.5,
+             "y": 1020,
+             "width": 38,
+             "height": 48
+            },
+            "characters": "Back",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 15,
+             "lineHeightPx": 48,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.239216,
+               "g": 0.254902,
+               "b": 0.333333,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "id": "1:185",
+          "name": "Button / Continue",
+          "type": "FRAME",
+          "absoluteBoundingBox": {
+           "x": 1532,
+           "y": 1020,
+           "width": 242,
+           "height": 48
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.941176,
+             "g": 0.392157,
+             "b": 0.235294,
+             "a": 1.0
+            }
+           }
+          ],
+          "strokes": [],
+          "cornerRadius": 10,
+          "clipsContent": false,
+          "children": [
+           {
+            "id": "1:186",
+            "name": "Label",
+            "type": "TEXT",
+            "absoluteBoundingBox": {
+             "x": 1619.5,
+             "y": 1020,
+             "width": 67,
+             "height": 48
+            },
+            "characters": "Continue",
+            "style": {
+             "fontFamily": "Lato",
+             "fontWeight": 700,
+             "fontSize": 15,
+             "lineHeightPx": 48,
+             "textAlignHorizontal": "LEFT",
+             "textAlignVertical": "CENTER"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 1.0,
+               "g": 1.0,
+               "b": 1.0,
+               "a": 1.0
+              }
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ }
+}

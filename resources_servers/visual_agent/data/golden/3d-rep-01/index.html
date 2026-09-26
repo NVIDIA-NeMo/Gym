@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Chess endgame still life</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #15171d; }
+  canvas { display: block; }
+</style>
+<script type="importmap">{"imports": {"three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/"}}</script>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const BG = '#15171d';
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(BG);
+scene.fog = new THREE.Fog(BG, 17, 30);
+
+const camera = new THREE.PerspectiveCamera(36, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(1.2, 8.6, 11.8);
+camera.lookAt(0.3, 0.4, 0.2);
+
+// Lights: warm key spotlight from the front-left, cool fill, cool rim from the back-right.
+scene.add(new THREE.HemisphereLight('#c9d6ff', '#3a2a1e', 0.7));
+const key = new THREE.SpotLight('#ffe2b8', 520, 40, 0.55, 0.55, 2);
+key.position.set(-7, 13, 7);
+key.target.position.set(0, 0, 0);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.near = 4;
+key.shadow.camera.far = 40;
+key.shadow.bias = -0.0004;
+key.shadow.radius = 3;
+scene.add(key, key.target);
+const rim = new THREE.DirectionalLight('#8fb2ff', 0.9);
+rim.position.set(8, 6, -9);
+scene.add(rim);
+
+function mesh(geo, mat, x, y, z) {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  scene.add(m);
+  return m;
+}
+
+// Table.
+const table = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), new THREE.MeshStandardMaterial({ color: '#3b2719', roughness: 0.7 }));
+table.rotation.x = -Math.PI / 2;
+table.receiveShadow = true;
+scene.add(table);
+
+// Board: frame plus 64 squares; a1 (near left) is dark.
+mesh(new THREE.BoxGeometry(9.2, 0.4, 9.2), new THREE.MeshStandardMaterial({ color: '#5a3820', roughness: 0.55 }), 0, 0.2, 0);
+const light = new THREE.MeshStandardMaterial({ color: '#ead9b5', roughness: 0.45 });
+const dark = new THREE.MeshStandardMaterial({ color: '#8f6038', roughness: 0.45 });
+const squareGeo = new THREE.BoxGeometry(1, 0.06, 1);
+for (let f = 0; f < 8; f++) {
+  for (let r = 0; r < 8; r++) {
+    const isDark = (f + r) % 2 === 0;
+    const sq = new THREE.Mesh(squareGeo, isDark ? dark : light);
+    sq.position.set(f - 3.5, 0.43, 3.5 - r);
+    sq.receiveShadow = true;
+    scene.add(sq);
+  }
+}
+const TOP = 0.46;
+function square(name) {
+  const f = name.charCodeAt(0) - 97;
+  const r = Number(name[1]) - 1;
+  return [f - 3.5, 3.5 - r];
+}
+
+// Piece profiles (radius, height) for LatheGeometry.
+const P = {
+  pawn: [[0, 0], [0.36, 0], [0.36, 0.08], [0.3, 0.12], [0.22, 0.2], [0.15, 0.42], [0.13, 0.52], [0.22, 0.56], [0.22, 0.6], [0.12, 0.62], [0, 0.62]],
+  rook: [[0, 0], [0.4, 0], [0.4, 0.1], [0.33, 0.15], [0.27, 0.25], [0.24, 0.72], [0.34, 0.78], [0.36, 1.02], [0.26, 1.02], [0.26, 0.94], [0, 0.94]],
+  queen: [[0, 0], [0.42, 0], [0.42, 0.1], [0.34, 0.16], [0.24, 0.3], [0.16, 0.9], [0.28, 0.98], [0.28, 1.04], [0.18, 1.08], [0.26, 1.28], [0, 1.24]],
+  king: [[0, 0], [0.42, 0], [0.42, 0.1], [0.34, 0.16], [0.25, 0.3], [0.17, 0.98], [0.3, 1.06], [0.3, 1.12], [0.2, 1.16], [0.24, 1.36], [0, 1.36]],
+};
+const geos = {};
+for (const [k, pts] of Object.entries(P)) geos[k] = new THREE.LatheGeometry(pts.map(([x, y]) => new THREE.Vector2(x, y)), 40);
+const headGeo = new THREE.SphereGeometry(0.17, 32, 20);
+const ballGeo = new THREE.SphereGeometry(0.1, 24, 16);
+const crossV = new THREE.BoxGeometry(0.09, 0.34, 0.09);
+const crossH = new THREE.BoxGeometry(0.28, 0.09, 0.09);
+
+const white = new THREE.MeshStandardMaterial({ color: '#f2e8d2', roughness: 0.35 });
+const black = new THREE.MeshStandardMaterial({ color: '#1c1b21', roughness: 0.22, metalness: 0.25 });
+
+function piece(type, mat, at) {
+  const [x, z] = typeof at === 'string' ? square(at) : at;
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(geos[type], mat);
+  body.castShadow = body.receiveShadow = true;
+  g.add(body);
+  const extra = [];
+  if (type === 'pawn') extra.push([headGeo, 0, 0.76, 0]);
+  if (type === 'queen') extra.push([ballGeo, 0, 1.33, 0]);
+  if (type === 'king') extra.push([crossV, 0, 1.52, 0], [crossH, 0, 1.55, 0]);
+  for (const [geo, ex, ey, ez] of extra) {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(ex, ey, ez);
+    m.castShadow = m.receiveShadow = true;
+    g.add(m);
+  }
+  g.position.set(x, TOP, z);
+  scene.add(g);
+  return g;
+}
+
+// White: Kg1, Qd4, Re1, pawns f2 g2 h2. Black: Kg8, Qc7, Rd8, pawns f7 g7 h6.
+piece('king', white, 'g1');
+piece('queen', white, 'd4');
+piece('rook', white, 'e1');
+for (const s of ['f2', 'g2', 'h2']) piece('pawn', white, s);
+piece('king', black, 'g8');
+piece('queen', black, 'c7');
+piece('rook', black, 'd8');
+for (const s of ['f7', 'g7', 'h6']) piece('pawn', black, s);
+
+// Captured pieces lying on the table to the right of the board.
+const fallenPawn = piece('pawn', black, [5.6, 1.6]);
+fallenPawn.rotation.set(0, 0.5, Math.PI / 2);
+fallenPawn.position.set(5.75, 0.36, 1.5);
+const standingPawn = piece('pawn', white, [5.4, -0.6]);
+standingPawn.position.y = 0;
+
+// A brass ball as a paperweight at the back left.
+mesh(new THREE.SphereGeometry(0.55, 48, 32), new THREE.MeshStandardMaterial({ color: '#d6b068', roughness: 0.3, metalness: 0.55 }), -5.8, 0.55, -2.4);
+
+function draw() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.render(scene, camera);
+}
+draw();
+window.addEventListener('resize', draw);
+</script>
+</body>
+</html>

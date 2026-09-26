@@ -1,0 +1,20 @@
+id,name,phase,duration_days,predecessors,percent_complete
+A1,Survey and measured drawings,Preparation,5,,100
+A2,Asbestos check,Preparation,3,A1,100
+A3,Design sign-off,Preparation,0,A2,100
+A4,Order furniture,Preparation,2,A3,100
+A5,Furniture manufacture and delivery,Preparation,30,A4,40
+B1,Move collections to store,Strip-out,6,A3,100
+B2,Strip-out,Strip-out,8,B1,100
+B3,Electrical first fix,Strip-out,7,B2,60
+B4,Plumbing first fix,Strip-out,5,B2,80
+B5,Roof repairs,Strip-out,12,B2,25
+C1,Plastering,Fit-out,6,B3;B4,0
+C2,Flooring,Fit-out,5,C1;B5,0
+C3,Decorating,Fit-out,6,C1,0
+C4,Electrical second fix,Fit-out,4,C3,0
+C5,Install shelving,Fit-out,5,C2;C3,0
+C6,Install furniture,Fit-out,3,C5;A5,0
+D1,Return collections,Reopening,5,C6,0
+D2,Staff training,Reopening,3,C4+2,0
+D3,Reopening day,Reopening,0,D1;D2,0

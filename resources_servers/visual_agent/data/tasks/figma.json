@@ -1,0 +1,1168 @@
+[
+ {
+  "task_id": "figma-rep-01",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive invoices admin page with sorting, filters and bulk actions from a Figma file",
+  "prompt": "Implement the Ledgerline invoices page from our Figma file as a real, responsive admin page. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (sizes, spacing, colors, radii, borders, shadows, Inter typography) and use every string and number exactly. Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: aside and nav for the sidebar, header, main, a real table with thead and th header buttons for the invoices on desktop, and a list of invoice cards on mobile, both rendered from one invoice data array. On mobile the sidebar collapses into the menu button, the KPI cards form a 2x2 grid, the status tabs become a Status select next to a Sort select, and the table becomes cards.\n\nMake it work:\n- Sorting (desktop): Issued, newest first, is the default. Clicking Client, Issued, Due date or Amount sorts by that column and shows an arrow on the active header; a second click reverses the order. Amount sorts high to low first (Halcyon Health $18,600.00 first, Mosaic Coffee $860.00 last); Client sorts A to Z first.\n- Status tabs All, Paid, Pending, Overdue and Draft filter the rows and show live counts. The 'Filter by client…' box narrows the rows by client name (case-insensitive) together with the active tab.\n- Selection: every row has a checkbox and the header checkbox selects or clears all visible rows. While any row is selected, a bulk bar replaces the tabs row with 'N selected', a 'Mark as paid' button and a 'Clear' button. Mark as paid sets the selected invoices to Paid, then recalculates the tab counts and the KPI cards: Outstanding = total of Pending and Overdue invoices (note: 'N open invoices'), Overdue = total of Overdue invoices, Collected in September = total of Paid invoices.\n- Mobile: the menu button opens a slide-in drawer with the sidebar navigation (Invoices active) that closes with its close button or Escape. The Status select (All statuses, Paid, Pending, Overdue, Draft) filters the cards and the Sort select offers Newest first, Oldest first, Amount: high to low and Amount: low to high.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 1148
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 1148
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Desktop: click the Amount header once (Halcyon Health first) and again (Mosaic Coffee first); click Client (Brightline Studio first). Click the Overdue tab (only INV-2045 and INV-2042), then All; type north in the client filter. Tick the INV-2045 and INV-2042 checkboxes, check the bulk bar reads 2 selected, click Mark as paid and read the tab counts (Paid 6, Overdue 0) and KPI cards (Outstanding $11,485.75, Overdue $0.00, Collected in September $54,455.75). Tick the header checkbox (10 selected). Mobile: open the menu drawer and close it with Escape; choose Overdue in the Status select (2 cards) and Amount: high to low in the Sort select (Halcyon Health first). For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: white sidebar (Ledgerline logo, Menu items with Invoices active and its 10 badge, Workspace items, Pro plan card, Nora Alvarez row), top bar with the search field and ⌘K hint, breadcrumb, 'Invoices' title and subtitle, Export CSV and New invoice buttons, four KPI cards, and the table card with status tabs, client filter, ten rows and the 'Showing 10 of 10 invoices' footer with pagination, at matching positions and sizes."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: app bar with menu button, logo, bell and avatar (no sidebar), stacked title block, Export and New invoice side by side, KPI cards in a 2x2 grid with the shortened labels and notes (e.g. 'Collected (Sep)', 'Oldest 12 days'), Status and Sort selects side by side, a full-width client filter, and ten invoice cards (client tile, name, 'INV-… · Issued …', amount, divider, due date, status pill) instead of a table."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: Inter, royal blue #2451d6 for the primary button, active tab and active nav item, colored client initial tiles, status pills with dots (green Paid, amber Pending, red Overdue, gray Draft), red due dates on overdue invoices, about 12px card radii, light borders and soft shadows."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "All data matches exactly: KPI values $21,746.50, $10,260.75, $44,195.00 and 14.6 days with their notes, and all ten invoices with number, client, email, issued date, due date, amount and status (e.g. INV-2045, Northwind Traders, finance@northwind.co, Sep 9, 2026, Sep 23, 2026, $7,920.00, Overdue)."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: one page with media queries and flex/grid layout (not absolutely positioned boxes), aside/nav, header and main landmarks, a real table with thead and th for the desktop invoices, and the mobile cards rendered from the same data as the table."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Sorting works: the first click on Amount puts Halcyon Health ($18,600.00) first and Mosaic Coffee ($860.00) last, a second click reverses it, Client sorts Brightline Studio first and Tidal Wave Media last, and the active header shows a direction arrow."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Filtering works: the Overdue tab shows exactly INV-2045 and INV-2042 and becomes the active tab, Paid shows 4 rows, All restores 10, and typing 'north' in the client filter leaves only Northwind Traders."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Bulk action works: selecting INV-2045 and INV-2042 shows a bar with '2 selected' and Mark as paid; clicking it turns both to Paid, the tabs read Paid 6 and Overdue 0, and the KPI cards read Outstanding $11,485.75 (3 open invoices), Overdue $0.00 and Collected in September $54,455.75."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The header checkbox selects every visible row ('10 selected' on All, '2 selected' on the Overdue tab) and clears them again; Clear deselects all and restores the tabs row."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px the menu button opens a drawer with the sidebar navigation (Invoices marked active) that closes with its close button and with Escape."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px the Status select set to Overdue leaves exactly two invoice cards, and the Sort select set to Amount: high to low puts Halcyon Health first and Mosaic Coffee last."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 there is no horizontal page scrolling and no overlapping or clipped text (the table may scroll inside its own container), and nothing overflows at 390px."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-02",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive profile settings page with validation, dirty state and a theme switch from a Figma file",
+  "prompt": "Implement the Northstar profile settings page from our Figma file as a real, responsive web page. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (Roboto, colors, radii, borders, shadows, spacing) and use every string exactly. Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Build it as one semantic form: nav for the top navigation and for the settings sections, main, a section with a heading per card, a label for every control, real text and email inputs, selects, a textarea, radio groups in fieldsets with legends for Date format and Theme, and the four switches as checkbox inputs or role='switch' buttons. On mobile the header becomes a back-button app bar, the settings sections become a tab strip that scrolls horizontally inside itself, fields stack in one column, the theme cards shrink to three compact cards and Discard / Save changes sit in a bar fixed to the bottom of the viewport.\n\nBehavior:\n- Save changes starts disabled (the muted violet in the design). Any edit (text, select, radio, switch, theme) enables it; Discard restores every control to the design values and disables it again. Clicking an enabled Save changes shows a 'Settings saved' toast for about three seconds, replaces 'Last saved Sep 22, 2026 at 4:18 PM' with 'All changes saved' and disables the button until the next edit.\n- The bio counter shows the live length as 'N / 160' (94 / 160 initially); the textarea accepts at most 160 characters and the counter turns red at 160.\n- Email: on blur, a value that is not a valid address (for example 'maya@') shows 'Enter a valid email address' in red under the field, gives the field a red border and hides the Verified badge; Save changes stays disabled while an error is shown, and fixing the value clears the error.\n- Date format updates the example line: MM/DD/YYYY gives 'Example: 09/24/2026', DD/MM/YYYY gives 'Example: 24/09/2026', YYYY-MM-DD gives 'Example: 2026-09-24'.\n- Theme: choosing Dark selects that card and immediately switches the whole page to a dark palette (dark page and card backgrounds, light text); Light switches back; System follows prefers-color-scheme.\n- The settings section links (desktop list and mobile tabs) mark the chosen item active; sections other than Profile may show a short placeholder panel with the section title.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 1840
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 1840
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Type in First name and check that Save changes becomes enabled, then click Discard and confirm the value and the disabled state return. Change the email to maya@, press Tab, and look for the red message and border; restore it. Type into the bio and read the counter; paste 200 characters and confirm it stops at 160 in red. Pick DD/MM/YYYY and YYYY-MM-DD and read the example line. Pick Dark and screenshot, then Light. Toggle Product updates and click Save changes: look for the toast and 'All changes saved'. Read the HTML for labels, fieldsets and switch semantics. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: top nav (Northstar logo, five links with Settings underlined, search, bell, avatar), title and subtitle, the settings list with Profile active and the Need a hand? card, the Profile card (avatar, Upload photo, Remove, two-column fields, bio with hint and counter), the Preferences card (language, date format radios with example, three theme cards) and the Email notifications card with four switches, then the action bar with Last saved, Discard and Save changes."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: back-button app bar with centered 'Settings' and avatar, the section tab strip with Profile underlined (cut off at the right edge), single-column fields, date format radios stacked, three compact theme cards in a row, switches with wrapped descriptions, the centered Last saved line and the bottom bar with Discard and Save changes side by side."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: Roboto, violet #6d28d9 for the active nav underline, active settings item, radios, switches and selected theme card (2px violet border on a lavender fill), a green Verified pill inside the email field, white cards with 12px radius and light borders, 8px inputs, and the muted (disabled) Save changes button."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Text matches exactly: every label, value and description, the bio 'Designing calm, accessible tools for research teams. Previously at Fieldwork and Lumen Health.' with '94 / 160', the four notification titles and descriptions, and 'Last saved Sep 22, 2026 at 4:18 PM'."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: one page with media queries and flex/grid layout, a form whose controls all have associated labels, real email/text inputs, selects and a textarea, radio groups inside fieldsets with legends, and switches implemented as checkboxes or role='switch' with aria-checked."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Dirty state works: Save changes is disabled on load, editing any field enables it, and Discard restores all original values (including switches, date format and theme) and disables it again."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Email validation works: entering 'maya@' and leaving the field shows 'Enter a valid email address' with a red border and hides Verified, Save changes stays disabled while the error shows, and correcting the address clears the error."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The bio counter updates live ('N / 160'), input stops at 160 characters, and the counter turns red at 160."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Date format radios update the example to 'Example: 24/09/2026' for DD/MM/YYYY and 'Example: 2026-09-24' for YYYY-MM-DD, and back to 'Example: 09/24/2026'."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Choosing the Dark theme card selects it and switches the page to a dark palette with readable light text; choosing Light restores the light design."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After an edit, Save changes shows a 'Settings saved' toast, the footer line changes to 'All changes saved', and the button is disabled again."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the section tab strip scrolls horizontally inside itself without page overflow and the Discard / Save changes bar stays fixed to the bottom of the viewport while scrolling; at 1024px wide there is no horizontal page scrolling or overlapping text."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-03",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive product listing with combined filters and sorting from a Figma file",
+  "prompt": "Implement the Fernhill Outdoor backpacks listing from our Figma file as a real, responsive storefront page. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (Open Sans, colors, radii, spacing, shadows) and use every string and price exactly. Draw each backpack illustration with CSS shapes or inline SVG, matching the design's shapes and colors (no images). Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: header with nav, a breadcrumb nav, an aside holding a filter form (fieldsets with real checkboxes, capacity chips as toggle buttons or checkboxes, number inputs for the price range, color swatches as buttons with accessible names, rating radios and an In stock only switch), a real select for sorting, and the products as a list of article cards whose icon buttons have accessible labels. On mobile the sidebar is replaced by Filters and Sort buttons above a two-column grid.\n\nProduct data (Featured order is the design order): Daypacks are Ridgeline, Canyon, Metro and Sprint; Hiking packs are Summit, Trailhead and Alpine; Travel packs are Voyager and Nomad. Colors: Forest is Ridgeline and Alpine, Sand is Canyon and Nomad, Slate is Metro, Rust is Summit and Sprint, Navy is Trailhead, Black is Voyager. Capacity comes from the name. Metro costs $59 (was $79) and Nomad is sold out.\n\nBehavior:\n- Filters combine with OR inside a group (two categories show both) and AND across groups. Capacity chips: Under 20L (below 20), 20–35L, 36–50L, 50L+ (above 50). The price inputs filter by current price, inclusive. A swatch toggles its color. Rating: 4.5 & up or 4.0 & up. In stock only hides sold-out products.\n- The result text reads 'Showing N products' ('Showing 1 product' for one) and the mobile count 'N products' updates too. When nothing matches, show 'No backpacks match these filters' with a 'Clear all filters' button. 'Clear all' resets every filter.\n- Sort by offers Featured, Price: low to high, Price: high to low and Top rated (ties keep Featured order), applied on top of the filters.\n- Heart buttons toggle a filled saved state; the dark plus buttons add the product to the cart and increment the badge from 2.\n- Mobile: Filters opens a full-screen sheet with the same filter groups, a close button and a sticky footer button 'Show N products' whose N updates live; tapping it closes the sheet. Sort opens the same sort options.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 1672
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 1672
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Tick Hiking packs (expect Summit 45L Hiking Pack, Trailhead 35L, Alpine 55L Expedition and 'Showing 3 products'), add Travel packs (5), then clear. Tick Daypacks and the 20–35L chip (only Ridgeline and Canyon). Set the max price to 150 (Ridgeline, Canyon, Metro, Trailhead, Sprint). Click the Rust swatch alone (Summit, Sprint). Toggle In stock only (8). Tick Travel packs + Under 20L for the empty state and use Clear all filters. Choose Price: low to high and read the order. Click two plus buttons (badge 4) and a heart. Mobile: open Filters, tick Hiking packs, read 'Show 3 products', tap it and count the cards. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: dark green promo bar, header (Fernhill logo, six nav links with Packs & Bags underlined and Sale in orange, search, account, saved and cart icons with badge 2), breadcrumb, 'Backpacks' title and intro, the filter sidebar (Category, Capacity chips, Price inputs and range, Color swatches, Rating, In stock only) with Clear all, 'Showing 9 products' with the Sort by select, a 3x3 product grid, and the viewed-9-of-9 progress with Back to top."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: short promo bar, header with menu button, centered logo, search and cart, breadcrumb, title with '9 products', the Filters and 'Sort: Featured' pill buttons, a two-column product grid with smaller tiles and single-line names, and the progress line; no sidebar."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The nine backpack illustrations are recognizable versions of the design's drawings in matching colors on matching tinted tiles: daypack with front pocket and handle loop, roll-top with buckle strap, hiking packs with lid and hip belt (sleeping pad or bottle), commuter with reflective strip, travel packs with framed front panel and side handle, and the running vest with two flasks."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Text matches exactly: the nine names, capacity and color lines, star ratings with review counts, prices including $59 in orange with $79 struck through, the New, Best seller, −25% and Sold out badges, filter labels with counts (4), (3), (2), and the promo, breadcrumb and intro copy."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: one page with media queries and grid/flex layout, header/nav, an aside with a form of fieldsets and real inputs, a select for sorting, product cards as a list of articles, icon buttons with aria-labels, and illustrations built from CSS or inline SVG (no raster images)."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Combined filters work: Hiking packs alone shows exactly Summit 45L Hiking Pack, Trailhead 35L and Alpine 55L Expedition with 'Showing 3 products'; adding Travel packs shows 5; Daypacks plus 20–35L shows only Ridgeline 28L Daypack and Canyon Roll-Top 22L."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "A max price of 150 shows exactly Ridgeline, Canyon, Metro, Trailhead and Sprint; the Rust swatch alone shows Summit and Sprint; In stock only hides Nomad and shows 8 products."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Sorting works on top of filters: Price: low to high orders Metro, Sprint, Canyon, Ridgeline, Trailhead, Nomad, Summit, Voyager, Alpine; Price: high to low reverses it; Top rated starts Alpine (4.9), Summit (4.8); an active filter stays applied after sorting."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Travel packs plus Under 20L shows 'No backpacks match these filters' with a Clear all filters button that restores all nine products and 'Showing 9 products'."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Clicking the plus button on two products raises the cart badge from 2 to 4, and a heart button toggles a filled saved state on and off."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px, Filters opens a full-screen sheet with the filter groups and a 'Show N products' button whose number updates live (3 after ticking Hiking packs); tapping it closes the sheet and the grid shows those 3 products."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 the sidebar and product grid fit without horizontal page scrolling or overlapping text, and nothing overflows at 390px."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-04",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive onboarding wizard step with live slug generation and validation from a Figma file",
+  "prompt": "Implement step 2 of the Plotline onboarding wizard from our Figma file as a real, responsive, working flow. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (Lato, the navy progress panel, coral accents, radii, the focus ring, spacing) and use every string exactly. Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: an aside with an ordered list for the stepper, main with a form, a label for every control, radio inputs for team size and checkboxes for the use-case cards (styled as the chips and cards in the design). On mobile the side panel and testimonial disappear, an app bar shows a back button and 'Step 2 of 4' above a four-segment progress bar, team-size chips form a 2x2 grid, use-case cards stack, and Back / Continue sit in a bar fixed to the bottom of the viewport.\n\nBehavior:\n- The workspace URL follows the name live until the user edits the URL field directly: lowercase, spaces and underscores become single hyphens, other characters are removed, no leading or trailing hyphens (typing 'Blue Harbor Studio!' gives 'blue-harbor-studio').\n- URL status (right of the field on desktop, under it on mobile): '✓ Available' in green for a valid slug, 'Use at least 3 characters' for shorter slugs, and 'That URL is taken' in red for plotline, admin or acme. Only lowercase letters, numbers and hyphens are accepted.\n- Team size is single-select; use-case cards are multi-select and toggle their coral check.\n- Continue validates: an empty name shows 'Enter a workspace name' under the field, an invalid or taken URL keeps its message, and no selected use case shows 'Pick at least one use case'. The page stays on step 2 and focus moves to the first invalid field. Enter in a text field acts like Continue.\n- A valid Continue shows step 3 in the same page: title 'Invite your teammates', three email inputs with the placeholder 'name@acmedesign.co', an 'Add another' link (up to 5 rows), 'Skip for now' and a 'Send invites' button. The stepper marks step 2 done with a check and makes step 3 current, the eyebrow reads 'STEP 3 OF 4', and on mobile three progress segments are filled and the app bar reads 'Step 3 of 4'.\n- Back on step 3 returns to step 2 with every value preserved.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 912
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 912
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Clear the workspace name and type Blue Harbor Studio! (URL should become blue-harbor-studio with ✓ Available). Set the URL to ab, then to admin, and read the status. Clear the name and click Continue (message, focus on the name field, still step 2). Unselect Product roadmaps and click Continue ('Pick at least one use case'). Fill valid values and click Continue: step 3 with 'Invite your teammates', stepper step 2 checked, eyebrow STEP 3 OF 4; click Add another until five rows; click Back and confirm the values. Repeat Continue at 390px and read the progress bar and 'Step 3 of 4'. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: the navy panel (Plotline logo, two-line heading, subheading, four-step vertical stepper with done, current and upcoming states and connectors, testimonial card with stars, quote, avatar, name and role) and the white form area (Having trouble? Contact support, STEP 2 OF 4 eyebrow, title, body, focused name field, URL field with the plotline.app/ prefix and ✓ Available, hint, four team-size chips with 11–50 selected, three use-case cards with Product roadmaps selected, auto-join checkbox, divider, Back and Continue)."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: app bar with back chevron, logo and 'Step 2 of 4', four progress segments (two filled), 'Next: Invite your teammates', title and body, stacked fields with ✓ Available under the URL field, 2x2 team-size chips, three full-width use-case cards with icon, text and check circle, the wrapped auto-join checkbox, and the bottom bar with Back and a wide Continue."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: Lato, navy #1b1f3b panel with soft glow circles, coral #f0643c for the logo, eyebrow, focus ring, selected chip and card, checks and Continue (with its coral shadow), green Available text, 10-12px radii, and tinted icon tiles on the use-case cards."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Text matches exactly: step titles and descriptions, the quote and 'Dana Whitfield, Head of Operations, Brightside', 'Set up your workspace' copy, 'Acme Design Co', 'acme-design-co', the hint, chip labels, use-case titles and descriptions, and the auto-join sentence."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: one page with media queries and flex/grid layout, an ordered list stepper, a form with labels, radio inputs for team size and checkbox inputs for use cases, and state kept in script rather than separate hard-coded pages."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Slug generation works: typing 'Blue Harbor Studio!' as the name sets the URL to 'blue-harbor-studio' live, and after the URL is edited by hand, name changes no longer overwrite it."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "URL status works: 'ab' shows 'Use at least 3 characters', 'admin' shows 'That URL is taken' in red, and a valid slug shows '✓ Available' in green."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Team size behaves as a single choice, use-case cards toggle independently, and Continue with no use case selected shows 'Pick at least one use case'."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Continue validates and advances: an empty name shows 'Enter a workspace name', stays on step 2 and focuses the field; valid data shows step 3 ('Invite your teammates', three email inputs, Send invites) with step 2 checked and step 3 current in the stepper, the eyebrow 'STEP 3 OF 4', and at 390px three filled segments with 'Step 3 of 4'."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "On step 3, Add another adds email rows up to five, and Back returns to step 2 with the name, URL, team size and use cases preserved."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Pressing Enter in the workspace name field acts like Continue (validation or advance)."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The Back / Continue bar stays fixed to the bottom of the 390x844 viewport while scrolling, and at 1024x768 there is no horizontal page scrolling or overlapping text."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-05",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive dark analytics dashboard with a working date-range switch from a Figma file",
+  "prompt": "Implement the Tideline Analytics overview from our Figma file as a real, responsive dashboard. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (dark palette, Inter, teal accents, radii, borders) and use every label and number exactly. Draw the visitors chart, KPI sparklines, share bar and country bars with HTML/CSS or inline SVG from data, not images: the 30 daily bars must have the design's relative heights (read them from the 'Bar / Sep N' nodes), weekend days in the darker slate color, and Sep 24 highlighted with its tooltip. Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: header with nav, main, section cards with headings, a real table for Top pages on desktop and a list on mobile. On mobile the nav collapses into a menu button, the range switch spans the width, KPI cards form a 2x2 grid without sparklines and the cards stack.\n\nBehavior:\n- The 7D / 30D / 90D / 12M switch is a button group (aria-pressed) that updates the subtitle date range, the four KPI values and deltas, the comparison note and the chart:\n  7D: Sep 24 – Sep 30, 2026; Visitors 11,382 ▲ 4.2%; Sessions 16,905 ▲ 3.6%; Conversion rate 3.71% ▲ 0.2 pts; Revenue $20,918 ▲ 6.3%; 7 daily bars (the last seven days of the design data) labeled Thu 24 … Wed 30; note 'vs prev. 7 days'.\n  30D: the design (Sep 1 – Sep 30, 2026, 'vs prev. 30 days').\n  90D: Jul 3 – Sep 30, 2026; Visitors 139,870 ▲ 9.7%; Sessions 207,115 ▲ 7.2%; Conversion rate 3.55% ▼ 0.1 pts; Revenue $241,760 ▲ 11.4%; 13 weekly bars; note 'vs prev. 90 days'.\n  12M: Oct 1, 2025 – Sep 30, 2026; Visitors 512,904 ▲ 31.8%; Sessions 768,331 ▲ 27.5%; Conversion rate 3.48% ▲ 0.6 pts; Revenue $902,115 ▲ 42.0%; 12 monthly bars labeled Oct … Sep; note 'vs prev. 12 months'.\n  Rising values use the green pill with ▲ and falling values the red pill with ▼.\n- Hovering or focusing any chart bar moves the tooltip above it with that bar's date and value (in 30D, Sep 24 reads 'Thu, Sep 24' and '2,418 visitors'; the 30 daily values sum to 48,210).\n- Top pages sorts by clicking the Views, Visitors, Avg. time or Bounce rate headers (numbers compared numerically, times as seconds). The first click sorts high to low, except Bounce rate, which sorts low to high first; a second click reverses; the active header shows ↓ or ↑. Default: Views, high to low.\n- Mobile: the menu button opens a drawer with the five nav items, and a sort select above the Top pages list offers the same sorts.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 1256
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 1256
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Click 90D and read the KPI values, subtitle, note and count the bars (13); click 7D (7 bars labeled Thu 24 to Wed 30, Visitors 11,382); click 30D to restore. Hover the Sep 24 bar and another bar and read the tooltip. Click the Bounce rate header (/docs/getting-started first, / last) and the Avg. time header (/docs/getting-started 5m 46s first, / 1m 05s last). Mobile: open the menu drawer, switch ranges and use the Top pages sort select. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: top bar (Tideline logo, five nav tabs with Overview active, tideline.io switcher, bell, avatar), Overview title and subtitle, the range switch with 30D active and Export, four KPI cards with delta pills, notes and sparklines, the Visitors chart card beside Traffic sources, and the Top pages table beside Top countries."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: app bar with menu button, logo and avatar, title with two-line subtitle, full-width range switch, KPI cards in a 2x2 grid without sparklines, a full-width chart with four x labels and the tooltip beside the Sep 24 bar, Traffic sources, Top pages as a list (path, bounce and time, views) and Top countries."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: #0b1120 page, #121a2c cards with 1px #1f2a40 borders and 14px radii, teal bars and highlights, share segments in teal, indigo, sky, pink and amber, green and red delta pills, the light tooltip, and Inter throughout."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Data matches exactly: KPI values 48,210, 71,954, 3.62% and $86,430 with ▲ 12.4%, ▲ 8.1%, ▼ 0.4 pts and ▲ 15.9%, the five sources with visitors and shares, all eight Top pages rows with views, visitors, avg. time and bounce rate, and the six countries with shares."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The chart geometry matches: 30 bars with the design's relative heights (Sep 24 tallest, weekend bars darker and lower), gridlines labeled 3k, 2k, 1k and 0, x labels Sep 1, 6, 11, 16, 21, 26 and 30, and the Sep 24 tooltip; the KPI sparklines and country bars are drawn too."
+   },
+   {
+    "id": "F6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: one page with media queries and grid/flex layout, header/nav and main landmarks, a real table for Top pages on desktop, and chart bars generated from data arrays rather than hard-coded images."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The range switch works: 90D shows Visitors 139,870, Sessions 207,115, Conversion rate 3.55% with a red ▼ 0.1 pts and Revenue $241,760 with 13 bars; 7D shows Visitors 11,382 and 7 bars labeled Thu 24 to Wed 30; 30D restores the design; the active segment is highlighted."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Changing the range also updates the subtitle date range (e.g. 'Jul 3 – Sep 30, 2026' for 90D) and the comparison note (e.g. 'vs prev. 90 days')."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Hovering a chart bar moves the tooltip above that bar with its date and value; the Sep 24 bar shows 'Thu, Sep 24' and '2,418 visitors'."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Table sorting works: Bounce rate puts /docs/getting-started (18.6%) first and / (48.9%) last, Avg. time puts /docs/getting-started (5m 46s) first and / (1m 05s) last, a second click reverses, and the active header shows the direction arrow."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px the menu button opens a drawer with the five nav items, and the Top pages sort select reorders the list."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 the dashboard reflows without horizontal page scrolling or overlapping text, and nothing overflows at 390px."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-06",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive Kanban board with a task panel, moves and persistence from a Figma file",
+  "prompt": "Implement the Tasklane board for the Website relaunch project from our Figma file as a real, responsive app page. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (Roboto, violet #6e56cf accents, label colors, card shadows, avatar stacks) and use every string exactly. Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: aside with nav, header, main, a section per column with a heading and a list of task cards (focusable buttons or articles with accessible names). On mobile the sidebar becomes a drawer behind the menu button, the columns become pill tabs in a strip that scrolls horizontally inside itself, one column of full-width cards is shown, and a floating + button and a bottom tab bar appear. Keep all tasks in one data array; the current user is Jordan Lee (JL).\n\nBehavior:\n- Clicking a card (or pressing Enter on it) opens a task panel (a right-side drawer on desktop, a full-screen sheet on mobile) with the title, labels, assignees, due date, a Status select (To do, In progress, In review, Done), a short description and the checklist. 'Build responsive navigation' has these items: Audit current nav links (done), Desktop mega menu (done), Mobile drawer (done), Keyboard focus order, QA on iOS Safari. Other cards may use generic item names, but their done/total counts must match the card. ✕ or Escape closes the panel and returns focus to the card.\n- Ticking a checklist item updates the card immediately (3/5 becomes 4/5 and the progress bar grows to 80%); a card with a complete checklist shows its count in green.\n- Changing Status moves the card to the bottom of that column and updates both column counts; cards in Done get the struck-through done style.\n- Add task (the row under each column and the + in the column header) opens an inline input: Enter adds a card with that title, assigned to JL with no labels or due date, at the bottom of the column and increments the count; Escape or an empty title cancels. The New task button does the same for To do.\n- 'Filter tasks…' filters cards by title (case-insensitive) across all columns and the counts show visible cards; Only my tasks shows only cards assigned to JL.\n- The board (moves, checklist ticks, added cards) persists in localStorage and survives a reload.\n- Mobile: the column tabs switch which column is shown, and the menu button opens the sidebar drawer.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 722
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 722
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Click 'Build responsive navigation', check the five checklist items, tick Keyboard focus order, close with Escape and read the card (4/5, longer bar). Open 'Illustrations for feature pages', set Status to Done, and read the counts (In progress 2, Done 4); reload and confirm it stays in Done. Use Add task in In review with the title Plan launch email + Enter. Type pricing in the filter (2 cards). Toggle Only my tasks (one card per column). Tab to a card and press Enter. Mobile: tap the In review tab (2 cards) and open the menu drawer. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: sidebar (Acme Studio switcher, search with / hint, five nav items with 4 and 3 badges, Projects list with Website relaunch active, Invite teammates, Jordan Lee), breadcrumb, title with On track pill, avatar stack with +3, Share and New task, Board/List/Timeline/Files tabs, the filter row with chips and Only my tasks, and four columns (To do 3, In progress 3, In review 2, Done 3) with Add task rows."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: app bar with menu button, 'Website relaunch ⌄' and avatar, On track pill with avatar stack, filter field with a filter button, the column tab strip with To do active (violet pill with count), the three To do cards at full width, a dashed Add task button, the floating + button and the bottom tab bar with Projects active."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: Roboto, violet #6e56cf for the active project, New task, active tab and progress bars, colored label pills (Design pink, Frontend blue, Content amber, QA green, Research violet), amber due dates for Sep 25 and Sep 26, green complete checklists, gray column backgrounds with 12px radius and white cards with a soft shadow."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Content matches exactly: all eleven cards with their labels, due dates, checklist counts, comment counts and assignee initials, done cards struck through, and the sidebar and header strings."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: one page with media queries and flex/grid layout, aside/nav, header and main landmarks, columns rendered from one task array, focusable cards, and localStorage persistence."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The task panel works: opening 'Build responsive navigation' lists the five named checklist items with three ticked; ticking Keyboard focus order changes the card to 4/5 with an 80% progress bar; Escape and ✕ close the panel."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Changing a card's Status to Done moves it to the bottom of Done with the done style, the counts update (In progress 2, Done 4 for an In progress card), and the move survives a reload."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Add task opens an inline input; Enter with 'Plan launch email' adds a card at the bottom of that column and increments its count; Escape or an empty title adds nothing."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Typing 'pricing' in the filter leaves only 'Write copy for pricing FAQ' and 'Pricing page QA pass', and Only my tasks shows only Jordan Lee's four cards (one per column), with counts updated."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Cards are reachable with Tab and open with Enter, and focus returns to the card when the panel closes."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px the column tabs switch the visible column (In review shows its 2 cards) and the menu button opens the sidebar navigation as a drawer."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 the board fits or scrolls horizontally inside its own container without page overflow or overlapping text, and nothing overflows at 390px."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-07",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive pricing page with a billing toggle, cost calculator and FAQ from a Figma file",
+  "prompt": "Implement the Cadence pricing page from our Figma file as a real, responsive marketing page. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (Open Sans, rose #e11d48 accents, the dark featured Teams card, the pink hero gradient, radii, shadows) and use every string exactly. Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: header with nav, main, an article per plan with a list of features, a real table with scoped th cells for the desktop comparison, and button elements with aria-expanded for the FAQ questions and disclosures. On mobile the nav becomes a menu button, plan cards stack in a compact form (price on the right, features behind a 'Show features' disclosure), Enterprise shrinks to the 'Need 100+ seats?' row, the calculator stacks, and a Free / Standard / Teams selector sits above a one-plan comparison list.\n\nPrices: Free $0; Standard $12 monthly or $10 annually (billed $120 per seat per year); Teams $20 monthly or $16 annually (billed $192 per seat per year).\n\nBehavior:\n- Monthly / Annually is a two-option toggle (aria-pressed or radios). Annually shows $10 and $16 with the notes 'Billed annually ($120/yr)' and 'Billed annually ($192/yr)'; Free stays $0 with 'Free forever'; Monthly restores the design.\n- Estimate your cost: the seat stepper (−, a typed number, +) is limited to 1–500 with − disabled at 1; the plan is Standard or Teams; the total follows plan, seats and billing. Monthly shows '$X / month' with the note 'Plan · N seats · billed monthly'; annually shows the per-month equivalent '$X / month' with the note 'Plan · N seats · billed $Y yearly' (Teams, 25 seats, annual: $400 / month, billed $4,800 yearly). Use 'seat' for 1 and thousands separators.\n- FAQ: one item open at a time; opening a question closes the open one and the icon switches between − and +. Answers: seat: 'A seat is anyone who hosts meetings on a booking page. Invitees never need a seat.' Nonprofits: 'Yes. Registered nonprofits get 30% off any paid plan. Contact our team to apply.' Free trial: 'Yes. Standard and Teams include a 14-day free trial, no credit card required.'\n- Mobile: the menu button opens a full-screen menu with the five nav links, Log in and Start free (✕ or Escape closes it); each plan's 'Show features' expands that card's five features and becomes 'Hide features'; the plan selector switches which plan's values the comparison list shows (Teams in the design).",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 2152
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 2152
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Click Annually and read the three plan prices and notes, then Monthly. In the calculator: Teams, type 25 seats, choose Annually (expect $400 / month and billed $4,800 yearly); choose Standard, Monthly, 3 seats (expect $36 / month, 'Standard · 3 seats · billed monthly'); press − down to 1 and confirm it stops. Open each FAQ question and check only one answer is open. Mobile: open the menu and close with Escape, expand Show features on Standard, and switch the comparison selector to Free (Booking pages 1, Group events –). For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: nav (Cadence logo, five links with Pricing in rose, Log in, Start free), pink-to-white hero with Pricing pill, headline, subheadline, Monthly/Annually toggle and Save 20% badge, three equal plan cards with the dark Teams card and Most popular badge, the Enterprise strip, the cost calculator strip, the comparison table with three groups and a tinted Teams column, and the two-column FAQ with the first question open."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: logo and bordered menu button, two-line headline, full-width billing toggle, 'Save 20% with annual billing' badge, three compact plan cards with price on the right and Show features rows, the 'Need 100+ seats?' row, the stacked calculator, the plan selector with Teams active above the Teams comparison list, and the FAQ."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: Open Sans, rose #e11d48 buttons, links, badges and check circles, navy #0f172a Teams card with a deep shadow and pink note text, green Save 20% badge, 18px plan cards, light gray toggles and selectors with white active segments, and uppercase rose group labels."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Text matches exactly: plan names, descriptions, prices, '/ seat / month', notes, buttons, all fifteen features with their 'Includes:' lines, the Enterprise copy, calculator labels with $200 / month and 'Teams · 10 seats · billed monthly', the nine comparison rows with every value, and the four FAQ questions with the open answer."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: one page with media queries and grid/flex layout, header/nav and main, an article per plan with a ul of features, a table with scoped th cells on desktop, and FAQ and disclosure buttons that update aria-expanded."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The billing toggle works: Annually shows $0, $10 and $16 with 'Free forever', 'Billed annually ($120/yr)' and 'Billed annually ($192/yr)'; Monthly restores $12, $20 and 'Billed monthly'."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The calculator is exact: Teams, 25 seats, annual shows '$400 / month' and 'billed $4,800 yearly'; Standard, 3 seats, monthly shows '$36 / month' and 'Standard · 3 seats · billed monthly'; − is disabled at 1 seat."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The FAQ is an accordion: clicking a question opens its given answer, closes the previously open one, and switches the icon between − and +."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px the comparison plan selector switches the list values (Free shows Booking pages 1 and – for Group events; Teams matches the design)."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px the menu button opens a menu with the five links, Log in and Start free that closes with ✕ or Escape, and Show features expands only that plan's five features and changes to Hide features."
+   },
+   {
+    "id": "F11",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 the plan cards, calculator and table fit without horizontal page scrolling or overlapping text, and nothing overflows at 390px."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-08",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive checkout with live order totals, discount codes and validation from a Figma file",
+  "prompt": "Implement the Kettle & Crane checkout from our Figma file as a real, responsive, working checkout page. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (Lato, espresso #231a15 and copper #b0561d, the cream summary panel, floating-label inputs, radii, shadows) and use every string exactly. Draw the three product thumbnails with CSS or inline SVG as in the design. Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use a real form with fieldsets and legends (Contact, Delivery, Shipping method, Payment), a label for every input, proper input types and autocomplete attributes, radio inputs for the shipping methods and an aside for the order summary. On mobile the logo is centered, the summary collapses into a 'Show order summary' bar with the total, the form is one column except the name, state/ZIP and expiration/security code pairs, and the footer links form two columns.\n\nPricing rules: Kettle $89.00, Grinder $124.00, Guji $19.50 each; shipping Standard $6.00, Express $14.00, Local pickup Free; estimated tax is 8% of the subtotal after discount, rounded to the cent; total = subtotal − discount + shipping + tax.\n\nBehavior:\n- Quantity steppers (1–10, − disabled at 1) update the line prices, 'Subtotal · N items', every total line, the Pay button label and the mobile summary bar. Example: Guji at 3 gives $58.50, 'Subtotal · 5 items' $271.50, tax $21.72 and total $299.22.\n- Express changes the shipping line to 'Shipping (Express)' $14.00 and the total to $286.16; Local pickup gives 'Shipping (Local pickup)' Free and $272.16.\n- Discount code BREW15 (case-insensitive) takes 15% off the subtotal: a 'Discount (BREW15)' line shows −$37.80, tax becomes $17.14 and the total $237.34 with Standard shipping; the code appears as a removable chip. Any other code shows 'Enter a valid discount code'. Apply is disabled while the field is empty.\n- Pay validates: empty required fields (email, first and last name, address, city, ZIP, card number, expiration, security code, name on card) show messages under the field such as 'Enter an email' and 'Enter a ZIP code'; the ZIP must be 5 digits ('Enter a valid 5-digit ZIP code'); the card number needs 16 digits and is grouped in fours while typing; expiration must be MM / YY. Focus moves to the first invalid field.\n- A valid Pay replaces the form with a confirmation: 'Thank you, Sam!', 'Order KC-10482 is confirmed' and the amount paid.\n- Mobile: 'Show order summary' expands the summary (items, discount field, totals) in place and the label becomes 'Hide order summary'.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 1580
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 1580
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Click + on the Guji stepper (quantity 3) and read the line price, subtotal, tax, total and Pay label; click − back to 2. Choose Express, then Local pickup, and read the totals. Type FREE and Apply (error), then brew15 (discount −$37.80, tax $17.14, total $237.34), then remove the chip. Clear the ZIP and click Pay; type 123 and click Pay; type 4242424242424242 into the card number and read the formatting. With valid fields click Pay for the confirmation. Mobile: tap Show order summary and read the expanded panel and the bar total after a quantity change. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: header with the Kettle & Crane logo and Secure checkout, Back to cart, the Contact, Delivery, Shipping method and Payment sections with floating-label inputs, three stacked shipping options with Standard selected, the credit card box with brand chips, the dark Pay $278.16 button and footer links on the left; the cream summary panel with three line items (thumbnails with quantity badges, steppers, prices), discount field with Apply, totals and assurances on the right."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: centered logo with cart button, the cream 'Show order summary ⌄' bar with $278.16, then the single-column form with the name, state/ZIP and expiration/security pairs, shipping options, payment box, full-width Pay button and two columns of footer links."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: Lato, espresso #231a15 Pay button and logo, copper #b0561d links, radios and checkboxes, cream #f5f0e9 summary panel, 10px bordered inputs with small gray labels, and recognizable kettle, grinder and coffee-bag thumbnails."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Text and numbers match exactly: every label and value (sam.rivera@fastmail.com, 2150 Larimer Street, Denver, Colorado, 80205, (303) 555-0187), the three shipping options with prices, the items with variants and prices, 'Subtotal · 4 items' $252.00, $6.00, 'Estimated tax (8%)' $20.16 and Total USD $278.16."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: one page with media queries and grid/flex layout, a form with fieldsets and legends, labels for every input, email/tel types and autocomplete attributes, radio inputs for shipping, and an aside for the summary."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Quantity changes recalculate exactly: Guji at 3 shows $58.50, 'Subtotal · 5 items' $271.50, tax $21.72, total $299.22 and 'Pay $299.22'; − is disabled at 1."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Shipping choice updates the totals: Express shows 'Shipping (Express)' $14.00 and $286.16; Local pickup shows Free and $272.16."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Discount codes work: brew15 adds 'Discount (BREW15)' −$37.80, tax $17.14 and total $237.34 with a removable chip; removing it restores $278.16; an unknown code shows 'Enter a valid discount code'."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Validation works: an empty ZIP shows 'Enter a ZIP code' and '123' shows 'Enter a valid 5-digit ZIP code' when paying, focus moves to the first invalid field, and a typed card number is grouped as '4242 4242 4242 4242'."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "With all fields valid, Pay replaces the form with 'Thank you, Sam!', 'Order KC-10482 is confirmed' and the amount paid."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px 'Show order summary' expands the items and totals in place and switches to 'Hide order summary', and the bar total follows quantity, shipping and discount changes."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 the two-column layout fits without horizontal page scrolling or overlapping text, and nothing overflows at 390px."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-open-01",
+  "category": "figma",
+  "mode": "open_ended",
+  "title": "Design a design-system foundations and component variant sheet as a layered Figma-ready SVG",
+  "prompt": "Create the foundations and core components page of Harbor, our design system, as one layered SVG file. The canvas is 1440 by 1800 (viewBox 0 0 1440 1800) with a white background rect. It will be imported into Figma, so organize it like a designer's file: every <g> gets a readable id that becomes its layer name (use ' / ' for hierarchy, never ids like g12), components are nested groups, and all copy stays live <text> (no outlined text). Use plain vectors only: no <image>, foreignObject, <script>, CSS animation or external references. Use Inter for all text. Every rect and group position and size (x, y, width, height and translate offsets) is a multiple of 4, sections start 48px from the left edge, each section has a 24px semibold title, and sections are separated by 64px of empty space.\n\nTop-level groups, in this order: 'Header' (title 'Harbor foundations' at 40 bold and 'v2.0 · Updated Sep 2026'), 'Foundations / Color', 'Foundations / Type', 'Foundations / Spacing', 'Components / Button', 'Components / Input', 'Components / Badge'.\n- Color: three ramps, groups 'Color / Primary', 'Color / Neutral' and 'Color / Danger', each with exactly five swatch groups named 'Color / <Ramp> / <step>' for steps 100, 300, 500, 700 and 900. A swatch is a 120 by 72 rect with rx 8 plus two labels under it: the step and its uppercase hex, which must equal the rect's fill. Primary 500 is #1F6FEB and Danger 500 is #D92D20; every ramp gets lighter toward 100 and darker toward 900.\n- Type: six groups 'Type / Display', 'Type / H1', 'Type / H2', 'Type / H3', 'Type / Body', 'Type / Caption', each with the sample 'The quick brown fox' at the exact size and weight and a spec label: Display 48/56 Bold, H1 36/44 Bold, H2 28/36 Semibold, H3 20/28 Semibold, Body 16/24 Regular, Caption 12/16 Medium (font-size and font-weight attributes must match the spec).\n- Spacing: eight groups 'Space / 4', 'Space / 8', 'Space / 12', 'Space / 16', 'Space / 24', 'Space / 32', 'Space / 48', 'Space / 64', each a Primary 500 bar 16 tall whose width is the token value times 4 (16 to 256), with the token label to its left, all bars left-aligned.\n- Button: a 3 by 3 variant grid of groups named 'Button / Variant=<Primary|Secondary|Ghost>, State=<Default|Hover|Disabled>', each 136 by 40 with rx 8 and a centered 'Button' label, 24px gaps, with row and column labels. Hover is visibly darker than Default, Disabled has clearly reduced contrast, Secondary has a 1px border, Ghost has no fill.\n- Input: groups 'Input / State=Default', 'Input / State=Focus' (2px Primary 500 border) and 'Input / State=Error' (Danger 500 border plus the helper 'Enter a valid email' in Danger 500), each a 320 by 40 field with the label 'Email' above it and a value or placeholder inside.\n- Badge: five pills 'Badge / Neutral', 'Badge / Info', 'Badge / Success', 'Badge / Warning', 'Badge / Danger', 24 tall, fully rounded, 12px medium text with a 6px leading dot, colored by meaning.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "design.svg"
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Reading the SVG source: exactly the seven top-level groups with the ids 'Header', 'Foundations / Color', 'Foundations / Type', 'Foundations / Spacing', 'Components / Button', 'Components / Input' and 'Components / Badge' in that order, with readable nested ids and no anonymous or g12-style ids."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The root viewBox is 0 0 1440 1800, all copy is live <text> in Inter, and there is no <image>, foreignObject or <script>."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Color: three ramp groups with exactly five swatch groups each, named 'Color / <Ramp> / <step>' for 100, 300, 500, 700 and 900; each swatch rect is 120x72 with rx 8, its hex label equals its fill in uppercase, Primary 500 is #1F6FEB, Danger 500 is #D92D20, and lightness decreases from 100 to 900."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Type: six style groups whose samples read 'The quick brown fox' with font-size and font-weight matching 48/700, 36/700, 28/600, 20/600, 16/400 and 12/500, each with its spec label (e.g. 'H2 28/36 Semibold')."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Spacing: eight 'Space / N' groups whose bars are 16 tall with widths 16, 32, 48, 64, 96, 128, 192 and 256, left-aligned, in Primary 500, each labeled."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Button: nine groups named exactly 'Button / Variant=…, State=…' covering Primary, Secondary and Ghost by Default, Hover and Disabled; each is 136x40 with rx 8 and a centered 'Button' label, 24px apart; Hover is darker than Default, Disabled is muted, Secondary has a 1px border and Ghost has no fill; row and column labels are present."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Input: three groups 'Input / State=Default', 'Input / State=Focus' and 'Input / State=Error', each 320x40 with the 'Email' label; Focus has a 2px #1F6FEB border and Error a #D92D20 border with 'Enter a valid email'."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Badge: five pill groups (Neutral, Info, Success, Warning, Danger), 24 tall and fully rounded, each with a 6px leading dot and 12px medium label in a color that fits its meaning."
+   },
+   {
+    "id": "R9",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Rect and group geometry uses multiples of 4 (spot-check at least 20 values), sections start 48px from the left with 24px section titles and 64px between sections, and nothing overlaps, is clipped or runs outside the canvas when rendered."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "The sheet looks like documentation a professional design team would publish: consistent alignment and spacing, a cohesive palette built from the ramps, and clear typographic hierarchy."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-open-02",
+  "category": "figma",
+  "mode": "open_ended",
+  "title": "Design a four-screen mobile banking send-money flow with shared components as a layered Figma-ready SVG",
+  "prompt": "Design the send-money flow of Pebble, a mobile bank, as one layered SVG file. The canvas is 1840 by 1000 (viewBox 0 0 1840 1000) with a #F2F4F7 background rect and four 375 by 812 screens at y = 120 and x = 80, 515, 950 and 1385, each a top-level group with the id '01 Home', '02 Choose recipient', '03 Enter amount' or '04 Sent' that starts with a white 375 by 812 background rect, plus a frame label in 14px #667085 text 24px above each screen. It will be imported into Figma, so organize it like a designer's file: every <g> gets a readable id that becomes its layer name (use ' / ' for hierarchy, never ids like g12), components are nested groups, and all copy stays live <text> (no outlined text). Use plain vectors only: no <image>, foreignObject, <script>, CSS animation or external references. Use Inter, the brand color #3E54D6, 24px side margins inside every screen, positions on an 8px grid, and this type scale: 32 bold for balances, 20 semibold for titles, 16 regular for body, 13 medium for captions.\n\nShared components must use the same id and the same size and position (relative to the screen) wherever they appear:\n- 'Status bar': 375 by 44 at the top of all four screens, with '9:41'.\n- 'Nav bar': 375 by 56 directly below the status bar on screens 02 and 03, with a back chevron and a centered title ('Send money' on both).\n- 'Tab bar': 375 by 84 at the bottom of screens 01 and 04 only, with four groups 'Tab / Home', 'Tab / Cards', 'Tab / Payments', 'Tab / Profile', each a vector icon plus label; Home is active on 01 and Payments on 04 (brand color), the others gray.\n- 'Button / Primary': 327 by 52, rx 14, at x = 24 inside the screen with its bottom edge 34px above the screen bottom on screen 03, and 34px above the tab bar on screen 04.\n\nScreens:\n- 01 Home: 'Hi, Priya', a balance card with 'Total balance' and '$4,812.50', four 64 by 64 quick actions ('Action / Send', 'Action / Request', 'Action / Top up', 'Action / More'), and 'Recent activity' with exactly four transaction rows, each a group 'Row / <merchant>' with an icon circle, merchant, date and amount.\n- 02 Choose recipient: a search field 'Search name or @handle', a 'Recent' row of four avatars with first names, and 'All contacts' with exactly five contact rows; 'Daniel Okafor' is selected with a tinted background and a check.\n- 03 Enter amount: a recipient chip 'Daniel Okafor', the amount '$250.00' centered at 56 bold, 'Available: $4,812.50', a note field 'Rent share – October', a 'Keypad' group with exactly twelve key groups ('Key / 1' to 'Key / 9', 'Key / .', 'Key / 0', 'Key / Delete') in a 3 by 4 grid of 101 by 56 keys with 12px column and 8px row gaps, and the primary button 'Send $250.00'.\n- 04 Sent: a success mark (circle with a check), 'Money sent!', '$250.00 is on its way to Daniel Okafor.', a 'Receipt' card with rows Amount $250.00, Fee $0.00, New balance $4,562.50 and Reference PBL-20931, the primary button 'Done', and the tab bar.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "design.svg"
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Reading the SVG source: four top-level screen groups '01 Home', '02 Choose recipient', '03 Enter amount' and '04 Sent', each starting with a white 375x812 rect at x 80, 515, 950 and 1385 and y 120, with a frame label above each."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The root viewBox is 0 0 1840 1000 with a #F2F4F7 background, all copy is live <text> in Inter, and there is no <image>, foreignObject or <script>."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Shared components are consistent: 'Status bar' (375x44) on all four screens at the same relative position; 'Nav bar' (375x56) only on 02 and 03 with identical geometry; 'Tab bar' (375x84) only on 01 and 04 with the four 'Tab / …' groups; 'Button / Primary' 327x52 rx 14 at x 24 inside screens 03 and 04 with the specified bottom spacing."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Home is complete: 'Hi, Priya', 'Total balance' '$4,812.50', four 64x64 'Action / …' groups, and exactly four 'Row / …' transaction groups each with icon, merchant, date and amount."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Choose recipient is complete: the search field, four recent avatars with names, and exactly five contact rows with 'Daniel Okafor' visibly selected with a check."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Enter amount is exact: a 'Keypad' group with exactly twelve correctly named key groups in a 3x4 grid of 101x56 keys with 12px column and 8px row gaps, '$250.00' at font-size 56 bold, 'Available: $4,812.50', the note 'Rent share – October' and the button 'Send $250.00'."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Sent is correct: 'Money sent!', the confirmation sentence, a 'Receipt' group with Amount $250.00, Fee $0.00, New balance $4,562.50 (= 4,812.50 − 250.00) and Reference PBL-20931, and a 'Done' button."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Brand and states: #3E54D6 is used for primary buttons and the active tab, Home is the active tab on 01 and Payments on 04, and the type scale is applied (32 balances, 20 titles, 16 body, 13 captions)."
+   },
+   {
+    "id": "R9",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Content keeps 24px side margins, positions sit on an 8px grid, and nothing overlaps, is clipped or spills outside its screen when rendered."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "The flow looks like a polished, trustworthy banking app a professional designer would ship: consistent components across screens, clear hierarchy and a cohesive palette."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-open-03",
+  "category": "figma",
+  "mode": "open_ended",
+  "title": "Design a landing page at three breakpoints on column grids as a layered Figma-ready SVG",
+  "prompt": "Design the landing page of Fieldnote, a note-taking app, at three breakpoints in one layered SVG file. The canvas is 2888 by 2440 (viewBox 0 0 2888 2440) with a #EEF1F4 background rect and three top-level frame groups, each starting with a white background rect of the frame size: 'Desktop / 1440' (1440 by 1400 at x 80, y 120), 'Tablet / 768' (768 by 1720 at x 1600, y 120) and 'Mobile / 360' (360 by 2240 at x 2448, y 120), each with a 14px frame label 24px above it. It will be imported into Figma, so organize it like a designer's file: every <g> gets a readable id that becomes its layer name (use ' / ' for hierarchy, never ids like g12), components are nested groups, and all copy stays live <text> (no outlined text). Use plain vectors only: no <image>, foreignObject, <script>, CSS animation or external references. Use Inter, brand #0F766E, text #0B1B1A.\n\nColumn grids: Desktop 12 columns of 86 with 72 margins and 24 gutters; Tablet 8 columns of 65 with 40 margins and 24 gutters; Mobile 4 columns of 70 with 16 margins and 16 gutters. Each frame's second child is a group 'Layout grid' holding exactly its column rects (full frame height, fill #FF3B30, opacity 0.06). Content edges must sit on column edges.\n\nEach frame then has these groups in order: 'Nav', 'Hero', 'Features', 'Testimonial', 'Footer'.\n- Nav: Desktop shows the logo, links Product, Templates, Pricing and Blog, 'Log in' and a 'Get Fieldnote' button; Tablet shows the logo, 'Get Fieldnote' and a menu icon; Mobile shows the logo and a menu icon.\n- Hero: the headline 'Notes that organize themselves' (Desktop 64/72, Tablet 48/56, Mobile 36/44, bold), a subheadline, a primary 'Get Fieldnote free' and a secondary 'See how it works' button, and a vector product mockup group 'Mockup' (app window with sidebar, note list and an open note). Desktop: copy on columns 1 to 6, mockup on columns 7 to 12. Tablet: copy across all 8 columns above the mockup. Mobile: stacked, both buttons full width (328).\n- Features: a section title and three card groups 'Card / Capture anywhere', 'Card / Auto-tagging', 'Card / Search everything' (icon, title, two-line text). Desktop: three across, each 4 columns wide (416). Tablet: two cards 4 columns wide (332) on the first row and the third 8 columns wide (688) below. Mobile: stacked, 328 wide.\n- Testimonial: the quote 'Fieldnote replaced three apps for our research team.' with an avatar, 'Maya Chen' and 'Head of Research, Lumen'.\n- Footer: logo, three link columns on Desktop and Tablet stacked into one column on Mobile, and '© 2026 Fieldnote, Inc.'.\nCopy must be identical across the three frames.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "design.svg"
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Reading the SVG source: three top-level frame groups 'Desktop / 1440', 'Tablet / 768' and 'Mobile / 360' whose first child is a white rect of 1440x1400, 768x1720 and 360x2240 at x 80, 1600 and 2448 (y 120), each with a label above and the child groups 'Layout grid', 'Nav', 'Hero', 'Features', 'Testimonial', 'Footer' in order."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The root viewBox is 0 0 2888 2440, all copy is live <text> in Inter, and there is no <image>, foreignObject or <script>."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Each 'Layout grid' holds exactly 12, 8 and 4 column rects with widths 86, 65 and 70, starting at the 72, 40 and 16 margins with 24, 24 and 16 gutters, at full frame height with opacity about 0.06."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Content snaps to the grids: on Desktop the hero copy ends by column 6 and the mockup spans columns 7 to 12; feature cards are 416 wide on Desktop, 332 + 332 then 688 on Tablet, and 328 on Mobile, with their left edges on column edges."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Nav adapts: Desktop has four links, Log in and Get Fieldnote; Tablet has the logo, Get Fieldnote and a menu icon; Mobile has the logo and a menu icon."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Type scale: the headline is 64, 48 and 36 bold on Desktop, Tablet and Mobile, and the Mobile buttons are full width (328)."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Copy is identical and complete in all frames: the headline, both button labels, the three feature titles, the quote with 'Maya Chen' and 'Head of Research, Lumen', and '© 2026 Fieldnote, Inc.'."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The 'Mockup' group is a convincing vector app window (window bar, sidebar, note list and open note) at every breakpoint."
+   },
+   {
+    "id": "R9",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Nothing overlaps, is clipped or runs outside its frame; vertical spacing between sections uses multiples of 8 and is consistent within each frame."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "All three breakpoints look like a polished, modern SaaS landing page a professional designer would hand off: clear hierarchy, cohesive teal palette, and balanced white space."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-open-04",
+  "category": "figma",
+  "mode": "open_ended",
+  "title": "Design a 24px icon set with navigation component variants built from reusable symbols as a Figma-ready SVG",
+  "prompt": "Create the icon set and navigation components of Orbit, our product UI kit, as one layered SVG file. The canvas is 1200 by 1000 (viewBox 0 0 1200 1000) with a white background rect. It will be imported into Figma, so organize it like a designer's file: every <g> gets a readable id that becomes its layer name (use ' / ' for hierarchy, never ids like g12), components are nested groups, and all copy stays live <text> (no outlined text). Use plain vectors only: no <image>, foreignObject, <script>, CSS animation or external references. Use Inter for labels, brand #6941C6 and neutral #1D2939.\n\nIcons: define 16 icons once in <defs> as <symbol> elements with ids icon-home, icon-search, icon-bell, icon-calendar, icon-chat, icon-user, icon-settings, icon-heart, icon-star, icon-folder, icon-camera, icon-lock, icon-trash, icon-download, icon-plus and icon-close, each with viewBox 0 0 24 24. Draw them on a 24px grid with a 2px safe margin (all geometry inside 2 to 22), using only strokes: stroke='currentColor', stroke-width 2, stroke-linecap round, stroke-linejoin round and fill none on every shape. Every icon must be instantly recognizable and share one visual weight.\n\nTop-level groups, in this order:\n- 'Icons': a section title plus an 8 by 2 grid of groups 'Icon / <Name>' (Home, Search, Bell, Calendar, Chat, User, Settings, Heart, Star, Folder, Camera, Lock, Trash, Download, Plus, Close), each a 96 by 112 cell with a <use> of its symbol at 48 by 48 in #1D2939 and the name in 12px below.\n- 'Tab bar': three variants 'Tab bar / Active=Home', 'Tab bar / Active=Chat', 'Tab bar / Active=Profile', each 375 by 84 with four tab groups Home, Search, Chat and Profile (icon-user), 24px icons via <use> above 11px labels; the active tab is #6941C6 with a 4px indicator bar, the others #667085.\n- 'Sidebar item': four variants 'Sidebar item / State=Default', 'State=Hover', 'State=Active' and 'State=Disabled', each 240 by 40 with rx 8, a 20px calendar icon via <use>, the label 'Calendar' and a count badge '3'; Hover gets a light gray fill, Active a #F4EBFF fill with brand icon and label, Disabled 40% opacity.\n- 'Icon button': six variants named 'Icon button / Size=<32|40|48>, Style=<Filled|Outline>' showing icon-plus at 16, 20 and 24; Filled is brand with a white icon, Outline has a 1px #D0D5DD border and a #1D2939 icon; all fully rounded.\nNo icon path data may be duplicated outside <defs>: every icon on the page is a <use>.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "design.svg"
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Reading the SVG source: <defs> contains exactly the sixteen <symbol> elements with the listed ids (icon-home … icon-close), each with viewBox 0 0 24 24."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Icon construction rules hold in every symbol: shapes use stroke='currentColor', stroke-width 2, round linecaps and linejoins and fill none, and all coordinates stay within the 2 to 22 live area (spot-check at least six symbols)."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The root viewBox is 0 0 1200 1000, labels are live <text> in Inter, there is no <image>, foreignObject or <script>, and every icon outside <defs> is a <use> (no duplicated icon paths)."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "'Icons' has sixteen 'Icon / <Name>' groups in an 8x2 grid of 96x112 cells, each using its matching symbol at 48x48 in #1D2939 with its name below."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The sixteen icons are each instantly recognizable as their name (home, magnifier, bell, calendar, speech bubble, person, gear, heart, star, folder, camera, padlock, trash can, download arrow, plus, close X) and share one consistent visual weight and style."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "'Tab bar' has three 375x84 variants named 'Tab bar / Active=Home', 'Active=Chat' and 'Active=Profile', each with Home, Search, Chat and Profile tabs; only the named tab is #6941C6 with a 4px indicator and the rest are #667085."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "'Sidebar item' has four 240x40 rx 8 variants (Default, Hover, Active, Disabled) with the calendar icon, 'Calendar' and a '3' badge, and the states are styled as specified (gray hover fill, #F4EBFF active fill with brand icon and label, 40% opacity disabled)."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "'Icon button' has six variants named 'Icon button / Size=…, Style=…' at 32, 40 and 48 with plus icons at 16, 20 and 24, Filled in brand with a white icon and Outline with a 1px #D0D5DD border, all fully rounded."
+   },
+   {
+    "id": "R9",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Sections are aligned on a clear grid with consistent spacing, variants line up in rows, and nothing overlaps, is clipped or runs outside the canvas when rendered."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "The sheet looks like a professional UI-kit page: crisp icons with optical balance, consistent component styling and a cohesive purple and neutral palette."
+   }
+  ]
+ }
+]

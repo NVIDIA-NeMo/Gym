@@ -574,6 +574,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             **self.config.opencode_config,
         }
 
+    def _opencode_run_extra_args(self, request: Request) -> str:
+        """Extra shell-quoted ``opencode run`` flags for this request (e.g. ``--file`` attachments)."""
+        return ""
+
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
         usages: List[NeMoGymResponseUsage] = []
         for message in opencode_export["messages"]:
@@ -725,7 +729,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
         && OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} {self._opencode_run_extra_args(request)} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
 

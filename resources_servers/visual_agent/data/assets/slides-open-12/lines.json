@@ -1,0 +1,20 @@
+{
+  "plant": "Hartwell",
+  "month": "2026-02",
+  "ideal_rate_units_per_minute": {
+    "L1": 120,
+    "L2": 90,
+    "L3": 150,
+    "L4": 60
+  },
+  "targets": {
+    "plant_oee": 0.7,
+    "world_class_oee": 0.85
+  },
+  "fill_weight_target_g": 500.0,
+  "control_chart_constants_n5": {
+    "A2": 0.577,
+    "D3": 0,
+    "D4": 2.114
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "program": "ReadBridge Tutoring",
+  "school_year": "2025-26",
+  "funder": "Alder Family Foundation",
+  "grant_usd": 480000,
+  "spending_usd": [
+    {
+      "category": "Tutor stipends",
+      "amount": 286400
+    },
+    {
+      "category": "Curriculum and materials",
+      "amount": 41850
+    },
+    {
+      "category": "Tutor training",
+      "amount": 27300
+    },
+    {
+      "category": "Site coordination",
+      "amount": 64200
+    },
+    {
+      "category": "Evaluation",
+      "amount": 18900
+    }
+  ],
+  "benchmarks": {
+    "grade_2": {
+      "fall": 400,
+      "spring": 430
+    },
+    "grade_3": {
+      "fall": 450,
+      "spring": 480
+    },
+    "grade_4": {
+      "fall": 495,
+      "spring": 520
+    }
+  },
+  "sessions_planned_per_month": 1323,
+  "sessions_delivered_by_month": [
+    {
+      "month": "Oct",
+      "sessions": 764
+    },
+    {
+      "month": "Nov",
+      "sessions": 983
+    },
+    {
+      "month": "Dec",
+      "sessions": 619
+    },
+    {
+      "month": "Jan",
+      "sessions": 946
+    },
+    {
+      "month": "Feb",
+      "sessions": 910
+    },
+    {
+      "month": "Mar",
+      "sessions": 1056
+    },
+    {
+      "month": "Apr",
+      "sessions": 1019
+    },
+    {
+      "month": "May",
+      "sessions": 983
+    }
+  ]
+}

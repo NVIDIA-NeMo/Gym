@@ -1,0 +1,21 @@
+item_id,item,category,menu_price_usd,plate_cost_usd
+M01,Hummus trio,Mezze,12.00,2.90
+M02,Grilled halloumi,Mezze,14.00,4.60
+M03,Muhammara,Mezze,11.00,2.35
+M04,Crispy calamari,Mezze,16.00,5.90
+M05,Fattoush salad,Mezze,13.00,3.20
+G01,Lamb kofta,Grill,26.00,8.40
+G02,Chicken shish,Grill,23.00,6.10
+G03,Ribeye 12 oz,Grill,44.00,17.80
+G04,Whole branzino,Grill,36.00,13.90
+G05,Mixed grill for two,Grill,68.00,24.50
+G06,Halloumi skewers,Grill,21.00,5.20
+N01,Moussaka,Mains,24.00,6.70
+N02,Chicken tagine,Mains,25.00,7.40
+N03,Seafood orzo,Mains,31.00,11.60
+N04,Falafel bowl,Mains,19.00,4.10
+N05,Braised short rib,Mains,34.00,12.90
+D01,Baklava,Desserts,9.00,1.90
+D02,Orange blossom panna cotta,Desserts,10.00,2.40
+D03,Pistachio kunafa,Desserts,12.00,3.10
+D04,Olive oil cake,Desserts,9.00,2.60

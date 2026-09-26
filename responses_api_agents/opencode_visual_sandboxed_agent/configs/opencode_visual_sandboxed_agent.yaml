@@ -1,0 +1,98 @@
+# OpenCode sandboxed agent with image input (see ../README.md). Same harness as
+# opencode_sandboxed_agent; images read by the model (screenshots, reference designs) and
+# input_image parts of the task prompt reach the model as image_url parts.
+opencode_visual_sandboxed_agent:
+  responses_api_agents:
+    opencode_visual_sandboxed_agent:
+      entrypoint: app.py
+      num_workers: 4
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      token_id_capture: true
+
+      debug: false
+
+      opencode_version: 1.17.11
+      # Must not exceed the serving engine's --max-model-len.
+      opencode_max_context_window: 262144
+      # Optional cached OpenCode binaries inside the sandbox (e.g. on a mounted volume); unset
+      # downloads opencode_version from opencode.ai in every sandbox.
+      remote_opencode_install_script_path: null
+      remote_opencode_binary_path: null
+      remote_opencode_musl_binary_path: null
+
+      enable_image_input: true
+      prompt_image_dir: /tmp/nemo_gym_prompt_images
+      max_prompt_image_bytes: 20971520
+      rollout_image_mode: reference
+
+      opencode_config:
+        permission:
+          "*": allow
+          edit:
+            "**": allow
+          bash:
+            "*": allow
+            # process termination
+            "*killall*": deny
+            "*pkill*": deny
+            "*kill -1*": deny
+            "*kill 0*": deny
+            # filesystem destruction
+            "*rm -rf /": deny
+            "*rm -rf /*": deny
+            "*rm -rf /bin*": deny
+            "*rm -rf /usr*": deny
+            "*rm -rf /etc*": deny
+            "*rm -rf /var*": deny
+            "*rm -rf /home*": deny
+            "*rm -rf /root*": deny
+            "*rm -rf /opt*": deny
+            "*rm -rf /lib*": deny
+            "*rm -rf /lib64*": deny
+            "*rm -rf /sbin*": deny
+            "*rm -rf /boot*": deny
+            "*rm -rf /dev*": deny
+            "*rm -rf /proc*": deny
+            "*rm -rf /sys*": deny
+            # disk devices
+            "dd *of=/dev/sd*": deny
+            "dd *of=/dev/nvme*": deny
+            "dd *of=/dev/hd*": deny
+        tools:
+          bash: true
+          edit: true
+          read: true
+          glob: true
+          grep: true
+          write: true
+          apply_patch: true
+          webfetch: false
+          websearch: false
+          task: true
+          skill: false
+          todowrite: true
+
+      sandbox_timeout: 3600
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        env:
+          # execd holds each finished command's response open for this long (default 1s);
+          # a short grace keeps every command and the readiness probe from paying that tail.
+          EXECD_API_GRACE_SHUTDOWN: "50ms"
+        resources:
+          cpu: 2
+          memory_mib: 4096
+          disk_gib: 30
+        provider_options: {}
+        metadata:
+          harness: opencode-visual
+
+      datasets: []
