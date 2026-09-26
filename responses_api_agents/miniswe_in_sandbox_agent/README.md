@@ -43,7 +43,8 @@ collection. Records are rewritten after every step, so a runner killed by the bu
 a trajectory. Trajectory format: `mini-swe-agent-1.1`.
 
 Termination mapping (same as the server-side harness): exec timeout or the runner's own
-`TimeExceeded` → `timeout`; runner exit ≠ 0 → `infrastructure_error` (log tail in the detail);
+`TimeExceeded` → `timeout` (including a wall budget that runs out while a model call is in flight: the
+pending call is dropped, the trajectory so far is graded); runner exit ≠ 0 → `infrastructure_error` (log tail in the detail);
 `Submitted` → `completed`; any other exit status → `nonzero_exit` with the status as detail. On an
 exec timeout the agent first SIGTERMs the runner's process groups (the runner saves a `TimeExceeded`
 exit) and only then downloads the records. A command that hits the per-step timeout is observed as
