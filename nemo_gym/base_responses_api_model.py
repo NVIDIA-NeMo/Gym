@@ -312,6 +312,23 @@ class BaseResponsesAPIModel(BaseServer):
     config: BaseResponsesAPIModelConfig
 
 
+def _drop_echoed_assistant_reasoning(body: dict[str, Any]) -> None:
+    """Drop reasoning fields harnesses echo on assistant turns when content already carries it.
+
+    The strict chat schema has no reasoning field, and the served content already holds the
+    reasoning inline as <think>...</think>, so the echo is redundant (opencode sends an empty
+    `reasoning`, hermes a copy in `reasoning_content`). Rejecting it drops every follow-up turn.
+    """
+    for message in body.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        inline = isinstance(content, str) and "<think>" in content
+        for key in ("reasoning", "reasoning_content"):
+            if key in message and (inline or not message[key]):
+                del message[key]
+
+
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     # Subclasses can declare successful metadata or health routes here.
     # Unknown successful routes fail closed during training-token capture.
@@ -557,6 +574,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
         malformed ``stream`` with the same 422 as before.
         """
+        _drop_echoed_assistant_reasoning(body)
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
             response = await self._invoke_chat_completions(request, params)
