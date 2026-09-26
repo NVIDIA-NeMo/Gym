@@ -1,0 +1,21 @@
+aegis_v4_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:AEGIS_V4_BASE_URL,http://127.0.0.1:8001/v1}
+      api_key: ${oc.env:AEGIS_V4_API_KEY,EMPTY}
+      model: ${oc.env:AEGIS_V4_MODEL,nvidia/Nemotron-3-Content-Safety}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      uses_interleaved_reasoning: false
+      chat_template_kwargs:
+        request_categories: /categories
+      sampling_overrides:
+        temperature: 0.01
+        top_p: 0.95
+      extra_body: null
+      default_headers: {}
+      endpoint_file: null
+      endpoint_stale_grace_s: 300.0
+      endpoint_connection_retries: 8
+      endpoint_check_interval_s: 10.0
