@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import multiprocessing
+import pickle
 import socket
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
@@ -1380,10 +1381,32 @@ class TestRunWebserverProxyKwargs:
         """The issue calls out parser, keepalive, access-log, and graceful-shutdown as must-not-change."""
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
 
-        assert "httptools" == kwargs["http"]
+        # httptools parser (never an h11 fallback), with TCP keepalive on accepted connections.
+        from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
+
+        assert issubclass(kwargs["http"].func, HttpToolsProtocol)
         assert 30 == kwargs["timeout_keep_alive"]
         assert kwargs["access_log"] is False
         assert 0.5 == kwargs["timeout_graceful_shutdown"]
+
+    def test_tcp_keepalive_defaults_and_config_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        from nemo_gym.server_utils import KeepaliveHttpToolsProtocol, UvicornTCPKeepaliveConfig
+
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
+        assert kwargs["http"].func is KeepaliveHttpToolsProtocol
+        assert kwargs["http"].keywords["tcp_keepalive"] == UvicornTCPKeepaliveConfig()
+
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch,
+            {"uvicorn_tcp_keepalive_idle_seconds": 90, "uvicorn_tcp_keepalive_probes": 5},
+            num_workers=1,
+        )
+        cfg = kwargs["http"].keywords["tcp_keepalive"]
+        assert (cfg.uvicorn_tcp_keepalive_idle_seconds, cfg.uvicorn_tcp_keepalive_probes) == (90, 5)
+        assert cfg.uvicorn_tcp_keepalive_interval_seconds == 10
+        # Multi-worker uvicorn ships its config to spawned processes, so the protocol must pickle.
+        restored = pickle.loads(pickle.dumps(kwargs["http"]))
+        assert restored.func is KeepaliveHttpToolsProtocol and restored.keywords["tcp_keepalive"] == cfg
 
     def test_trusted_proxy_opt_in_is_forwarded_to_uvicorn(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(
@@ -1443,3 +1466,29 @@ class TestHeadServerProxyKwargs:
 
         assert kwargs["proxy_headers"] is True
         assert kwargs["forwarded_allow_ips"] == ["10.0.0.1"]
+
+
+def test_enable_server_tcp_keepalive_sets_socket_options() -> None:
+    from nemo_gym.server_utils import UvicornTCPKeepaliveConfig, enable_server_tcp_keepalive
+
+    cfg = UvicornTCPKeepaliveConfig(uvicorn_tcp_keepalive_idle_seconds=45)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        enable_server_tcp_keepalive(sock, cfg)
+        assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            assert sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE) == 45
+    finally:
+        sock.close()
+
+
+def test_enable_server_tcp_keepalive_ignores_non_tcp_sockets() -> None:
+    from nemo_gym.server_utils import UvicornTCPKeepaliveConfig, enable_server_tcp_keepalive
+
+    cfg = UvicornTCPKeepaliveConfig()
+    enable_server_tcp_keepalive(None, cfg)
+    unix_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        enable_server_tcp_keepalive(unix_sock, cfg)  # must not raise
+    finally:
+        unix_sock.close()

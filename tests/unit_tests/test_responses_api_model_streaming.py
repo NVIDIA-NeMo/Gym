@@ -21,12 +21,14 @@ is re-emitted as a synthesized SSE event stream. Non-streaming requests keep the
 strict-validation behavior.
 """
 
+import asyncio
 import json
 from time import time
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from aiohttp import ClientResponseError
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
@@ -619,6 +621,21 @@ class _FailingModel(_EchoModel):
         raise RuntimeError("backend exploded")
 
 
+class _SlowFlakyModel(_EchoModel):
+    """responses() takes a moment and the first ``failures`` calls raise ``error``."""
+
+    failures: int = 0
+    error: object = None
+    calls: int = 0
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        object.__setattr__(self, "calls", self.calls + 1)
+        await asyncio.sleep(0.2)
+        if self.calls <= self.failures:
+            raise self.error
+        return await super().responses(body)
+
+
 def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
     server = model_cls(
         config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
@@ -689,6 +706,39 @@ class TestResponsesDispatchRoute:
         payload = json.loads(failed[0][len("data: ") :])
         assert payload["response"]["status"] == "failed"
         assert "backend exploded" in payload["response"]["error"]["message"]
+
+    def _slow_flaky(self, failures: int, error: BaseException) -> tuple[TestClient, "_SlowFlakyModel"]:
+        server = _SlowFlakyModel(
+            config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
+            server_client=MagicMock(
+                spec=ServerClient,
+                global_config_dict={
+                    "model_server_sse_heartbeat_grace_seconds": 0.05,
+                    "model_server_sse_heartbeat_interval_seconds": 0.05,
+                    "model_server_sse_heartbeat_retry_backoff_seconds": 0.01,
+                },
+            ),
+        )
+        object.__setattr__(server, "failures", failures)
+        object.__setattr__(server, "error", error)
+        return TestClient(server.setup_webserver()), server
+
+    def test_slow_5xx_is_retried_then_completes(self) -> None:
+        error = ClientResponseError(request_info=MagicMock(), history=(), status=502, message="bad gateway")
+        client, server = self._slow_flaky(failures=1, error=error)
+        resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        assert resp.status_code == 200
+        assert resp.text.startswith(": keepalive\n\n")
+        assert "event: response.completed" in resp.text
+        assert "event: response.failed" not in resp.text
+        assert server.calls == 2
+
+    def test_slow_non_retryable_error_yields_response_failed(self) -> None:
+        client, server = self._slow_flaky(failures=1, error=RuntimeError("backend exploded"))
+        resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        assert resp.status_code == 200
+        assert "event: response.failed" in resp.text
+        assert server.calls == 1
 
     def test_non_streaming_backend_error_still_raises(self) -> None:
         # Without the streaming contract, a backend failure is a normal exception (HTTP 500), not a
