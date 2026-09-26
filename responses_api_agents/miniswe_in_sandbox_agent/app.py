@@ -117,6 +117,17 @@ class MiniSWEInSandboxConfig(BaseResponsesAPIAgentConfig):
             raise ValueError("model_gateway_url must be an origin such as http://10.0.0.1:24402 (no path)")
         return value.rstrip("/")
 
+    @field_validator("provider_overrides")
+    @classmethod
+    def _transport_only(cls, value: dict) -> dict:
+        for provider, override in value.items():
+            if isinstance(override, dict) and "connection" in override:
+                raise ValueError(
+                    f"provider_overrides.{provider}.connection is not allowed: the agent must reach the sandbox with "
+                    "the credentials the resources server seeded"
+                )
+        return value
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -462,6 +473,9 @@ class MiniSWEInSandboxAgent(SimpleResponsesAPIAgent):
         for provider, override in self.config.provider_overrides.items():
             if provider in config and isinstance(config[provider], dict):
                 config[provider] = merge(config[provider], override)
+        # One exec spans the whole rollout; a foreground exec would sit on a single HTTP request for hours.
+        if isinstance(config.get("opensandbox"), dict):
+            config["opensandbox"].setdefault("operations", {})["background_exec"] = True
         return config
 
     async def _stop_runner(self, sandbox: AsyncSandbox, seed: SeedSessionResponse, workdir: str) -> None:

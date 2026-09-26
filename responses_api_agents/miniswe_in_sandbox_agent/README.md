@@ -66,7 +66,9 @@ the verifier stays deny-all.
 `harness.http_retries`/`http_timeout_sec`, `agent_max_timeout_sec`, `setup_timeout_sec`,
 `runner_exit_margin_sec` (the runner stops itself this long before the exec budget so it exits
 cleanly with a saved trajectory), `instruction_suffix` (appended to the task instruction),
-`python_executable`, `remote_dir_prefix`, `artifacts_dir`. Benchmark profile:
+`python_executable`, `remote_dir_prefix`, `artifacts_dir`, `provider_overrides` (deep-merged into the seeded
+provider block for this agent's transport only — polling cadence; a `connection` override is rejected and
+`background_exec` is always on). Benchmark profile:
 `benchmarks/terminal_bench_4/miniswe_in_sandbox.yaml` (`++tb4_model_gateway_url=…`).
 
 ## Trust boundary
