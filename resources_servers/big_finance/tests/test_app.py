@@ -15,7 +15,7 @@
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from big_finance_harness.prompts import SYSTEM_PROMPT
@@ -27,6 +27,7 @@ from big_finance_harness.tools import (
     ToolError,
     WebSearchTool,
 )
+from omegaconf import OmegaConf
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
@@ -42,6 +43,7 @@ from resources_servers.big_finance.app import (
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_CONFIG_FPATH = _REPO_ROOT / "resources_servers/big_finance/configs/big_finance.yaml"
 
 
 def _response(output: list[dict]) -> NeMoGymResponse:
@@ -270,6 +272,7 @@ def test_truncated_or_failed_terminal_call_does_not_become_final_answer() -> Non
 @pytest.mark.asyncio
 async def test_verify_aggregates_points_and_defaults_reward_to_final_answer() -> None:
     server = _server()
+    assert server.config.reward_mode == "final_answer"
     judge = {
         "final_answer_correct": True,
         "rubric": [
@@ -300,6 +303,63 @@ async def test_verify_aggregates_points_and_defaults_reward_to_final_answer() ->
     assert result.rubric_points_possible == 3
     assert result.rubric_points_fraction == pytest.approx(2 / 3)
     assert [v.satisfied for v in result.rubric_verdicts] == [True, False]
+    server.server_client.post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_passthrough_skips_judge_and_accepts_generation_only_request() -> None:
+    server = _server(
+        reward_mode="passthrough",
+        judge_model_server=None,
+        judge_responses_create_params=None,
+    )
+    response = _response(
+        [
+            {
+                "id": "call",
+                "call_id": "call-1",
+                "type": "function_call",
+                "name": "final_answer",
+                "arguments": '{"answer":"Generated answer"}',
+                "status": "completed",
+            }
+        ]
+    )
+    request = BigFinanceVerifyRequest(
+        id="generation-only",
+        query="Research this company.",
+        reference_answer="",
+        rubric=[],
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"role": "user", "content": "Research this company."}]
+        ),
+        response=response,
+    )
+
+    judge = AsyncMock()
+    with patch.object(server, "_judge", judge):
+        result = await server.verify(MagicMock(), request)
+
+    assert result.reward == 1.0
+    assert result.responses_create_params == request.responses_create_params
+    assert result.response == response
+    assert result.reference_answer == ""
+    assert result.final_answer == "Generated answer"
+    assert result.final_answer_correct is None
+    assert result.rubric_verdicts == []
+    assert result.judge_text is None
+    assert result.judge_error is None
+    judge.assert_not_awaited()
+    server.server_client.post.assert_not_called()
+
+
+def test_yaml_reward_mode_can_select_passthrough() -> None:
+    config = OmegaConf.merge(
+        OmegaConf.load(_CONFIG_FPATH),
+        {"big_finance_reward_mode": "passthrough"},
+    )
+
+    assert config.big_finance_resources_server.resources_servers.big_finance.reward_mode == "passthrough"
 
 
 @pytest.mark.asyncio

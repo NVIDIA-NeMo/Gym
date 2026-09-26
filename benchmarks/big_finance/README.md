@@ -40,6 +40,12 @@ reward is the judge's binary `final_answer_correct`. Set
 fraction instead. Every result includes both metrics, each rubric verdict, the
 judge's raw text, and any judge error. Reverification is stateless.
 
+For generation-only rollouts without a reference answer or rubric, set
+`big_finance_reward_mode=passthrough`. The verify endpoint then preserves the
+request and rollout response, extracts a final answer when possible, and returns
+`reward=1.0` without calling or requiring the judge model. The default remains
+`final_answer`.
+
 ## Parity and safety
 
 The server imports the upstream `WebSearchTool`, `EdgarSearchTool`,
