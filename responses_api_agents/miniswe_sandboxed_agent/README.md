@@ -19,9 +19,10 @@ session correlation. The sandbox does not need direct access to model credential
 Tool observations and the native trajectory return over the same sandbox transport.
 
 `app.py` owns the Gym `/run` loop: it calls the configured resources server's
-`/seed_session`, connects to the returned sandbox, and stores agent state keyed by
-client and resource session IDs. It then calls `responses()` directly; that method
-retrieves the state and executes the sandbox runner. `/run` sends the response and
+`/seed_session`, connects to the returned sandbox, and stores agent state under
+the inbound request's client session ID, with the resource session ID inside the
+state. It passes the same request and original create-params to `responses()`,
+which retrieves the state and executes the sandbox runner. `/run` sends the response and
 termination to `/verify` after execution stops and releases its session state and
 transport. The resources server retains provisioning, renewal, grading, and
 sandbox destruction. Retried runs share one execution, and seeded cookies are

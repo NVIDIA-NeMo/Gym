@@ -8,6 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import FastAPI, HTTPException, Request
+from httpx import ASGITransport, AsyncClient
+from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.miniswe_sandboxed_agent import app as module
@@ -30,7 +33,9 @@ async def fixture(tmp_path, monkeypatch):
         ),
         server_client=MagicMock(spec=ServerClient),
     )
-    request = SimpleNamespace(session={SESSION_ID_KEY: "owner"}, cookies={"session": "incoming"})
+    request = Request(
+        {"type": "http", "session": {SESSION_ID_KEY: "owner"}, "headers": [(b"cookie", b"session=incoming")]}
+    )
     body = MiniSWERunRequest(responses_create_params={"input": []}, problem={"id": 42}, rollout_id="rollout")
     seed = dict(
         session_id="resource-session",
@@ -125,9 +130,9 @@ async def test_run_agent_borrowed_session_without_resource_calls(fixture):
     f = fixture
     f.seed.pop("task_id")  # Optional for other resources and old seed responses.
     result = await f.agent._run_agent(
+        f.request,
         SeedSessionResponse.model_validate(f.seed),
         f.body.responses_create_params.model_copy(deep=True),
-        client_session_id="owner",
         rollout_id="activation",
         capture_model_calls=False,
         cookies={"session": "seeded"},
@@ -180,49 +185,103 @@ async def test_run_invokes_responses_with_session_state_and_releases_it(fixture,
     original = module.MiniSWESandboxedAgent.responses
 
     async def responses(self, request, body):
-        key = (request.session[SESSION_ID_KEY], request.session[module._SESSION_KEY])
+        key = request.session[SESSION_ID_KEY]
         state = self._sessions[key]
+        assert request is f.request
+        assert request.session == {SESSION_ID_KEY: "owner"}
+        assert state.resource_session_id == "resource-session"
         assert state.sandbox is f.sandbox
         assert state.harness is f.harnesses[0]
         assert state.harness.context.instruction == f.seed["instruction"]
+        assert body.input == []
+        assert state.harness.params.input != body.input
         calls.append(key)
         return await original(self, request, body)
 
     monkeypatch.setattr(module.MiniSWESandboxedAgent, "responses", responses)
     first, replay = await asyncio.gather(f.agent.run(f.request, f.body), f.agent.run(f.request, f.body))
     assert first == replay
-    assert calls == [("owner", "resource-session")]
+    assert calls == ["owner"]
     assert not f.agent._sessions
     assert f.body.responses_create_params.input == []
 
 
 async def test_responses_requires_matching_session_and_replays_one_execution(fixture):
-    from fastapi import HTTPException, Request
-
     f = fixture
     params = f.body.responses_create_params
+    harness_params = params.model_copy(deep=True)
+    harness_params.input = [module.NeMoGymEasyInputMessage(role="user", content="Seeded instruction")]
     response = module.empty_response(params, "model")
-    execute = AsyncMock(return_value=(response, HarnessOutcome(reason="completed"), {}))
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def run_harness(budget):
+        started.set()
+        await finish.wait()
+        return response, HarnessOutcome(reason="completed"), {}
+
+    execute = AsyncMock(side_effect=run_harness)
     state = module.MiniSWESession(
         sandbox=f.sandbox,
-        harness=SimpleNamespace(params=params, execute=execute),
+        resource_session_id="resource-session",
+        harness=SimpleNamespace(params=harness_params, execute=execute),
+        original_params=params.model_copy(deep=True),
         budget=60,
     )
-    f.agent._sessions["owner", "resource-session"] = state
+    f.agent._sessions["owner"] = state
 
-    def request(owner, session_id):
-        return Request({"type": "http", "session": {SESSION_ID_KEY: owner, module._SESSION_KEY: session_id}})
+    def request(owner):
+        return Request({"type": "http", "session": {SESSION_ID_KEY: owner}})
 
-    for owner, session_id in [("other", "resource-session"), ("owner", "missing")]:
-        with pytest.raises(HTTPException, match="No seeded") as error:
-            await f.agent.responses(request(owner, session_id), params)
-        assert error.value.status_code == 409
+    with pytest.raises(HTTPException, match="No seeded") as error:
+        await f.agent.responses(request("other"), params)
+    assert error.value.status_code == 409
     with pytest.raises(HTTPException, match="bound to another"):
-        await f.agent.responses(request("owner", "resource-session"), params.model_copy(update={"input": "different"}))
-    first, replay = await asyncio.gather(
-        *[f.agent.responses(request("owner", "resource-session"), params) for _ in range(2)]
-    )
+        await f.agent.responses(request("owner"), params.model_copy(update={"input": "different"}))
+    first_call = asyncio.create_task(f.agent.responses(request("owner"), params))
+    await started.wait()
+    replay_call = asyncio.create_task(f.agent.responses(request("owner"), params.model_copy(deep=True)))
+    await asyncio.sleep(0)
+    assert execute.await_count == 1
+    finish.set()
+    first, replay = await asyncio.gather(first_call, replay_call)
     assert first == replay == response
     execute.assert_awaited_once_with(60)
     assert state.result[1].reason == "completed"
     f.agent._sessions.clear()
+
+
+async def test_http_responses_uses_middleware_session_cookie(fixture):
+    f = fixture
+    params = f.body.responses_create_params
+    harness_params = params.model_copy(deep=True)
+    harness_params.input = [module.NeMoGymEasyInputMessage(role="user", content=f.seed["instruction"])]
+    response = module.empty_response(params, "model")
+    execute = AsyncMock(return_value=(response, HarnessOutcome(reason="completed"), {}))
+    f.agent._sessions["owner"] = module.MiniSWESession(
+        sandbox=f.sandbox,
+        resource_session_id="resource-session",
+        harness=SimpleNamespace(params=harness_params, execute=execute),
+        original_params=params.model_copy(deep=True),
+        budget=60,
+    )
+    app = FastAPI()
+    app.add_middleware(SessionMiddleware, secret_key="test-key")
+
+    @app.get("/session")
+    async def start_session(request: Request):
+        request.session[SESSION_ID_KEY] = "owner"
+        return {}
+
+    @app.post("/v1/responses")
+    async def responses(request: Request, body: module.NeMoGymResponseCreateParamsNonStreaming):
+        return await f.agent.responses(request, body)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.get("/session")
+        result = await client.post("/v1/responses", json=params.model_dump(mode="json"))
+        assert result.status_code == 200
+        assert result.json()["id"] == response.id
+        replay = await client.post("/v1/responses", json=params.model_dump(mode="json"))
+        assert replay.status_code == 200
+        assert replay.json() == result.json()
+    execute.assert_awaited_once_with(60)
