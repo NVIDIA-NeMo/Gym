@@ -57,6 +57,7 @@ from nemo_gym._checkpoint.admission import (
 )
 from nemo_gym._checkpoint.artifacts import (
     EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE,
+    GENERATION_CUT_INDEX_UNION_FEATURE,
     GENERATION_CUT_LINEAGE_FEATURE,
 )
 from nemo_gym._checkpoint.control import (
@@ -468,6 +469,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             capabilities.checkpoint_mode = "export_restore"
             capabilities.features = [
                 EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE,
+                GENERATION_CUT_INDEX_UNION_FEATURE,
                 GENERATION_CUT_LINEAGE_FEATURE,
             ]
         return capabilities
