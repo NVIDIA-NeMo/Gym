@@ -58,7 +58,7 @@ class EnvironmentConfig(Settings):
     efs_logs_host_path: str | None
     efs_logs_init_image: str
     # Egress targets (IPs/CIDRs the OpenSandbox policy accepts) allowed for the AGENT role of no-network tasks only,
-    # e.g. the model gateway an in-sandbox harness such as OpenCode must reach. The verifier stays deny-all.
+    # e.g. the model gateway an in-sandbox harness (OpenCode, mini-SWE) must reach. The verifier stays deny-all.
     agent_egress_allow: list[str] = Field(default_factory=list)
 
 

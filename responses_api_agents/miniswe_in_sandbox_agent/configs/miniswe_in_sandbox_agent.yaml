@@ -1,0 +1,27 @@
+miniswe_in_sandbox_agent:
+  responses_api_agents:
+    miniswe_in_sandbox_agent:
+      entrypoint: app.py
+      num_workers: 1
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Sandbox-reachable origin that forwards to this Gym's model server (relay/tunnel); the runner appends
+      # Gym's rollout-capture prefix and /v1. The model server itself is still the Gym `policy_model`.
+      model_gateway_url: ???
+      harness:
+        step_limit: 0
+        step_timeout_sec: 30
+        max_consecutive_format_errors: 3
+        http_retries: 3
+        http_timeout_sec: 3600
+      agent_max_timeout_sec: null
+      setup_timeout_sec: 360
+      runner_exit_margin_sec: 60
+      instruction_suffix: ""
+      remote_dir_prefix: /tmp/ng-miniswe-
+      python_executable: python3
+      artifacts_dir: results/miniswe_in_sandbox_agent

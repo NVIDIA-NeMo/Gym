@@ -484,3 +484,25 @@ def test_offline_policy_and_unsupported_config(tmp_path, monkeypatch):
         make_environment(tmp_path, monkeypatch, config={"sandbox_split_endpoints": True})
     with pytest.raises(ValueError, match="Offline"):
         make_environment(tmp_path, monkeypatch, compose=True, task_config={"environment": {"allow_internet": False}})
+
+
+@pytest.mark.parametrize("verifier", [False, True])
+def test_agent_egress_allow_applies_to_the_agent_role_only(tmp_path, monkeypatch, verifier):
+    env, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        verifier=verifier,
+        config={"agent_egress_allow": ["10.109.22.242"]},
+        task_config={
+            "environment": {"network_mode": "no-network"},
+            "verifier": {"environment": {"docker_image": "public/verifier", "network_mode": "no-network"}},
+        },
+    )
+    policy = env.build_spec().provider_options["network_policy"]
+    expected = [] if verifier else [{"action": "allow", "target": "10.109.22.242"}]
+    assert policy == {"defaultAction": "deny", "egress": expected}
+
+
+def test_public_tasks_keep_the_provider_default_network_policy(tmp_path, monkeypatch):
+    env, *_ = make_environment(tmp_path, monkeypatch, config={"agent_egress_allow": ["10.109.22.242"]})
+    assert "network_policy" not in env.build_spec().provider_options
