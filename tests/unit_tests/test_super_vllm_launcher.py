@@ -1,12 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
+import shlex
 import signal
 import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+import yaml
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh"
@@ -93,6 +97,103 @@ getent() { printf '10.0.0.1 node0\n'; }
 
     def settings(self, args, key):
         return [arg for arg in args if arg.lstrip("+").startswith(key + "=")]
+
+    def test_mooncake_metrics_endpoint_uses_only_master_node(self) -> None:
+        for mode in ("independent", "coupled"):
+            for enabled in ("0", "1"):
+                with self.subTest(mode=mode, enabled=enabled), TemporaryDirectory() as temporary_dir:
+                    command, _ = self.generate_commands(
+                        env={"VLLM_PD_DEPLOYMENT_MODE": mode, "ENABLE_MOONCAKE": enabled}
+                    )
+                    start = 'read -r -a nodes <<< "$ALL_NODES"'
+                    setup = start + command.split(start, 1)[1].split("gym_config_args+=(--config", 1)[0]
+                    config_path = Path(temporary_dir) / "metrics.yaml"
+                    status, _, stderr = self.run_shell(
+                        setup, env={"inference_metrics_config": str(config_path), "ROUTER_NODE": "separate-router"}
+                    )
+                    self.assertEqual(status, 0, stderr)
+                    metrics = yaml.safe_load(config_path.read_text())["inference_metrics"]
+                    self.assertEqual(len(metrics["endpoints"]), 8 if mode == "independent" else 2)
+                    if enabled == "1":
+                        self.assertEqual(metrics["mooncake_endpoint"], "http://node0:9003/metrics")
+                    else:
+                        self.assertNotIn("mooncake_endpoint", metrics)
+
+    def model_arguments(self, *, config_path: Path, enable_mooncake: bool) -> list[list[str]]:
+        _, command = self.generate_commands(
+            env={"VLLM_CONFIG": str(config_path), "ENABLE_MOONCAKE": str(int(enable_mooncake))}
+        )
+        # Execute model setup without installing packages or starting services.
+        setup = command.split("# Increase the number of file descriptors", 1)[0]
+        inspect = r"""
+printf '%s\0' "${VLLM_COMMON_ARGS[@]}" ''
+printf '%s\0' "${VLLM_PREFILL_ARGS[@]}" ''
+printf '%s\0' "${VLLM_DECODE_ARGS[@]}" ''
+"""
+        status, stdout, stderr = self.run_shell(setup + inspect)
+        self.assertEqual(status, 0, stderr)
+        return [args.split("\0") for args in stdout.removesuffix("\0\0").split("\0\0")]
+
+    def test_mooncake_preserves_every_model_connector_and_other_arguments(self) -> None:
+        """Every shipped model keeps its tuning and NIXL settings when the store is enabled."""
+        for config_path in sorted((SCRIPT.parent / "vllm_configs").glob("*.sh")):
+            with self.subTest(model=config_path.name):
+                original = self.model_arguments(config_path=config_path, enable_mooncake=False)
+                wrapped = self.model_arguments(config_path=config_path, enable_mooncake=True)
+                self.assertEqual(len(original), 3)
+                self.assertEqual(len(wrapped), 3)
+                for original_args, wrapped_args in zip(original, wrapped, strict=True):
+                    self.assertEqual(len(original_args), len(wrapped_args))
+                    for i, original_arg in enumerate(original_args):
+                        if i == 0 or original_args[i - 1] != "--kv-transfer-config":
+                            self.assertEqual(wrapped_args[i], original_arg)
+                            continue
+                        original_config = json.loads(original_arg)
+                        self.assertEqual(original_config["kv_connector"], "NixlConnector")
+                        config = json.loads(wrapped_args[i])
+                        self.assertEqual(config["kv_connector"], "MultiConnector")
+                        self.assertEqual(config["kv_role"], "kv_both")
+                        connectors = config["kv_connector_extra_config"]["connectors"]
+                        self.assertEqual(connectors[0], original_config)
+                        self.assertEqual(
+                            connectors[1:],
+                            [
+                                {
+                                    "kv_connector": "MooncakeStoreConnector",
+                                    "kv_role": "kv_both",
+                                    "kv_connector_extra_config": {"load_async": True, "lookup_async": True},
+                                }
+                            ],
+                        )
+
+    def test_mooncake_handles_common_equals_form_and_existing_multiconnector(self) -> None:
+        """Preserve an existing store's settings and support transfer configs in common args."""
+        nixl = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+        multi = {
+            "kv_connector": "MultiConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "connectors": [
+                    nixl,
+                    {"kv_connector": "MooncakeStoreConnector", "kv_role": "kv_both"},
+                ],
+            },
+        }
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "model config.sh"
+            config_path.write_text(
+                f"VLLM_COMMON_ARGS=({shlex.quote('--kv-transfer-config=' + json.dumps(nixl))})\n"
+                f"VLLM_PREFILL_ARGS=(--kv-transfer-config {shlex.quote(json.dumps(multi))})\n"
+                "VLLM_DECODE_ARGS=(--unrelated 'value with spaces')\n"
+            )
+            common, prefill, decode = self.model_arguments(config_path=config_path, enable_mooncake=True)
+        self.assertEqual(common[0], "--kv-transfer-config")
+        connectors = json.loads(common[1])["kv_connector_extra_config"]["connectors"]
+        self.assertEqual(connectors[0], nixl)
+        self.assertEqual(len(connectors), 2)
+        self.assertEqual(connectors[1]["kv_connector"], "MooncakeStoreConnector")
+        self.assertEqual(json.loads(prefill[1]), multi)
+        self.assertEqual(decode, ["--unrelated", "value with spaces"])
 
     def serving_arguments(self, command, *, rank, coupled_head=False, env=None):
         # Record argv separately for vLLM and the router; marker files synchronize startup.
@@ -266,6 +367,47 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
         status, stdout, stderr = self.run_shell(setup + inspect, *expected)
         self.assertEqual(status, 0, stderr)
         self.assertEqual(dict(zip(expected, stdout.removesuffix("\0").split("\0"), strict=True)), expected)
+
+    def test_api_server_count_is_removed_only_from_headless_ranks(self):
+        with TemporaryDirectory(prefix="gym-headless-args-") as directory:
+            config = Path(directory) / "config with spaces.sh"
+            config.write_text(
+                "VLLM_COMMON_ARGS=(--api-server-count 3 --common-test 'value with spaces')\n"
+                "VLLM_PREFILL_ARGS=(--prefill-test producer --api-server-count=2)\n"
+                "VLLM_DECODE_ARGS=(--api-server-count 5 --decode-test consumer)\n"
+            )
+            for mode, ranks in (("coupled", (1, 3, 4, 5, 7)), ("independent", (1,))):
+                env = {"VLLM_PD_DEPLOYMENT_MODE": mode, "VLLM_CONFIG": str(config)}
+                _, command = self.generate_commands(env=env)
+                for rank in ranks:
+                    with self.subTest(mode=mode, rank=rank):
+                        _, _, args, _ = self.serving_arguments(command, rank=rank, env=env)
+                        self.assertIn("value with spaces", args)
+                        self.assertIn("producer" if rank < 4 else "consumer", args)
+                        if mode == "coupled" and rank != 4:
+                            self.assertIn("--headless", args)
+                            self.assertFalse(any(arg.startswith("--api-server-count") for arg in args))
+                            self.assertEqual(
+                                args[: args.index("--headless")],
+                                [
+                                    "serve",
+                                    "/test/model",
+                                    "--served-model-name",
+                                    "/test/model",
+                                    "--common-test",
+                                    "value with spaces",
+                                    "--prefill-test" if rank < 4 else "--decode-test",
+                                    "producer" if rank < 4 else "consumer",
+                                ],
+                            )
+                        else:
+                            self.assertNotIn("--headless", args)
+                            self.assertIn("--api-server-count", args)
+                            self.assertIn("3", args)
+                            if mode == "coupled":
+                                self.assertEqual(args[-2:], ["--api-server-count", "1"])
+                            else:
+                                self.assertIn("--api-server-count=2", args)
 
     def test_coupled_nodes_use_correct_tier_roles_and_ranks(self):
         """Assign coupled tier roles, ranks, and ports while leaving router balancing thresholds at defaults."""

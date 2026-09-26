@@ -1,5 +1,7 @@
 #!/bin/bash
 
+NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
+
 GYM_MODEL_PARAMS=(
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
@@ -41,15 +43,15 @@ VLLM_COMMON_ARGS=(
     --prefix-match-unit 16
 )
 VLLM_PREFILL_ARGS=(
-    --speculative-config '{"method":"mtp","num_speculative_tokens":5,"num_speculative_tokens_per_batch_size":[[1,1024,0]]}'
+    --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS},\"num_speculative_tokens_per_batch_size\":[[1,1024,0]]}"
     --max-cudagraph-capture-size 1200
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":3600}}'
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
 )
 VLLM_DECODE_ARGS=(
-    --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
+    --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS}}"
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":3600}}'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --max-num-batched-tokens 33920
     --max-num-seqs 1024

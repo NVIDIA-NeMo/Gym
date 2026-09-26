@@ -27,13 +27,14 @@ MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
-SBATCH_TIME="${SBATCH_TIME:-${SBATCH_TIMELIMIT:-04:00:00}}"
+ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-0}
+if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then
+    echo "ENABLE_MOONCAKE requires VLLM_MODE=pd" >&2
+    exit 1
+fi
 # Independent mode starts one complete TP model replica per node. Coupled mode
 # forms one multi-node DP/EP engine per tier for models that cannot fit per node.
 VLLM_PD_DEPLOYMENT_MODE="${VLLM_PD_DEPLOYMENT_MODE:-independent}"
-# Empty falls back to main's SEGMENT or the calculated node count below.
-# Coupled deployments can override this with their tier size.
-VLLM_SLURM_SEGMENT="${VLLM_SLURM_SEGMENT:-}"
 SLURM_COMMENT="${SLURM_COMMENT:-}"
 OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
@@ -71,9 +72,8 @@ PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 
 ROUTER_SERVER_PORT=8000
+ROUTER_METRICS_PORT=29000
 WORKER_SERVER_PORT=8001
-PREFILL_SERVER_PORT=8001
-DECODE_SERVER_PORT=8002
 
 PREFILL_DP_RPC_PORT=13345
 DECODE_DP_RPC_PORT=13346
@@ -82,6 +82,7 @@ ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
 ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
 ROUTER_POLICY="${ROUTER_POLICY:-cache_aware}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
+# Optional whitespace-separated flags, e.g. ROUTER_ARGS="--balance-abs-threshold 32 --balance-rel-threshold 1.1".
 
 eval_command=$(cat <<EOF
 set -euo pipefail
@@ -93,7 +94,6 @@ cd /opt/Gym
 export NEMO_GYM_RUN_ID="\$SLURM_JOB_ID"
 export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 
-GYM_MODEL_PARAMS=()
 source "$VLLM_CONFIG"
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
@@ -103,6 +103,33 @@ experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%
 # default timestamped name makes the aggregate unfindable to anything that
 # did not watch the job run. Override it when results/ is already per-run.
 rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
+
+# Scrape each API server directly; the router only exposes its own metrics.
+gym_config_args=(
+    --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml
+    --config benchmarks/nemotron_3.5_super/policy_model_override.yaml
+)
+inference_metrics_config="results/\$experiment_name/inference-metrics.yaml"
+mkdir -p "\$(dirname "\$inference_metrics_config")"
+read -r -a nodes <<< "\$ALL_NODES"
+{
+    printf 'inference_metrics:\n  enabled: true\n  endpoints:\n'
+    for node_index in "\${!nodes[@]}"; do
+        # Coupled tiers expose one API server each; other ranks are headless.
+        if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]] && \
+            (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
+            continue
+        fi
+        printf '    node%s: "http://%s:$WORKER_SERVER_PORT/metrics"\n' \
+            "\$node_index" "\${nodes[node_index]}"
+    done
+    printf '  router_endpoints:\n    main: "http://%s:$ROUTER_METRICS_PORT/metrics"\n' "\$ROUTER_NODE"
+    if (( $ENABLE_MOONCAKE )); then
+        printf '  mooncake_endpoint: "http://%s:9003/metrics"\n' "\${nodes[0]}"
+    fi
+} > "\$inference_metrics_config"
+gym_config_args+=(--config "\$inference_metrics_config")
+
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
 # ++use_absolute_ip=true: Necessary for communication between harness in sandbox and Gym model servers
@@ -112,8 +139,7 @@ rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
 # We add the sandbox_utils and policy_model_override yamls so users don't need to add them on every invocation
 gym eval run \
     $@ \
-    --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
-    --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
+    "\${gym_config_args[@]}" \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
     +uv_venv_dir=/opt/uv_venvs \
@@ -174,7 +200,69 @@ export NCCL_CUMEM_ENABLE=1
 export NCCL_MNNVL_ENABLE=1
 export NCCL_NVLS_ENABLE=1
 
+export ENABLE_MOONCAKE=$ENABLE_MOONCAKE
 source "$VLLM_CONFIG"
+
+if (( ENABLE_MOONCAKE )); then
+    kv_load_failure_policy=fail
+    mooncake_kv_role=kv_consumer
+    if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+        kv_load_failure_policy=recompute
+        mooncake_kv_role=kv_both
+    fi
+    # Preserve each model's connector settings while adding the shared KV store.
+    add_mooncake_to_args() {
+        mooncake_args=()
+        local arg config
+        while (( \$# )); do
+            arg=\$1
+            shift
+            if [[ "\$arg" == --kv-transfer-config ]]; then
+                config=\${1:?Missing value for --kv-transfer-config}
+                shift
+            elif [[ "\$arg" == --kv-transfer-config=* ]]; then
+                config=\${arg#*=}
+            else
+                mooncake_args+=("\$arg")
+                continue
+            fi
+            config=\$(python3 - "\$config" "\$kv_load_failure_policy" "\$mooncake_kv_role" <<'MOONCAKE_CONNECTOR'
+import json
+import sys
+
+config = json.loads(sys.argv[1])
+if config["kv_connector"] != "MultiConnector":
+    config = {
+        "kv_connector": "MultiConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"connectors": [config]},
+    }
+config["kv_load_failure_policy"] = sys.argv[2]
+connectors = config["kv_connector_extra_config"]["connectors"]
+if not any(connector["kv_connector"] == "MooncakeStoreConnector" for connector in connectors):
+    connectors.append({
+        "kv_connector": "MooncakeStoreConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"load_async": True, "lookup_async": True},
+    })
+for connector in connectors:
+    if connector["kv_connector"] == "MooncakeStoreConnector":
+        connector["kv_role"] = sys.argv[3]
+        if sys.argv[3] == "kv_consumer":
+            connector.setdefault("kv_connector_extra_config", {})["save_decode_cache"] = False
+print(json.dumps(config))
+MOONCAKE_CONNECTOR
+)
+            mooncake_args+=(--kv-transfer-config "\$config")
+        done
+    }
+    add_mooncake_to_args "\${VLLM_COMMON_ARGS[@]}"
+    VLLM_COMMON_ARGS=("\${mooncake_args[@]}")
+    add_mooncake_to_args "\${VLLM_PREFILL_ARGS[@]}"
+    VLLM_PREFILL_ARGS=("\${mooncake_args[@]}")
+    add_mooncake_to_args "\${VLLM_DECODE_ARGS[@]}"
+    VLLM_DECODE_ARGS=("\${mooncake_args[@]}")
+fi
 
 # Increase the number of file descriptors to 65k
 if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
@@ -184,30 +272,99 @@ fi
 this_node_hostname=\$(hostname)
 read -r -a nodes <<< "\$ALL_NODES"
 
+mooncake_pid=""
+cleanup_mooncake() {
+    if [[ -n "\$mooncake_pid" ]]; then
+        kill "\$mooncake_pid" 2>/dev/null || true
+        wait "\$mooncake_pid" 2>/dev/null || true
+    fi
+}
+
+if (( ENABLE_MOONCAKE )); then
+    # Cover setup failures before the serving-mode cleanup traps take over.
+    trap cleanup_mooncake EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    export MOONCAKE_CONFIG_PATH="\${MOONCAKE_CONFIG_PATH:-/tmp/mooncake-\$SLURM_JOB_ID/config.json}"
+    mkdir -p "\$(dirname "\$MOONCAKE_CONFIG_PATH")"
+    cat > "\$MOONCAKE_CONFIG_PATH" <<MOONCAKE_CONFIG
+{
+  "mode": "embedded",
+  "metadata_server": "P2PHANDSHAKE",
+  "master_server_address": "\${nodes[0]}:50051",
+  "global_segment_size": "150GB",
+  "local_buffer_size": "4GB",
+  "protocol": "rdma",
+  "device_name": "mlx5_0,mlx5_1,mlx5_3,mlx5_4",
+  "enable_offload": false
+}
+MOONCAKE_CONFIG
+
+    # @bxyu-nvidia: Specific to OCI-HSG, as with the device_names above. Otherwise we get errors like:
+    # W0924 18:25:48.906106 1830563 worker_pool.cpp:477] Worker: Cannot make connection for endpoint: 10.109.24.46:15741@mlx5_2, pausing peer rail and retrying through an alternate peer RNIC
+    export MC_TE_FILTERS=mlx5_0,mlx5_1,mlx5_3,mlx5_4
+
+    uv pip install --system mooncake-transfer-engine-cuda13
+
+    # @bxyu-nvidia: Need these for mooncake connector on GB200 https://github.com/vllm-project/vllm/blob/main/docs/features/mooncake_connector_usage.md#environment-variables
+    export WITH_NVIDIA_PEERMEM=0
+
+    if (( SLURM_PROCID == 0 )); then
+        echo "Starting mooncake_master on \${nodes[0]}"
+        mooncake_master \
+            -rpc_port=50051 \
+            -rpc_thread_num=4 \
+            -metrics_port=9003 \
+            -eviction_high_watermark_ratio=0.95 \
+            -eviction_ratio=0.1 \
+            -minloglevel=1 \
+            -enable_metric_reporting=false \
+            -default_kv_lease_ttl=120000 \
+            -logtostderr &
+        mooncake_pid=\$!
+    fi
+
+    mooncake_health_url="http://\${nodes[0]}:9003/health"
+    mooncake_deadline=\$(( SECONDS + 120 ))
+    echo "Waiting for Mooncake master at \$mooncake_health_url"
+    until curl --fail --silent --noproxy '*' --connect-timeout 2 --max-time 5 \
+        --output /dev/null "\$mooncake_health_url"; do
+        if [[ -n "\$mooncake_pid" ]] && ! kill -0 "\$mooncake_pid" 2>/dev/null; then
+            echo "mooncake_master exited during startup" >&2
+            exit 1
+        fi
+        if (( SECONDS >= mooncake_deadline )); then
+            echo "Timed out waiting for Mooncake master at \$mooncake_health_url" >&2
+            exit 1
+        fi
+        sleep 1
+    done
+    echo "Mooncake master is ready"
+fi
+
+router_common_args=(--log-level error --prometheus-host 0.0.0.0 --prometheus-port $ROUTER_METRICS_PORT)
+read -r -a router_extra_args <<< $(printf '%q' "${ROUTER_ARGS:-}")
+if (( \${#router_extra_args[@]} )); then
+    router_common_args+=("\${router_extra_args[@]}")
+fi
+
 if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
     PREFILL_HEAD=\${nodes[0]}
     DECODE_HEAD=\${nodes[$NUM_PREFILL_NODES]}
 
-    wait_for_vllm_health() {
-        local role=\$1
-        local url=\$2
-        local local_pid=\${3:-}
-        local local_role=\${4:-\$role}
-
-        while true; do
-            if [[ -n "\$local_pid" ]] && ! kill -0 "\$local_pid" 2>/dev/null; then
-                local status=0
-                wait "\$local_pid" || status=\$?
-                (( status != 0 )) || status=1
-                echo "ERROR: \$local_role vLLM process exited while waiting for \$role health (status=\$status)." >&2
-                return "\$status"
+    set_headless_args() {
+        # Model configs tune API processes for serving ranks. Headless ranks
+        # reject this option, whether supplied as two arguments or with '='.
+        headless_args=()
+        while (( \$# )); do
+            if [[ "\$1" == --api-server-count ]]; then
+                shift 2
+            elif [[ "\$1" == --api-server-count=* ]]; then
+                shift
+            else
+                headless_args+=("\$1")
+                shift
             fi
-            # Bound each probe so a stalled endpoint cannot block process checks.
-            # Timeouts retry below; they do not limit overall model startup time.
-            if curl -fs --connect-timeout 5 --max-time 10 "\$url" >/dev/null; then
-                return 0
-            fi
-            sleep 5
         done
     }
 
@@ -218,11 +375,11 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
         vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
             --host \$this_node_hostname \
-            --port $PREFILL_SERVER_PORT \
+            --port $WORKER_SERVER_PORT \
             --data-parallel-size $NUM_PREFILL_NODES \
             --data-parallel-address \$PREFILL_HEAD \
             --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
-            --api-server-count 1 \
+            --api-server-count 16 \
             &
         prefill_pid=\$!
         coupled_pids=("\$prefill_pid")
@@ -232,28 +389,25 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             # Signal both local services without delaying failure propagation;
             # the enclosing srun tears down the remaining distributed workers.
             kill "\${coupled_pids[@]}" 2>/dev/null || true
+            cleanup_mooncake
             exit "\$status"
         }
         trap cleanup_coupled_head EXIT
         trap 'exit 130' INT
         trap 'exit 143' TERM
 
-        wait_for_vllm_health "prefill" "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" "\$prefill_pid"
-        # Monitor the local prefill process while the remote decode API
-        # starts. The enclosing srun handles failures on the decode ranks.
-        wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" "\$prefill_pid" "prefill"
-
         vllm-router \
             --prefill-policy $ROUTER_PREFILL_POLICY \
             --decode-policy $ROUTER_DECODE_POLICY \
             --vllm-pd-disaggregation \
-            --prefill "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT" \
-            --decode "http://\$DECODE_HEAD:$DECODE_SERVER_PORT" \
+            --prefill "http://\$PREFILL_HEAD:$WORKER_SERVER_PORT" \
+            --decode "http://\$DECODE_HEAD:$WORKER_SERVER_PORT" \
             --host \$PREFILL_HEAD \
             --port $ROUTER_SERVER_PORT \
             --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
-            --log-level error &
+            --worker-startup-timeout-secs 1200 \
+            "\${router_common_args[@]}" &
         router_pid=\$!
         coupled_pids+=("\$router_pid")
 
@@ -275,9 +429,10 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         echo "ERROR: \$failed_role process exited after startup (status=\$failed_status)." >&2
         exit "\$failed_status"
     elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+        set_headless_args "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}"
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${headless_args[@]}" \
             --headless \
             --data-parallel-size $NUM_PREFILL_NODES \
             --data-parallel-start-rank \$SLURM_PROCID \
@@ -290,15 +445,16 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
         vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
             --host \$this_node_hostname \
-            --port $DECODE_SERVER_PORT \
+            --port $WORKER_SERVER_PORT \
             --data-parallel-size $NUM_DECODE_NODES \
             --data-parallel-address \$DECODE_HEAD \
             --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
-            --api-server-count 1
+            --api-server-count 16
     else
+        set_headless_args "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}"
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${headless_args[@]}" \
             --headless \
             --data-parallel-size $NUM_DECODE_NODES \
             --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
@@ -313,6 +469,7 @@ else
             kill "\$router_pid" 2>/dev/null || true
             wait "\$router_pid" 2>/dev/null || true
         fi
+        cleanup_mooncake
     }
     trap cleanup_vllm EXIT
     trap 'exit 130' INT
@@ -329,7 +486,7 @@ else
             --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
             --worker-startup-timeout-secs 1200 \
-            --log-level error
+            "\${router_common_args[@]}"
         )
 
         if [[ "$VLLM_MODE" == pd ]]; then
@@ -408,12 +565,6 @@ fi
 EOF
 )
 
-VLLM_SLURM_SEGMENT="${VLLM_SLURM_SEGMENT:-${SEGMENT:-$NUM_NODES}}"
-if [[ ! "$VLLM_SLURM_SEGMENT" =~ ^[1-9][0-9]*$ ]]; then
-    echo "ERROR: VLLM_SLURM_SEGMENT must be a positive integer." >&2
-    exit 2
-fi
-
 batch_command=$(cat <<EOF
 set -euo pipefail
 
@@ -458,6 +609,7 @@ if (( $should_run_eval )); then
 
     # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
     ROUTER_NODE="\${nodes[0]}" \
+    ALL_NODES="\${nodes[*]}" \
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$EVAL_NODE" --gpus=0 \
         --container-image=$CONTAINER \
         --container-name=eval-container-on-node \
@@ -492,8 +644,9 @@ wait "\$server_step"
 EOF
 )
 
-# This cluster needs --segment > 0 to avoid distributed engine hangs.
-# Coupled tiers benefit from caller-configurable segments matching their node count.
+# --segment > 0 otherwise the engine will hang on the second or third engine step.
+SEGMENT=${SEGMENT:-$NUM_NODES}
+
 submit_dir=$(pwd -P)
 # An exported connection is sent as arguments; otherwise env.yaml is read.
 if [[ -n "$OPENSANDBOX_DOMAIN" ]]; then
@@ -502,6 +655,10 @@ else
     cleanup_connection=(--connection-config "$submit_dir/env.yaml")
 fi
 cleanup_user=${NEMO_GYM_USER:-$USER}
+mooncake_memory_arg=""
+if (( ENABLE_MOONCAKE )); then
+    mooncake_memory_arg="--mem=0"
+fi
 main_job_id=$(
     NEMO_GYM_USER="$cleanup_user" \
     vllm_command="$vllm_command" \
@@ -510,13 +667,15 @@ main_job_id=$(
     sbatch \
         --parsable \
         --nodes=$NUM_NODES \
-        --time="$SBATCH_TIME" \
-        --segment="$VLLM_SLURM_SEGMENT" \
+        --time="${SBATCH_TIMELIMIT:-04:00:00}" \
         --job-name=gym-$EXPERIMENT_NAME-$USER \
         --output=slurm-logs/%j-%x.log \
         --ntasks-per-node=1 \
         --comment="$SLURM_COMMENT" \
         --exclusive \
+        ${mooncake_memory_arg:+"$mooncake_memory_arg"} \
+        --segment=$SEGMENT \
+        ${NODELIST:+--nodelist="$NODELIST"} \
         --wrap 'exec bash -c "$batch_command"'
 )
 main_job_id=${main_job_id%%;*}

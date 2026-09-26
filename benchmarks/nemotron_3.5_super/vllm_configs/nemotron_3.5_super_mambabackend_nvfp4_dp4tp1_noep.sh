@@ -12,6 +12,9 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 # @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
 export VLLM_USE_V2_MODEL_RUNNER=0
 
+# @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
+# @bxyu-nvidia: --kernel-config '{"linear_backend_per_quant":{"fp8_w8a8":"torch"}}' is not supported in vLLM 2a02f6efe319c885e3ccbcecde402e0028f9ec1e
+# So we add the `--linear-backend torch` flag instead
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
@@ -23,13 +26,21 @@ VLLM_COMMON_ARGS=(
     --reasoning-parser nemotron_v3
     --enable-chunked-prefill
     --enable-prefix-caching
+    --max-model-len 262144
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
     --block-size 128
+    --mamba-backend flashinfer
+    --mamba-ssm-cache-dtype float16
+    --enable-mamba-cache-stochastic-rounding
+    --mamba-cache-philox-rounds 5
     --mamba-cache-mode align
-    --mamba-ssm-cache-dtype float32
+    --prefix-match-unit 16
+    --enable-mamba-fine-grained-prefix-cache
+    --linear-backend torch
+    --compilation-config '{"pass_config": {"fuse_attn_quant": true}}'
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
-    --enable-expert-parallel
+    --skip-mm-profiling
     --data-parallel-size 4
     --data-parallel-size-local 4
     --tensor-parallel-size 1

@@ -69,6 +69,7 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.inference_metrics import InferenceMetricsConfig, collect_inference_metrics
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
@@ -115,38 +116,6 @@ from nemo_gym.token_id_capture.delivery import (
 
 
 logger = logging.getLogger(__name__)
-
-
-def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) -> Dict[str, float]:
-    """In-progress view of what a run is losing to its environment rather than its policy.
-
-    ``scored`` covers persisted rollouts only, split into the unmasked ones (``count``,
-    ``reward``) and the masked ones; ``dropped`` counts what never reached the main output
-    at all. ``reward_unmasked`` averages over the unmasked rollouts alone, so the gap
-    against the existing ``reward`` series is the score lost to infrastructure. Failed and
-    omitted attempts are reported as counts, never folded into a quality average.
-
-    Empty until something is actually masked or dropped, so a healthy run exports exactly
-    what it exported before. The final numbers come from ``/aggregate_metrics``; this is
-    the progress view while the run is still going.
-    """
-    masked, unmasked = int(scored["masked"]), int(scored["count"])
-    failed, omitted = int(dropped["failed"]), int(dropped["omitted"])
-    if not (masked or failed or omitted):
-        return {}
-
-    metrics: Dict[str, float] = {}
-    persisted = masked + unmasked
-    if masked and persisted:
-        metrics[f"progress/{agent_name}/masked_pct"] = round(100 * masked / persisted, 2)
-    if unmasked:
-        metrics[f"progress/{agent_name}/reward_unmasked"] = round(100 * scored["reward"] / unmasked, 2)
-    if failed:
-        metrics[f"progress/{agent_name}/failed"] = failed
-    if omitted:
-        metrics[f"progress/{agent_name}/omitted"] = omitted
-    return metrics
-
 
 # ---------------------------------------------------------------------------
 # Failure-routing sentinels (set by agent servers, read by the dispatcher).
@@ -448,9 +417,8 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     observed: per-turn evidence is needed rather than just raw model-call capture,
     so a rollout collected with observability disabled produces no ``ng_perf`` at all.
 
-    Token fields are summed over every model call referenced by a reasoning-turn
-    ``AgentInvocation``. This includes compaction calls whenever the harness also lists
-    them in ``AgentInvocation.model_calls``.
+    Token fields are summed only over model calls owned by a reasoning-turn ``AgentInvocation``,
+    excluding compaction calls -- mixing in compaction overhead would skew the token efficiency signal.
 
     ``num_turns`` counts reasoning turns summed across all invocations (an ``AgentInvocation``
     is one root-agent or subagent conversation that may span many turns). Each invocation
@@ -604,6 +572,7 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
 
 
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
+    inference_metrics: InferenceMetricsConfig = Field(default_factory=InferenceMetricsConfig)
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
         default=None, description="Limit the number of concurrent samples running at once."
@@ -1407,13 +1376,6 @@ class RolloutCollectionHelper(BaseModel):
         pcts_to_print = list(range(1, 100)) + [99.5, 100]
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
-        # Quality accounting restricted to persisted rollouts: `count`/`reward` over the
-        # unmasked ones, `masked` over the rest. Token capture already reports its own
-        # masking; this is the same accounting for what an environment declares on its
-        # verify response.
-        agent_name_to_scored = defaultdict(Counter)
-        # Rollouts that never reach the main output at all, kept apart from quality.
-        agent_name_to_dropped = defaultdict(Counter)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         dispatched_per_agent = Counter(counts_left)
         start_time = time()
@@ -1428,202 +1390,191 @@ class RolloutCollectionHelper(BaseModel):
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
         failure_counts: Counter = Counter()
-        for future in self._run_examples_with_metadata(
-            input_rows,
-            semaphore=semaphore,
-            route_failures_to_sidecar=config.route_failures_to_sidecar,
-        ):
-            completed = await future
-            row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
-
-            result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
-            result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
-            result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
-            if TASK_SOURCE_KEY_NAME in row:
-                result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
-            if SKILLS_REF_KEY_NAME in row:
-                result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
-            if ATTEMPT_INDEX_KEY_NAME in row:
-                result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
-            if ROLLOUT_ID_KEY_NAME in row:
-                # Capture readback recomputes the id from the finished record.
-                # Preserve an explicit id on the result just like the indices.
-                result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
-
-            no_persist = bool(result.get(NG_NO_PERSIST_KEY))
-            failure_class = result.get(NG_FAILURE_CLASS_KEY)
-            # No rollout happened, so there is nothing to capture, tokenize or average.
-            no_result = failure_class in _NO_RESULT_FAILURE_CLASSES
-
-            # Fold this rollout's captured model calls into its record (uniform across agents; no-op
-            # when capture is off). Never alters the harness output/reward already in `result`.
-            if capture_dirs and not no_result:
-                merge_model_call_capture_into_record(
-                    result,
-                    capture_dirs,
-                    include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
-                )
-
-            if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
-                _attach_trajectory_record(row, result)
-
-            # Assembles ng_perf from ng_trajectory when observability is enabled.
-            _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
-
-            # Freeze and rebuild tokens only for participating agents.
-            # This step does not retire the frozen snapshot.
-            # It leaves harness output and reward unchanged.
-            # Direct callers of run_examples finalize each record themselves.
-            token_capture_build = None
-            if not no_result and token_id_capture_enabled_for_agent(
-                global_config,
-                (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
+        async with collect_inference_metrics(config.inference_metrics):
+            for future in self._run_examples_with_metadata(
+                input_rows,
+                semaphore=semaphore,
+                route_failures_to_sidecar=config.route_failures_to_sidecar,
             ):
-                token_capture_build = await finalize_rollout_token_capture(result, token_source)
-                if token_capture_build is not None:
-                    finalized_count += 1
-                    if token_capture_build.get(MASK_SAMPLE_KEY):
-                        masked_count += 1
-                        # Aggregate available reasons for the abort message.
-                        build_metrics = token_capture_build.get("metrics") or {}
-                        if build_metrics.get("capture_incomplete"):
-                            mask_reasons["capture_incomplete"] += 1
-                        if build_metrics.get("unresolved_parent_calls"):
-                            mask_reasons["unresolved_parent_calls"] += 1
-                        build_error = token_capture_build.get("error") or build_metrics.get("error")
-                        if build_error:
-                            mask_reasons[str(build_error)] += 1
-                    settings = token_capture_config.token_id_capture
-                    if (
-                        settings.max_mask_fraction is not None
-                        and finalized_count >= settings.mask_fraction_min_samples
-                        and masked_count / finalized_count > settings.max_mask_fraction
-                    ):
-                        raise RuntimeError(
-                            f"{masked_count}/{finalized_count} finalized rollouts "
-                            f"({masked_count / finalized_count:.1%}) are masked, exceeding "
-                            f"token_id_capture.max_mask_fraction={settings.max_mask_fraction}. "
-                            f"Mask reasons: {dict(mask_reasons)}. Aborting instead of collecting "
-                            "mostly token-less data."
-                        )
+                completed = await future
+                row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
 
-            rows.append(row)
-            results.append(result)
-            serialized = orjson.dumps(result)
+                result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
+                result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+                result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+                if TASK_SOURCE_KEY_NAME in row:
+                    result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
+                if SKILLS_REF_KEY_NAME in row:
+                    result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
+                if ATTEMPT_INDEX_KEY_NAME in row:
+                    result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
+                if ROLLOUT_ID_KEY_NAME in row:
+                    # Capture readback recomputes the id from the finished record.
+                    # Preserve an explicit id on the result just like the indices.
+                    result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
 
-            if no_persist:
-                # kill_shaped: don't write anywhere. Set-difference on resume
-                # naturally re-dispatches; per-task timeout bounds wallclock.
-                pass
-            elif failure_class is not None:
-                # Non-kill_shaped failure → sidecar. The aggregator only reads
-                # the main jsonl, so this keeps win-rate uncontaminated.
-                failure_counts[failure_class] += 1
-                # Every dropped rollout says so as it happens, whichever layer classified it.
-                # tqdm.write keeps the line off the progress bar it would otherwise collide with.
-                detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]
-                tqdm.write(
-                    "🚨 [rollout_collection] rollout dropped from the score: "
-                    f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
-                    f"class={failure_class} error={detail}"
+                no_persist = bool(result.get(NG_NO_PERSIST_KEY))
+                failure_class = result.get(NG_FAILURE_CLASS_KEY)
+                # No rollout happened, so there is nothing to capture, tokenize or average.
+                no_result = failure_class in _NO_RESULT_FAILURE_CLASSES
+
+                # Fold this rollout's captured model calls into its record (uniform across agents; no-op
+                # when capture is off). Never alters the harness output/reward already in `result`.
+                if capture_dirs and not no_result:
+                    merge_model_call_capture_into_record(
+                        result,
+                        capture_dirs,
+                        include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
+                    )
+
+                if (
+                    "ng_model_call_capture" in result
+                    or "ng_agent_observations" in result
+                    or NG_TRAJECTORY_KEY in result
+                ):
+                    _attach_trajectory_record(row, result)
+
+                # Assembles ng_perf from ng_trajectory when observability is enabled.
+                _attach_ng_perf(
+                    result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms
                 )
-                failures_file.write(serialized + b"\n")
-                failures_file.flush()
-            else:
-                # Success → main jsonl.
-                results_file.write(serialized + b"\n")
-                results_file.flush()
-                persisted_rows.append(row)
-                persisted_results.append(result)
-                try:
-                    rollout_id = maybe_rollout_id_from_run_body(result)
-                except (TypeError, ValueError) as error:
-                    # Preserve capture evidence when the rollout id is invalid.
-                    rollout_id = None
-                    if not warned_malformed_rollout_id:
-                        warned_malformed_rollout_id = True
-                        warnings.warn(
-                            f"a result carries a malformed rollout id ({error}); "
-                            "its token capture will not be retired.",
-                            stacklevel=2,
-                        )
-                if rollout_id is not None and capture_build_can_retire(token_capture_build):
-                    os.fsync(results_file.fileno())
-                    await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
-            counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
-            if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
-                counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
-
-            agent_name = result["agent_ref"]["name"]
-            if not no_result:
-                # An infrastructure failure is not a score of zero, and not a sample either.
-                metrics = agent_name_to_metrics[agent_name]
-                metrics.update(
-                    {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
-                )
-                agent_name_to_counts[agent_name] += 1
-
-            # Quality accounting covers only what reaches the main rollout output, which is
-            # what /aggregate_metrics later scores. Broader than `no_result`: any failure
-            # class goes to the sidecar and a kill-shaped rollout is not stored at all, so
-            # both are counted as such rather than as a reward that happened to be zero.
-            if no_persist or failure_class is not None:
-                agent_name_to_dropped[agent_name].update({"omitted" if no_persist else "failed": 1})
-            elif result.get(MASK_SAMPLE_KEY):
-                agent_name_to_scored[agent_name].update({"masked": 1})
-            else:
-                agent_name_to_scored[agent_name].update({"reward": float(result.get("reward") or 0.0), "count": 1})
-
-            current_pct = 100 * len(results) / len(input_rows)
-            if pcts_to_print and current_pct >= pcts_to_print[0]:
-                while pcts_to_print and current_pct >= pcts_to_print[0]:
-                    pcts_to_print.pop(0)
-
-                time_taken_s = time() - start_time
-                time_taken = timedelta(seconds=int(time_taken_s))
-                rollouts_per_min = len(results) / (time_taken_s / 60)
-                print_str = f"Finished {len(results)} / {len(input_rows)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
-
-                top_left = counts_left.most_common()
-                top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                print_str += f"""Examples left:
-{top_left_str}
-"""
-                for agent_name in sorted(agent_name_to_metrics):
-                    metrics = agent_name_to_metrics[agent_name]
-                    agent_total_samples = dispatched_per_agent[agent_name]
-                    agent_sample_pct = 100 * agent_name_to_counts[agent_name] / agent_total_samples
-                    avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
-                    print_str += f"""Found {agent_name_to_counts[agent_name]} / {agent_total_samples} ({agent_sample_pct:.2f}%) rollouts for `{agent_name}`.
-{json.dumps(avg_metrics, indent=4)}
-"""
-                # Use tqdm.write here so we can print properly with tqdm being used.
-                tqdm.write(print_str)
-
-                if get_exporters():
-                    step_metrics = {"progress/total/rollouts_per_min": rollouts_per_min}
-                    for agent_name, metrics in agent_name_to_metrics.items():
-                        step_metrics[f"progress/{agent_name}/reward"] = round(
-                            100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
-                        )
-                        step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
-                            100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]), 2
-                        )
-                    # The union, not just the scored agents: an agent whose every request
-                    # fails never lands in `agent_name_to_counts`, and reporting only the
-                    # agents that produced a result would hide exactly the total failure
-                    # this series exists to surface.
-                    for agent_name in sorted(agent_name_to_scored.keys() | agent_name_to_dropped.keys()):
-                        step_metrics.update(
-                            _masking_step_metrics(
-                                agent_name,
-                                agent_name_to_scored.get(agent_name, Counter()),
-                                agent_name_to_dropped.get(agent_name, Counter()),
+                # Freeze and rebuild tokens only for participating agents.
+                # This step does not retire the frozen snapshot.
+                # It leaves harness output and reward unchanged.
+                # Direct callers of run_examples finalize each record themselves.
+                token_capture_build = None
+                if not no_result and token_id_capture_enabled_for_agent(
+                    global_config,
+                    (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
+                ):
+                    token_capture_build = await finalize_rollout_token_capture(result, token_source)
+                    if token_capture_build is not None:
+                        finalized_count += 1
+                        if token_capture_build.get(MASK_SAMPLE_KEY):
+                            masked_count += 1
+                            # Aggregate available reasons for the abort message.
+                            build_metrics = token_capture_build.get("metrics") or {}
+                            if build_metrics.get("capture_incomplete"):
+                                mask_reasons["capture_incomplete"] += 1
+                            if build_metrics.get("unresolved_parent_calls"):
+                                mask_reasons["unresolved_parent_calls"] += 1
+                            build_error = token_capture_build.get("error") or build_metrics.get("error")
+                            if build_error:
+                                mask_reasons[str(build_error)] += 1
+                        settings = token_capture_config.token_id_capture
+                        if (
+                            settings.max_mask_fraction is not None
+                            and finalized_count >= settings.mask_fraction_min_samples
+                            and masked_count / finalized_count > settings.max_mask_fraction
+                        ):
+                            raise RuntimeError(
+                                f"{masked_count}/{finalized_count} finalized rollouts "
+                                f"({masked_count / finalized_count:.1%}) are masked, exceeding "
+                                f"token_id_capture.max_mask_fraction={settings.max_mask_fraction}. "
+                                f"Mask reasons: {dict(mask_reasons)}. Aborting instead of collecting "
+                                "mostly token-less data."
                             )
-                        )
 
-                    export_metrics(step_metrics, step=int(current_pct))
+                rows.append(row)
+                results.append(result)
+                serialized = orjson.dumps(result)
+
+                if no_persist:
+                    # kill_shaped: don't write anywhere. Set-difference on resume
+                    # naturally re-dispatches; per-task timeout bounds wallclock.
+                    pass
+                elif failure_class is not None:
+                    # Non-kill_shaped failure → sidecar. The aggregator only reads
+                    # the main jsonl, so this keeps win-rate uncontaminated.
+                    failure_counts[failure_class] += 1
+                    # Every dropped rollout says so as it happens, whichever layer classified it.
+                    # tqdm.write keeps the line off the progress bar it would otherwise collide with.
+                    detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]
+                    tqdm.write(
+                        "🚨 [rollout_collection] rollout dropped from the score: "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
+                        f"class={failure_class} error={detail}"
+                    )
+                    failures_file.write(serialized + b"\n")
+                    failures_file.flush()
+                else:
+                    # Success → main jsonl.
+                    results_file.write(serialized + b"\n")
+                    results_file.flush()
+                    persisted_rows.append(row)
+                    persisted_results.append(result)
+                    try:
+                        rollout_id = maybe_rollout_id_from_run_body(result)
+                    except (TypeError, ValueError) as error:
+                        # Preserve capture evidence when the rollout id is invalid.
+                        rollout_id = None
+                        if not warned_malformed_rollout_id:
+                            warned_malformed_rollout_id = True
+                            warnings.warn(
+                                f"a result carries a malformed rollout id ({error}); "
+                                "its token capture will not be retired.",
+                                stacklevel=2,
+                            )
+                    if rollout_id is not None and capture_build_can_retire(token_capture_build):
+                        os.fsync(results_file.fileno())
+                        await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
+
+                counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
+                if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
+                    counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
+
+                agent_name = result["agent_ref"]["name"]
+                if not no_result:
+                    # An infrastructure failure is not a score of zero, and not a sample either.
+                    metrics = agent_name_to_metrics[agent_name]
+                    metrics.update(
+                        {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
+                    )
+                    agent_name_to_counts[agent_name] += 1
+
+                current_pct = 100 * len(results) / len(input_rows)
+                if pcts_to_print and current_pct >= pcts_to_print[0]:
+                    while pcts_to_print and current_pct >= pcts_to_print[0]:
+                        pcts_to_print.pop(0)
+
+                    time_taken_s = time() - start_time
+                    time_taken = timedelta(seconds=int(time_taken_s))
+                    rollouts_per_min = len(results) / (time_taken_s / 60)
+                    print_str = f"Finished {len(results)} / {len(input_rows)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
+
+                    top_left = counts_left.most_common()
+                    top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
+                    print_str += f"""Examples left:
+    {top_left_str}
+    """
+                    for agent_name in sorted(agent_name_to_metrics):
+                        metrics = agent_name_to_metrics[agent_name]
+                        agent_total_samples = dispatched_per_agent[agent_name]
+                        agent_sample_pct = 100 * agent_name_to_counts[agent_name] / agent_total_samples
+                        avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
+                        print_str += f"""Found {agent_name_to_counts[agent_name]} / {agent_total_samples} ({agent_sample_pct:.2f}%) rollouts for `{agent_name}`.
+    {json.dumps(avg_metrics, indent=4)}
+    """
+                    # Use tqdm.write here so we can print properly with tqdm being used.
+                    tqdm.write(print_str)
+
+                    if get_exporters():
+                        step_metrics = {"progress/total/rollouts_per_min": rollouts_per_min}
+                        for agent_name, metrics in agent_name_to_metrics.items():
+                            step_metrics[f"progress/{agent_name}/reward"] = round(
+                                100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
+                            )
+                            step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
+                                100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]),
+                                2,
+                            )
+
+                        if config.inference_metrics.enabled:
+                            step_metrics["progress/completion_pct"] = current_pct
+                            export_metrics(step_metrics)
+                        else:
+                            export_metrics(step_metrics, step=int(current_pct))
 
         results_file.close()
         failures_file.close()

@@ -5,7 +5,7 @@
 import asyncio
 import gzip
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, call
 
 import aiohttp
 import httpx
@@ -13,6 +13,7 @@ import pytest
 from aiohttp import web
 
 from nemo_gym import server_utils
+from nemo_gym.sandbox.providers import _http_transport
 from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 from nemo_gym.sandbox.providers.e2b import _sdk as e2b_sdk
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
@@ -24,11 +25,15 @@ pytestmark = pytest.mark.sandbox
 @pytest.fixture
 async def shared_server(monkeypatch):
     calls = []
+    replies = []
     entered = asyncio.Event()
     release = asyncio.Event()
 
     async def echo(request):
         calls.append((request.transport, request.headers, await request.read()))
+        if replies:
+            status, headers = replies.pop(0)
+            return web.Response(status=status, headers=headers, body=b"rejected")
         if request.path == "/broken":
             response = web.StreamResponse(headers={"Content-Length": "100"})
             await response.prepare(request)
@@ -51,7 +56,12 @@ async def shared_server(monkeypatch):
         monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", client)
         try:
             yield SimpleNamespace(
-                url=f"http://127.0.0.1:{port}", client=client, calls=calls, entered=entered, release=release
+                url=f"http://127.0.0.1:{port}",
+                client=client,
+                calls=calls,
+                replies=replies,
+                entered=entered,
+                release=release,
             )
         finally:
             release.set()
@@ -190,3 +200,94 @@ async def test_truncated_stream_raises_read_error_and_releases_connection(shared
         response = await client.get(shared_server.url + "/echo", timeout=1)
         assert response.content == b"response body"
     assert not shared_server.client.closed
+
+
+@pytest.mark.parametrize(
+    "retry_after,expected_delay",
+    [
+        ("27", 27.0),
+        (" 120 ", 120.0),
+        ("0", 0.0),
+        ("Wed, 23 Sep 2026 18:42:09 GMT", 27.0),
+        ("Wed, 23 Sep 2026 18:41:00 GMT", 0.0),
+        (None, 1.0),
+        ("invalid", 1.0),
+        ("", 1.0),
+        ("-1", 1.0),
+        ("NaN", 1.0),
+        ("inf", 1.0),
+    ],
+)
+async def test_rate_limit_retries_preserve_body_and_honor_retry_after(
+    shared_server, monkeypatch, retry_after, expected_delay
+):
+    monkeypatch.setattr(_http_transport.time, "time", lambda: 1790188902.0)
+    sleep = AsyncMock()
+    monkeypatch.setattr(_http_transport, "asyncio", SimpleNamespace(sleep=sleep))
+    headers = {"retry-after": retry_after} if retry_after is not None else {}
+    shared_server.replies.append((429, headers))
+    async with httpx.AsyncClient(transport=GymAiohttpTransport()) as client:
+        response = await client.post(shared_server.url + "/sandboxes", content=b"create sandbox", timeout=1)
+    assert response.status_code == 200
+    assert response.content == b"response body"
+    sleep.assert_awaited_once_with(expected_delay)
+    assert [body for _, _, body in shared_server.calls] == [b"create sandbox", b"create sandbox"]
+    assert not shared_server.client.closed
+
+
+async def test_rate_limit_retries_are_bounded_and_preserve_final_response(shared_server, monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr(_http_transport, "asyncio", SimpleNamespace(sleep=sleep))
+    shared_server.replies.extend([(429, {})] * 4)
+    async with httpx.AsyncClient(transport=GymAiohttpTransport()) as client:
+        response = await client.post(shared_server.url + "/sandboxes", json={"image": "test"}, timeout=1)
+        assert response.status_code == 429
+        assert response.content == b"rejected"
+        assert len(shared_server.calls) == 4
+        assert sleep.await_args_list == [call(1.0), call(2.0), call(4.0)]
+        assert (await client.get(shared_server.url + "/echo", timeout=1)).status_code == 200
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 500, 503])
+async def test_other_http_errors_are_not_retried(shared_server, monkeypatch, status):
+    sleep = AsyncMock()
+    monkeypatch.setattr(_http_transport, "asyncio", SimpleNamespace(sleep=sleep))
+    shared_server.replies.append((status, {"Retry-After": "27"}))
+    async with httpx.AsyncClient(transport=GymAiohttpTransport()) as client:
+        response = await client.post(shared_server.url + "/command", content=b"run once")
+    assert response.status_code == status
+    assert response.content == b"rejected"
+    assert len(shared_server.calls) == 1
+    sleep.assert_not_awaited()
+
+
+async def test_rate_limited_upload_stream_is_not_replayed(shared_server, monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr(_http_transport, "asyncio", SimpleNamespace(sleep=sleep))
+    shared_server.replies.append((429, {"Retry-After": "27"}))
+
+    async def body():
+        yield b"streamed upload"
+
+    async with httpx.AsyncClient(transport=GymAiohttpTransport()) as client:
+        response = await client.post(shared_server.url + "/upload", content=body())
+    assert response.status_code == 429
+    assert response.content == b"rejected"
+    assert [body for _, _, body in shared_server.calls] == [b"streamed upload"]
+    sleep.assert_not_awaited()
+
+
+async def test_cancelling_rate_limit_sleep_closes_response_without_retrying(monkeypatch):
+    response = Mock(status=429, headers={"Retry-After": "27"})
+    send = AsyncMock(return_value=response)
+    monkeypatch.setattr(server_utils, "request", send)
+
+    async def cancel_sleep(delay):
+        response.close.assert_called_once_with()
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(_http_transport, "asyncio", SimpleNamespace(sleep=cancel_sleep))
+    async with httpx.AsyncClient(transport=GymAiohttpTransport()) as client:
+        with pytest.raises(asyncio.CancelledError):
+            await client.post("https://sandbox.example/sandboxes", content=b"create sandbox")
+    send.assert_awaited_once()
