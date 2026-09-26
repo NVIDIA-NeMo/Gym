@@ -121,6 +121,54 @@ class TestServerJunitReports:
         assert (tmp_path / "reports").is_dir()
 
 
+@pytest.mark.parametrize("internal_error", [True, False])
+def test_server_suite_exit_status(tmp_path: Path, monkeypatch: MonkeyPatch, capfd, internal_error: bool) -> None:
+    servers = [tmp_path / "responses_api_models" / name for name in ("first", "second")]
+    for server in servers:
+        server.mkdir(parents=True)
+        (server / "README.md").touch()
+        (server / "requirements.txt").touch()
+        (server / "test_app.py").write_text("from pathlib import Path\n\ndef test_runs():\n    Path('ran').touch()\n")
+    if internal_error:
+        (servers[0] / "conftest.py").write_text(
+            "def pytest_configure(config):\n    raise RuntimeError('server setup failed')\n"
+        )
+
+    config = OmegaConf.create({"uv_cache_dir": str(tmp_path / "uv-cache")})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr("nemo_gym.cli.setup_command.get_global_config_dict", lambda: config)
+    monkeypatch.setattr("nemo_gym.cli.setup_command.stdout", sys.stdout)
+    monkeypatch.setattr("nemo_gym.cli.setup_command.stderr", sys.stderr)
+    monkeypatch.setattr(nemo_gym.cli.env, "component_search_roots", lambda: [tmp_path])
+    # Reuse this interpreter's pytest instead of installing a venv for each synthetic server.
+    monkeypatch.setattr(
+        nemo_gym.cli.env,
+        "setup_env_command",
+        lambda directory, *_: f"cd {shlex.quote(str(directory))} && "
+        f"export PATH={shlex.quote(str(Path(sys.executable).parent))}:$PATH",
+    )
+    monkeypatch.setenv("PYTEST_ADDOPTS", "")
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    monkeypatch.delenv("GYM_CI_JUNIT_DIR", raising=False)
+
+    if internal_error:
+        with raises(SystemExit) as exc:
+            nemo_gym.cli.env.test_all()
+        assert exc.value.code == 1
+    else:
+        nemo_gym.cli.env.test_all()
+
+    assert (servers[1] / "ran").exists(), "The suite must still run the later server."
+    output = capfd.readouterr()
+    if internal_error:
+        assert "RuntimeError: server setup failed" in output.err
+        assert "Tests that returned unrecognized exit codes 1 / 2" in output.out
+    else:
+        assert (servers[0] / "ran").exists()
+        assert "Tests passed 2 / 2" in output.out
+
+
 def test_server_venv_cleanup_uses_configured_root(tmp_path: Path) -> None:
     server_dir = tmp_path / "checkout" / "resources_servers" / "example"
     source_venv = server_dir / ".venv"

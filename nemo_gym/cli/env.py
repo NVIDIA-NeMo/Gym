@@ -1170,7 +1170,7 @@ gym env test +entrypoint={data_validation_failed[0]} +should_validate_data=true
 
 Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
 
-    if tests_missing or tests_failed or data_validation_failed:
+    if tests_missing or tests_failed or tests_unrecognized or data_validation_failed:
         exit(1)
 
 
