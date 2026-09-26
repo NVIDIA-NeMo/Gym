@@ -131,6 +131,35 @@ async def test_run_passes_rollout_prefixed_gym_model_url(fixture):
     assert f.harnesses[0].model_base_url == "http://gym-model:8000/ng-rollout/rollout/v1"
 
 
+async def test_run_uses_sandbox_reachable_model_url_with_rollout_capture(fixture, monkeypatch):
+    f = fixture
+    f.agent.config = module.MiniSWESandboxedConfig.model_validate(
+        f.agent.config.model_dump() | {"sandbox_model_base_url": "https://sandbox-model:8443/gym/v1/"}
+    )
+    monkeypatch.setattr(module.MiniSWESandboxedAgent, "_token_id_capture_enabled", lambda self: True)
+    body = f.body.model_copy(update={"capture_rollout_id": "rollout", "capture_token_ids": True})
+    await f.agent.run(f.request, body)
+    assert (
+        f.harnesses[0].model_base_url == "https://sandbox-model:8443/gym/ng-rollout/rollout/training-token-capture/v1"
+    )
+
+
+@pytest.mark.parametrize("url", ["localhost:8000", "https://sandbox-model/gym?token=secret"])
+def test_sandbox_model_url_rejects_non_http_roots(url):
+    with pytest.raises(ValueError, match="sandbox_model_base_url"):
+        module.MiniSWESandboxedConfig.model_validate(
+            {
+                "host": "localhost",
+                "port": 1,
+                "name": "agent",
+                "entrypoint": "app.py",
+                "resources_server": {"type": "resources_servers", "name": "resources"},
+                "model_server": {"type": "responses_api_models", "name": "model"},
+                "sandbox_model_base_url": url,
+            }
+        )
+
+
 async def test_run_agent_borrowed_session_without_resource_calls(fixture):
     f = fixture
     f.seed.pop("task_id")  # Optional for other resources and old seed responses.

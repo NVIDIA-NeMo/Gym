@@ -12,10 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, time
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -65,11 +66,27 @@ class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
     num_workers: Literal[1] = 1
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
+    sandbox_model_base_url: str | None = None
     harness: MiniSWEConfig = Field(default_factory=MiniSWEConfig)
     artifacts_dir: Path = Path("results/miniswe_sandboxed_agent")
     agent_max_timeout_sec: float | None = Field(default=None, gt=0)
     setup_timeout_sec: float = Field(default=360, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
+
+    @field_validator("sandbox_model_base_url")
+    @classmethod
+    def normalize_sandbox_model_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.query or parsed.fragment:
+            raise ValueError("sandbox_model_base_url must be an HTTP(S) URL without a query or fragment")
+        # This is the model server's address as seen by the sandbox, not the
+        # /v1 endpoint. Accept either form to match other sandboxed agents.
+        path = parsed.path.rstrip("/")
+        if path.endswith("/v1"):
+            path = path[:-3]
+        return urlunsplit((parsed.scheme, parsed.netloc, path, "", "")).rstrip("/")
 
 
 def now() -> str:
@@ -284,7 +301,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                             and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)),
                             params=params,
                             model_base_url=self.base_url_for_run(
-                                base_url=get_server_url(self.config.model_server.name),
+                                base_url=self.config.sandbox_model_base_url
+                                or get_server_url(self.config.model_server.name),
                                 body={"_ng_rollout_id": rollout_id},
                             )
                             + "/v1",

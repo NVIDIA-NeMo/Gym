@@ -18,6 +18,12 @@ The agent calls the configured Gym model server directly at its rollout-prefixed
 training token capture through Gym's model wrapper; `x-session-id` correlates
 failed calls to the resource session. The sandbox saves its model and tool history
 as an artifact that the harness downloads after the single agent command exits.
+For a remote sandbox, the model server must have an address reachable from that
+sandbox. If Gym's configured server address is host loopback, set
+`sandbox_model_base_url` to the sandbox-reachable HTTP(S) address of the same Gym
+model server. The TB4 profile exposes this as `++tb4_sandbox_model_base_url=...`.
+The address may end in `/v1`; the agent preserves its path prefix and appends the
+run's rollout and token-capture paths before `/v1`.
 
 `app.py` owns the Gym `/run` loop: it calls the configured resources server's
 `/seed_session`, connects to the returned sandbox, and stores agent state under
