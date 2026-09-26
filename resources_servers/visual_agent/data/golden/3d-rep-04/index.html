@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Isometric floating island diorama</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #bfe6f7; }
+  canvas { display: block; }
+</style>
+<script type="importmap">{"imports": {"three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/"}}</script>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+// Sky: a vertical gradient drawn on a canvas.
+const sky = document.createElement('canvas');
+sky.width = 4;
+sky.height = 256;
+const sctx = sky.getContext('2d');
+const grad = sctx.createLinearGradient(0, 0, 0, 256);
+grad.addColorStop(0, '#6fbfe9');
+grad.addColorStop(1, '#e3f5fc');
+sctx.fillStyle = grad;
+sctx.fillRect(0, 0, 4, 256);
+const skyTex = new THREE.CanvasTexture(sky);
+skyTex.colorSpace = THREE.SRGBColorSpace;
+scene.background = skyTex;
+
+// True isometric orthographic camera (45° azimuth, 35.264° elevation).
+const VIEW_H = 16.5;
+const aspect = window.innerWidth / window.innerHeight;
+const camera = new THREE.OrthographicCamera((-VIEW_H * aspect) / 2, (VIEW_H * aspect) / 2, VIEW_H / 2, -VIEW_H / 2, 0.1, 200);
+camera.position.set(30, 28.4, 30);
+camera.lookAt(0, -1.6, 0);
+
+scene.add(new THREE.HemisphereLight('#e8f6ff', '#6b5a48', 1.1));
+const sun = new THREE.DirectionalLight('#fff4e0', 2.4);
+sun.position.set(-9, 16, 5);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -12, right: 12, top: 12, bottom: -12, near: 1, far: 50 });
+sun.shadow.bias = -0.0006;
+scene.add(sun);
+
+const mats = {};
+function mat(color, extra = {}) {
+  const key = color + JSON.stringify(extra);
+  if (!mats[key]) mats[key] = new THREE.MeshStandardMaterial({ color, roughness: 0.9, flatShading: true, ...extra });
+  return mats[key];
+}
+function add(geo, material, x, y, z, parent = scene) {
+  const m = new THREE.Mesh(geo, material);
+  m.position.set(x, y, z);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  parent.add(m);
+  return m;
+}
+// Cell (col, row) -> world centre; col grows +x, row grows +z (toward the viewer's right-front).
+const cx = (c) => c - 4.5;
+const cz = (r) => r - 4.5;
+const key = (c, r) => c + ',' + r;
+
+const river = new Set(['9,4', '8,4', '7,4', '6,4', '6,5', '5,5', '4,5'].concat(['2,5', '3,5', '2,6', '3,6']));
+const path = new Set(['1,7', '2,7', '3,7', '4,7', '5,7', '6,7', '7,7', '7,6', '7,5']);
+const field = new Set();
+for (let c = 0; c < 4; c++) for (let r = 0; r < 3; r++) field.add(key(c, r));
+
+// Top tiles.
+const tile = new THREE.BoxGeometry(1, 0.3, 1);
+const waterTile = new THREE.BoxGeometry(1, 0.18, 1);
+const cropGeo = new THREE.BoxGeometry(0.86, 0.22, 0.16);
+for (let c = 0; c < 10; c++) {
+  for (let r = 0; r < 10; r++) {
+    const k = key(c, r);
+    if (river.has(k)) {
+      const w = add(waterTile, mat('#4aa6e0', { roughness: 0.25, metalness: 0.1 }), cx(c), -0.21, cz(r));
+      w.castShadow = false;
+      continue;
+    }
+    let color = (c + r) % 2 ? '#7cc46a' : '#72b862';
+    if (path.has(k)) color = '#dcc68e';
+    if (field.has(k)) color = '#8a5a35';
+    add(tile, mat(color), cx(c), -0.15, cz(r));
+    if (field.has(k)) {
+      for (const dz of [-0.3, 0, 0.3]) add(cropGeo, mat(c % 2 ? '#c9d94a' : '#a9cc45'), cx(c), 0.11, cz(r) + dz);
+    }
+  }
+}
+// Channel walls under the water and the soil/rock body below the top.
+add(new THREE.BoxGeometry(10, 0.9, 10), mat('#8b5a3c'), 0, -0.75, 0);
+add(new THREE.BoxGeometry(9, 1.1, 9), mat('#a08f7d'), 0, -1.75, 0);
+add(new THREE.BoxGeometry(7.2, 1.3, 7.2), mat('#8a7b6c'), 0.2, -2.95, -0.1);
+add(new THREE.BoxGeometry(5.2, 1.4, 5.2), mat('#72675c'), 0.3, -4.3, 0.1);
+const tip = add(new THREE.ConeGeometry(2.6, 3.2, 4), mat('#5f564d'), 0.3, -6.6, 0.1);
+tip.rotation.set(Math.PI, Math.PI / 4, 0);
+
+// Waterfall pouring off the right edge where the river leaves the island.
+const fall = add(new THREE.BoxGeometry(0.12, 5.2, 0.9), mat('#7cc2ee', { transparent: true, opacity: 0.85, roughness: 0.2 }), 5.06, -2.7, cz(4));
+fall.castShadow = false;
+
+// Wooden bridge across the river at (7, 4).
+const bridge = new THREE.Group();
+bridge.position.set(cx(7), 0.02, cz(4));
+add(new THREE.BoxGeometry(0.9, 0.1, 1.3), mat('#9a6a3e'), 0, 0.02, 0, bridge);
+for (const dx of [-0.42, 0.42]) {
+  add(new THREE.BoxGeometry(0.06, 0.06, 1.3), mat('#6e4a2a'), dx, 0.32, 0, bridge);
+  for (const dz of [-0.55, 0, 0.55]) add(new THREE.BoxGeometry(0.07, 0.3, 0.07), mat('#6e4a2a'), dx, 0.17, dz, bridge);
+}
+scene.add(bridge);
+
+// Windmill at (7, 1): white tower, red cap, four sails facing the viewer.
+const mill = new THREE.Group();
+mill.position.set(cx(7), 0, cz(1));
+add(new THREE.CylinderGeometry(0.5, 0.78, 3.0, 8), mat('#f1ebdd'), 0, 1.5, 0, mill);
+add(new THREE.ConeGeometry(0.72, 0.9, 8), mat('#c8452f'), 0, 3.45, 0, mill);
+add(new THREE.BoxGeometry(0.28, 0.5, 0.05), mat('#6e4a2a'), 0, 0.25, 0.74, mill).rotation.x = -0.25;
+const sails = new THREE.Group();
+sails.position.set(0.42, 2.7, 0.42);
+sails.rotation.y = Math.PI / 4;
+add(new THREE.CylinderGeometry(0.12, 0.12, 0.3, 12), mat('#4a3a2c'), 0, 0, 0, sails).rotation.x = Math.PI / 2;
+for (let i = 0; i < 4; i++) {
+  const arm = new THREE.Group();
+  arm.rotation.z = (i * Math.PI) / 2 + 0.35;
+  add(new THREE.BoxGeometry(0.08, 1.9, 0.05), mat('#5b4331'), 0, 1.0, 0.1, arm);
+  add(new THREE.BoxGeometry(0.34, 1.35, 0.03), mat('#f6f1e4'), 0.2, 1.2, 0.12, arm);
+  sails.add(arm);
+}
+mill.add(sails);
+scene.add(mill);
+
+// Cottage at (1, 8) with a pyramid roof and a chimney.
+const house = new THREE.Group();
+house.position.set(cx(1) + 0.1, 0, cz(8) + 0.2);
+add(new THREE.BoxGeometry(1.4, 1.0, 1.2), mat('#f3e2bd'), 0, 0.5, 0, house);
+add(new THREE.CylinderGeometry(0, 1.15, 0.85, 4), mat('#a4492c'), 0, 1.42, 0, house).rotation.y = Math.PI / 4;
+add(new THREE.BoxGeometry(0.22, 0.5, 0.22), mat('#7d6a5a'), 0.35, 1.7, -0.2, house);
+add(new THREE.BoxGeometry(0.3, 0.55, 0.04), mat('#6e4a2a'), 0.2, 0.28, 0.61, house);
+add(new THREE.BoxGeometry(0.28, 0.26, 0.04), mat('#8fd0f0'), -0.35, 0.6, 0.61, house);
+add(new THREE.BoxGeometry(0.04, 0.26, 0.28), mat('#8fd0f0'), 0.71, 0.6, 0.1, house);
+scene.add(house);
+
+// Trees: round deciduous trees and two-tier conifers.
+function roundTree(c, r, s = 1) {
+  const g = new THREE.Group();
+  g.position.set(cx(c), 0, cz(r));
+  add(new THREE.CylinderGeometry(0.1 * s, 0.13 * s, 0.6 * s, 6), mat('#7a5033'), 0, 0.3 * s, 0, g);
+  add(new THREE.IcosahedronGeometry(0.55 * s, 0), mat('#4f9d45'), 0, 0.95 * s, 0, g);
+  scene.add(g);
+}
+function pine(c, r, s = 1) {
+  const g = new THREE.Group();
+  g.position.set(cx(c), 0, cz(r));
+  add(new THREE.CylinderGeometry(0.08 * s, 0.1 * s, 0.4 * s, 6), mat('#6b4428'), 0, 0.2 * s, 0, g);
+  add(new THREE.ConeGeometry(0.55 * s, 0.9 * s, 6), mat('#2f7040'), 0, 0.75 * s, 0, g);
+  add(new THREE.ConeGeometry(0.4 * s, 0.75 * s, 6), mat('#357a47'), 0, 1.25 * s, 0, g);
+  scene.add(g);
+}
+roundTree(8, 7);
+roundTree(6, 8, 0.85);
+roundTree(9, 9, 1.1);
+roundTree(4, 9, 0.9);
+pine(5, 1);
+pine(4, 0, 0.85);
+pine(9, 6, 1.1);
+pine(1, 4);
+pine(0, 5, 0.8);
+
+// Clouds and floating rocks around the island.
+function cloud(x, y, z, s) {
+  const g = new THREE.Group();
+  g.position.set(x, y, z);
+  for (const [dx, dy, dz, r] of [[0, 0, 0, 0.9], [0.9, -0.15, 0.1, 0.7], [-0.85, -0.2, 0, 0.65], [0.3, 0.45, -0.1, 0.6]]) {
+    const m = add(new THREE.IcosahedronGeometry(r * s, 1), mat('#ffffff', { roughness: 1 }), dx * s, dy * s, dz * s, g);
+    m.castShadow = false;
+  }
+  scene.add(g);
+}
+cloud(-7.5, 1.4, -3.0, 1.0);
+cloud(5.5, 3.6, -7.5, 0.85);
+cloud(1.5, -4.2, 7.5, 1.0);
+add(new THREE.DodecahedronGeometry(0.7, 0), mat('#7f7366'), -7.0, -3.4, 3.0).rotation.set(0.4, 0.3, 0.2);
+add(new THREE.DodecahedronGeometry(0.45, 0), mat('#8a7e70'), -6.0, -5.2, 5.2).rotation.set(0.1, 0.8, 0.3);
+
+function draw() {
+  const a = window.innerWidth / window.innerHeight;
+  camera.left = (-VIEW_H * a) / 2;
+  camera.right = (VIEW_H * a) / 2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.render(scene, camera);
+}
+draw();
+window.addEventListener('resize', draw);
+</script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+{
+  "quarter": "Q2 2026 (April-June)",
+  "note": "Food revenue and food cost come from item sales (quantity \u00d7 menu price, quantity \u00d7 plate cost). Beverage and labor figures are quarter totals in USD.",
+  "locations": {
+    "Harbor Street": {
+      "seats": 96,
+      "open_hours_per_day": 11,
+      "days_open": 91,
+      "beverage_revenue_usd": 213420,
+      "beverage_cost_usd": 49790,
+      "labor_cost_usd": 259620
+    },
+    "Midtown": {
+      "seats": 124,
+      "open_hours_per_day": 12,
+      "days_open": 91,
+      "beverage_revenue_usd": 227100,
+      "beverage_cost_usd": 58230,
+      "labor_cost_usd": 317340
+    },
+    "Westfield": {
+      "seats": 82,
+      "open_hours_per_day": 10,
+      "days_open": 78,
+      "beverage_revenue_usd": 99920,
+      "beverage_cost_usd": 25340,
+      "labor_cost_usd": 164530
+    },
+    "Lakeside": {
+      "seats": 110,
+      "open_hours_per_day": 11,
+      "days_open": 91,
+      "beverage_revenue_usd": 198810,
+      "beverage_cost_usd": 47010,
+      "labor_cost_usd": 215790
+    }
+  },
+  "prime_cost_target": 0.62
+}

@@ -1,0 +1,29 @@
+{
+  "note": "Corrections to the 2024 figures in hotel_monthly.csv, which are as originally reported. Apply each change to the stated hotel and month.",
+  "corrections": [
+    {
+      "hotel": "Old Town",
+      "month": "2024-06",
+      "rooms_available_change": 0,
+      "rooms_sold_change": -620,
+      "room_revenue_change": -178560,
+      "reason": "A wedding group block was posted twice"
+    },
+    {
+      "hotel": "Airport",
+      "month": "2024-09",
+      "rooms_available_change": 0,
+      "rooms_sold_change": -1450,
+      "room_revenue_change": -172550,
+      "reason": "Airline crew contract nights were double-counted"
+    },
+    {
+      "hotel": "Riverside",
+      "month": "2024-11",
+      "rooms_available_change": -900,
+      "rooms_sold_change": 0,
+      "room_revenue_change": 0,
+      "reason": "30 flood-damaged rooms were out of order all month but left in inventory"
+    }
+  ]
+}

@@ -1,0 +1,102 @@
+name,ra_h,dec_deg,mag,constellation
+Alpheratz,0.140,29.09,2.06,Pegasus
+Caph,0.153,59.15,2.27,Cassiopeia
+Algenib,0.221,15.18,2.83,Pegasus
+Schedar,0.675,56.54,2.24,Cassiopeia
+Navi,0.945,60.72,2.47,Cassiopeia
+Mirach,1.162,35.62,2.05,
+Ruchbah,1.430,60.24,2.68,Cassiopeia
+Segin,1.907,63.67,3.38,Cassiopeia
+Almach,2.065,42.33,2.10,
+Hamal,2.120,23.46,2.00,
+Polaris,2.530,89.26,1.98,Ursa Minor
+Gamma Per,3.080,53.51,2.91,Perseus
+Algol,3.136,40.96,2.12,Perseus
+Mirfak,3.405,49.86,1.79,Perseus
+Delta Per,3.715,47.79,3.01,Perseus
+Zeta Per,3.902,31.88,2.85,Perseus
+Epsilon Per,3.964,40.01,2.88,Perseus
+Gamma Tau,4.330,15.63,3.65,Taurus
+Delta Tau,4.382,17.54,3.76,Taurus
+Ain,4.477,19.18,3.53,Taurus
+Aldebaran,4.599,16.51,0.87,Taurus
+Hassaleh,4.950,33.17,2.69,Auriga
+Rigel,5.242,-8.20,0.13,Orion
+Capella,5.278,46.00,0.08,Auriga
+Bellatrix,5.419,6.35,1.64,Orion
+Elnath,5.438,28.61,1.65,Auriga
+Mintaka,5.533,-0.30,2.23,Orion
+Meissa,5.585,9.93,3.39,Orion
+Alnilam,5.604,-1.20,1.69,Orion
+Zeta Tau,5.627,21.14,3.00,Taurus
+Alnitak,5.679,-1.94,1.77,Orion
+Saiph,5.796,-9.67,2.09,Orion
+Betelgeuse,5.919,7.41,0.50,Orion
+Menkalinan,5.992,44.95,1.90,Auriga
+Theta Aur,5.995,37.21,2.65,Auriga
+Mirzam,6.378,-17.96,1.98,Canis Major
+Tejat,6.383,22.51,2.87,Gemini
+Alhena,6.629,16.40,1.93,Gemini
+Mebsuta,6.732,25.13,2.98,Gemini
+Sirius,6.752,-16.72,-1.46,Canis Major
+Adhara,6.977,-28.97,1.50,Canis Major
+Wezen,7.140,-26.39,1.83,Canis Major
+Wasat,7.335,21.98,3.53,Gemini
+Aludra,7.402,-29.30,2.45,Canis Major
+Castor,7.577,31.89,1.58,Gemini
+Procyon,7.655,5.22,0.34,
+Pollux,7.755,28.03,1.14,Gemini
+Epsilon Leo,9.764,23.77,2.98,Leo
+Eta Leo,10.122,16.76,3.48,Leo
+Regulus,10.140,11.97,1.35,Leo
+Adhafera,10.278,23.42,3.43,Leo
+Algieba,10.333,19.84,2.08,Leo
+Merak,11.031,56.38,2.37,Ursa Major
+Dubhe,11.062,61.75,1.79,Ursa Major
+Zosma,11.235,20.52,2.56,Leo
+Chertan,11.237,15.43,3.33,Leo
+Denebola,11.818,14.57,2.14,Leo
+Phecda,11.897,53.69,2.44,Ursa Major
+Megrez,12.257,57.03,3.31,Ursa Major
+Alioth,12.900,55.96,1.77,Ursa Major
+Mizar,13.399,54.93,2.23,Ursa Major
+Spica,13.420,-11.16,0.97,
+Alkaid,13.792,49.31,1.86,Ursa Major
+Muphrid,13.911,18.40,2.68,Bootes
+Arcturus,14.261,19.18,-0.05,Bootes
+Seginus,14.535,38.31,3.03,Bootes
+Izar,14.750,27.07,2.37,Bootes
+Kochab,14.845,74.16,2.08,Ursa Minor
+Nekkar,15.032,40.39,3.49,Bootes
+Delta Boo,15.258,33.31,3.47,Bootes
+Pherkad,15.345,71.83,3.05,Ursa Minor
+Alphecca,15.578,26.71,2.22,
+Zeta UMi,15.734,77.79,4.29,Ursa Minor
+Eta UMi,16.292,75.76,4.95,Ursa Minor
+Antares,16.490,-26.43,1.06,
+Epsilon UMi,16.766,82.04,4.21,Ursa Minor
+Yildun,17.537,86.59,4.36,Ursa Minor
+Rasalhague,17.582,12.56,2.07,
+Eltanin,17.943,51.49,2.23,
+Vega,18.616,38.78,0.03,Lyra
+Zeta Lyr,18.746,37.61,4.34,Lyra
+Sheliak,18.835,33.36,3.52,Lyra
+Delta Lyr,18.908,36.90,4.30,Lyra
+Sulafat,18.982,32.69,3.25,Lyra
+Albireo,19.512,27.96,3.08,Cygnus
+Delta Cyg,19.750,45.13,2.87,Cygnus
+Tarazed,19.771,10.61,2.72,Aquila
+Altair,19.846,8.87,0.77,Aquila
+Alshain,19.922,6.41,3.71,Aquila
+Sadr,20.370,40.26,2.23,Cygnus
+Deneb,20.690,45.28,1.25,Cygnus
+Gienah,20.770,33.97,2.48,Cygnus
+Alderamin,21.310,62.59,2.45,Cepheus
+Alfirk,21.478,70.56,3.23,Cepheus
+Enif,21.736,9.88,2.38,Pegasus
+Zeta Cep,22.181,58.20,3.35,Cepheus
+Iota Cep,22.828,66.20,3.52,Cepheus
+Fomalhaut,22.961,-29.62,1.16,
+Scheat,23.063,28.08,2.42,Pegasus
+Markab,23.080,15.21,2.49,Pegasus
+Errai,23.656,77.63,3.21,Cepheus

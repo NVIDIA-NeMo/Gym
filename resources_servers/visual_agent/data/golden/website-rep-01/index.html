@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2025 Impact Report · Canopy Fund</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:#f6f4ee}
+body{font-family:'Inter',sans-serif;color:#16241d;-webkit-font-smoothing:antialiased;font-size:16px;line-height:1.5}
+a{color:inherit;text-decoration:none}
+.serif{font-family:'DejaVu Serif',serif}
+.wrap{width:100%;max-width:1280px;margin:0 auto;padding:0 64px}
+
+/* nav */
+.nav{height:76px;display:flex;align-items:center;border-bottom:1px solid #e2e4da}
+.brand{display:flex;align-items:center;gap:10px;font-size:19px;font-weight:700;letter-spacing:-0.01em;color:#0e3b2c}
+.links{margin-left:56px;display:flex;gap:32px;font-size:15px;font-weight:500;color:#4f5f56}
+.links a{position:relative;height:76px;display:flex;align-items:center}
+.links a.on{color:#0e3b2c;font-weight:600}
+.links a.on:after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:3px;border-radius:3px 3px 0 0;background:#1f6b4a}
+.nav-r{margin-left:auto;display:flex;align-items:center;gap:20px}
+.lang{font-size:14px;font-weight:500;color:#4f5f56}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:44px;padding:0 22px;border-radius:999px;font-size:15px;font-weight:600}
+.btn-dark{background:#0e3b2c;color:#ffffff}
+.btn-line{border:1.5px solid #0e3b2c;color:#0e3b2c}
+.menu{display:none}
+
+/* hero */
+.hero{display:grid;grid-template-columns:1fr 500px;gap:56px;align-items:center;padding:48px 0 44px}
+.kicker{display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 14px;border-radius:999px;background:#fbecd2;color:#9a5b05;font-size:12px;font-weight:700;letter-spacing:0.12em}
+.kicker i{width:7px;height:7px;border-radius:50%;background:#e8a33d}
+.hero h1{margin-top:22px;font-size:54px;line-height:1.1;font-weight:700;letter-spacing:-0.02em;color:#0e3b2c}
+.hero p{margin-top:22px;font-size:18px;line-height:1.6;color:#4f5f56;max-width:560px}
+.cta{margin-top:32px;display:flex;gap:14px}
+.art{border-radius:28px;overflow:hidden;display:block;width:100%;height:auto}
+
+/* kpis */
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);background:#ffffff;border:1px solid #e2e4da;border-radius:24px;box-shadow:0 1px 2px rgba(20,40,30,0.04)}
+.kpi{padding:24px 28px}
+.kpi+.kpi{border-left:1px solid #e9ebe3}
+.kpi b{display:block;font-family:'DejaVu Serif',serif;font-size:42px;line-height:1.1;font-weight:700;color:#0e3b2c;letter-spacing:-0.02em}
+.kpi span{display:block;margin-top:8px;font-size:15px;color:#4f5f56}
+.kpi em{display:inline-flex;margin-top:14px;height:24px;align-items:center;padding:0 10px;border-radius:999px;background:#e3f1e7;color:#1f6b4a;font-style:normal;font-size:12px;font-weight:700}
+
+/* section heads */
+.sec{padding-top:60px}
+.sh{display:flex;align-items:flex-end;justify-content:space-between;gap:24px}
+.sh h2{font-family:'DejaVu Serif',serif;font-size:34px;line-height:1.2;font-weight:700;color:#0e3b2c;letter-spacing:-0.01em}
+.sh p{margin-top:8px;font-size:16px;color:#5b6b62;max-width:560px}
+.sh .note{font-size:14px;color:#7a877f;white-space:nowrap}
+
+/* charts */
+.charts{margin-top:28px;display:grid;grid-template-columns:1fr 360px;gap:24px}
+.card{background:#ffffff;border:1px solid #e2e4da;border-radius:20px;padding:26px 28px}
+.ct{display:flex;align-items:flex-start;justify-content:space-between}
+.ct h3{font-size:17px;font-weight:700;color:#16241d}
+.ct small{display:block;margin-top:4px;font-size:13px;color:#7a877f}
+.leg{display:flex;gap:16px;font-size:13px;color:#4f5f56}
+.leg span{display:flex;align-items:center;gap:6px}
+.leg i{width:10px;height:10px;border-radius:3px}
+.chart{display:block;width:100%;height:auto;margin-top:12px}
+.m-only{display:none}
+.donut{display:block;width:176px;height:176px;margin:14px auto 0}
+.dl{margin-top:16px;display:grid;gap:9px}
+.dl div{display:flex;align-items:center;gap:10px;font-size:14px;color:#33443b}
+.dl i{width:10px;height:10px;border-radius:50%}
+.dl b{margin-left:auto;font-weight:700}
+
+/* table */
+.tcard{margin-top:28px;background:#ffffff;border:1px solid #e2e4da;border-radius:20px;overflow:hidden}
+table{width:100%;border-collapse:collapse;font-size:15px}
+th{height:44px;padding:0 20px;text-align:left;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#6b7a71;background:#f1f3ec;border-bottom:1px solid #e2e4da}
+td{height:52px;padding:0 20px;border-bottom:1px solid #eef0e9;color:#33443b}
+td.r,th.r{text-align:right}
+td.n{font-weight:600;color:#16241d}
+tr.tot td{background:#f7f8f3;font-weight:700;color:#0e3b2c;border-bottom:0}
+.sv{display:flex;align-items:center;gap:10px}
+.bar{width:84px;height:6px;border-radius:6px;background:#e9ece4;overflow:hidden}
+.bar i{display:block;height:100%;border-radius:6px;background:#3e9b6b}
+.pill{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:999px;font-size:12px;font-weight:700}
+.pill:before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.ok{background:#e3f1e7;color:#1f6b4a}
+.mon{background:#fbecd2;color:#9a5b05}
+.risk{background:#fbe1dc;color:#b3361f}
+
+/* quote */
+.quote{margin-top:60px;display:grid;grid-template-columns:1fr 300px;gap:48px;align-items:center;padding:40px 48px;border-radius:28px;background:#0e3b2c;color:#eef5ef}
+.qm{font-family:'DejaVu Serif',serif;font-size:72px;line-height:0.6;color:#e8a33d}
+blockquote{margin-top:14px;font-family:'DejaVu Serif',serif;font-style:italic;font-size:24px;line-height:1.45;color:#ffffff}
+.who{margin-top:26px;display:flex;align-items:center;gap:14px}
+.who i{width:48px;height:48px;border-radius:50%;background:#e8a33d;color:#0e3b2c;font-style:normal;font-weight:700;font-size:16px;display:flex;align-items:center;justify-content:center}
+.who b{display:block;font-size:16px;color:#ffffff}
+.who span{font-size:14px;color:#a9c4b3}
+.qs{display:grid;gap:18px}
+.qs div{padding:18px 22px;border-radius:16px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12)}
+.qs b{display:block;font-family:'DejaVu Serif',serif;font-size:32px;line-height:1.1;color:#ffffff}
+.qs span{display:block;margin-top:6px;font-size:14px;color:#a9c4b3}
+
+/* timeline */
+.tl{margin-top:28px;display:grid;grid-template-columns:repeat(4,1fr);gap:24px;position:relative}
+.tl:before{content:"";position:absolute;left:8px;right:8px;top:9px;height:2px;background:#cfd8cd}
+.step{position:relative;padding-top:38px}
+.dot{position:absolute;left:0;top:0;width:20px;height:20px;border-radius:50%;background:#f6f4ee;border:4px solid #1f6b4a}
+.step.last .dot{background:#e8a33d;border-color:#e8a33d}
+.yr{font-size:13px;font-weight:700;letter-spacing:0.1em;color:#9a5b05}
+.step h4{margin-top:6px;font-size:18px;line-height:1.35;font-weight:700;color:#0e3b2c}
+.step p{margin-top:8px;font-size:15px;line-height:1.55;color:#5b6b62}
+
+
+/* footer */
+.foot{margin-top:60px;border-top:1px solid #e2e4da;padding:40px 0 28px}
+.fg{display:grid;grid-template-columns:1.6fr 1fr 1fr 1fr;gap:40px}
+.fg p{margin-top:14px;font-size:14px;line-height:1.6;color:#5b6b62;max-width:300px}
+.fg h5{font-size:13px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#16241d}
+.fg ul{list-style:none;margin-top:14px;display:grid;gap:10px;font-size:14px;color:#5b6b62}
+.legal{margin-top:32px;padding-top:20px;border-top:1px solid #e2e4da;display:flex;justify-content:space-between;font-size:13px;color:#7a877f}
+.legal span+span{margin-left:24px}
+
+@media (max-width:760px){
+  .wrap{padding:0 20px}
+  .nav{height:64px}
+  .links,.lang{display:none}
+  .nav-r{gap:12px}
+  .nav-r .btn{height:38px;padding:0 16px;font-size:14px}
+  .menu{display:flex;width:40px;height:40px;border-radius:12px;border:1px solid #d7dccf;align-items:center;justify-content:center}
+  .hero{grid-template-columns:1fr;gap:32px;padding:36px 0 40px}
+  .hero h1{font-size:36px;margin-top:18px}
+  .hero p{font-size:16px;margin-top:16px}
+  .cta{flex-direction:column;gap:10px;margin-top:24px}
+  .cta .btn{width:100%}
+  .art{border-radius:20px}
+  .kpis{grid-template-columns:1fr 1fr;border-radius:20px}
+  .kpi{padding:20px 18px}
+  .kpi+.kpi{border-left:0}
+  .kpi:nth-child(2n){border-left:1px solid #e9ebe3}
+  .kpi:nth-child(n+3){border-top:1px solid #e9ebe3}
+  .kpi b{font-size:30px}
+  .kpi span{font-size:13px}
+  .kpi em{margin-top:10px;font-size:11px}
+  .sec{padding-top:48px}
+  .sh{flex-direction:column;align-items:flex-start;gap:6px}
+  .sh h2{font-size:26px}
+  .sh p{font-size:15px}
+  .charts{grid-template-columns:1fr;gap:16px;margin-top:20px}
+  .card{padding:20px 18px}
+  .ct{flex-direction:column;gap:10px}
+  .tcard{margin-top:20px;border-radius:16px}
+  table{font-size:13px}
+  th{padding:0 12px;font-size:11px;letter-spacing:0.04em}
+  td{padding:0 12px;height:54px}
+  .c-proj,.c-stat,.c-ha{display:none}
+  .d-only{display:none}
+  .m-only{display:block}
+  .bar{display:none}
+  .quote{margin-top:48px;grid-template-columns:1fr;gap:28px;padding:32px 24px;border-radius:22px}
+  blockquote{font-size:20px}
+  .qs{grid-template-columns:1fr 1fr;gap:12px}
+  .qs div{padding:16px}
+  .qs b{font-size:24px}
+  .qs span{font-size:13px}
+  .tl{grid-template-columns:1fr;gap:28px;margin-top:28px;padding-left:36px}
+  .tl:before{left:9px;right:auto;top:8px;bottom:8px;width:2px;height:auto}
+  .step{padding-top:0}
+  .dot{left:-36px}
+  .foot{margin-top:48px;padding:32px 0 24px}
+  .fg{grid-template-columns:1fr 1fr;gap:28px}
+  .fg .about{grid-column:1 / -1}
+  .legal{flex-direction:column;gap:10px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="nav">
+    <a class="brand" href="#">
+      <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="17" fill="#0e3b2c"/><path d="M17 7c6 4 8 9 6 14-1.4 3.4-4 5-6 5s-4.6-1.6-6-5c-2-5 0-10 6-14z" fill="#8fd19e"/><path d="M17 11v18" stroke="#0e3b2c" stroke-width="2" stroke-linecap="round"/><path d="M17 17l4-3M17 22l-4-3" stroke="#0e3b2c" stroke-width="1.8" stroke-linecap="round"/></svg>
+      Canopy Fund
+    </a>
+    <nav class="links"><a href="#">About</a><a href="#">Projects</a><a class="on" href="#">Impact</a><a href="#">Reports</a><a href="#">Journal</a></nav>
+    <div class="nav-r">
+      <span class="lang">EN</span>
+      <a class="btn btn-dark" href="#">Donate</a>
+      <span class="menu"><svg width="18" height="14" viewBox="0 0 18 14"><path d="M1 1h16M1 7h16M1 13h16" stroke="#0e3b2c" stroke-width="2" stroke-linecap="round"/></svg></span>
+    </div>
+  </header>
+
+  <section class="hero">
+    <div>
+      <span class="kicker"><i></i>2025 IMPACT REPORT</span>
+      <h1 class="serif">Four million trees, and the forests they became.</h1>
+      <p>In 2025 our partners planted 4.2 million native trees across six regions. This report shows where every dollar went, what survived, and what we learned along the way.</p>
+      <div class="cta"><a class="btn btn-dark" href="#">Download the full report</a><a class="btn btn-line" href="#">Explore projects</a></div>
+    </div>
+    <svg class="art" viewBox="0 0 520 400" aria-label="Illustration of restored forest hills">
+      <defs>
+        <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fbe3b8"/><stop offset="1" stop-color="#f6f0dc"/></linearGradient>
+        <linearGradient id="h1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7fbf8a"/><stop offset="1" stop-color="#5a9d6a"/></linearGradient>
+        <linearGradient id="h2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3e8a5c"/><stop offset="1" stop-color="#2c6e48"/></linearGradient>
+      </defs>
+      <rect width="520" height="400" fill="url(#sky)"/>
+      <circle cx="380" cy="118" r="56" fill="#f4b95a"/>
+      <circle cx="380" cy="118" r="80" fill="#f4b95a" opacity="0.18"/>
+      <path d="M0 230 C90 180 170 190 250 214 C330 238 420 180 520 196 L520 400 L0 400Z" fill="#b9d9b0"/>
+      <path d="M0 270 C110 226 200 240 290 262 C380 284 450 244 520 250 L520 400 L0 400Z" fill="url(#h1)"/>
+      <path d="M0 322 C90 290 190 296 280 318 C360 338 440 306 520 312 L520 400 L0 400Z" fill="url(#h2)"/>
+      <g fill="#2c6e48">
+        <path d="M66 214 L82 170 L98 214Z"/><path d="M92 206 L106 168 L120 206Z"/><path d="M200 206 L214 172 L228 206Z"/>
+        <path d="M300 222 L316 180 L332 222Z"/><path d="M436 196 L450 160 L464 196Z"/><path d="M462 202 L474 170 L486 202Z"/>
+      </g>
+      <g fill="#1d5438">
+        <path d="M40 272 L62 214 L84 272Z"/><path d="M130 262 L150 208 L170 262Z"/><path d="M158 268 L176 222 L194 268Z"/>
+        <path d="M340 282 L362 226 L384 282Z"/><path d="M376 276 L394 232 L412 276Z"/>
+      </g>
+      <g fill="#0e3b2c">
+        <path d="M22 336 L50 262 L78 336Z"/><path d="M226 330 L252 262 L278 330Z"/><path d="M262 336 L286 276 L310 336Z"/>
+        <path d="M420 330 L446 264 L472 330Z"/><path d="M456 336 L478 282 L500 336Z"/>
+      </g>
+      <rect x="28" y="28" width="196" height="46" rx="23" fill="#ffffff"/>
+      <circle cx="52" cy="51" r="8" fill="#3e9b6b"/>
+      <text x="68" y="56" font-family="Inter" font-size="14" font-weight="600" fill="#16241d">Site 214 · Nyeri, Kenya</text>
+      <rect x="300" y="344" width="192" height="36" rx="18" fill="#0e3b2c"/>
+      <text x="396" y="367" text-anchor="middle" font-family="Inter" font-size="13" font-weight="600" fill="#ffffff">97% survival since 2023</text>
+    </svg>
+  </section>
+
+  <section class="kpis">
+    <div class="kpi"><b>4.2M</b><span>trees planted in 2025</span><em>+18% vs 2024</em></div>
+    <div class="kpi"><b>18,400</b><span>hectares under restoration</span><em>+2,950 ha</em></div>
+    <div class="kpi"><b>312</b><span>partner communities</span><em>+41 new</em></div>
+    <div class="kpi"><b>96%</b><span>two-year survival rate</span><em>Target 90%</em></div>
+  </section>
+
+  <section class="sec">
+    <div class="sh">
+      <div><h2>Growth and carbon</h2><p>Estimated under the Verra VM0047 method and audited every year.</p></div>
+      <span class="note">Figures in kilotonnes CO₂e</span>
+    </div>
+    <div class="charts">
+      <div class="card">
+        <div class="ct">
+          <div><h3>Carbon captured, cumulative</h3><small>2018–2025, all regions</small></div>
+          <div class="leg"><span><i style="background:#1f6b4a"></i>Measured</span><span><i style="background:#e8a33d"></i>2025</span></div>
+        </div>
+        <svg class="chart d-only" viewBox="0 0 700 270" aria-label="Line chart of cumulative carbon captured">
+          <defs><linearGradient id="ar" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3e9b6b" stop-opacity="0.28"/><stop offset="1" stop-color="#3e9b6b" stop-opacity="0.02"/></linearGradient></defs>
+          <g stroke="#e9ece4" stroke-width="1">
+            <line x1="52" y1="16" x2="690" y2="16"/><line x1="52" y1="70" x2="690" y2="70"/><line x1="52" y1="124" x2="690" y2="124"/><line x1="52" y1="178" x2="690" y2="178"/>
+          </g>
+          <line x1="52" y1="232" x2="690" y2="232" stroke="#c9d0c4" stroke-width="1"/>
+          <g font-family="Inter" font-size="12" fill="#8a968e" text-anchor="end">
+            <text x="42" y="20">200</text><text x="42" y="74">150</text><text x="42" y="128">100</text><text x="42" y="182">50</text><text x="42" y="236">0</text>
+          </g>
+          <g font-family="Inter" font-size="12" fill="#6b7a71" text-anchor="middle">
+            <text x="70" y="256">2018</text><text x="155.7" y="256">2019</text><text x="241.4" y="256">2020</text><text x="327.1" y="256">2021</text><text x="412.9" y="256">2022</text><text x="498.6" y="256">2023</text><text x="584.3" y="256">2024</text><text x="670" y="256">2025</text>
+          </g>
+          <path d="M70,219.04 L155.7,211.48 L241.4,198.52 L327.1,180.16 L412.9,156.4 L498.6,128.32 L584.3,90.52 L670,50.56 L670,232 L70,232Z" fill="url(#ar)"/>
+          <polyline points="70,219.04 155.7,211.48 241.4,198.52 327.1,180.16 412.9,156.4 498.6,128.32 584.3,90.52 670,50.56" fill="none" stroke="#1f6b4a" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+          <g fill="#ffffff" stroke="#1f6b4a" stroke-width="2.5">
+            <circle cx="70" cy="219.04" r="5"/><circle cx="155.7" cy="211.48" r="5"/><circle cx="241.4" cy="198.52" r="5"/><circle cx="327.1" cy="180.16" r="5"/><circle cx="412.9" cy="156.4" r="5"/><circle cx="498.6" cy="128.32" r="5"/><circle cx="584.3" cy="90.52" r="5"/>
+          </g>
+          <circle cx="670" cy="50.56" r="7" fill="#e8a33d" stroke="#ffffff" stroke-width="3"/>
+          <g font-family="Inter" font-size="12" font-weight="700" fill="#1f6b4a" text-anchor="middle">
+            <text x="70" y="204">12</text><text x="155.7" y="196.5">19</text><text x="241.4" y="183.5">31</text><text x="327.1" y="165">48</text><text x="412.9" y="141.4">70</text><text x="498.6" y="113.3">96</text><text x="584.3" y="75.5">131</text>
+          </g>
+          <rect x="584" y="10" width="72" height="28" rx="8" fill="#0e3b2c"/>
+          <text x="620" y="29" text-anchor="middle" font-family="Inter" font-size="13" font-weight="700" fill="#ffffff">168 kt</text>
+        </svg>
+        <svg class="chart m-only" viewBox="0 0 340 214" aria-hidden="true">
+          <defs><linearGradient id="arm" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3e9b6b" stop-opacity="0.28"/><stop offset="1" stop-color="#3e9b6b" stop-opacity="0.02"/></linearGradient></defs>
+          <g stroke="#e9ece4" stroke-width="1">
+            <line x1="34" y1="16" x2="336" y2="16"/><line x1="34" y1="59.5" x2="336" y2="59.5"/><line x1="34" y1="103" x2="336" y2="103"/><line x1="34" y1="146.5" x2="336" y2="146.5"/>
+          </g>
+          <line x1="34" y1="190" x2="336" y2="190" stroke="#c9d0c4" stroke-width="1"/>
+          <g font-family="Inter" font-size="10" fill="#8a968e" text-anchor="end">
+            <text x="26" y="19.5">200</text><text x="26" y="63">150</text><text x="26" y="106.5">100</text><text x="26" y="150">50</text><text x="26" y="193.5">0</text>
+          </g>
+          <g font-family="Inter" font-size="10" fill="#6b7a71" text-anchor="middle">
+            <text x="46" y="208">2018</text><text x="86" y="208">2019</text><text x="126" y="208">2020</text><text x="166" y="208">2021</text><text x="206" y="208">2022</text><text x="246" y="208">2023</text><text x="286" y="208">2024</text><text x="326" y="208">2025</text>
+          </g>
+          <path d="M46,179.56 L86,173.47 L126,163.03 L166,148.24 L206,129.1 L246,106.48 L286,76.03 L326,43.84 L326,190 L46,190Z" fill="url(#arm)"/>
+          <polyline points="46,179.56 86,173.47 126,163.03 166,148.24 206,129.1 246,106.48 286,76.03 326,43.84" fill="none" stroke="#1f6b4a" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+          <g fill="#ffffff" stroke="#1f6b4a" stroke-width="2">
+            <circle cx="46" cy="179.56" r="3.5"/><circle cx="86" cy="173.47" r="3.5"/><circle cx="126" cy="163.03" r="3.5"/><circle cx="166" cy="148.24" r="3.5"/><circle cx="206" cy="129.1" r="3.5"/><circle cx="246" cy="106.48" r="3.5"/><circle cx="286" cy="76.03" r="3.5"/>
+          </g>
+          <circle cx="326" cy="43.84" r="5" fill="#e8a33d" stroke="#ffffff" stroke-width="2"/>
+          <g font-family="Inter" font-size="10" font-weight="700" fill="#1f6b4a" text-anchor="middle">
+            <text x="46" y="170.6">12</text><text x="86" y="164.5">19</text><text x="126" y="154">31</text><text x="166" y="139.2">48</text><text x="206" y="120.1">70</text><text x="246" y="97.5">96</text><text x="286" y="67">131</text>
+          </g>
+          <rect x="262" y="4" width="52" height="22" rx="6" fill="#0e3b2c"/>
+          <text x="288" y="19" text-anchor="middle" font-family="Inter" font-size="11" font-weight="700" fill="#ffffff">168 kt</text>
+        </svg>
+      </div>
+      <div class="card">
+        <div class="ct"><div><h3>Where each dollar goes</h3><small>Share of 2025 spending</small></div></div>
+        <svg class="donut" viewBox="0 0 200 200" aria-label="Donut chart of spending">
+          <g transform="rotate(-90 100 100)" fill="none" stroke-width="26">
+            <circle cx="100" cy="100" r="70" stroke="#1f6b4a" stroke-dasharray="252.1 187.72" stroke-dashoffset="0"/>
+            <circle cx="100" cy="100" r="70" stroke="#6cb88a" stroke-dasharray="89.36 350.46" stroke-dashoffset="-255.1"/>
+            <circle cx="100" cy="100" r="70" stroke="#e8a33d" stroke-dasharray="49.78 390.04" stroke-dashoffset="-347.46"/>
+            <circle cx="100" cy="100" r="70" stroke="#c3ccc0" stroke-dasharray="36.58 403.24" stroke-dashoffset="-400.24"/>
+          </g>
+          <text x="100" y="98" text-anchor="middle" font-family="DejaVu Serif" font-size="21" font-weight="700" fill="#0e3b2c">$24.6M</text>
+          <text x="100" y="120" text-anchor="middle" font-family="Inter" font-size="12" fill="#6b7a71">raised in 2025</text>
+        </svg>
+        <div class="dl">
+          <div><i style="background:#1f6b4a"></i>Planting &amp; saplings<b>58%</b></div>
+          <div><i style="background:#6cb88a"></i>Community stewards<b>21%</b></div>
+          <div><i style="background:#e8a33d"></i>Monitoring &amp; science<b>12%</b></div>
+          <div><i style="background:#c3ccc0"></i>Operations<b>9%</b></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sh">
+      <div><h2>Projects by region</h2><p>Survival is measured on permanent plots two years after planting.</p></div>
+      <span class="note">As of December 31, 2025</span>
+    </div>
+    <div class="tcard">
+      <table>
+        <thead><tr><th>Region</th><th class="r c-proj">Projects</th><th class="r c-ha">Hectares</th><th class="r">Trees planted</th><th>Survival</th><th class="c-stat">Status</th></tr></thead>
+        <tbody>
+          <tr><td class="n">East Africa highlands</td><td class="r c-proj">64</td><td class="r c-ha">5,820</td><td class="r">1,310,000</td><td><div class="sv"><span class="bar"><i style="width:97%"></i></span>97%</div></td><td class="c-stat"><span class="pill ok">On track</span></td></tr>
+          <tr><td class="n">Atlantic Forest, Brazil</td><td class="r c-proj">48</td><td class="r c-ha">4,110</td><td class="r">980,000</td><td><div class="sv"><span class="bar"><i style="width:95%"></i></span>95%</div></td><td class="c-stat"><span class="pill ok">On track</span></td></tr>
+          <tr><td class="n">Borneo lowlands</td><td class="r c-proj">37</td><td class="r c-ha">3,260</td><td class="r">760,000</td><td><div class="sv"><span class="bar"><i style="width:93%"></i></span>93%</div></td><td class="c-stat"><span class="pill mon">Monitoring</span></td></tr>
+          <tr><td class="n">Western Ghats, India</td><td class="r c-proj">41</td><td class="r c-ha">2,480</td><td class="r">590,000</td><td><div class="sv"><span class="bar"><i style="width:98%"></i></span>98%</div></td><td class="c-stat"><span class="pill ok">On track</span></td></tr>
+          <tr><td class="n">Sahel restoration belt</td><td class="r c-proj">29</td><td class="r c-ha">1,690</td><td class="r">360,000</td><td><div class="sv"><span class="bar"><i style="width:89%;background:#e07a5f"></i></span>89%</div></td><td class="c-stat"><span class="pill risk">At risk</span></td></tr>
+          <tr><td class="n">Central America dry forest</td><td class="r c-proj">23</td><td class="r c-ha">1,040</td><td class="r">200,000</td><td><div class="sv"><span class="bar"><i style="width:96%"></i></span>96%</div></td><td class="c-stat"><span class="pill ok">On track</span></td></tr>
+          <tr class="tot"><td>Total</td><td class="r c-proj">242</td><td class="r c-ha">18,400</td><td class="r">4,200,000</td><td>96%</td><td class="c-stat"></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="quote">
+    <div>
+      <div class="qm">“</div>
+      <blockquote>We used to walk two hours for firewood. Now the forest is ten minutes from the school, and the stream runs all year.</blockquote>
+      <div class="who"><i>AW</i><div><b>Amina Wanjiru</b><span>Community steward, Nyeri County</span></div></div>
+    </div>
+    <div class="qs">
+      <div><b>1,860</b><span>local stewards employed</span></div>
+      <div><b>41%</b><span>of nurseries led by women</span></div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sh"><div><h2>Milestones</h2><p>Seven years from a single nursery to six restoration regions.</p></div></div>
+    <div class="tl">
+      <div class="step"><span class="dot"></span><div class="yr">2019</div><h4>Our first 100,000 trees</h4><p>Two nurseries in Nyeri grow 14 native species from local seed.</p></div>
+      <div class="step"><span class="dot"></span><div class="yr">2021</div><h4>Satellite monitoring goes live</h4><p>Every site is mapped and checked for canopy loss each quarter.</p></div>
+      <div class="step"><span class="dot"></span><div class="yr">2023</div><h4>The Sahel belt partnership</h4><p>Farmer-managed regeneration across 29 villages in Niger.</p></div>
+      <div class="step last"><span class="dot"></span><div class="yr">2025</div><h4>4.2 million trees in one year</h4><p>Our largest season yet, with 96% two-year survival.</p></div>
+    </div>
+  </section>
+
+
+  <footer class="foot">
+    <div class="fg">
+      <div class="about">
+        <a class="brand" href="#"><svg width="30" height="30" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="17" fill="#0e3b2c"/><path d="M17 7c6 4 8 9 6 14-1.4 3.4-4 5-6 5s-4.6-1.6-6-5c-2-5 0-10 6-14z" fill="#8fd19e"/><path d="M17 11v18" stroke="#0e3b2c" stroke-width="2" stroke-linecap="round"/></svg>Canopy Fund</a>
+        <p>We fund community-led reforestation with native species, and publish every number we collect.</p>
+      </div>
+      <div><h5>Organization</h5><ul><li>About us</li><li>Team</li><li>Careers</li><li>Press</li></ul></div>
+      <div><h5>Reports</h5><ul><li>2025 Impact</li><li>2024 Impact</li><li>Financials</li><li>Methodology</li></ul></div>
+      <div><h5>Contact</h5><ul><li>hello@canopyfund.org</li><li>+1 (415) 555-0142</li><li>Newsletter</li></ul></div>
+    </div>
+    <div class="legal"><div>© 2026 Canopy Fund. Registered charity 1187342.</div><div><span>Privacy</span><span>Terms</span><span>Accessibility</span></div></div>
+  </footer>
+</div>
+</body>
+</html>

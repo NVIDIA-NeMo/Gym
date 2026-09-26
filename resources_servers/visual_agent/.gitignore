@@ -1,0 +1,8 @@
+data/vendor/
+results/
+data/visual_agent_tasks.jsonl
+# Rendered reference images (~23 MB): regenerate with `python build_dataset.py references`
+# (deterministic; reference_info.json records self_similarity 1.0 for every task).
+data/assets/*/*.png
+# Superseded task sets kept locally.
+data/archive/

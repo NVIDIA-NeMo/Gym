@@ -1,0 +1,41 @@
+# Grade with a fixed Qwen3.8-Flash-Next judge served by a separate vLLM-only job
+# (launch_judge_qwen3.8.sh) instead of the policy endpoint, so scores of different policies are
+# comparable. The launcher sets `endpoint_file` to the file that job publishes its router URL to.
+#
+# `base_url` is a placeholder that does not resolve: Gym's startup probe skips unresolvable
+# hosts, and the first judge request rebinds to the published URL (vllm_model endpoint_file).
+# A restarted judge job publishes its new host and in-flight graders follow it.
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: http://visual-agent-judge-unpublished.invalid/v1
+      endpoint_file: ???
+      # A judge job restart takes ~15 min to load; keep the last clients that long.
+      endpoint_stale_grace_s: 1800.0
+      api_key: dummy_api_key
+      model: qwen3.8-flash-next
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      chat_template_kwargs:
+        enable_thinking: true
+      extra_body:
+        skip_special_tokens: false
+      # Same judge sampling as qwen3.8_flash_next_override.yaml.
+      sampling_overrides:
+        num_workers: 16
+        max_output_tokens: null
+        max_tokens: null
+        max_completion_tokens: null
+        temperature: 0.6
+        top_p: 0.95
+
+visual_agent_resources_server:
+  resources_servers:
+    visual_agent:
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge:
+        max_context_window: 262144

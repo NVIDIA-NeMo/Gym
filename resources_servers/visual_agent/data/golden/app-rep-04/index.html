@@ -1,0 +1,703 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stratus Drive · Aurora</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    font-family: Inter, sans-serif; color: #1e2536; background: #f2f4f8;
+    -webkit-font-smoothing: antialiased; font-size: 14px;
+  }
+  button, input { font-family: inherit; color: inherit; font-size: inherit; }
+  button { border: 0; background: none; padding: 0; cursor: pointer; }
+  svg { display: block; flex: none; }
+  .ico { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .ico.sm { width: 16px; height: 16px; }
+  .ico.xs { width: 14px; height: 14px; }
+
+  .app { display: grid; grid-template-columns: 248px 1fr; grid-template-rows: 64px 1fr; height: 100vh; }
+
+  /* Sidebar */
+  .side { grid-row: 1 / 3; display: flex; flex-direction: column; padding: 0 14px 16px 16px; min-height: 0; }
+  .brand { display: flex; align-items: center; gap: 10px; height: 64px; padding: 0 6px; }
+  .brand-mark { width: 32px; height: 32px; border-radius: 9px; background: linear-gradient(145deg, #3b82f6, #1d4ed8); display: grid; place-items: center; box-shadow: 0 4px 10px rgba(37, 99, 235, 0.28); }
+  .brand-name { font-size: 18px; font-weight: 700; letter-spacing: -0.02em; color: #111827; }
+  .brand-name span { font-weight: 400; color: #5b6478; margin-left: 3px; }
+  .new { margin-top: 6px; align-self: flex-start; height: 48px; padding: 0 22px 0 16px; border-radius: 14px; background: #fff; color: #1e2536; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 10px; box-shadow: 0 1px 2px rgba(17, 24, 39, 0.08), 0 4px 12px rgba(17, 24, 39, 0.08); border: 1px solid #e3e7ef; }
+  .new .ico { color: #2563eb; width: 20px; height: 20px; stroke-width: 2.2; }
+  .nav { margin-top: 18px; display: flex; flex-direction: column; gap: 2px; }
+  .nav a { display: flex; align-items: center; gap: 14px; height: 38px; padding: 0 14px; border-radius: 19px; color: #465067; font-size: 14px; font-weight: 500; cursor: pointer; text-decoration: none; }
+  .nav a .ico { color: #6b7488; }
+  .nav a.active { background: #dce8fd; color: #1a4fc4; font-weight: 600; }
+  .nav a.active .ico { color: #2563eb; }
+  .nav a .badge { margin-left: auto; font-size: 12px; font-weight: 600; color: #6b7488; }
+  .nav a.active .badge { color: #1a4fc4; }
+  .side-sep { height: 1px; background: #e2e6ee; margin: 14px 8px 10px; }
+  .side-h { padding: 0 14px 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: #8a92a5; }
+  .drive { display: flex; align-items: center; gap: 12px; height: 34px; padding: 0 14px; font-size: 13px; color: #465067; }
+  .drive i { width: 10px; height: 10px; border-radius: 3px; }
+  .storage { margin-top: auto; padding: 14px; border-radius: 14px; background: #fff; border: 1px solid #e3e7ef; }
+  .storage-head { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: #1e2536; }
+  .storage-head .ico { color: #2563eb; }
+  .meter { margin-top: 10px; height: 6px; border-radius: 99px; background: #e5e9f1; overflow: hidden; }
+  .meter i { display: block; height: 100%; border-radius: 99px; background: linear-gradient(90deg, #3b82f6, #2563eb); }
+  .storage-note { margin-top: 8px; font-size: 12px; color: #6b7488; }
+  .storage-btn { margin-top: 12px; width: 100%; height: 34px; border-radius: 17px; border: 1px solid #c9d6f2; color: #1d4ed8; font-size: 13px; font-weight: 600; background: #fff; }
+
+  /* Top bar */
+  .top { display: flex; align-items: center; gap: 14px; padding: 0 20px 0 0; }
+  .search { display: flex; align-items: center; gap: 12px; height: 46px; width: 620px; padding: 0 8px 0 16px; border-radius: 23px; background: #e6eaf1; color: #5b6478; }
+  .search input { border: 0; outline: 0; background: none; font-size: 15px; flex: 1; min-width: 0; color: #1e2536; }
+  .search input::placeholder { color: #5b6478; }
+  .search .tune { width: 32px; height: 32px; border-radius: 16px; display: grid; place-items: center; color: #465067; }
+  .top-icons { margin-left: auto; display: flex; align-items: center; gap: 6px; color: #465067; }
+  .icon-btn { width: 36px; height: 36px; border-radius: 18px; display: grid; place-items: center; color: #465067; }
+  .av { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-size: 12px; font-weight: 700; flex: none; }
+  .top .av { margin-left: 8px; width: 34px; height: 34px; box-shadow: 0 0 0 2px #f2f4f8, 0 0 0 3px #c9d3e6; }
+
+  /* Content */
+  .content { display: grid; grid-template-columns: 1fr 296px; gap: 16px; padding: 0 16px 16px 0; min-height: 0; }
+  .panel { background: #fff; border-radius: 18px; box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05), 0 0 0 1px rgba(17, 24, 39, 0.04); min-height: 0; }
+  .main { display: flex; flex-direction: column; overflow: hidden; }
+  .sortbtn { white-space: nowrap; }
+  .head { display: flex; align-items: center; gap: 10px; height: 60px; padding: 8px 16px 0 22px; }
+  .crumbs { display: flex; align-items: center; gap: 4px; font-size: 20px; color: #5b6478; min-width: 0; }
+  .crumbs a { padding: 4px 8px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+  .crumbs a:first-child { margin-left: -8px; }
+  .crumbs a.cur { color: #111827; font-weight: 600; display: flex; align-items: center; gap: 4px; }
+  .crumbs .sep { color: #9aa2b4; width: 18px; height: 18px; }
+  .seg { margin-left: auto; display: flex; border: 1px solid #cfd6e3; border-radius: 18px; overflow: hidden; }
+  .seg button { width: 46px; height: 34px; display: grid; place-items: center; color: #465067; }
+  .seg button + button { border-left: 1px solid #cfd6e3; }
+  .seg button.on { background: #dce8fd; color: #1a4fc4; }
+  .seg .ico { width: 17px; height: 17px; }
+  .toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 20px 0 22px; height: 44px; }
+  .chip { height: 32px; padding: 0 10px 0 12px; border-radius: 9px; border: 1px solid #cfd6e3; display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; color: #394257; }
+  .chip .ico { color: #6b7488; }
+  .count { margin-left: auto; font-size: 13px; color: #5b6478; font-variant-numeric: tabular-nums; }
+  .count b { color: #1e2536; font-weight: 600; }
+  .label { font-size: 13px; font-weight: 600; color: #394257; }
+  .sec { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 20px 0 22px; }
+  .sec.folders-h { margin-top: 8px; }
+  .folders { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 2px 20px 6px 22px; }
+  .fchip { display: flex; align-items: center; gap: 10px; height: 54px; padding: 0 12px; border-radius: 12px; background: #f3f5f9; border: 1px solid #e8ecf2; cursor: pointer; user-select: none; min-width: 0; }
+  .fchip:hover { background: #eaeef5; }
+  .fchip .fold { width: 22px; height: 22px; }
+  .fchip b { display: block; font-size: 13px; font-weight: 600; color: #1e2536; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fchip small { display: block; margin-top: 1px; font-size: 12px; color: #6b7488; }
+  .fchip .txt { min-width: 0; }
+  .selbar { display: none; align-items: center; gap: 2px; height: 30px; padding: 0 4px 0 12px; border-radius: 15px; background: #dce8fd; color: #1a4fc4; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .selbar.show { display: flex; }
+  .selbar .t { margin-right: 6px; white-space: nowrap; }
+  .selbar button { width: 26px; height: 26px; border-radius: 13px; display: grid; place-items: center; color: #1a4fc4; }
+  .selbar .ico { width: 15px; height: 15px; }
+  .sortbtn { margin-left: auto; display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; border-radius: 15px; font-size: 13px; font-weight: 500; color: #394257; }
+  .sortbtn .ico { width: 15px; height: 15px; color: #1a4fc4; }
+
+  /* Table */
+  .table { flex: 1; min-height: 0; padding: 0 12px 8px; overflow: hidden; }
+  .thead, .row { display: grid; grid-template-columns: minmax(0, 1fr) 146px 118px 84px 40px; align-items: center; }
+  .thead { height: 36px; padding: 0 10px; border-bottom: 1px solid #e8ecf2; font-size: 12px; font-weight: 600; color: #5b6478; }
+  .thead .th { display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
+  .thead .th.sorted { color: #1a4fc4; }
+  .thead .th .ico { width: 14px; height: 14px; }
+  .thead .th.right { justify-content: flex-end; }
+  .row { height: 42px; padding: 0 10px; border-bottom: 1px solid #f0f2f6; cursor: default; user-select: none; }
+  .row:last-child { border-bottom-color: transparent; }
+  .row:hover { background: #f6f8fb; }
+  .row.sel { background: #e3edfd; border-bottom-color: #e3edfd; border-radius: 10px; }
+  .name { display: flex; align-items: center; gap: 12px; min-width: 0; font-size: 14px; font-weight: 500; color: #1e2536; }
+  .name .n { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .owner { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #465067; white-space: nowrap; }
+  .owner .av { width: 22px; height: 22px; font-size: 9px; }
+  .mod { font-size: 13px; color: #465067; font-variant-numeric: tabular-nums; }
+  .size { font-size: 13px; color: #465067; text-align: right; font-variant-numeric: tabular-nums; }
+  .star { width: 30px; height: 30px; border-radius: 15px; display: grid; place-items: center; margin-left: auto; color: #b3bac8; }
+  .star .ico { width: 17px; height: 17px; }
+  .star.on { color: #f0a020; }
+  .star.on .ico { fill: #f5b73b; stroke: #e39a12; }
+  .meta { display: none; }
+  .empty { padding: 48px 0; text-align: center; color: #6b7488; font-size: 14px; }
+
+  /* File type icons */
+  .ft { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; flex: none; }
+  .ft svg { width: 18px; height: 18px; }
+  .ft-pdf { background: #fde7e7; } .ft-sheet { background: #dff3e7; } .ft-doc { background: #e1ebfd; }
+  .ft-image { background: #f5e3fb; } .ft-video { background: #feead9; } .ft-zip { background: #e9edf3; } .ft-figma { background: #fff; border: 1px solid #e3e7ef; }
+
+  /* Grid view */
+  .grid { display: none; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 4px 8px 12px; }
+  .main.gridmode .grid { display: grid; }
+  .main.gridmode .thead, .main.gridmode .rows { display: none; }
+  .main.gridmode .table { overflow: auto; }
+  .card { border-radius: 12px; border: 1px solid #e3e7ef; background: #f7f8fb; overflow: hidden; cursor: default; user-select: none; }
+  .card.sel { border-color: #7aa4f2; background: #e3edfd; box-shadow: 0 0 0 1px #7aa4f2; }
+  .card .cap { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 6px 0 10px; font-size: 13px; font-weight: 500; }
+  .card .cap .ft { width: 22px; height: 22px; border-radius: 6px; }
+  .card .cap .ft svg { width: 14px; height: 14px; }
+  .card .cap .n { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .pv { height: 112px; margin: 0 8px 8px; border-radius: 8px; }
+
+  /* Previews */
+  .pv { position: relative; overflow: hidden; border-radius: 12px; display: grid; place-items: center; }
+  .pv-pdf { background: #fbe4e1; }
+  .pv-sheet { background: #dcf1e4; }
+  .pv-doc { background: #dfe9fc; }
+  .pv-zip { background: #e7ebf1; }
+  .pv-video { background: linear-gradient(135deg, #1f2a44, #3b2f5c); }
+  .pv-figma { background: #2b2d33; }
+  .pv-image { background: linear-gradient(180deg, #ffd3b0 0%, #f7a8c4 55%, #c9a7f0 100%); }
+  .page { width: 44%; height: 84%; align-self: end; background: #fff; border-radius: 4px 4px 0 0; box-shadow: 0 2px 8px rgba(17, 24, 39, 0.12); padding: 9% 8% 0; display: flex; flex-direction: column; gap: 6%; }
+  .page i { display: block; height: 5px; border-radius: 3px; background: #e3e7ef; }
+  .page i.h { height: 8px; width: 60%; background: #e5484d; }
+  .page i.s { width: 70%; }
+  .page .blk { height: 26%; border-radius: 4px; background: linear-gradient(120deg, #22c1a4, #3b82f6 55%, #8b5cf6); }
+  .pv-doc .page i.h { background: #2563eb; }
+  .sheet { width: 70%; height: 80%; align-self: end; background: #fff; border-radius: 4px 4px 0 0; box-shadow: 0 2px 8px rgba(17, 24, 39, 0.12); background-image: linear-gradient(#1f9d55 0 14%, transparent 14%), repeating-linear-gradient(0deg, transparent 0 13px, #e3e7ef 13px 14px), repeating-linear-gradient(90deg, transparent 0 27px, #e3e7ef 27px 28px); }
+  .play { width: 44px; height: 44px; border-radius: 50%; background: rgba(255, 255, 255, 0.92); display: grid; place-items: center; }
+  .dur { position: absolute; right: 8px; bottom: 8px; font-size: 11px; font-weight: 600; color: #fff; background: rgba(0, 0, 0, 0.55); border-radius: 5px; padding: 1px 6px; }
+  .zipbig { width: 46px; height: 58px; border-radius: 6px; background: #fff; box-shadow: 0 2px 8px rgba(17, 24, 39, 0.12); position: relative; }
+  .zipbig::before { content: ""; position: absolute; left: 20px; top: 0; width: 6px; height: 34px; background: repeating-linear-gradient(180deg, #64748b 0 4px, #cbd3df 4px 8px); }
+  .zipbig::after { content: ""; position: absolute; left: 17px; top: 34px; width: 12px; height: 14px; border-radius: 3px; border: 2px solid #64748b; }
+  .frames { display: flex; gap: 8%; width: 80%; height: 64%; }
+  .frames i { flex: 1; border-radius: 5px; background: #fff; position: relative; }
+  .frames i::before { content: ""; position: absolute; left: 14%; right: 14%; top: 14%; height: 22%; border-radius: 3px; background: #a78bfa; }
+  .frames i:nth-child(2)::before { background: #34d399; }
+  .frames i:nth-child(3)::before { background: #fb923c; }
+  .frames i::after { content: ""; position: absolute; left: 14%; right: 30%; top: 46%; height: 8%; border-radius: 3px; background: #e5e7eb; box-shadow: 0 10px 0 #e5e7eb; }
+  .pv-image svg { position: absolute; left: 0; bottom: 0; width: 100%; height: 70%; }
+
+  /* Details pane */
+  .details { display: flex; flex-direction: column; padding: 18px 18px 16px; overflow: hidden; }
+  .d-head { display: flex; align-items: flex-start; gap: 10px; }
+  .d-head .ft { width: 28px; height: 28px; }
+  .d-title { flex: 1; min-width: 0; font-size: 15px; font-weight: 600; color: #111827; line-height: 20px; margin-top: 4px; overflow-wrap: anywhere; }
+  .d-close { width: 28px; height: 28px; border-radius: 14px; display: grid; place-items: center; color: #6b7488; }
+  .d-pv { margin-top: 14px; height: 150px; }
+  .d-pv .pv { height: 100%; }
+  .d-sec { margin-top: 16px; font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #6b7488; }
+  .props { margin-top: 8px; display: grid; grid-template-columns: 78px 1fr; row-gap: 9px; font-size: 13px; }
+  .props dt { color: #6b7488; }
+  .props dd { margin: 0; color: #1e2536; font-weight: 500; display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .props dd .av { width: 20px; height: 20px; font-size: 8px; }
+  .props dd .fold { width: 16px; height: 16px; }
+  .access { margin-top: 10px; display: flex; align-items: center; }
+  .access .av { width: 30px; height: 30px; font-size: 10px; box-shadow: 0 0 0 2px #fff; }
+  .access .av + .av { margin-left: 4px; }
+  .access .more { background: #e6eaf1; color: #465067; }
+  .access button { margin-left: auto; height: 30px; padding: 0 12px; border-radius: 15px; border: 1px solid #c9d6f2; color: #1d4ed8; font-size: 12px; font-weight: 600; }
+  .acts { margin-top: 10px; display: flex; flex-direction: column; gap: 12px; }
+  .act { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; color: #465067; line-height: 18px; }
+  .act .av { width: 26px; height: 26px; font-size: 10px; }
+  .act b { color: #1e2536; font-weight: 600; }
+  .act small { display: block; font-size: 12px; color: #8a92a5; }
+  .d-empty { margin: auto; text-align: center; color: #6b7488; font-size: 13px; line-height: 20px; }
+  .d-empty .big { width: 56px; height: 56px; border-radius: 16px; background: #eef2f8; display: grid; place-items: center; margin: 0 auto 12px; color: #6b7488; }
+  .d-multi { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+  .d-multi .it { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .d-multi .it .ft { width: 24px; height: 24px; border-radius: 6px; }
+  .d-multi .it .ft svg { width: 14px; height: 14px; }
+  .d-multi .it .nm { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .d-multi .it em { font-style: normal; color: #6b7488; font-variant-numeric: tabular-nums; }
+
+  .m-only { display: none; }
+
+  /* Mobile */
+  @media (max-width: 700px) {
+    body { background: #fff; }
+    .app { display: block; height: auto; }
+    .main { position: relative; }
+    .selbar button:not(#sel-clear) { display: none; }
+    .sortbtn { white-space: nowrap; padding: 0 4px 0 8px; }
+    .side, .top, .details, .head, .toolbar .chip { display: none; }
+    .content { display: block; padding: 0; }
+    .panel { border-radius: 0; box-shadow: none; }
+    .m-only { display: flex; }
+    .m-search { align-items: center; gap: 12px; height: 50px; margin: 10px 14px 0; padding: 0 8px 0 14px; border-radius: 25px; background: #e9edf3; color: #465067; }
+    .m-search .ph { flex: 1; font-size: 15px; color: #5b6478; }
+    .m-search .av { width: 32px; height: 32px; }
+    .m-title { flex-direction: column; padding: 16px 18px 0; }
+    .m-title .up { display: flex; align-items: center; gap: 2px; font-size: 13px; font-weight: 500; color: #1a4fc4; margin-left: -4px; }
+    .m-title h1 { margin: 2px 0 0; font-size: 24px; font-weight: 700; letter-spacing: -0.02em; color: #111827; }
+    .toolbar { padding: 4px 18px 0; height: 36px; }
+    .count { margin-left: 0; }
+    .toolbar .seg { margin-left: auto; }
+    .seg button { width: 40px; height: 30px; }
+    .sec { padding: 0 18px; }
+    .sec.folders-h { margin-top: 6px; }
+    .folders { grid-template-columns: 1fr 1fr; gap: 10px; padding: 2px 18px 6px; }
+    .fchip { height: 50px; }
+    .table { padding: 0 6px; overflow: visible; }
+    .thead { display: none; }
+    .row { grid-template-columns: minmax(0, 1fr) 36px; height: 60px; padding: 0 8px 0 12px; border-bottom: 0; }
+    .row.sel { border-radius: 12px; }
+    .owner, .mod, .size { display: none; }
+    .name { gap: 14px; }
+    .name .ft { width: 36px; height: 36px; border-radius: 10px; }
+    .name .ft svg { width: 20px; height: 20px; }
+    .name .txt { min-width: 0; display: flex; flex-direction: column; }
+    .meta { display: block; margin-top: 2px; font-size: 12px; font-weight: 400; color: #6b7488; font-variant-numeric: tabular-nums; }
+    .grid { grid-template-columns: 1fr 1fr; padding: 4px 12px 12px; }
+    .fab { position: absolute; right: 16px; bottom: 84px; height: 54px; padding: 0 22px 0 18px; border-radius: 18px; background: #2563eb; color: #fff; font-weight: 600; font-size: 15px; align-items: center; gap: 8px; box-shadow: 0 8px 20px rgba(37, 99, 235, 0.35); }
+    .fab .ico { width: 20px; height: 20px; stroke-width: 2.2; }
+    .mnav { position: sticky; bottom: 0; margin-top: 90px; justify-content: space-around; height: 68px; border-top: 1px solid #e8ecf2; background: #fff; }
+    .mnav a { display: flex; flex-direction: column; align-items: center; gap: 4px; padding-top: 8px; width: 80px; font-size: 11px; font-weight: 600; color: #6b7488; text-decoration: none; cursor: pointer; }
+    .mnav a .pill { width: 56px; height: 30px; border-radius: 15px; display: grid; place-items: center; }
+    .mnav a.active { color: #1a4fc4; }
+    .mnav a.active .pill { background: #dce8fd; }
+  }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+    <symbol id="i-tune" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.6"/><path d="M12 17h.01"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-drive" viewBox="0 0 24 24"><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M5.5 13 8 5h8l2.5 8"/><path d="M7 16.5h.01M10 16.5h.01"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7"/><path d="M18.5 14.5a6.5 6.5 0 0 1 3 5.5"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 2.8 2.85 5.78 6.38.93-4.62 4.5 1.09 6.35L12 17.36l-5.7 3 1.09-6.35-4.62-4.5 6.38-.93L12 2.8z"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 10v6M14 10v6"/></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 9.5a4.25 4.25 0 0 1-.5 8.5z"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+    <symbol id="i-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
+    <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="i-share" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M19 8v6M16 11h6"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5"/><path d="M4 19h16"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11 12 4l9 7"/><path d="M5 10v10h14V10"/></symbol>
+    <symbol id="i-folder-o" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+  </defs>
+</svg>
+
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <div class="brand-mark"><svg viewBox="0 0 24 24" width="20" height="20" fill="#fff"><path d="M7.2 18.5a4.6 4.6 0 0 1-.7-9.15A6.1 6.1 0 0 1 18.3 9.9a4.3 4.3 0 0 1-.6 8.6z"/><path d="M8 15.2h8" stroke="#3b82f6" stroke-width="1.6" stroke-linecap="round"/></svg></div>
+      <div class="brand-name">Stratus<span>Drive</span></div>
+    </div>
+    <button class="new"><svg class="ico"><use href="#i-plus"/></svg>New</button>
+    <nav class="nav" id="nav">
+      <a data-view="folder" class="active"><svg class="ico"><use href="#i-drive"/></svg>My Drive</a>
+      <a data-view="shared"><svg class="ico"><use href="#i-users"/></svg>Shared with me</a>
+      <a data-view="recent"><svg class="ico"><use href="#i-clock"/></svg>Recent</a>
+      <a data-view="starred"><svg class="ico"><use href="#i-star"/></svg>Starred</a>
+      <a data-view="trash"><svg class="ico"><use href="#i-trash"/></svg>Trash<span class="badge" id="trash-badge"></span></a>
+    </nav>
+    <div class="side-sep"></div>
+    <div class="side-h">SHARED DRIVES</div>
+    <div class="drive"><i style="background:#2563eb"></i>Product Design</div>
+    <div class="drive"><i style="background:#0f9d8a"></i>Marketing</div>
+    <div class="drive"><i style="background:#e2683c"></i>Customer Success</div>
+    <div class="storage">
+      <div class="storage-head"><svg class="ico"><use href="#i-cloud"/></svg>Storage</div>
+      <div class="meter"><i id="meter"></i></div>
+      <div class="storage-note" id="storage-note"></div>
+      <button class="storage-btn">Get more storage</button>
+    </div>
+  </aside>
+
+  <header class="top">
+    <label class="search"><svg class="ico"><use href="#i-search"/></svg><input id="q" type="text" placeholder="Search in Drive" autocomplete="off"><span class="tune"><svg class="ico"><use href="#i-tune"/></svg></span></label>
+    <div class="top-icons">
+      <span class="icon-btn"><svg class="ico"><use href="#i-help"/></svg></span>
+      <span class="icon-btn"><svg class="ico"><use href="#i-gear"/></svg></span>
+      <span class="av" style="background:#6d5bd0">MC</span>
+    </div>
+  </header>
+
+  <div class="content">
+    <main class="panel main" id="main">
+      <div class="m-only m-search"><svg class="ico"><use href="#i-menu"/></svg><span class="ph">Search in Drive</span><span class="av" style="background:#6d5bd0">MC</span></div>
+      <div class="m-only m-title" id="m-title"></div>
+      <div class="head">
+        <nav class="crumbs" id="crumbs"></nav>
+        <div class="seg" id="seg-d"><button data-layout="list" class="on" aria-label="List view"><svg class="ico"><use href="#i-list"/></svg></button><button data-layout="grid" aria-label="Grid view"><svg class="ico"><use href="#i-grid"/></svg></button></div>
+        <span class="icon-btn"><svg class="ico"><use href="#i-info"/></svg></span>
+      </div>
+      <div class="toolbar">
+        <span class="chip">Type<svg class="ico xs"><use href="#i-down"/></svg></span>
+        <span class="chip">People<svg class="ico xs"><use href="#i-down"/></svg></span>
+        <span class="chip">Modified<svg class="ico xs"><use href="#i-down"/></svg></span>
+        <span class="count" id="count"></span>
+        <div class="seg m-only" id="seg-m"><button data-layout="list" class="on" aria-label="List view"><svg class="ico"><use href="#i-list"/></svg></button><button data-layout="grid" aria-label="Grid view"><svg class="ico"><use href="#i-grid"/></svg></button></div>
+      </div>
+      <div id="folders-wrap">
+        <div class="sec folders-h"><span class="label">Folders</span></div>
+        <div class="folders" id="folders"></div>
+      </div>
+      <div class="sec">
+        <span class="label">Files</span>
+        <div class="selbar" id="selbar"><span class="t" id="seltext"></span><button title="Share"><svg class="ico"><use href="#i-share"/></svg></button><button title="Download"><svg class="ico"><use href="#i-download"/></svg></button><button title="Move to Trash" id="sel-trash"><svg class="ico"><use href="#i-trash"/></svg></button><button title="Clear selection" id="sel-clear"><svg class="ico"><use href="#i-x"/></svg></button></div>
+        <button class="sortbtn" id="sortbtn"></button>
+      </div>
+      <div class="table">
+        <div class="thead" id="thead">
+          <div class="th" data-sort="name">Name</div>
+          <div class="th">Owner</div>
+          <div class="th" data-sort="modified">Last modified</div>
+          <div class="th right" data-sort="size">File size</div>
+          <div></div>
+        </div>
+        <div class="rows" id="rows"></div>
+        <div class="grid" id="grid"></div>
+      </div>
+      <button class="m-only fab"><svg class="ico"><use href="#i-plus"/></svg>New</button>
+      <nav class="m-only mnav">
+        <a><span class="pill"><svg class="ico"><use href="#i-home"/></svg></span>Home</a>
+        <a><span class="pill"><svg class="ico"><use href="#i-star"/></svg></span>Starred</a>
+        <a><span class="pill"><svg class="ico"><use href="#i-users"/></svg></span>Shared</a>
+        <a class="active"><span class="pill"><svg class="ico"><use href="#i-folder-o"/></svg></span>Files</a>
+      </nav>
+    </main>
+    <aside class="panel details" id="details"></aside>
+  </div>
+</div>
+
+<script>
+const PEOPLE = {
+  MC: { name: 'Maya Chen', color: '#6d5bd0' },
+  DO: { name: 'Daniel Okafor', color: '#0f9d8a' },
+  PR: { name: 'Priya Raman', color: '#e2683c' },
+  LF: { name: 'Lena Fischer', color: '#d6457a' },
+  TS: { name: 'Tomás Silva', color: '#3b82c4' },
+};
+const ME = 'MC';
+const FOLDERS = {
+  aurora: { name: 'Aurora', path: ['My Drive', 'Projects', 'Aurora'], children: ['brand', 'research', 'sprints', 'archive'] },
+  brand: { name: 'Brand assets', parent: 'aurora', color: '#d6457a' },
+  research: { name: 'Research', parent: 'aurora', color: '#0f9d8a' },
+  sprints: { name: 'Sprint reviews', parent: 'aurora', color: '#2563eb' },
+  archive: { name: 'Archive 2025', parent: 'aurora', color: '#7c8698' },
+};
+const KIND_LABEL = { pdf: 'PDF document', sheet: 'Spreadsheet', doc: 'Document', image: 'PNG image', video: 'MP4 video', zip: 'ZIP archive', figma: 'Figma design' };
+// kb: size in KB (1 MB = 1000 KB). Dates are ISO strings.
+const FILES = [
+  { id: 1, name: 'Aurora brand guidelines.pdf', kind: 'pdf', kb: 8400, owner: 'MC', modified: '2026-09-22', created: '2026-08-14', folder: 'aurora', starred: false, access: ['MC', 'LF', 'DO', 'PR', 'TS'],
+    activity: [['LF', 'edited', 'Sep 22'], ['DO', 'commented', 'Sep 20'], ['MC', 'uploaded', 'Aug 14']] },
+  { id: 2, name: 'Q3 budget forecast.xlsx', kind: 'sheet', kb: 1200, owner: 'DO', modified: '2026-09-24', created: '2026-07-30', folder: 'aurora', starred: true, access: ['DO', 'MC', 'PR'] },
+  { id: 3, name: 'Launch plan v3.docx', kind: 'doc', kb: 486, owner: 'PR', modified: '2026-09-23', created: '2026-09-01', folder: 'aurora', starred: true, access: ['PR', 'MC', 'DO', 'LF'] },
+  { id: 4, name: 'Hero illustration.png', kind: 'image', kb: 5800, owner: 'LF', modified: '2026-09-18', created: '2026-09-16', folder: 'aurora', starred: false, access: ['LF', 'MC'] },
+  { id: 5, name: 'Product walkthrough.mp4', kind: 'video', kb: 248600, owner: 'TS', modified: '2026-09-15', created: '2026-09-15', folder: 'aurora', starred: false, access: ['TS', 'MC', 'LF'] },
+  { id: 6, name: 'Onboarding flows.fig', kind: 'figma', kb: 32400, owner: 'LF', modified: '2026-09-21', created: '2026-06-09', folder: 'aurora', starred: true, access: ['LF', 'MC', 'TS', 'PR'] },
+  { id: 7, name: 'Press kit.zip', kind: 'zip', kb: 64100, owner: 'MC', modified: '2026-09-10', created: '2026-09-10', folder: 'aurora', starred: false, access: ['MC'] },
+  { id: 8, name: 'Interview notes.docx', kind: 'doc', kb: 212, owner: 'PR', modified: '2026-09-12', created: '2026-08-20', folder: 'aurora', starred: false, access: ['PR', 'MC'] },
+  { id: 9, name: 'Pricing experiments.xlsx', kind: 'sheet', kb: 740, owner: 'DO', modified: '2026-09-19', created: '2026-08-03', folder: 'aurora', starred: false, access: ['DO', 'MC'] },
+  { id: 10, name: 'App icon exports.zip', kind: 'zip', kb: 18900, owner: 'TS', modified: '2026-09-08', created: '2026-09-08', folder: 'aurora', starred: false, access: ['TS', 'LF', 'MC'] },
+  { id: 11, name: 'Logo primary.png', kind: 'image', kb: 48, owner: 'LF', modified: '2026-09-05', created: '2026-09-05', folder: 'brand', starred: false, access: ['LF', 'MC'] },
+  { id: 12, name: 'Brand palette.pdf', kind: 'pdf', kb: 1900, owner: 'LF', modified: '2026-09-03', created: '2026-08-28', folder: 'brand', starred: false, access: ['LF', 'MC'] },
+  { id: 13, name: 'Typography specimen.fig', kind: 'figma', kb: 12600, owner: 'LF', modified: '2026-08-31', created: '2026-08-12', folder: 'brand', starred: false, access: ['LF', 'MC'] },
+  { id: 14, name: 'User survey results.xlsx', kind: 'sheet', kb: 2300, owner: 'PR', modified: '2026-08-28', created: '2026-08-11', folder: 'research', starred: false, access: ['PR', 'MC'] },
+  { id: 15, name: 'Competitor audit.pdf', kind: 'pdf', kb: 14700, owner: 'DO', modified: '2026-08-30', created: '2026-08-02', folder: 'research', starred: false, access: ['DO', 'MC'] },
+  { id: 16, name: 'Usability test clips.mp4', kind: 'video', kb: 512400, owner: 'TS', modified: '2026-09-02', created: '2026-09-02', folder: 'research', starred: false, access: ['TS', 'PR', 'MC'] },
+  { id: 17, name: 'Persona sketches.png', kind: 'image', kb: 3100, owner: 'LF', modified: '2026-08-25', created: '2026-08-21', folder: 'research', starred: false, access: ['LF', 'PR'] },
+  { id: 18, name: 'Sprint 14 review.pdf', kind: 'pdf', kb: 3800, owner: 'PR', modified: '2026-08-29', created: '2026-08-29', folder: 'sprints', starred: false, access: ['PR', 'MC'] },
+  { id: 19, name: 'Sprint 15 review.pdf', kind: 'pdf', kb: 4200, owner: 'PR', modified: '2026-09-12', created: '2026-09-12', folder: 'sprints', starred: false, access: ['PR', 'MC'] },
+  { id: 20, name: 'Aurora 2025 assets.zip', kind: 'zip', kb: 1400000, owner: 'MC', modified: '2026-01-15', created: '2026-01-15', folder: 'archive', starred: false, access: ['MC'] },
+];
+const STORAGE_TOTAL_GB = 100;
+let storageUsedKb = 41300000;
+
+const state = {
+  view: 'folder', folder: 'aurora', sort: { key: 'modified', dir: 'desc' }, layout: 'list',
+  selected: new Set([1]), anchor: 1, query: '',
+};
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const fmtDate = (iso) => { const [y, m, d] = iso.split('-').map(Number); return `${MONTHS[m - 1]} ${d}, ${y}`; };
+const fmtSize = (kb) => {
+  if (kb < 1000) return `${kb} KB`;
+  const mb = kb / 1000;
+  if (mb < 1000) return `${mb.toFixed(1)} MB`;
+  return `${(mb / 1000).toFixed(1)} GB`;
+};
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+const av = (p, extra = '') => `<span class="av" style="background:${PEOPLE[p].color}"${extra}>${p}</span>`;
+const icon = (id, cls = 'ico') => `<svg class="${cls}"><use href="#${id}"/></svg>`;
+
+const GLYPH = {
+  pdf: '<svg viewBox="0 0 24 24"><text x="12" y="15.8" text-anchor="middle" font-family="Inter, sans-serif" font-size="10.4" font-weight="800" letter-spacing="-0.3" fill="#d93d42">PDF</text></svg>',
+  sheet: '<svg viewBox="0 0 24 24" fill="none" stroke="#1f9d55" stroke-width="1.9"><rect x="4" y="4" width="16" height="16" rx="2.5"/><path d="M4 9.5h16M4 14.8h16M10 9.5V20"/></svg>',
+  doc: '<svg viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round"><path d="M6 6.5h12M6 10.5h12M6 14.5h12M6 18.5h7"/></svg>',
+  image: '<svg viewBox="0 0 24 24" fill="none" stroke="#b340d6" stroke-width="1.9" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="9.5" r="1.8" fill="#b340d6" stroke="none"/><path d="m3.5 17 5-5 4 4 3-3 5 5"/></svg>',
+  video: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3" fill="#f07b1f"/><path d="M10 9v6l5-3z" fill="#fff"/></svg>',
+  zip: '<svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2.5" fill="none" stroke="#5b6b82" stroke-width="1.9"/><path d="M11 3h2v2h-2zM11 7h2v2h-2zM11 11h2v2h-2z" fill="#5b6b82"/><rect x="10.3" y="13.5" width="3.4" height="4" rx="1" fill="#5b6b82"/></svg>',
+  figma: '<svg viewBox="0 0 24 24"><path d="M8.5 3h3.5v6H8.5a3 3 0 0 1 0-6z" fill="#f24e1e"/><path d="M12 3h3.5a3 3 0 0 1 0 6H12z" fill="#ff7262"/><path d="M8.5 9H12v6H8.5a3 3 0 0 1 0-6z" fill="#a259ff"/><circle cx="15.5" cy="12" r="3" fill="#1abcfe"/><path d="M8.5 15H12v3a3 3 0 1 1-3.5-3z" fill="#0acf83"/></svg>',
+};
+const ft = (kind) => `<span class="ft ft-${kind}">${GLYPH[kind]}</span>`;
+const folderSvg = (color, cls = 'fold') => `<svg class="${cls}" viewBox="0 0 24 24"><path d="M2.5 6.5A2 2 0 0 1 4.5 4.5h4.3l2 2.2h8.7a2 2 0 0 1 2 2v9.8a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2z" fill="${color}"/><path d="M2.5 9.5h19v9a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2z" fill="${color}" opacity="0.82"/></svg>`;
+
+function preview(f) {
+  switch (f.kind) {
+    case 'pdf': return `<div class="pv pv-pdf"><div class="page"><i class="h"></i><i></i><i class="s"></i><div class="blk"></div><i></i><i class="s"></i></div></div>`;
+    case 'doc': return `<div class="pv pv-doc"><div class="page"><i class="h"></i><i></i><i></i><i class="s"></i><i></i><i></i><i class="s"></i></div></div>`;
+    case 'sheet': return `<div class="pv pv-sheet"><div class="sheet"></div></div>`;
+    case 'zip': return `<div class="pv pv-zip"><div class="zipbig"></div></div>`;
+    case 'video': return `<div class="pv pv-video"><div class="play"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M8 5.5v13l10.5-6.5z" fill="#1f2a44"/></svg></div><span class="dur">${f.id === 5 ? '2:48' : '14:05'}</span></div>`;
+    case 'figma': return `<div class="pv pv-figma"><div class="frames"><i></i><i></i><i></i></div></div>`;
+    case 'image': return `<div class="pv pv-image"><svg viewBox="0 0 200 100" preserveAspectRatio="none"><circle cx="140" cy="30" r="16" fill="#fff4d6"/><path d="M0 100 L0 62 L42 30 L78 58 L112 36 L160 70 L200 48 L200 100 Z" fill="#7c5cc4"/><path d="M0 100 L0 78 L56 56 L100 80 L150 60 L200 82 L200 100 Z" fill="#4b3a8c"/></svg></div>`;
+  }
+  return '';
+}
+
+const byId = (id) => FILES.find((f) => f.id === id);
+function viewFiles() {
+  let list;
+  if (state.view === 'starred') list = FILES.filter((f) => f.starred && !f.trashed);
+  else if (state.view === 'trash') list = FILES.filter((f) => f.trashed);
+  else list = FILES.filter((f) => f.folder === state.folder && !f.trashed);
+  const { key, dir } = state.sort;
+  const cmpName = (a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' });
+  list.sort((a, b) => {
+    let c = 0;
+    if (key === 'name') c = cmpName(a, b);
+    else if (key === 'size') c = a.kb - b.kb;
+    else c = a.modified < b.modified ? -1 : a.modified > b.modified ? 1 : 0;
+    if (c === 0) c = cmpName(a, b);
+    return dir === 'asc' ? c : -c;
+  });
+  return list;
+}
+function visibleFiles() {
+  const q = state.query.trim().toLowerCase();
+  const list = viewFiles();
+  return q ? list.filter((f) => f.name.toLowerCase().includes(q)) : list;
+}
+const total = (list) => list.reduce((s, f) => s + f.kb, 0);
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+function renderSide() {
+  document.querySelectorAll('#nav a').forEach((a) => {
+    const v = a.dataset.view;
+    a.classList.toggle('active', v === state.view);
+  });
+  const trashed = FILES.filter((f) => f.trashed).length;
+  document.getElementById('trash-badge').textContent = trashed ? String(trashed) : '';
+  const gb = storageUsedKb / 1e6;
+  document.getElementById('meter').style.width = `${(gb / STORAGE_TOTAL_GB) * 100}%`;
+  document.getElementById('storage-note').textContent = `${gb.toFixed(1)} GB of ${STORAGE_TOTAL_GB} GB used`;
+}
+
+function renderHead() {
+  const crumbs = document.getElementById('crumbs');
+  const mt = document.getElementById('m-title');
+  const sep = icon('i-right', 'ico sep');
+  if (state.view === 'folder') {
+    const fo = FOLDERS[state.folder];
+    const path = fo.parent ? [...FOLDERS[fo.parent].path, fo.name] : fo.path;
+    crumbs.innerHTML = path.map((p, i) => {
+      const last = i === path.length - 1;
+      const target = p === 'Aurora' ? ' data-go="aurora"' : '';
+      return `<a class="${last ? 'cur' : ''}"${target}>${esc(p)}${last ? icon('i-down', 'ico sm') : ''}</a>`;
+    }).join(sep);
+    const up = path[path.length - 2];
+    mt.innerHTML = `<span class="up"${up === 'Aurora' ? ' data-go="aurora"' : ''}>${icon('i-left', 'ico sm')}${esc(up)}</span><h1>${esc(fo.name)}</h1>`;
+  } else {
+    const title = state.view === 'starred' ? 'Starred' : 'Trash';
+    crumbs.innerHTML = `<a class="cur">${title}</a>`;
+    mt.innerHTML = `<span class="up" data-view-go="folder">${icon('i-left', 'ico sm')}My Drive</span><h1>${title}</h1>`;
+  }
+  const fw = document.getElementById('folders-wrap');
+  const kids = state.view === 'folder' ? (FOLDERS[state.folder].children || []) : [];
+  fw.style.display = kids.length ? '' : 'none';
+  document.getElementById('folders').innerHTML = kids.map((k) => {
+    const n = FILES.filter((f) => f.folder === k && !f.trashed).length;
+    return `<div class="fchip" data-folder="${k}">${folderSvg(FOLDERS[k].color)}<span class="txt"><b>${esc(FOLDERS[k].name)}</b><small>${plural(n, 'file')}</small></span></div>`;
+  }).join('');
+}
+
+function renderList() {
+  const list = visibleFiles();
+  const q = state.query.trim();
+  const count = document.getElementById('count');
+  if (q) count.innerHTML = `<b>${plural(list.length, 'result')}</b>`;
+  else count.innerHTML = `<b>${plural(list.length, 'file')}</b> · ${fmtSize(total(list))}`;
+
+  const { key, dir } = state.sort;
+  document.querySelectorAll('#thead .th[data-sort]').forEach((th) => {
+    const on = th.dataset.sort === key;
+    th.classList.toggle('sorted', on);
+    const label = th.textContent.trim();
+    th.innerHTML = label + (on ? icon(dir === 'asc' ? 'i-arrow-up' : 'i-arrow-down') : '');
+  });
+  const keyLabel = { name: 'Name', size: 'File size', modified: 'Last modified' }[key];
+  document.getElementById('sortbtn').innerHTML = `${keyLabel}${icon(dir === 'asc' ? 'i-arrow-up' : 'i-arrow-down')}`;
+
+  const rows = document.getElementById('rows');
+  const grid = document.getElementById('grid');
+  if (!list.length) {
+    const msg = q ? 'No files match your search' : state.view === 'trash' ? 'Trash is empty' : 'No files here yet';
+    rows.innerHTML = `<div class="empty">${msg}</div>`;
+    grid.innerHTML = `<div class="empty" style="grid-column:1/-1">${msg}</div>`;
+    return;
+  }
+  rows.innerHTML = list.map((f) => {
+    const sel = state.selected.has(f.id) ? ' sel' : '';
+    const own = f.owner === ME ? 'me' : PEOPLE[f.owner].name;
+    return `<div class="row${sel}" data-id="${f.id}">
+      <div class="name">${ft(f.kind)}<span class="txt"><span class="n">${esc(f.name)}</span><span class="meta">${fmtDate(f.modified)} · ${fmtSize(f.kb)}</span></span></div>
+      <div class="owner">${av(f.owner)}${esc(own)}</div>
+      <div class="mod">${fmtDate(f.modified)}</div>
+      <div class="size">${fmtSize(f.kb)}</div>
+      <button class="star${f.starred ? ' on' : ''}" data-star="${f.id}" aria-label="Star">${icon('i-star')}</button>
+    </div>`;
+  }).join('');
+  grid.innerHTML = list.map((f) => {
+    const sel = state.selected.has(f.id) ? ' sel' : '';
+    return `<div class="card${sel}" data-id="${f.id}"><div class="cap">${ft(f.kind)}<span class="n">${esc(f.name)}</span><button class="star${f.starred ? ' on' : ''}" data-star="${f.id}" aria-label="Star">${icon('i-star')}</button></div>${preview(f)}</div>`;
+  }).join('');
+}
+
+function renderSelection() {
+  const sel = [...state.selected].map(byId).filter(Boolean);
+  const bar = document.getElementById('selbar');
+  bar.classList.toggle('show', sel.length > 0);
+  document.getElementById('seltext').textContent = sel.length ? `${sel.length} selected · ${fmtSize(total(sel))}` : '';
+  const d = document.getElementById('details');
+  if (!sel.length) {
+    d.innerHTML = `<div class="d-empty"><div class="big">${icon('i-file')}</div>Select a file to see its details</div>`;
+    return;
+  }
+  if (sel.length > 1) {
+    d.innerHTML = `<div class="d-head"><div class="d-title">${sel.length} items selected</div></div>
+      <dl class="props"><dt>Total size</dt><dd>${fmtSize(total(sel))}</dd></dl>
+      <div class="d-multi">${sel.map((f) => `<div class="it">${ft(f.kind)}<span class="nm">${esc(f.name)}</span><em>${fmtSize(f.kb)}</em></div>`).join('')}</div>`;
+    return;
+  }
+  const f = sel[0];
+  const acts = f.activity || [[f.owner, 'edited', fmtDate(f.modified).replace(/, \d+$/, '')], [f.owner, 'uploaded', fmtDate(f.created).replace(/, \d+$/, '')]];
+  const shown = f.access.slice(0, 4);
+  const more = f.access.length - shown.length;
+  d.innerHTML = `<div class="d-head">${ft(f.kind)}<div class="d-title">${esc(f.name)}</div><button class="d-close" id="d-close" aria-label="Close">${icon('i-x', 'ico sm')}</button></div>
+    <div class="d-pv">${preview(f)}</div>
+    <div class="d-sec">Details</div>
+    <dl class="props">
+      <dt>Type</dt><dd>${KIND_LABEL[f.kind]}</dd>
+      <dt>Size</dt><dd>${fmtSize(f.kb)}</dd>
+      <dt>Location</dt><dd>${folderSvg(FOLDERS[f.folder].color || '#7c8698')}${esc(FOLDERS[f.folder].name)}</dd>
+      <dt>Owner</dt><dd>${av(f.owner)}${esc(PEOPLE[f.owner].name)}</dd>
+      <dt>Modified</dt><dd>${fmtDate(f.modified)}</dd>
+      <dt>Created</dt><dd>${fmtDate(f.created)}</dd>
+    </dl>
+    <div class="d-sec">Who has access</div>
+    <div class="access">${shown.map((p) => av(p)).join('')}${more > 0 ? `<span class="av more">+${more}</span>` : ''}<button>Manage</button></div>
+    <div class="d-sec">Activity</div>
+    <div class="acts">${acts.map(([p, verb, when]) => `<div class="act">${av(p)}<div><b>${esc(PEOPLE[p].name)}</b> ${verb}<small>${when}</small></div></div>`).join('')}</div>`;
+}
+
+function renderLayout() {
+  document.getElementById('main').classList.toggle('gridmode', state.layout === 'grid');
+  document.querySelectorAll('.seg button').forEach((b) => b.classList.toggle('on', b.dataset.layout === state.layout));
+}
+
+function render() { renderSide(); renderHead(); renderList(); renderSelection(); renderLayout(); }
+
+function go(view, folder) {
+  state.view = view;
+  if (folder) state.folder = folder;
+  state.selected = new Set();
+  state.anchor = null;
+  render();
+}
+
+function clickItem(id, ev) {
+  const list = visibleFiles().map((f) => f.id);
+  if (ev.shiftKey && state.anchor != null && list.includes(state.anchor)) {
+    const a = list.indexOf(state.anchor), b = list.indexOf(id);
+    const [lo, hi] = a < b ? [a, b] : [b, a];
+    state.selected = new Set(list.slice(lo, hi + 1));
+  } else if (ev.ctrlKey || ev.metaKey) {
+    if (state.selected.has(id)) state.selected.delete(id); else state.selected.add(id);
+    state.anchor = id;
+  } else {
+    state.selected = new Set([id]);
+    state.anchor = id;
+  }
+  renderList(); renderSelection();
+}
+
+function trashSelected() {
+  if (state.view === 'trash' || !state.selected.size) return;
+  for (const id of state.selected) {
+    const f = byId(id);
+    if (f && !f.trashed) { f.trashed = true; storageUsedKb -= f.kb; }
+  }
+  state.selected = new Set();
+  state.anchor = null;
+  render();
+}
+
+document.getElementById('rows').addEventListener('click', (ev) => {
+  const star = ev.target.closest('[data-star]');
+  if (star) { const f = byId(+star.dataset.star); f.starred = !f.starred; renderList(); return; }
+  const row = ev.target.closest('.row');
+  if (row) clickItem(+row.dataset.id, ev);
+});
+document.getElementById('grid').addEventListener('click', (ev) => {
+  const star = ev.target.closest('[data-star]');
+  if (star) { const f = byId(+star.dataset.star); f.starred = !f.starred; renderList(); return; }
+  const card = ev.target.closest('.card');
+  if (card) clickItem(+card.dataset.id, ev);
+});
+document.getElementById('thead').addEventListener('click', (ev) => {
+  const th = ev.target.closest('[data-sort]');
+  if (!th) return;
+  const key = th.dataset.sort;
+  if (state.sort.key === key) state.sort.dir = state.sort.dir === 'asc' ? 'desc' : 'asc';
+  else state.sort = { key, dir: 'asc' };
+  renderList();
+});
+document.getElementById('sortbtn').addEventListener('click', () => {
+  state.sort.dir = state.sort.dir === 'asc' ? 'desc' : 'asc';
+  renderList();
+});
+document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => { state.layout = b.dataset.layout; renderLayout(); }));
+document.getElementById('folders').addEventListener('dblclick', (ev) => {
+  const chip = ev.target.closest('.fchip');
+  if (chip) { state.query = ''; document.getElementById('q').value = ''; go('folder', chip.dataset.folder); }
+});
+document.getElementById('crumbs').addEventListener('click', (ev) => {
+  const a = ev.target.closest('[data-go]');
+  if (a && !(state.view === 'folder' && state.folder === a.dataset.go)) go('folder', a.dataset.go);
+});
+document.getElementById('m-title').addEventListener('click', (ev) => {
+  const a = ev.target.closest('[data-go]');
+  if (a) go('folder', a.dataset.go);
+  else if (ev.target.closest('[data-view-go]')) go('folder', 'aurora');
+});
+document.getElementById('nav').addEventListener('click', (ev) => {
+  const a = ev.target.closest('a');
+  if (!a) return;
+  const v = a.dataset.view;
+  if (v === 'folder') go('folder', 'aurora');
+  else if (v === 'starred' || v === 'trash') go(v);
+});
+document.getElementById('q').addEventListener('input', (ev) => { state.query = ev.target.value; renderList(); });
+document.getElementById('sel-trash').addEventListener('click', trashSelected);
+document.getElementById('sel-clear').addEventListener('click', () => { state.selected = new Set(); renderList(); renderSelection(); });
+document.getElementById('details').addEventListener('click', (ev) => {
+  if (ev.target.closest('#d-close')) { state.selected = new Set(); renderList(); renderSelection(); }
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.target.closest && ev.target.closest('input, textarea')) return;
+  if (ev.key === 'Delete') { ev.preventDefault(); trashSelected(); }
+  else if (ev.key === 'Escape') { state.selected = new Set(); renderList(); renderSelection(); }
+});
+
+render();
+</script>
+</body>
+</html>

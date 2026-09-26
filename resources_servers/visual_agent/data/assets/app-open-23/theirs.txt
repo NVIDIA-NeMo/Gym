@@ -1,0 +1,42 @@
+# Relay gateway configuration
+# Maintainer: edge-team@northwind.io
+
+[server]
+name = relay-gateway
+version = 2.5.0
+region = us-east-1
+host = 0.0.0.0
+port = 9090
+workers = 4
+keepalive = on
+timeout = 45s
+
+[tls]
+enabled = false
+cert = /etc/relay/cert.pem
+key = /etc/relay/key.pem
+min_version = 1.2
+
+[logging]
+level = warn
+format = logfmt
+file = /var/log/relay/access.log
+rotate = daily
+
+[cache]
+backend = memory
+ttl = 300
+max_entries = 10000
+
+[features]
+legacy_mode = false
+rate_limit = 100
+compression = gzip
+metrics = true
+
+[upstreams]
+primary = http://10.0.0.12:9000
+secondary = http://10.0.0.14:9000
+health_check = /healthz
+retry = 2
+circuit_breaker = on

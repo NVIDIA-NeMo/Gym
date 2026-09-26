@@ -1,0 +1,278 @@
+{
+ "title": "Moves between the regions of Estavia, 2025",
+ "unit": "people who changed their registered address",
+ "regions": [
+  {
+   "id": "northreach",
+   "name": "Northreach",
+   "color": "#4e79a7"
+  },
+  {
+   "id": "portmere",
+   "name": "Portmere",
+   "color": "#e15759"
+  },
+  {
+   "id": "eastfen",
+   "name": "Eastfen",
+   "color": "#59a14f"
+  },
+  {
+   "id": "highvale",
+   "name": "Highvale",
+   "color": "#b07aa1"
+  },
+  {
+   "id": "saltcoast",
+   "name": "Saltcoast",
+   "color": "#f28e2b"
+  },
+  {
+   "id": "midmoor",
+   "name": "Midmoor",
+   "color": "#76b7b2"
+  },
+  {
+   "id": "westerly",
+   "name": "Westerly",
+   "color": "#edc948"
+  }
+ ],
+ "moves": [
+  {
+   "from": "highvale",
+   "to": "eastfen",
+   "people": 1300
+  },
+  {
+   "from": "midmoor",
+   "to": "portmere",
+   "people": 14800
+  },
+  {
+   "from": "eastfen",
+   "to": "northreach",
+   "people": 2800
+  },
+  {
+   "from": "eastfen",
+   "to": "portmere",
+   "people": 11200
+  },
+  {
+   "from": "portmere",
+   "to": "highvale",
+   "people": 4200
+  },
+  {
+   "from": "westerly",
+   "to": "midmoor",
+   "people": 3700
+  },
+  {
+   "from": "portmere",
+   "to": "saltcoast",
+   "people": 7300
+  },
+  {
+   "from": "eastfen",
+   "to": "eastfen",
+   "people": 14200
+  },
+  {
+   "from": "westerly",
+   "to": "saltcoast",
+   "people": 2900
+  },
+  {
+   "from": "highvale",
+   "to": "westerly",
+   "people": 2600
+  },
+  {
+   "from": "midmoor",
+   "to": "midmoor",
+   "people": 17400
+  },
+  {
+   "from": "westerly",
+   "to": "highvale",
+   "people": 2100
+  },
+  {
+   "from": "saltcoast",
+   "to": "saltcoast",
+   "people": 12600
+  },
+  {
+   "from": "portmere",
+   "to": "portmere",
+   "people": 35000
+  },
+  {
+   "from": "northreach",
+   "to": "northreach",
+   "people": 21000
+  },
+  {
+   "from": "highvale",
+   "to": "portmere",
+   "people": 5200
+  },
+  {
+   "from": "eastfen",
+   "to": "midmoor",
+   "people": 3600
+  },
+  {
+   "from": "portmere",
+   "to": "midmoor",
+   "people": 12500
+  },
+  {
+   "from": "highvale",
+   "to": "saltcoast",
+   "people": 800
+  },
+  {
+   "from": "midmoor",
+   "to": "saltcoast",
+   "people": 1900
+  },
+  {
+   "from": "westerly",
+   "to": "westerly",
+   "people": 6100
+  },
+  {
+   "from": "saltcoast",
+   "to": "portmere",
+   "people": 9400
+  },
+  {
+   "from": "midmoor",
+   "to": "eastfen",
+   "people": 2900
+  },
+  {
+   "from": "eastfen",
+   "to": "saltcoast",
+   "people": 4400
+  },
+  {
+   "from": "northreach",
+   "to": "portmere",
+   "people": 8200
+  },
+  {
+   "from": "saltcoast",
+   "to": "highvale",
+   "people": 700
+  },
+  {
+   "from": "eastfen",
+   "to": "highvale",
+   "people": 1900
+  },
+  {
+   "from": "saltcoast",
+   "to": "eastfen",
+   "people": 5200
+  },
+  {
+   "from": "portmere",
+   "to": "northreach",
+   "people": 6400
+  },
+  {
+   "from": "saltcoast",
+   "to": "westerly",
+   "people": 3300
+  },
+  {
+   "from": "midmoor",
+   "to": "westerly",
+   "people": 4400
+  },
+  {
+   "from": "saltcoast",
+   "to": "northreach",
+   "people": 1100
+  },
+  {
+   "from": "northreach",
+   "to": "midmoor",
+   "people": 6100
+  },
+  {
+   "from": "northreach",
+   "to": "eastfen",
+   "people": 3100
+  },
+  {
+   "from": "portmere",
+   "to": "westerly",
+   "people": 5100
+  },
+  {
+   "from": "saltcoast",
+   "to": "midmoor",
+   "people": 2100
+  },
+  {
+   "from": "westerly",
+   "to": "portmere",
+   "people": 4300
+  },
+  {
+   "from": "midmoor",
+   "to": "highvale",
+   "people": 3800
+  },
+  {
+   "from": "highvale",
+   "to": "highvale",
+   "people": 9800
+  },
+  {
+   "from": "northreach",
+   "to": "westerly",
+   "people": 900
+  },
+  {
+   "from": "midmoor",
+   "to": "northreach",
+   "people": 5300
+  },
+  {
+   "from": "northreach",
+   "to": "saltcoast",
+   "people": 1500
+  },
+  {
+   "from": "northreach",
+   "to": "highvale",
+   "people": 2400
+  },
+  {
+   "from": "westerly",
+   "to": "northreach",
+   "people": 700
+  },
+  {
+   "from": "highvale",
+   "to": "midmoor",
+   "people": 4700
+  },
+  {
+   "from": "portmere",
+   "to": "eastfen",
+   "people": 9800
+  },
+  {
+   "from": "highvale",
+   "to": "northreach",
+   "people": 3900
+  }
+ ]
+}

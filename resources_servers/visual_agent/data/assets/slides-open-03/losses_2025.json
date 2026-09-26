@@ -1,0 +1,28 @@
+{
+  "portfolio": "Helio Ridge Renewables",
+  "year": 2025,
+  "unit": "MWh",
+  "note": "Energy lost versus the expected (P50, weather-adjusted) model, by cause. The categories sum to total expected minus total actual.",
+  "losses": [
+    {
+      "category": "Soiling",
+      "mwh": 14057
+    },
+    {
+      "category": "Curtailment",
+      "mwh": 8561
+    },
+    {
+      "category": "Inverter downtime",
+      "mwh": 8781
+    },
+    {
+      "category": "Grid outages",
+      "mwh": 2498
+    },
+    {
+      "category": "Degradation and other",
+      "mwh": 4811
+    }
+  ]
+}

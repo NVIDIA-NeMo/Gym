@@ -1,0 +1,29 @@
+{
+  "company": "Kestrel Home",
+  "baseline_year": 2025,
+  "on_time_target_pct": 95.0,
+  "proposal": "Two-node Midwest/Southwest redesign",
+  "levers": [
+    {
+      "lever": "Open Phoenix cross-dock (shorter West Coast lanes)",
+      "annual_change_usd": -1240000
+    },
+    {
+      "lever": "Zone-skip parcels to regional carriers",
+      "annual_change_usd": -870000
+    },
+    {
+      "lever": "Consolidate Columbus into new Indianapolis DC",
+      "annual_change_usd": -2050000
+    },
+    {
+      "lever": "Added line-haul between Indianapolis and Atlanta",
+      "annual_change_usd": 620000
+    },
+    {
+      "lever": "Transition and dual-running costs (annualized)",
+      "annual_change_usd": 390000
+    }
+  ],
+  "note": "annual_change_usd is the change in total annual logistics cost (freight plus warehouse) versus the 2025 baseline; negative values are savings."
+}

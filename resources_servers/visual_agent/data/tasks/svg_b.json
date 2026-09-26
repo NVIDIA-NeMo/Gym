@@ -1,0 +1,1057 @@
+[
+ {
+  "task_id": "svg-open-09",
+  "category": "svg",
+  "mode": "open_ended",
+  "title": "Squarified two-level treemap of library loans with merge rules",
+  "artifact": {
+   "kind": "svg",
+   "entry": "loans_treemap.svg"
+  },
+  "assets": [
+   "loans_2025.json"
+  ],
+  "prompt": "Build a two-level treemap of 2025 loans at Northgate Public Library as one SVG with viewBox 0 0 1200 800, from loans_2025.json (six departments, each with a color and its collections with 2025 and 2024 loans).\n\nTitle 'Where Northgate’s loans went in 2025', subtitle 'Area proportional to loans · <total> loans in total' with the grand total of 2025 loans written with thousands separators, and footer 'Source: Northgate Public Library circulation export'.\n\nData rules:\n- Leave out collections with no 2025 loans.\n- Inside each department, collections with less than 3% of that department’s 2025 loans are combined into one tile named 'Other' (2025 and 2024 loans summed), which then takes its place in the size order like any other tile. If only one collection in a department is that small, it keeps its own tile.\n\nLayout (exact; coordinates will be checked in the source):\n- The treemap fills the rectangle from (40, 120) to (1160, 760). Both levels use the squarified layout: sort items by 2025 loans, largest first; fill a strip along the shorter side of the remaining rectangle, adding the next item to the strip as long as that does not make the worst aspect ratio in the strip worse; then fix the strip and continue with the rest. When the remaining rectangle is at least as wide as it is tall, the strip is a column at its left edge filled top to bottom; otherwise it is a row along its top edge filled left to right. Areas are exactly proportional to loans.\n- Each department rectangle is filled with the department color. Its collections are laid out inside it, inset 4 units on the left, right and bottom and 26 units at the top (the header band). Draw each collection tile inset 1 unit on every side of its computed rectangle.\n- Header band text: '<department> · <total>k · <share>%' (2025 total in thousands and share of all loans, one decimal each) in 14-unit bold white Inter, 8 units from the department’s left edge. If that does not fit in the department width minus 16, show only the department name; if the name does not fit either, leave the band empty.\n\nTiles:\n- Fill by change against 2024: above +5% the department color; from −5% to +5% the color mixed 55% with 45% white; below −5% the color mixed 25% with 75% white. Tile text is white on the full color and #1f2937 on the two tints.\n- Label a tile only when its drawn size is at least 80 by 36: the collection name in 12-unit semibold (wrapped onto a second line if needed) and below it the loans in thousands with one decimal, like '98.4k', all inside the tile. Smaller tiles get no text.\n- Every tile has a data-name attribute with its collection name and a title child like 'General fiction: 98,400 loans (+3.5% vs 2024)'.\n\nAdd a legend for the three change bands, and give each department group the id dept-<department id>.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Department rectangles are exact (x, y, width, height within 1.5 units; check the source): Fiction (40, 120, 329.4, 640.0); Children & Teens (369.4, 120, 535.3, 348.9); Digital (369.4, 468.9, 535.3, 291.1); Non-fiction (904.8, 120, 255.2, 418.0); Audio & Video (904.8, 538.0, 194.4, 222.0); Local History (1099.1, 538.0, 60.9, 222.0)."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Fiction's seven tiles follow the squarified rule (computed rectangles x, y, w, h within 1.5 units; the drawn tiles are these inset by 1): General fiction (44.0, 146.0, 321.4, 196.3); Crime & thriller (44.0, 342.3, 197.7, 231.1); Science fiction & fantasy (241.7, 342.3, 123.7, 231.1); Romance (44.0, 573.4, 136.6, 182.6); Historical fiction (180.6, 573.4, 140.2, 101.3); Graphic novels (180.6, 674.6, 140.2, 81.4); Other (320.8, 573.4, 44.6, 182.6)."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Non-fiction and Digital tiles are exact (computed rectangles within 1.5 units): Biography & memoir (908.8, 146.0, 138.2, 139.9); History (1047.0, 146.0, 109.0, 139.9); Health & wellbeing (908.8, 285.9, 131.4, 103.3); Arts & crafts (1029.5, 389.2, 67.8, 102.4); Other (1029.5, 491.6, 126.5, 42.4); E-books (373.4, 494.9, 276.5, 261.1); E-audiobooks (649.9, 494.9, 250.8, 185.3); Streaming film (822.0, 680.2, 78.8, 75.8)."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Merge rules: Fiction has an 'Other' tile of 12,710 loans (Short stories, Poetry and Plays) and Non-fiction an 'Other' tile of 8,650 (Computing, Languages, Religion & philosophy); Comics for kids keeps its own tile in Children & Teens (the only small collection there); there is no Microfilm tile; no other department has an Other tile and no merged collection also appears on its own."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Change tints are right: full color for Picture books (+5.1%), Graphic novels, E-audiobooks and Vinyl; the 55% tint for General fiction (+3.5%), Cookery, E-magazines and Fiction's Other (−3.0%); the 25% tint for History (−5.02%, just below −5%), Romance (−5.6%), DVDs & Blu-ray, Business & money and Non-fiction's Other (−8.0%). Text is white on full-color tiles and dark on the tints."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Label rule: tiles drawn at least 80 by 36 show name and value (e.g. General fiction '98.4k', Audiobooks on CD '11.3k' kept inside its 96-wide tile, Non-fiction's Other '8.7k'); smaller tiles have no text: Fiction's Other, Comics for kids, Streaming film, Arts & crafts, Business & money, Video games, Music CDs, Vinyl and all four Local History tiles. No label spills outside its tile."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Header bands read 'Fiction · 305.8k · 29.4%', 'Children & Teens · 270.9k · 26.1%', 'Digital · 226.0k · 21.7%' and 'Non-fiction · 154.8k · 14.9%'; Audio & Video shows only its name; the Local History band is empty."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Title 'Where Northgate’s loans went in 2025', subtitle 'Area proportional to loans · 1,039,710 loans in total' and footer 'Source: Northgate Public Library circulation export' are exact, and a legend explains the three change bands."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "File quality: every tile has data-name and a title child in the given format (e.g. 'General fiction: 98,400 loans (+3.5% vs 2024)', 'Crime & thriller: 71,250 loans (+10.0% vs 2024)'); department groups are dept-fiction, dept-children, dept-digital, dept-non-fiction, dept-audio-video and dept-local-history."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Professional result: 2-unit gaps between tiles, department colors from the file, one consistent type scale, readable text contrast on every labeled tile, and nothing outside the viewBox."
+   }
+  ]
+ },
+ {
+  "task_id": "svg-open-10",
+  "category": "svg",
+  "mode": "open_ended",
+  "title": "Directed chord diagram of interregional moves with exact arcs",
+  "artifact": {
+   "kind": "svg",
+   "entry": "moves_chord.svg"
+  },
+  "assets": [
+   "moves_2025.json"
+  ],
+  "prompt": "Make a chord diagram of 2025 moves between the seven regions of Estavia as one SVG with viewBox 0 0 1200 900, from moves_2025.json (regions with colors, and moves as from, to and people, listed in no particular order).\n\nTitle 'Who moved where in Estavia, 2025' and subtitle 'Moves between regions: <n> people · plus <m> moves within a region, not shown', with both totals computed from the file and written with thousands separators. Footer 'Source: Estavia civil registry'.\n\nGeometry (exact; the source will be checked):\n- Centre (440, 470). Region arcs are ring segments between radius 300 and 318, in the order of the regions list, clockwise, the first starting exactly at 12 o'clock. Each region’s arc angle is proportional to its outflow (people who left it for another region), and every arc is followed by a 2° gap, so the arcs share 346°.\n- Moves within a region are left out entirely: not in the arcs, not drawn.\n- One ribbon per pair of regions with any moves between them. At region A’s end the ribbon is as wide as the moves from A to B; at B’s end, as wide as those from B to A. Within each arc the ribbon ends are laid out clockwise in the order of the regions list. Ribbon ends are arcs of radius 296 and the sides are quadratic Bézier curves with their control point at the centre.\n- Color each ribbon with the region that sends more people in that pair, at 70% opacity, and draw the ribbons from the largest total (both directions) to the smallest, so small ribbons stay on top.\n- Ticks outside each arc every 5,000 people counted from its start, labeled '0' at the start and then every 10,000 as '10k', '20k', and so on.\n- Region names outside the ticks, following the circle with textPath and reading upright (never upside down) on the lower half.\n\nRight-hand panel (from x 850):\n- 'Net migration': a diverging bar chart of each region’s inflow minus outflow, sorted from most positive to most negative, 12 units of bar length per 1,000 people, labeled like '+1,234' and '−1,234'.\n- 'Largest flows': the five largest single directions, largest first, like 'Northreach → Westerly 900'.\n\nGive each arc the id arc-<region id> and each ribbon the id ribbon-<a>-<b> (a before b in the regions list), and keep all text as real text.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Arc angles are exact (within 0.5°, clockwise from 12 o'clock): Northreach 0.00–43.03°, Portmere 45.03–132.84°, Eastfen 134.84–181.17°, Highvale 183.17–219.03°, Saltcoast 221.03–263.28°, Midmoor 265.28–329.44°, Westerly 331.44–358.00°. (Counting within-region moves would change every angle.) E.g. Portmere's outer edge runs from about (665.0, 245.3) to (673.2, 686.2)."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Exactly 20 ribbons: every pair except Eastfen–Westerly (no moves either way). Ribbon ends are right (within 0.5°): Portmere–Midmoor spans 98.72–122.95° at Portmere (12,500) and 275.56–304.25° at Midmoor (14,800); Northreach–Portmere spans 0.00–15.89° at Northreach and 45.03–57.44° at Portmere; Midmoor–Westerly spans 320.92–329.44° at Midmoor and 350.83–358.00° at Westerly."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Ribbon shape and order: ends are arcs of radius 296 and the sides are quadratic curves with control point (440, 470); ribbons are drawn largest total first (Portmere–Midmoor first, Highvale–Saltcoast last)."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Ribbon colors follow the larger sender, at 70% opacity: Portmere–Midmoor and Midmoor–Westerly in Midmoor's color; Portmere–Eastfen and Eastfen–Highvale in Eastfen's; Northreach–Highvale and Highvale–Westerly in Highvale's; Portmere–Westerly in Portmere's; Portmere–Saltcoast in Saltcoast's."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The subtitle reads exactly 'Moves between regions: 178,500 people · plus 116,100 moves within a region, not shown'; the title 'Who moved where in Estavia, 2025' and footer 'Source: Estavia civil registry' are exact."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Ticks every 5,000 people from each arc start (39 in total, e.g. 10 on Portmere and 3 on Westerly), labeled '0' at each start and '10k', '20k', … every 10,000 (Portmere up to '40k')."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Region names follow the circle outside the ticks using textPath and all read upright: Eastfen, Highvale and Saltcoast on the lower half are not upside down."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Net migration bars, sorted: Portmere +7,800, Westerly +2,600, Midmoor −400, Eastfen −1,600, Northreach −2,000, Saltcoast −3,000, Highvale −3,400, diverging from one zero line at 12 units per 1,000 (Portmere 93.6 long, Highvale 40.8)."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Largest flows, in order: Midmoor → Portmere 14,800; Portmere → Midmoor 12,500; Eastfen → Portmere 11,200; Portmere → Eastfen 9,800; Saltcoast → Portmere 9,400."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "File quality and layout: ids arc-northreach … arc-westerly and ribbon ids like ribbon-portmere-midmoor (a before b in list order); text as text elements; tick labels, names and the panel never collide, and everything fits inside the viewBox."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Polished result: the file's region colors used consistently on arcs, ribbons and bars, a clear hierarchy, readable small labels and no clutter."
+   }
+  ]
+ },
+ {
+  "task_id": "svg-open-11",
+  "category": "svg",
+  "mode": "open_ended",
+  "title": "Octilinear transit map with shared corridors and bend rules",
+  "artifact": {
+   "kind": "svg",
+   "entry": "kestrel_rail.svg"
+  },
+  "assets": [
+   "network.json"
+  ],
+  "prompt": "Draw the network map of Kestrel City Rail as one SVG with viewBox 0 0 1200 860, from network.json: 23 stations on a grid, four lines with their station order and color, and the River Kess as a polyline in grid units.\n\nRules (the geometry will be checked in the source):\n- A station at grid (gx, gy) sits at x = 60 + 40 × gx, y = 120 + 40 × gy. The river points use the same mapping.\n- Track between consecutive stations of a line is one straight segment when they are level, directly above each other, or exactly diagonal (45°). Otherwise it is two straight segments: leave the earlier station of the pair (in the line’s order) at 45° until level with or directly above or below the later one, then run straight into it. Bends may be rounded with a radius of at most 12. No other angles anywhere.\n- Lines are 6-unit strokes in their colors with round caps. Where two lines serve the same consecutive stations, draw them side by side 8 units apart centre to centre, centred on the track, never crossing or overlapping inside the shared stretch.\n- Stations: a stop served by one line is a short tick in the line color; an interchange (served by two or more lines) is a white circle or capsule with a 2.5-unit black outline covering all its strokes. The closed station (closed: true) keeps a tick but in gray, and its label is gray italic with ' (closed)' added.\n- Every station is labeled horizontally in 12-unit Inter, the termini of each line in bold 13. No label may touch a line, a station symbol or another label. Airport gets a small plane pictogram next to its name.\n- The river is a 16-unit pale blue band behind everything, with 'River Kess' in italic running along it (textPath).\n\nRight of the map: the title 'Kestrel City Rail', the subtitle 'Network map · Autumn 2026 · not to scale', and a legend with one row per line in file order (color swatch, then '<line name> · <n> stations · <first> – <last>') plus the interchange and closed-station symbols.\n\nGroup each line as g id line-<line id> and each station as g id st-<station id>.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Stations sit on the grid mapping (symbol centres within 5 units, allowing for parallel strokes): e.g. Central (500, 440), Airport (900, 240), Brookside (620, 760), Elm Park (140, 200), Kilnworth (180, 640), Harbour Point (860, 520)."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The bend rule is followed (check the source; points within 5 units to allow for parallel offsets): Docklands to Airport runs diagonally from (740, 440) to (900, 280), then straight up to (900, 240); Docklands to Harbour Point diagonally to (820, 520), then right to (860, 520); Northgate to University diagonally from (460, 280) to (500, 320), then down; Beacon Hill to University diagonally from (340, 320) to (380, 360), then right; Millbrook to Tanner Row diagonally from (180, 480) to (220, 440), then right; Canal Street to Southmead diagonally from (420, 600) to (380, 640), then left."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Octilinear only: every track segment is horizontal, vertical or at 45° (rounded bends of radius 12 or less allowed); no curves between stations and no other angles."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Shared stretches are parallel strokes 8 units apart that never cross or overlap: Harbour Line and Airport Express from Market Square through Central and Riverside to Docklands; Crown Line and Garden Line from University through Central to Old Town."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Interchange symbols (white, black outline, covering all strokes) at exactly Market Square, Central, Riverside, Docklands, University and Old Town; every other station has a tick in its line color; Abbotsford's tick is gray and its label reads 'Abbotsford (closed)' in gray italic."
+   },
+   {
+    "id": "R6",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "All 23 stations are labeled with exact names, horizontally, and no label touches a line, a station symbol or another label (check around Central, University and Old Town); the termini Crown Heights, Brookside, Westgate, Harbour Point, Elm Park, Kilnworth, Market Square and Airport are bold; Airport has a plane pictogram."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The River Kess is a pale blue band through (60, 540), (400, 540), (480, 620) and (920, 620), behind the lines, with 'River Kess' in italic along it using textPath."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Legend rows in file order read exactly 'Crown Line · 9 stations · Crown Heights – Brookside', 'Harbour Line · 8 stations · Westgate – Harbour Point', 'Garden Line · 9 stations · Elm Park – Kilnworth' and 'Airport Express · 5 stations · Market Square – Airport', with interchange and closed symbols; title 'Kestrel City Rail' and subtitle 'Network map · Autumn 2026 · not to scale'."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "File quality: groups line-crown, line-harbour, line-garden and line-airport, and st-<id> groups for all 23 stations; labels are text elements."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Reads like a professional transit diagram: consistent stroke weights and corner treatment, even label offsets, clear hierarchy, and nothing outside the viewBox."
+   }
+  ]
+ },
+ {
+  "task_id": "svg-open-12",
+  "category": "svg",
+  "mode": "open_ended",
+  "title": "Horizontal sundial dial for Porto with computed hour lines",
+  "artifact": {
+   "kind": "svg",
+   "entry": "porto_sundial.svg"
+  },
+  "prompt": "Design the engraved dial plate of a horizontal garden sundial for Porto (latitude 41.15° N, longitude 8.61° W) as one SVG with viewBox 0 0 1200 1000, north up.\n\nGeometry (exact; it will be checked in the source):\n- The gnomon is a 10-unit-thick plate on the noon line; seen from above it is the rectangle from x 475 to 485, y 270 to 600. Morning hour lines radiate from its west root (475, 600) and afternoon lines from its east root (485, 600); the noon line rises from both.\n- The hour line for hour h (6 to 18, local solar time) makes the angle θ = atan(sin 41.15° × tan(15° × (h − 12))) with the noon line, to the west before noon and to the east after it; 6 and 18 run due west and due east. Each hour line is exactly 340 units long from its root.\n- Half-hour marks run from 310 to 340 units along their own lines and quarter-hour marks from 325 to 340, from the same roots (same formula with fractional h).\n- The chapter ring is a pair of concentric semicircles of radius 300 and 340 around (480, 600), above the root line.\n- Hour numerals VI VII VIII IX X XI XII I II III IV V VI, upright, centred 375 units from the root along their hour line (VI at both ends).\n- The dial plate is a circle of radius 440 around (480, 520), filled like polished brass, with a double engraved border. Along its lower rim the motto 'LUX UMBRA DEI · TEMPUS FUGIT' follows the edge (textPath), and below the root sits a small compass rose with N pointing up.\n\nRight panel (from x 950):\n- 'Gnomon elevation': a right triangle with a horizontal base from (980, 400) to (1140, 400) whose style rises from (980, 400) at exactly 41.15° to the vertical side at x 1140; mark the angle with an arc labeled '41.15°' and put S under the left end and N under the right end.\n- A table 'Hour-line angles' listing 1 h to 6 h from noon with θ to one decimal, like '1 h · 10.0°'.\n- A note giving the correction from sundial time to UTC (4 minutes of time per degree of longitude, rounded to the whole second) in the form 'Add <m> min <s> s to sundial time for UTC'.\n- The title 'PORTO', the line '41.15° N · 8.61° W' and one short sentence saying that the dial shows local solar time.\n\nUse real text for all lettering, a serif face for numerals and titles, and give the hour lines the ids hour-6 to hour-18.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Hour-line angles are exact: in the source the lines end (340 from their roots, within 2 units) at IX (288.1, 316.0), X (354.2, 282.2), XI (416.0, 265.2), I (544.0, 265.2), III (671.9, 316.0) and V (799.9, 471.8), and the VI lines end at (135, 600) and (825, 600)."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Split roots: morning lines (6 to 11) start at (475, 600) and afternoon lines (13 to 18) at (485, 600); the noon line rises from both roots; the gnomon rectangle x 475–485, y 270–600 is drawn."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Half- and quarter-hour marks use the same formula and roots: the 9:30 mark ends at (321.8, 296.5), 2:30 at (638.2, 296.5), 11:45 at (460.3, 260.3) and 12:15 at (499.7, 260.3) (within 2 units); half marks are 30 long, quarter marks 15."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Numerals VI … XII … VI are upright and centred 375 from their roots along their lines within 4 units: IX at (268.9, 286.7), III at (691.1, 286.7), XII near (480, 225), and VI at (100, 600) and (860, 600)."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Chapter ring of two semicircles (radius 300 and 340 around (480, 600)) above the root line; the plate is a circle of radius 440 around (480, 520) with a brass-like gradient and a double border; a compass rose with N up sits below the root."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The motto 'LUX UMBRA DEI · TEMPUS FUGIT' follows the lower rim using textPath and reads upright, left to right."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Gnomon elevation: base (980, 400)–(1140, 400) and the vertical side at x 1140 reaching (1140, 260.2) within 1.5 units (a 41.15° style), with an angle arc labeled '41.15°' and S and N under the ends."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The angle table reads '1 h · 10.0°', '2 h · 20.8°', '3 h · 33.3°', '4 h · 48.7°', '5 h · 67.8°' and '6 h · 90.0°'."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The note reads 'Add 34 min 26 s to sundial time for UTC'; 'PORTO', '41.15° N · 8.61° W' and a sentence about local solar time are present."
+   },
+   {
+    "id": "R10",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "File quality: hour lines carry ids hour-6 to hour-18; all lettering is real text; numerals and titles use a serif face."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Looks like a finely engraved brass dial: consistent dark engraving strokes, a clear hierarchy between hour lines and marks, balanced ornament, nothing clipped."
+   }
+  ]
+ },
+ {
+  "task_id": "svg-open-13",
+  "category": "svg",
+  "mode": "open_ended",
+  "title": "Marey train graph with overtakes and a speed table",
+  "artifact": {
+   "kind": "svg",
+   "entry": "coast_line_marey.svg"
+  },
+  "assets": [
+   "timetable.csv",
+   "stations.csv"
+  ],
+  "prompt": "Draw a Marey train graph (time–distance diagram) of the Kestrel Coast Line morning service as one SVG with viewBox 0 0 1200 1040, from stations.csv (nine stations with their km from Port Alder) and timetable.csv (12 trains, one row per stop with arrival and departure times; express and freight trains list only the stations where they stop and run at constant speed between them).\n\nChart (exact; checked in the source):\n- Time runs left to right from 06:00 at x = 160 to 10:00 at x = 1160 (250 units per hour); distance runs down from Port Alder (km 0) at y = 150, with y = 150 + 6.5 × km.\n- Station lines are horizontal gridlines with the station names on the left; vertical gridlines every 15 minutes, stronger every hour, with labels 06:00 to 10:00 at the top.\n- Each train is one polyline through (arrival, km) and (departure, km) of every stop, so dwells are horizontal. Styles by type: local blue 1.8 units, express red 2.5, freight gray 2 dashed. Label each train with its id at its first point.\n- Clip everything to the chart. A train still running at 10:00 is cut at the right edge with its arrival time written there, like '→ 10:45'.\n- Overtakes: wherever a train passes another one going the same way, draw a ring at the meeting point with a small label like 'X201 passes L101'.\n\nBelow the chart, a table of all trains sorted by departure time, with columns Train, Type, From, Departs, To, Arrives, Stops (intermediate stops) and Avg speed (km/h to one decimal: distance over total time including dwells).\n\nTitle 'Kestrel Coast Line · weekday mornings', a legend for the three train types, and each train grouped as g id train-<id>.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Scales are exact: 06:00 at x 160, 10:00 at x 1160, km 0 at y 150 and Kingsmouth (km 84) at y 696; stations at y = 150 + 6.5 × km (Redcliff 328.75, Harwick Junction 397, Linmouth 471.75). Check vertices: L101 leaves Port Alder at (180.8, 150) and arrives at Kingsmouth 07:53 at (630.8, 696)."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "All 12 trains follow the timetable, with dwells as horizontal segments (e.g. L101 at Redcliff 06:39–06:44, L103 at Redcliff 07:44–07:50, F301 at Linmouth 07:52–08:06) and express trains running straight through the stations they skip."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Styles: locals blue at 1.8, expresses red at 2.5, freights gray dashed at 2; each train labeled with its id at its first point."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Exactly five overtakes are marked with rings and labels at the right points (within 3 units): X201 passes L101 at Redcliff (333.5, 328.75); X202 passes L102 at Redcliff (511.5, 328.75); X203 passes L103 at Redcliff (604.3, 328.75); X204 passes L104 at Linmouth (643.3, 471.75); X203 passes F301 at Linmouth (668.3, 471.75). Opposite-direction crossings are not marked."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "F302 is cut at the right edge at about y 280 (km 20 at 10:00) with '→ 10:25' written there; no line leaks outside the chart."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Table rows in departure order with exact values: L101 06:05 → 07:53, 7 stops, 46.7; L102 06:12 → 08:01, 46.2; X201 06:25 → 07:18, 1 stop, 95.1; X202 06:48 → 07:41, 95.1; F301 06:50 → 08:50, 1 stop, 42.0; L103 07:10 → 08:59, 46.2; L104 07:12 → 09:00, 46.7; X203 07:30 → 08:23, 95.1; X204 07:35 → 08:28, 95.1; L105 08:10 → 09:54, 48.5; L106 08:14 → 09:58, 48.5; F302 08:40 → 10:25, 0 stops, 48.0."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Grid: nine horizontal station lines with names on the left; vertical lines every 15 minutes with stronger hourly lines and labels 06:00, 07:00, 08:00, 09:00 and 10:00 at the top."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Title 'Kestrel Coast Line · weekday mornings' and a legend for local, express and freight; groups train-L101 … train-F302 for all 12 trains."
+   },
+   {
+    "id": "R9",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Train ids, overtake labels and the clip note are legible and do not overlap each other; table columns are aligned; everything is inside the viewBox."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Clean, information-dense technical chart: consistent line weights, a readable type hierarchy and a restrained palette."
+   }
+  ]
+ },
+ {
+  "task_id": "svg-open-14",
+  "category": "svg",
+  "mode": "open_ended",
+  "title": "SMIL bar chart race of metro station entries",
+  "artifact": {
+   "kind": "svg",
+   "entry": "station_race.svg"
+  },
+  "assets": [
+   "entries.csv"
+  ],
+  "checks": {
+   "animation": true
+  },
+  "prompt": "Make an animated bar chart race of annual entries at Kestrel Metro stations, 2018–2025, as one SVG with viewBox 0 0 1200 800 that plays by itself when opened as an image. Use SMIL only (animate, set, animateTransform), with no CSS animation and no script, so it can be scrubbed with setCurrentTime. Data: entries.csv (millions of entries per station and year, with each station’s line and line color; an empty cell means the station was not open yet: treat it as 0 and rank it below every open station).\n\nTimeline:\n- One cycle lasts 16 s and repeats forever. Year 2018 + k (k = 0 to 7) is shown exactly at t = 2k s; between two keyframes every bar moves and grows linearly; from 14 s to 16 s the chart holds 2025, then it restarts at 2018.\n- Ranking in each year: by value, largest first; equal values rank alphabetically.\n\nChart:\n- The top 8 of each year are visible. A bar with rank r (1 to 8) has its top at y = 140 + 72 × (r − 1) and a height of 56; bars ranked 9 or lower sit at y = 716, hidden by a clip of the bar area that ends at y = 708, so bars slide in and out at the bottom.\n- Bars start at x = 260 and are 8 units long per million, filled with their line color. A fixed axis from 0 to 100 with gridlines every 20 and labels on top.\n- Each bar carries the station name just left of its start (right-aligned at x = 250) and a value label just right of its end, like '88.4M', showing the value of the year currently displayed and switching exactly at the keyframes; both move with the bar.\n- A large year label at the bottom right shows 2018 during 0–2 s, 2019 during 2–4 s, and so on, with 2025 from 14 s to the end of the cycle.\n\nTitle 'Busiest stations on Kestrel Metro', subtitle 'Annual entries in millions, 2018–2025 · top 8 each year', and a small legend of the four lines. Give each station’s bar group the id bar-<station name in lowercase with hyphens>.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "SMIL only: no script, no CSS @keyframes or animation properties; all animations begin at 0 with a 16 s cycle (dur 16s, or equivalent) and repeatCount indefinite, so they stay in sync. To check timing, open the SVG directly in a browser page and scrub it with pauseAnimations() and setCurrentTime(t)."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Keyframe ranks: at t = 0 the order is Central, Market Square, University, Riverside, Old Town, Northgate, Airport, Docklands; at t = 6 (2021) Central, Market Square, Riverside, University (tied at 38.4, broken alphabetically), Old Town, Docklands, Northgate, Beacon Hill; at t = 14 (2025) Central, Market Square, University, Docklands, Harbour Gate, Riverside, Old Town, Airport."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Keyframe geometry (within 1.5 units): bar tops at y 140, 212, 284, …, 644; bars start at x 260; Central is 707.2 long at t = 0 and 714.4 at t = 14; at t = 14 Harbour Gate's bar top is at y 428 and it is 445.6 long."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Linear transitions: at t = 3 s Central is 558.8 long, University's bar top is at y 392 (halfway from rank 3 to rank 6) and Airport's at 644 (halfway from 572 to 716, sliding out); at t = 11 s Docklands is 396.4 long with its top at y 392."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Late opener: Harbour Gate has no visible bar before 2021, and at t = 7 s its bar top is at y 680 with a length of 176.8, sliding up into view."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Labels: the year label shows 2019 at t = 3, 2021 at t = 6.5 and 2025 at t = 15; value labels switch at the keyframes (Central shows '90.1M' at t = 3 and '49.6M' at t = 4.5) and ride along with the bar ends."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Clip: bars ranked 9 or lower are invisible below y 708 at keyframes, and bars never cover the axis labels or the title."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Static parts: title 'Busiest stations on Kestrel Metro', subtitle 'Annual entries in millions, 2018–2025 · top 8 each year', axis 0–100 with gridlines every 20, and a legend of Crown, Harbour, Garden and Airport Express with their colors."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "File quality: groups bar-central, bar-market-square, …, bar-harbour-gate and bar-tanner-row for all 12 stations; names right-aligned at x 250; values formatted like '88.4M'."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Smooth and legible race: consistent bar colors by line, no label collisions at keyframes, and a clear, large year label."
+   }
+  ]
+ },
+ {
+  "task_id": "svg-open-15",
+  "category": "svg",
+  "mode": "open_ended",
+  "title": "Stereographic star chart with a projected ecliptic",
+  "artifact": {
+   "kind": "svg",
+   "entry": "northern_sky.svg"
+  },
+  "assets": [
+   "stars.csv",
+   "figures.json"
+  ],
+  "prompt": "Make a star chart of the northern sky as one SVG with viewBox 0 0 1200 1000, from stars.csv (101 stars with right ascension in hours, declination in degrees, magnitude and constellation) and figures.json (the stick figure of each constellation as pairs of star names).\n\nProjection (exact; positions will be checked in the source):\n- Polar stereographic around the north celestial pole, centred at (500, 500): a star at declination δ lies at radius r = k × tan((90° − δ) / 2), with k chosen so that δ = −30° falls exactly on r = 440, the edge of the chart.\n- Right ascension α (in hours) sets the direction: x = 500 + r × sin(15° × α), y = 500 + r × cos(15° × α), so 0h points straight down and 6h to the right.\n\nContent:\n- A dark sky disc of radius 440 with a thin rim; declination circles at +60°, +30° and 0° (the celestial equator, slightly stronger); hour lines every 2h from the +60° circle to the rim; labels 0h to 23h just outside the rim and +60°, +30° and 0° along the 0h line.\n- The ecliptic (obliquity 23.44°) as a dashed gold curve computed through the projection.\n- Stars as white discs sized by magnitude: below 0.5 radius 7; from 0.5 to below 1.5 radius 5.5; from 1.5 to below 2.5 radius 4; from 2.5 to below 3.5 radius 2.8; 3.5 and fainter radius 1.8.\n- Constellation lines from figures.json as thin translucent lines between star centres.\n- The names of all stars brighter than magnitude 1.5, plus Polaris, next to their stars without overlapping any star or other text.\n- Each constellation’s name in small letter-spaced capitals, centred exactly at the average projected position of its stars in stars.csv (even where that touches a star).\n\nRight of the chart: the title 'The Northern Sky', the subtitle 'Stereographic projection · north celestial pole at centre · to declination −30°', a magnitude legend with the five sizes, and legend entries for the ecliptic and the celestial equator.\n\nDraw each star as a circle with id star-<name in lowercase with hyphens>, and group the constellation lines as g id figures.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Projection is exact (k = 254.03; star centres within 2 units): Vega (379.8, 519.6), Sirius (835.0, 433.2), Capella (600.8, 519.3), Arcturus (399.2, 350.1), Dubhe (515.5, 438.0), Fomalhaut (382.7, 920.6), Polaris (501.0, 501.3)."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Grid: declination circles centred on (500, 500) with radii 68.1 (+60°), 146.7 (+30°), 254.0 (0°) and the rim at 440; hour lines every 2h; hour labels 0h at the bottom, 6h at the right, 12h at the top and 18h at the left (increasing counter-clockwise)."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The ecliptic is a dashed gold circle (or smooth closed curve) centred at (389.9, 500) with radius 276.9: it passes through (666.7, 500) at 6h and (113.0, 500) at 18h and crosses the equator at (500, 754.0) and (500, 246.0), within 3 units."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Star sizes by magnitude: radius 7 only for Sirius, Arcturus, Vega, Capella, Rigel and Procyon; Betelgeuse (0.50) is 5.5; Adhara (1.50) and Polaris (1.98) are 4; Megrez (3.31) is 2.8; Yildun (4.36) is 1.8."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "All 85 figure lines join the right star centres (spot-check the Big Dipper, Orion's belt Mintaka–Alnilam–Alnitak and Cassiopeia's W)."
+   },
+   {
+    "id": "R6",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Star labels: exactly the 15 stars brighter than 1.5 (Sirius, Arcturus, Vega, Capella, Rigel, Procyon, Betelgeuse, Altair, Aldebaran, Spica, Antares, Pollux, Fomalhaut, Deneb, Regulus) plus Polaris, with Adhara (1.50) unlabeled; no star name overlaps a star, a constellation name or another star name."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Constellation names are centred at the mean projected positions (within 3 units): Ursa Major (491.8, 424.4), Orion (752.7, 527.0), Cygnus (397.7, 566.2), Leo (563.5, 330.4), Canis Major (879.2, 402.7), Pegasus (462.8, 671.4)."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Side panel: title 'The Northern Sky', subtitle 'Stereographic projection · north celestial pole at centre · to declination −30°', a legend of the five magnitude sizes, and entries for the ecliptic and the celestial equator."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "File quality: one circle per star with ids like star-vega and star-epsilon-umi; figure lines grouped in g id figures; all text as text elements."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Handsome night-sky styling: dark background, crisp white stars with a clear size hierarchy, a subtle grid and legible labels."
+   }
+  ]
+ },
+ {
+  "task_id": "svg-open-16",
+  "category": "svg",
+  "mode": "open_ended",
+  "title": "Critical-path Gantt chart on a working-day calendar",
+  "artifact": {
+   "kind": "svg",
+   "entry": "refurbishment_gantt.svg"
+  },
+  "assets": [
+   "tasks.csv",
+   "calendar.json"
+  ],
+  "prompt": "Build the schedule chart for the Riverside Library refurbishment as one SVG with viewBox 0 0 1400 860, from tasks.csv (19 tasks in four phases with durations in working days, finish-to-start predecessors, where 'C4+2' means two working days of lag after C4, and percent complete) and calendar.json (project start, status date, working days and public holidays).\n\nScheduling rules:\n- Work happens Monday to Friday except the listed holidays. A task starts on the first working day after all its predecessors (plus any lag) have finished; tasks without predecessors start on the project start date. A task of d days occupies d consecutive working days. A milestone (0 days) happens at the end of the day its last predecessor finishes.\n- Compute total float (latest minus earliest start, in working days) with a backward pass from the project finish; the tasks with zero float form the critical path.\n\nChart:\n- A table on the left with columns ID, Task, Start, Finish and Days; dates like 'Mon 02 Mar'. Rows: each phase as a bold summary row (its first start and last finish) followed by its tasks in file order, 26 units per row starting at y = 150.\n- A timeline from Monday 2 March to Sunday 31 May 2026: x = 550 at the start of 2 March and 9 units per calendar day. A header with the month names and the date of every Monday. Weekends shaded light gray and holidays hatched over the full chart height.\n- Task bars run from the start of their first day to the end of their last day, 14 units tall: red for critical tasks, blue for the rest; a darker inner bar shows percent complete as a share of the drawn length, from the bar’s start. Milestones are diamonds; phase rows get thin black bracket bars.\n- Float: a thin gray line from the end of each non-critical bar to the end of its latest finish day, labeled like '3d float'.\n- Dependency arrows: from the middle of the predecessor’s right end, run right to 6 units past the successor’s start, then down into the top of the successor, ending in an arrowhead; only horizontal and vertical segments.\n- A dashed red vertical line at the start of the status date, labeled 'Status 15 Apr'.\n\nAbove the chart: the title 'Riverside Library refurbishment' and a summary line 'Reopening <date> · <n> working days · critical path <task ids joined with → >', with the date written like 'Mon 01 Jun 2026'. Add a legend, and group each task as g id task-<id>.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Table dates are right: A5 Mon 16 Mar – Tue 28 Apr (30 days across Good Friday and Easter Monday); B3 Wed 01 Apr – Mon 13 Apr; B5 Wed 01 Apr – Mon 20 Apr; C4 Thu 30 Apr – Wed 06 May (skipping 1 May); D2 Mon 11 May – Wed 13 May (two days of lag after C4); D1 Wed 13 May – Tue 19 May."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Bars are exact (x within 1 unit): A5 from 676 to 1072, B3 820 to 937, B5 820 to 1000, C1 937 to 1009, D2 1180 to 1207, D1 1198 to 1261; milestone diamonds centred at x 640 (A3) and x 1261 (D3)."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The critical path is exactly A1, A2, A3, B1, B2, B3, C1, C3, C5, C6, D1 and D3, drawn red; A4, A5, B4, B5, C2, C4 and D2 are blue."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Float lines end at the late finish (within 1 unit) with the right labels: A4 and A5 '6d float' (A5's line to x 1153), B4 and B5 '2d float' (B5's to 1018), C2 '1d float' (to 1081), C4 and D2 '4d float' (D2's to 1261)."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Calendar: 26 weekend days shaded between 2 March and 31 May; holidays hatched on 3 Apr (x 838), 6 Apr (x 865), 1 May (x 1090) and 25 May (x 1306); month names and Monday dates in the header."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "24 dependency arrows with only horizontal and vertical segments, each from the predecessor's right end to 6 units past the successor's start and down into its top with an arrowhead (check C4 → D2 across its lag, A5 → C6, B5 → C2 and A3 → B1)."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Progress fills are proportional (A5 40%, B3 60%, B4 80%, B5 25%; finished tasks full, unstarted empty) and the dashed red status line is at x 946, labeled 'Status 15 Apr'."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Phase rows: bold summary rows with bracket bars spanning Preparation 550–1072, Strip-out 640–1000, Fit-out 937–1198 and Reopening 1180–1261, with their first start and last finish in the table."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The summary line reads exactly 'Reopening Tue 19 May 2026 · 54 working days · critical path A1 → A2 → A3 → B1 → B2 → B3 → C1 → C3 → C5 → C6 → D1 → D3'; the title 'Riverside Library refurbishment' and a legend are present."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Table and chart rows align (26-unit pitch from y 150); labels and float labels do not overlap bars or arrows; everything fits in the viewBox; task groups task-A1 … task-D3 exist."
+   }
+  ]
+ },
+ {
+  "task_id": "svg-rep-07",
+  "category": "svg",
+  "mode": "replication",
+  "title": "Recreate a vintage botanical plate of the common poppy",
+  "prompt": "Recreate the attached botanical plate as a hand-written SVG with viewBox 0 0 700 1000. On speckled cream paper with a soft darker vignette and a double-rule frame with small diamond corners, the header reads PLATE XIV, then the italic serif title Papaver rhoeas and a subtitle, over a thin rule with a diamond.\n\nThe plant: a hairy main stem rising from a small root to an open four-petal red poppy (darker back petals, lighter front petals, each with a radial gradient into a black blotch at the base and fine veins), with a ring of dark stamens around a green seed head topped by a purple rayed disc; one branch to a nodding hairy bud on the left and one to an urn-shaped capsule on the right; three deeply lobed leaves with pale midribs and veins. Studies around it: a flattened petal, five seeds, and a circular inset of the capsule cross-section with its chambers and seeds. Lettered italic labels with thin leader lines, a scale bar and a footer line complete the plate.\n\nUse gradients for the petals, leaves, bud and capsule, clipPaths for the petal veins and the inset, and a pattern for the paper. Match positions, proportions, colors and text as closely as you can.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "poppy_plate.svg"
+  },
+  "reference_images": [
+   "reference.png"
+  ],
+  "golden": {
+   "entry": "poppy_plate.svg"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Composition matches: speckled cream paper with a vignette, a double frame (thick outer, thin inner) with diamond corners; 'PLATE XIV', italic 'Papaver rhoeas' and 'Common poppy · Papaveraceae' over a rule with a diamond; the flower centred near (330, 332) and the plant rising from a root near (300, 900)."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Flower: four red petals (two darker back petals up-left and up-right, two lighter front petals down-left and down-right) with radial gradients darkening to a black blotch at the base and faint radiating veins clipped to each petal; a ring of dark stamens with anther dots around a green seed head topped by a purple disc with pale rays."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Stems: a main stem with two branches, to a nodding hairy green bud at the left (red showing at its seam) and to an urn-shaped ribbed capsule with a purple rayed cap at the right, all edged with short hairs; a small brown root at the base."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Leaves: three deeply lobed leaves with gradient fill, pale midrib and side veins: two spreading left and right at the base and a smaller one on the main stem."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Studies: a circular inset (double ring) of the capsule cross-section with a thick green wall, ten radial walls, a central column and dark seeds; a flattened petal with veins; five brown kidney-shaped seeds; captions 'g. capsule, cross-section × 4', 'h. petal, flattened' and 'i. seeds × 10'."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Labels 'a. petal', 'b. stamens', 'c. stigmatic disc' and 'e. capsule' on the right and 'd. flower bud' and 'f. leaf' on the left, in italic serif, with thin leader lines ending in small dots on the right parts."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Footer: a 0–1–2 cm scale bar (first half filled) at the bottom left and 'Drawn from life · Kestrel Herbarium · 1887' centred at the bottom."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Palette matches: cream paper, scarlet-to-dark-red petals, sage and olive greens, a purple disc and dark brown ink."
+   },
+   {
+    "id": "F9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Technique as requested: gradients for petals, leaves, bud and capsule; clipPaths for the petal veins and the inset; a pattern for the paper. The file is built from real vector elements (paths, shapes, gradients, patterns, text), with no embedded image and no traced mesh of hundreds of tiny shapes."
+   }
+  ]
+ },
+ {
+  "task_id": "svg-rep-08",
+  "category": "svg",
+  "mode": "replication",
+  "title": "Recreate a 555 LED-flasher schematic with title block",
+  "prompt": "Recreate the attached electronic schematic as a hand-written SVG with viewBox 0 0 1200 800. It is drawn on light blue grid paper (fine lines every 10 units, stronger every 50) inside a double border with zone numbers 1–6 along the top and bottom and letters A–D down both sides.\n\nThree labeled sections: a power input (connector, reverse-protection diode, electrolytic and ceramic capacitors and a 7805 regulator feeding the +5 V rail along the top), an astable timer (an NE555 box with its eight numbered and named pins, two timing resistors, the timing and control capacitors) and an LED driver (base resistor, NPN transistor, red LED with light arrows and its series resistor, a test point flag and a decoupling capacitor). Every component has a bold reference and a value; wires meet at junction dots; every ground uses the same three-bar symbol.\n\nBelow the circuit: a notes box, a two-column parts list and the title block at the bottom right.\n\nRead every reference, value, pin and text from the image. Build the grid as a pattern, and define the ground symbol once and reuse it. Match positions, colors and typography as closely as you can.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "schematic.svg"
+  },
+  "reference_images": [
+   "reference.png"
+  ],
+  "golden": {
+   "entry": "schematic.svg"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Sheet matches: light grid (minor 10, major 50) inside a double navy border with zones 1–6 at top and bottom and A–D on both sides; section headings POWER INPUT, ASTABLE TIMER and LED DRIVER in pale letter-spaced capitals."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Power input: J1 two-pin connector '9–12 V DC', D1 '1N4007' pointing right, C1 '100 µF 25 V' electrolytic (with + and curved plate) and C2 '100 nF' to ground, U1 box '7805' with IN, OUT and GND, and the red '+5 V' flag on the rail running along the top."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "NE555 (U2, 'NE555' over 'timer'): pins 7 DIS, 6 THR and 2 TRIG on the left, 3 OUT on the right, 8 VCC and 4 RST on top tied to the rail, 1 GND and 5 CTRL at the bottom (C4 '10 nF' to ground), with pin numbers outside the box and names inside."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Timing network: R1 '10 kΩ' from the rail to the DIS node, R2 '68 kΩ' from DIS to a node joining pins 6 and 2, C3 '10 µF' electrolytic from that node to ground; junction dots at every T-junction."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "LED driver: R3 '1 kΩ' from OUT to the base of Q1 'BC547' (circle, base bar, emitter arrow, emitter to ground); the collector goes up through D2 'LED red' (red triangle, two light arrows) and R4 '330 Ω' to the rail; TP1 test point with a 'CLK' flag; C5 '100 nF' at the end of the rail."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Symbols and style: zigzag resistors, flat and curved capacitor plates, three-bar grounds, 2-unit navy wires, bold navy references with lighter blue-gray values."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Notes box 'NOTES' with the four lines '1. f = 1.44 / ((R1 + 2·R2) · C3) ≈ 0.99 Hz', '2. Duty cycle = (R1 + R2) / (R1 + 2·R2) ≈ 53 %', '3. Resistors 0.25 W, 5 %; capacitors 50 V unless noted' and '4. Q1 sinks up to 100 mA; D2 current ≈ 9 mA'."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Parts list 'PARTS LIST (16)' with R1–R4 and C1–C5 and their values in the left column, and U1, U2, Q1, D1, D2, J1 and TP1 with their descriptions in the right column."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Title block: 'LED FLASHER · 555 ASTABLE', 'Kestrel Electronics Lab · Schematic', 'Drawn: K. Osei', 'Checked: M. Ruiz', 'Date: 2026-09-12', 'Rev: B' (B in red), 'Doc: KEL-SCH-0142', 'Size: A4', 'Sheet 1 of 1', 'Scale: NTS'."
+   },
+   {
+    "id": "F10",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Technique: the grid is a pattern and the ground symbol is defined once and placed with use elements. The file is built from real vector elements (paths, shapes, gradients, patterns, text), with no embedded image and no traced mesh of hundreds of tiny shapes."
+   }
+  ]
+ },
+ {
+  "task_id": "svg-rep-09",
+  "category": "svg",
+  "mode": "replication",
+  "title": "Recreate a serpentine aviation-history infographic",
+  "prompt": "Recreate the attached infographic as a hand-written SVG with viewBox 0 0 900 1340. A sky-gradient header with a glowing sun and two clouds holds a kicker, a heavy headline and a subtitle. Below it a dark road with a pale verge and a dashed yellow centre line winds down the page in three horizontal runs joined by U-turns and ends at a checkered flag. Eight milestone circles sit on the road, colored by era (teal, orange, purple), each with a white line icon and a dotted connector up to a white shadowed card with a colored top strip, the year, a bold title and two lines of text. The era names follow the road: one under the first run and two along the outside of the U-turns.\n\nUnderneath: three donut gauges with percentages and captions, a bar chart of passengers per decade with value labels, and a source line, all on a warm cream background with a faint dot pattern.\n\nUse textPath for the curved era names, gradients for the sky, sun and road, and a pattern for the dots. Read every number and text from the image and match positions, colors and typography as closely as you can.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "timeline.svg"
+  },
+  "reference_images": [
+   "reference.png"
+  ],
+  "golden": {
+   "entry": "timeline.svg"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Layout matches: sky header (sun top right, clouds) with 'KESTREL FIELD', '100 Years of Flight' and 'From a grass strip to a regional hub · 1926–2026'; the road's runs at about y 380, 620 and 860 joined by a right U-turn and then a left U-turn, ending at a checkered flag with 'NEXT 100'; the stats and bar chart below."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Milestones in order on the road: 1926, 1938 and 1952 on the first run (left to right), 1969, 1983 and 1997 on the second (right to left), 2011 and 2026 on the third, each a colored circle with a white ring and a white icon (biplane, terminal, tower, jet, runway, cargo box, sun, star)."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Cards: eight white rounded cards with drop shadows, era-colored top strips and years, the bold titles 'First airstrip', 'Terminal opens', 'Control tower', 'First jet service', 'Runway 2', 'Cargo hub', 'Solar farm' and 'Centenary' with their two-line texts, each joined to its circle by a dotted line."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Era labels and colors: teal 'THE PROPELLER AGE · 1926–1957' under the first run; orange 'THE JET AGE · 1958–1999' along the outside of the right U-turn; purple 'THE DIGITAL AGE · 2000–2026' along the outside of the left U-turn, reading upwards; milestones and cards follow the era colors (1997 is orange)."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Road style: dark gradient road with a pale verge and a dashed yellow centre line, with smooth semicircular U-turns."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Donuts under 'KESTREL FIELD IN 2025': 87% 'On-time departures' (teal), 64% 'Renewable electricity' (orange) and 79% 'Seats filled' (purple), arcs starting at 12 o'clock clockwise with round caps over a beige track."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Bar chart 'Passengers per year, millions': ten bars 1930s–2020s labeled 0.01, 0.04, 0.2, 0.6, 1.1, 1.6, 2.3, 2.9, 3.6 and 4.2, heights to scale, teal up to the 1950s, orange for the 1960s–1990s and purple for the 2000s–2020s."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Background and footer: warm cream page with a faint dot grid; 'Source: Kestrel Field Archives · Design: Studio Meridian' centred at the bottom."
+   },
+   {
+    "id": "F9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Technique: the curved era labels use textPath; gradients for sky, sun and road; the dot grid is a pattern. The file is built from real vector elements (paths, shapes, gradients, patterns, text), with no embedded image and no traced mesh of hundreds of tiny shapes."
+   }
+  ]
+ },
+ {
+  "task_id": "svg-rep-10",
+  "category": "svg",
+  "mode": "replication",
+  "title": "Recreate a chronograph watch face with a tachymeter bezel",
+  "prompt": "Recreate the attached chronograph watch as a hand-written SVG with viewBox 0 0 800 800 on a dark radial background. A polished steel case with lugs at the top and bottom, a knurled crown at 3 o'clock and two pushers carries a black bezel with a tachymeter scale: numbers from 500 down to 60 at their true positions (the angle for a value T is 6° × 3600 / T), tick marks, and the red word TACHYMETER along the ring.\n\nThe deep blue sunburst dial has a fine minute track, applied steel baton indices with lume (doubled at 12), three recessed subdials with concentric grooves (small seconds at 9, a 30-minute counter at 3, a 12-hour counter at 6), a date window at 4:30, the brand block, and a curved line of small text near the bottom. The hands show the time, with a red central chronograph hand at zero, and a soft glare crosses the upper dial.\n\nUse gradients for the metal, dial and glare, textPath for the curved text, and a clipPath for the dial. Match positions, angles, colors and text as closely as you can.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "chronograph.svg"
+  },
+  "reference_images": [
+   "reference.png"
+  ],
+  "golden": {
+   "entry": "chronograph.svg"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Structure matches: steel case of radius about 336 centred at (400, 400) with lugs at the top and bottom, a knurled crown at 3 o'clock and pushers at about 2 and 4 o'clock; a black bezel ring from about radius 296 to 324; a blue dial of radius about 288."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Tachymeter: 500, 400, 300, 250, 200, 180, 160, 150, 140, 130, 120, 110, 100, 90, 80, 70 and 60 at 6° × 3600/T (e.g. 250 at 86.4°, 120 at 6 o'clock, 80 at 9 o'clock, 60 at 12), rotated along the ring and upright on the lower half, with ticks and minor ticks between 60 and 120; red 'TACHYMETER' along the ring between 70 and 60."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Subdials: small seconds at 9 (60, 20, 40), a 30-minute counter at 3 (30, 10, 20) and a 12-hour counter at 6 (12, 3, 6, 9), each about 64 in radius with a concentric groove texture, ticks, a light rim and a white hand (small seconds at about 37 s, the counters at zero)."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Dial details: faint sunburst lines over a radial blue gradient, a fine minute track with 60 stronger ticks, and steel baton indices with cream lume at every hour except 3, 6 and 9, doubled at 12."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Hands: a steel hour hand just past 10 (about 304°) and a minute hand at about 8½ minutes (about 52°), both with cream lume and offset shadows; a thin red chronograph hand pointing at 12 with a ring counterweight; a steel centre cap with a red dot."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Text: gold crown logo, 'AURELIA', 'GENÈVE', red 'CHRONOGRAPH', 'AUTOMATIC' and a curved 'SWISS MADE' at the bottom; a date window at 4:30, rotated 45°, showing '24'."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Materials: metallic steel gradients on the case, lugs, crown (knurled) and hands; a dark radial background; a soft white glare over the upper dial."
+   },
+   {
+    "id": "F8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Technique: gradients for metal, dial and glare; textPath for curved text; a clipPath for the dial. The file is built from real vector elements (paths, shapes, gradients, patterns, text), with no embedded image and no traced mesh of hundreds of tiny shapes."
+   }
+  ]
+ },
+ {
+  "task_id": "svg-rep-11",
+  "category": "svg",
+  "mode": "replication",
+  "title": "Recreate an apartment floor plan with finishes and dimensions",
+  "prompt": "Recreate the attached architectural floor plan as a hand-written SVG with viewBox 0 0 1080 760 (60 units per metre). A rectangular apartment with thick black outer walls holds two bedrooms and a bathroom along the top, a hall with the front door on the right, an L-shaped living and dining room and a kitchen, plus a balcony outside the bottom wall. Interior partitions are hatched and have door gaps; doors show their leaf and a dashed swing arc; windows are white insets with blue glazing lines; the balcony has a sliding door.\n\nThe floors use patterned finishes, each room has furniture drawn in plan and a label with its name and area, dimension chains run along the top and the left side, and a panel on the right holds the title, areas, a finishes legend, a north arrow, a scale bar and drawing notes.\n\nBuild the floor finishes and the wall hatch as patterns. Read every label, area and dimension from the image and match positions and proportions exactly.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "floor_plan.svg"
+  },
+  "reference_images": [
+   "reference.png"
+  ],
+  "golden": {
+   "entry": "floor_plan.svg"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Plan matches: interior 660 by 480 units from (120, 120) with 16-unit black outer walls; Bedroom 1, Bath and Bedroom 2 across the top (partitions near x 400 and 560, y 340); a hall along the middle right; an L-shaped living/dining on the left and bottom; the kitchen at the bottom right; a balcony outside the bottom wall below the living room."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Walls and openings: hatched partitions with door gaps; swing doors with leaf and dashed arc into Bedroom 1, Bath and Bedroom 2, and the front door on the right wall into the hall; windows in the same places as the target (three on the top wall, Bedroom 2's right wall, the living room's left wall, two on the bottom wall) and the balcony sliding door."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Floor patterns: oak boards in the bedrooms, hall and living room; small square ceramic tile in the bath; a diagonal two-tone checker in the kitchen; timber deck boards on the balcony."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Furniture: a double bed with two pillows, nightstands and a wardrobe in Bedroom 1; tub, WC and vanity in the bath; a single bed, desk with chair and wardrobe in Bedroom 2; an L-shaped counter with a 'REF' fridge, four-ring hob and double sink in the kitchen; sofa, patterned rug, coffee table, armchair, TV unit and a six-chair dining table in the living room; a bench in the hall; planters and a railing on the balcony."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Room labels are exact: 'BEDROOM 1' 16.6 m², 'BATH' 9.1 m², 'BEDROOM 2' 13.0 m², 'HALL' 9.5 m², 'LIVING / DINING' 25.2 m², 'KITCHEN' 10.6 m², 'BALCONY' 4.8 m²."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Dimensions: a top chain 4.60, 2.53, 3.60 with 11.00 overall above it; a left chain 3.60 and 4.27 with 8.00 overall, rotated, with slash ticks and extension lines."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Side panel: 'APARTMENT 4B', 'Floor plan · Level 4 · 2 bedrooms', a red rule, 'Net floor area 84.0 m²', 'Balcony 4.8 m²', a 'FINISHES' legend with five swatches (Oak boards, Ceramic tile, Porcelain tile, Timber deck, Partition wall), a north arrow, a 0/1/2 m scale bar, 'Scale 1:100 · dimensions in metres', 'Drawing A-104 · Rev C' and 'Harbour Row Residences'."
+   },
+   {
+    "id": "F8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Technique: floor finishes and the wall hatch are patterns. The file is built from real vector elements (paths, shapes, gradients, patterns, text), with no embedded image and no traced mesh of hundreds of tiny shapes."
+   }
+  ]
+ },
+ {
+  "task_id": "svg-rep-12",
+  "category": "svg",
+  "mode": "replication",
+  "title": "Recreate a ridgeline chart of monthly sea temperatures",
+  "prompt": "Recreate the attached ridgeline chart as a hand-written SVG with viewBox 0 0 1000 900. Twelve overlapping density curves, January at the top to December at the bottom, show how hourly sea temperatures were distributed each month. Every ridge is filled with the same horizontal temperature color scale (deep blue at 4° through pale cyan and yellow to dark red at 24°) and outlined in white, sits on a thin baseline with a dark dot at the monthly mean, and later months overlap earlier ones. Month names are on the left and the monthly means in a column on the right.\n\nThe chart has solid and dashed vertical gridlines with degree labels, two annotations with leader lines, a color-bar legend, a title, a subtitle and a source line on a pale gradient background.\n\nRead the shapes, positions and numbers from the image (the curves are smooth distributions; July has a second, smaller bump). Use one shared gradient for all ridge fills. Match positions, colors and typography as closely as you can.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "ridgeline.svg"
+  },
+  "reference_images": [
+   "reference.png"
+  ],
+  "golden": {
+   "entry": "ridgeline.svg"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Layout matches: the plot runs from 4° at x 150 to 24° at x 850 (35 units per degree); twelve baselines 48 units apart from January at y 214 to December at y 742; month names right-aligned left of the plot; the means column right of it under a 'MEAN' header."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Ridge shapes: smooth single peaks centred on each month's mean, tallest and narrowest in February, lowest and widest in May to July; July has a small second bump near 14.6° besides its main peak near 19°; heights and spreads comparable to the target."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Fill: one shared horizontal gradient mapped to temperature (color depends on x, not on the month), from deep blue at 4° through pale cyan near 14° and yellow near 16° to orange and dark red at 24°, with white outlines; later months drawn over earlier ones."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Means: a dark dot with a white outline on every baseline at the mean, all visible on top, and the right column reading 9.8°, 9.1°, 9.6°, 11.2°, 13.4°, 16.1°, 18.4°, 19.4°, 17.8°, 15.2°, 12.6° and 10.9°."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Grid: vertical lines every 2° (solid at multiples of 4, dashed otherwise) with labels 4° to 24° under the plot."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Annotations: 'Upwelling, 12–19 Jul' over 'cold water drops readings to ~14.6°' with a curved leader to the July bump, and 'Warmest reading' over '23.1° on 9 Aug' with a long vertical leader down to the August tail."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Text: title 'Kestrel Point sea temperature, 2025', subtitle 'Distribution of hourly buoy readings by month, °C · dots mark the monthly mean', a 'WATER TEMPERATURE' color bar labeled 4°, 9°, 14°, 19° and 24°, and 'Source: Kestrel Point buoy KP-3, hourly readings (8,760)' at the bottom right."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Background: a pale vertical gradient from near-white to light blue-gray; restrained dark navy and slate typography."
+   },
+   {
+    "id": "F9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Technique: ridges are smooth paths sharing one gradient defined once. The file is built from real vector elements (paths, shapes, gradients, patterns, text), with no embedded image and no traced mesh of hundreds of tiny shapes."
+   }
+  ]
+ }
+]

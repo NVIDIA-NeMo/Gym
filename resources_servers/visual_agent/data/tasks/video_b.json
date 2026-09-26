@@ -1,0 +1,869 @@
+[
+ {
+  "task_id": "video-open-09",
+  "category": "video",
+  "mode": "open_ended",
+  "title": "MLFQ CPU scheduler with queue lanes and a live Gantt chart",
+  "prompt": "Create a teaching animation for an operating-systems course that shows a multilevel feedback queue (MLFQ) CPU scheduler running the workload below. Compute the schedule from the rules; every state on screen must follow from them.\n\nWorkload (name, arrival time, CPU burst, in ms): A 0 6 · B 1 3 · C 2 9 · D 5 4 · E 9 2 · F 13 5 · G 30 2.\n\nScheduler rules:\n- Three FIFO ready queues: Q0 (quantum 2 ms), Q1 (quantum 4 ms) and Q2 (first-come first-served, no quantum).\n- A new arrival joins the tail of Q0. The CPU always runs the head of the highest non-empty queue (Q0 before Q1 before Q2).\n- A process that uses up its whole quantum without finishing is demoted one level (Q2 stays in Q2) and joins the tail of that queue. A process that finishes leaves at once.\n- If a process arrives while a process from a lower queue is running, the running process is preempted immediately: it keeps its level, goes to the tail of its own queue, and gets a fresh full quantum the next time it runs.\n- With nothing ready, the CPU is idle.\n- At any instant, handle things in this order: the running process finishing or using up its quantum, then arrivals, then preemption, then dispatch.\n\nFormat: 1280x720, 30 fps, exactly 22 s. Simulated time T (in ms) plays at video time t = 1.0 + 0.5 × T seconds, starting at 1.0 s (T = 0) and running until every process has finished; after that the clock stops and the frame holds.\n\nOn screen:\n- The title 'MLFQ scheduler · 3 levels' and a clock 'T = 13 ms' (whole ms, rounded down).\n- Three horizontal queue lanes labelled 'Q0 · q = 2', 'Q1 · q = 4' and 'Q2 · FCFS' holding the waiting processes as letter chips, head on the left. Each process keeps one colour everywhere.\n- A CPU box with the running process's letter, its level and quantum pips (one per ms of its quantum; one pip dims at the end of each ms it runs; no pips in Q2). It reads 'idle' when the CPU is idle.\n- A Gantt chart along the bottom with an axis from 0 to 32 ms (ticks every 2 ms, labels every 4 ms) that grows continuously with the clock: one block per uninterrupted run, in the process colour with its letter and a small level tag (Q0, Q1 or Q2), and hatched grey blocks for idle time. Mark every arrival with a small triangle under the axis.\n- A process table: name, arrival, burst and remaining ms (updated at the end of each ms); a finished process turns grey with a check mark.\n- From 17.5 to 18.0 s a results panel fades in over the queue lanes (the Gantt chart stays visible) and stays to the end: for each process its completion, turnaround (completion − arrival) and waiting (turnaround − burst) times, then 'Average turnaround X ms' and 'Average waiting Y ms' with two decimals.\n\nStyle: a dark IDE-like theme, Inter or Roboto with monospaced digits, everything legible at 720p.",
+  "artifact": {
+   "kind": "video",
+   "entry": "video.mp4"
+  },
+  "video_spec": {
+   "width": 1280,
+   "height": 720,
+   "min_duration_s": 21.9,
+   "max_duration_s": 22.1,
+   "min_fps": 30
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Preemption goes to the tail: at about 5.25 s (T = 8.5) A runs from Q1 (after its demotion) with Q1 holding B, C, D in that order; at about 5.75 s (T = 9.5) E runs from Q0 and Q1 holds B, C, D, A in that order (A was preempted by E's arrival and went to the tail)."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "At about 7.75 s (T = 13.5) F runs from Q0 and Q1 holds D, A, C in that order (C was preempted at T = 13 after 1 ms of its Q1 turn); Q0 and Q2 are empty."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Fresh quantum and demotion to Q2: at about 12.25 s (T = 22.5) C runs from Q1 with 2 of its 4 pips used and F waiting in Q1; at about 13.75 s (T = 25.5) F runs from Q1 while C waits alone in Q2; C then runs from 27 to 29 ms tagged Q2."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The final Gantt chart has exactly these 16 blocks: A 0–2 Q0, B 2–4 Q0, C 4–6 Q0, D 6–8 Q0, A 8–9 Q1, E 9–11 Q0, B 11–12 Q1, C 12–13 Q1, F 13–15 Q0, D 15–17 Q1, A 17–20 Q1, C 20–24 Q1, F 24–27 Q1, C 27–29 Q2, idle 29–30, G 30–32 Q0."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Idle gap: at about 15.75 s (T = 29.5) the CPU box reads idle, all three queues are empty and the Gantt chart shows a hatched idle block; G appears and runs from about 16.0 s (T = 30)."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Results panel: completion A 20, B 12, C 29, D 17, E 11, F 27, G 32; turnaround 20, 11, 27, 12, 2, 14, 2; waiting 14, 8, 18, 8, 0, 9, 0; 'Average turnaround 12.57 ms' and 'Average waiting 8.14 ms'."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The process table tracks remaining time: at about 7.75 s (T = 13.5) it reads A 3, C 6, D 2, F 5, G 2 with B and E finished (grey with a check mark); at the end every row is finished."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Timing and chrome: the clock reads T = 9 ms at about 5.6 s and T = 32 ms from 17.0 s on; arrival triangles sit at 0, 1, 2, 5, 9, 13 and 30 ms; the results panel is absent at 17.3 s and fully shown by 18.0 s with the Gantt chart still visible; the video is 22 s long."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Quantum pips: during D's first run (about 4.75 s, T = 7.5) the CPU box shows Q0 with 2 pips, one of them dimmed; during C's run from Q2 (about 14.75 s, T = 27.5) it shows Q2 with no pips."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Lanes, CPU box, process table and Gantt chart do not overlap; the 1 ms blocks (A 8–9, B 11–12, C 12–13, idle 29–30) remain legible; chips never collide; nothing is clipped at the frame edges."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A consistent dark IDE look a course designer would accept: each process keeps the same colour in chips, CPU box, Gantt blocks and table; digits do not jitter sideways; chips move smoothly between lanes and the CPU box."
+   }
+  ]
+ },
+ {
+  "task_id": "video-open-10",
+  "category": "video",
+  "mode": "open_ended",
+  "title": "Game of Life from a seed file with age colours and settle detection",
+  "prompt": "Make a 20-second Game of Life video for a generative-art channel, starting from the seed in seed.txt: 24 lines of 40 characters, '#' for a live cell and '.' for a dead one (line 1 is the top row). Everything on screen must come from actually running the rules.\n\nRules: Conway's B3/S23 on a bounded 40 × 24 grid: cells outside the grid are always dead (no wrap-around) and all cells update at the same time.\n\nFormat: 1280x720, 30 fps, exactly 20 s (600 frames). Generation 0 is shown until 1.0 s; after that the grid advances one generation every 0.1 s, so generation g (g ≥ 1) appears at t = 0.9 + 0.1 × g s and the last frames show generation 190.\n\nGrid: square cells of at least 20 px with thin grid lines and the whole 40 × 24 board visible inside a border. Colour each live cell by its age, the number of consecutive generations it has already been alive before the current one: age 0 (just born; every cell of generation 0 counts as age 0) #FDE68A, age 1 to 9 #FB923C, age 10 or more #38BDF8. Dead cells show the background.\n\nSide panel:\n- 'Generation N' and 'Population P' (live cells), updated every generation;\n- 'Peak P at gen G': the highest population so far and the first generation that reached it;\n- a line chart of population against generation (x from 0 to 190, y from 0 to 100 with gridlines every 20) drawn only up to the current generation, with a dot on the latest point;\n- once the board has started repeating with period 1 or 2, a badge 'Settled at generation S', where S is the first generation whose state equals the state two generations later. The badge appears on generation S + 2, the first moment this can be seen, and stays;\n- a legend for the three age colours.\n\nTitle at the top: 'Life from a seed' with the subtitle 'B3/S23 · 40 × 24 · no wrap'. Dark background, Inter, and digits in fixed-width cells so the counters never jitter.",
+  "artifact": {
+   "kind": "video",
+   "entry": "video.mp4"
+  },
+  "assets": [
+   "seed.txt"
+  ],
+  "video_spec": {
+   "width": 1280,
+   "height": 720,
+   "min_duration_s": 19.9,
+   "max_duration_s": 20.1,
+   "min_fps": 30
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Population counter matches the simulation, with the generation label agreeing: Generation 10 / Population 16 at about 1.95 s, Generation 24 / Population 51 at about 3.35 s, Generation 50 / Population 47 at about 5.95 s."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The mid-run collapse: at about 4.45 s (Generation 35) Population 10 while the peak reads 52 at gen 26; at about 6.95 s (Generation 60) Population 53 and the peak reads 53 at gen 60."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Peak tracking: at about 11.65 s (Generation 107) the peak reads 82 at gen 106; from about 11.75 s (Generation 108, Population 85) it reads 85 at gen 108 and never changes afterwards."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Settle badge: absent at about 15.05 s (Generation 141), present from about 15.15 s (Generation 142) reading 'Settled at generation 140' and staying to the end; the population is 32 from generation 140 on."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The final board (last frame, generation 190; rows and columns counted from 1 at the top left) holds exactly 32 cells: blocks at rows 4–5 / columns 22–23, rows 8–9 / columns 39–40 and in the bottom-right corner (rows 23–24 / columns 39–40), a boat at rows 6–8 / columns 33–35, a traffic light of four blinkers around row 11 / column 19, and a lone blinker at column 39, rows 13–15."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Generation 0 (about 0.5 s) matches seed.txt: a glider at rows 2–4 / columns 3–5 and an R-pentomino at rows 13–15 / columns 22–24, 10 cells, all in the age-0 colour #FDE68A."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Age colours are right: in the final frames the blocks and the boat are entirely #38BDF8 and each blinker has a #38BDF8 centre cell with two #FDE68A end cells; frames during the busy phase (e.g. 9–11 s) show all three colours."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The chart draws live: at about 5.95 s it covers generations 0–50 only, with the dip to 10 around generations 35–41 visible; the final chart shows the maximum at generation 108 and a flat line at 32 from generation 140 to 190."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Timing: generation 0 is held until 1.0 s, the counter advances by one every 3 frames (Generation 1 at 1.0–1.1 s, Generation 100 at about 10.95 s), and the last frame shows Generation 190; the video is 20 s long."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The full 40 × 24 grid is visible with square cells of at least 20 px; panel text, chart and legend never overlap the grid or each other; counters do not jitter sideways; nothing is clipped."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A polished generative-art look: dark background, crisp cells and grid, clear title and panel hierarchy in Inter, and a chart with readable axes."
+   }
+  ]
+ },
+ {
+  "task_id": "video-open-11",
+  "category": "video",
+  "mode": "open_ended",
+  "title": "Dijkstra route search on a metro map with tie-breaks and an early stop",
+  "prompt": "Animate Dijkstra's shortest-path algorithm for a transit explainer. metro_graph.json lists 13 stations (name and x, y pixel position in the 1280x720 frame; draw each station there) and the lines between them with travel times in minutes (lines work in both directions). Find the fastest route from Abbey to Jetty.\n\nAlgorithm rules (follow them exactly; the timeline depends on them):\n- Start: Abbey has distance 0 and every other station ∞.\n- Repeatedly settle the unsettled station with the smallest tentative distance; break ties alphabetically.\n- After settling station u, examine its neighbours that are not yet settled, in alphabetical order. For each neighbour v compute d(u) + w; if it is strictly smaller than v's current distance, update v and record u as its predecessor; otherwise keep the old value.\n- Stop as soon as Jetty is settled. Stations that were never settled keep their tentative values.\n\nFormat: 1280x720, 30 fps. The duration follows from the rules; compute it.\n\nTimeline:\n- 0.0 to 1.0 s: the map fades in: grey lines with their minute labels at the midpoints, and each station as a circle with its name and a distance tag (0 or ∞).\n- From 1.0 s the steps run back to back: every settle step lasts 0.5 s and every examined neighbour 0.4 s. A settle step starts when the station leaves the queue: it fills solid, its tag turns bold and a counter 'Settled: k' increments. An examination step highlights the edge in yellow. On an improvement the neighbour's tag changes as the step starts and the edge to its predecessor turns teal (replacing any older teal edge into that station); when the value is kept the edge flashes red instead. During each step a status line shows the arithmetic, for example 'Canal → Docks: 3 + 5 = 8 < 9 · update' or 'Bridge → Docks: 4 + 4 = 8 ≥ 8 · keep'.\n- When Jetty's settle step ends: a 0.3 s pause, then the route from Abbey to Jetty is traced as a thick accent line over 1.5 s. When the trace completes, a banner 'Abbey → Jetty · N min' listing the stations in between appears and holds for exactly 2.5 s, then the video ends.\n\nRight panel: 'Priority queue', listing the stations that have a finite tentative distance and are not settled, sorted by distance then name, each as 'Docks 8', updated live.\n\nStyle: a clean transit-map look on a light background, Inter, and colour-coded states (unvisited grey, queued with an amber outline, settled solid, the current step highlighted).",
+  "artifact": {
+   "kind": "video",
+   "entry": "video.mp4"
+  },
+  "assets": [
+   "metro_graph.json"
+  ],
+  "video_spec": {
+   "width": 1280,
+   "height": 720,
+   "min_duration_s": 19.1,
+   "max_duration_s": 19.3,
+   "min_fps": 30
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Settle order and values: Abbey 0, Canal 3, Bridge 4, Foundry 7, Docks 8, Elm 9, Grove 12, Harbor 12, Kiln 15, Iris 16, Jetty 16 (Grove before Harbor and Iris before Jetty by the alphabetical tie-break); Lantern and Mill are never settled and end showing 22."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Result and length: the traced route is Abbey → Canal → Foundry → Harbor → Jetty, the banner reads 16 min and lists Canal, Foundry, Harbor, it appears at about 16.7 s, and the video is 19.2 s long (±0.1 s)."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Early examinations: at about 3.4 s the status line shows Canal → Docks 3 + 5 = 8 < 9 and Docks's tag reads 8; at about 4.7 s Bridge → Docks is rejected (4 + 4 = 8 is not smaller than 8), that edge flashes red and Docks keeps 8 with its teal edge still coming from Canal."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Mid-run state at about 9.45 s: Grove is being settled with 12 while Harbor (also 12) waits; the priority-queue panel lists Harbor 12, Kiln 16, Iris 17 in that order; the counter reads Settled: 7."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Later improvements happen on time: at about 9.9 s Iris improves from 17 to 16 via Grove; at about 11.2 s Jetty improves from 19 to 16 via Harbor; at about 11.6 s Kiln improves from 16 to 15 via Harbor."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Early stop: at about 14.65 s Jetty is being settled (Settled: 11) and the queue panel shows only Lantern 22 and Mill 22; no examination of Jetty's neighbours follows."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Predecessor tree: at the end the teal edges are exactly Abbey–Bridge, Abbey–Canal, Canal–Docks, Canal–Foundry, Bridge–Elm, Elm–Grove, Foundry–Harbor, Harbor–Kiln, Grove–Iris, Harbor–Jetty, Kiln–Lantern and Iris–Mill (the replaced Abbey–Docks, Docks–Grove, Foundry–Kiln, Elm–Iris and Grove–Jetty are no longer teal)."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Map fidelity: all 13 stations at their given positions with their names and all 22 lines with minute labels; at about 0.8 s Abbey shows 0 and every other station ∞."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Step durations: Abbey's three examinations run from 1.5 to 2.7 s in the order Bridge, Canal, Docks (Bridge at about 1.7 s, Docks at about 2.5 s), and Canal's settle step starts at 2.7 s."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Station names, distance tags and minute labels do not overlap each other or the lines; the queue panel and status line never cover a station; nothing is clipped."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A clean transit-map look: distinct, consistent state colours, legible Inter typography with clear hierarchy, and a smooth route trace."
+   }
+  ]
+ },
+ {
+  "task_id": "video-open-12",
+  "category": "video",
+  "mode": "open_ended",
+  "title": "Limit order book replay with price-time matching",
+  "prompt": "Build a market-microstructure explainer: replay the order flow in orders.csv through a limit order book and animate the book, the trades and the statistics. Columns: t (seconds into the video when the message arrives), id, action (LIMIT, MARKET or CANCEL), side (BUY or SELL), price, qty, and ref (for CANCEL, the id of the order to cancel). The rows at t = 0 form the opening book.\n\nMatching rules (price-time priority):\n- An incoming BUY trades against the lowest ask while that ask is at or below its limit (at any price for MARKET); an incoming SELL trades against the highest bid while that bid is at or above its limit. Within a price level older orders fill first. Every fill trades at the resting order's price and prints as its own trade.\n- The unfilled remainder of a LIMIT order rests in the book at its limit price. The unfilled remainder of a MARKET order is cancelled.\n- CANCEL removes whatever remains of the referenced order; if nothing remains, the cancel is rejected.\n\nFormat: 1280x720, 30 fps, exactly 18 s. Each message takes effect on the first frame at or after its time, and everything it changes updates on that frame.\n\nLayout:\n- Centre: a price ladder from 100.50 (top) to 99.50 (bottom) in 0.10 steps. Bids are green bars growing left from the price column and asks red bars growing right, all on one quantity scale. Each resting order is its own segment separated by a thin gap, the oldest nearest the price column, and the level total is printed at the outer end. Highlight the best bid and best ask rows and flash changed levels for 0.3 s.\n- Top bar: Last, Bid, Ask, Spread, Volume and VWAP (volume-weighted average trade price), prices with two decimals and '—' when a value is undefined.\n- Right: a time-and-sales tape, newest on top, showing up to 10 trades like '09:30:07  BUY  150 @ 100.10', where market time is 09:30:00 plus the video time and the side is that of the incoming (aggressor) order.\n- Bottom: a message line with the latest message and its outcome, for example 'LIMIT BUY 200 @ 100.30 (#99) · 2 fills, 50 rests', 'Cancel #99 rejected: already filled' or 'MARKET SELL (#99) · 120 unfilled, cancelled'.\n- From 16.0 s a 'Session summary' card slides in over the tape and holds to the end: trade count, volume, VWAP, high, low and last price.\n\nStyle: a dark trading-terminal look, Roboto or Inter with tabular digits, green and red for bids and asks.",
+  "artifact": {
+   "kind": "video",
+   "entry": "video.mp4"
+  },
+  "assets": [
+   "orders.csv"
+  ],
+  "video_spec": {
+   "width": 1280,
+   "height": 720,
+   "min_duration_s": 17.9,
+   "max_duration_s": 18.1,
+   "min_fps": 30
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "After the market buy at 2 s (frame at about 2.5 s): the tape shows two prints, BUY 50 @ 100.10 (newest, top) and BUY 250 @ 100.10; the 100.10 ask level holds only 100 (the rest of order 7); Last 100.10, Volume 300, VWAP 100.10."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Price improvement at 3 s (frame at about 3.5 s): the sell limit at 99.90 fills 150 @ 100.00, 300 @ 99.90 and 50 @ 99.90; the 100.00 bid level is empty and 99.90 shows 50 (the rest of order 4); no sell order rests; Last 99.90, Volume 800, VWAP 99.99."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Cancels: at about 4.5 s the 99.90 bid level is gone, Bid 99.80 and Spread 0.30; at about 5.5 s the message line reports that the cancel of order 5 is rejected because it is already filled, and the book is unchanged."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Time priority is visible: at about 6.5 s the 100.10 ask level shows two segments, 100 (order 7) nearest the price column and 200 (order 14) outside it, total 300; at about 9.5 s the 100.00 bid level shows two segments, 300 then 200."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "At about 7.5 s, after the buy limit 450 @ 100.20: new prints 100 @ 100.10, 200 @ 100.10 and 150 @ 100.20; the 100.20 ask level has 150 left; Bid 99.80, Ask 100.20, Volume 1250, VWAP 100.04."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "At about 10.5 s, after the market sell 600: prints 300 @ 100.00, 200 @ 100.00, 100 @ 99.80; 100 left at the 99.80 bid; Volume 1850, VWAP 100.02. At about 11.5 s the sell limit 150 @ 99.80 has filled 100 and rests 50 as an ask at 99.80: Bid 99.70, Ask 99.80, Spread 0.10, VWAP 100.01."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "At about 12.5 s the market buy 900 has swept 50 @ 99.80, 150 @ 100.20 and 500 @ 100.40, the message line reports 200 unfilled and cancelled, the ask side is empty and Ask and Spread show '—'; Last 100.40, Volume 2650."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "End state: at about 15.5 s the book holds only a 250 bid at 99.90 and a 300 ask at 100.30 (Spread 0.40); from about 16.5 s the summary card reads 15 trades, volume 2650, VWAP 100.09, high 100.40, low 99.80, last 100.40."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Tape format: times follow 09:30:00 plus the video time (e.g. 09:30:07 for the prints at 7 s, 09:30:12 for those at 12 s), each row shows the aggressor side, quantity and price, and the newest trade is on top."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The ladder shows all 11 price rows from 100.50 to 99.50 with the price column centred; bars never cover the price column or each other; the top bar, tape, message line and summary card do not collide; nothing is clipped."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A convincing dark trading-terminal design: consistent green and red, tabular digits that do not jitter, clear hierarchy between prices, sizes and labels, and restrained flashes."
+   }
+  ]
+ },
+ {
+  "task_id": "video-open-13",
+  "category": "video",
+  "mode": "open_ended",
+  "title": "Connect Four replay with an invalid move and a diagonal win",
+  "prompt": "Make a replay video of a Connect Four game for a board-game channel. moves.txt lists the column (1 to 7, left to right) of each move attempt, one per line. Red moves first and the players alternate. Replay it with the real rules:\n- A disc falls to the lowest empty cell of its column on the standard board of 7 columns and 6 rows.\n- If the column is already full the attempt is invalid: nothing is placed and the same player tries again with the next line.\n- The game ends at the first four in a row (horizontal, vertical or diagonal); any remaining lines of the file are ignored.\n\nFormat: 1280x720, 30 fps. The length follows from the file; compute it.\n\nTimeline:\n- 0.0 to 1.0 s: the title 'Replay: Game 7' over the empty board.\n- From 1.0 s every processed line of the file takes 0.6 s. For a valid move the disc appears above its column and falls into its cell with an ease-in (gravity-like) motion during the first 0.35 s, then rests. For an invalid attempt the column number flashes red and a toast 'Column N is full · Red plays again' (or Yellow) shows for that 0.6 s.\n- At the end of the winning move's 0.6 s slot the four winning discs get a white ring, all other discs dim to 50%, and a banner 'Yellow wins · move M' (or Red, where M is the number of discs on the board) appears. Hold this for exactly 3.0 s, then the video ends.\n\nHUD: 'Move M' (discs placed so far), a turn indicator with a disc in the colour of the player to move ('Red to play' or 'Yellow to play'), and a move log on the right listing the 10 most recently processed lines, valid moves as '12. Yellow → 6' and invalid attempts in grey as '× Red → 4 (full)'.\n\nBoard: blue (#1D4ED8) with round holes on a dark background, red #EF4444 and yellow #FACC15 discs, and column numbers 1 to 7 above the columns. Use Inter.",
+  "artifact": {
+   "kind": "video",
+   "entry": "video.mp4"
+  },
+  "assets": [
+   "moves.txt"
+  ],
+  "video_spec": {
+   "width": 1280,
+   "height": 720,
+   "min_duration_s": 18.9,
+   "max_duration_s": 19.1,
+   "min_fps": 30
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Column 4 fills first: at about 5.7 s column 4 holds, from the bottom, Red, Yellow, Red, Red, Yellow, Red, with one yellow disc in column 5 and one in column 7; the HUD reads Move 8."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The invalid attempt: between about 5.8 and 6.4 s the toast 'Column 4 is full · Red plays again' shows, column 4's number flashes red, nothing is added (Move 8) and the indicator still reads Red to play; at about 6.95 s a red disc sits in column 7 on top of the yellow one (Move 9) and it is Yellow's turn."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Board at about 11.75 s (Move 17): bottom row from column 1 to 7 is empty, empty, Yellow, Red, Yellow, Yellow, Yellow; column 3 holds Yellow, Red; column 5 Yellow, Red, Yellow; column 6 Yellow, Red, Yellow; column 7 Yellow, Red, Red (bottom to top)."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Red's threat before the end: at about 15.35 s (Move 23) column 3 holds Yellow, Red, Red, Red from the bottom (three reds stacked with the cell above open), it is Yellow's turn and no banner is shown."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The win: Yellow's disc in column 6 (row 4 from the bottom) completes the diagonal column 3 row 1, column 4 row 2, column 5 row 3, column 6 row 4; at about 16.3 s exactly these four discs are ringed, the others dimmed, and the banner reads 'Yellow wins · move 24'."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The last three lines of the file are ignored: the final board has exactly 24 discs, 12 red and 12 yellow, column 2 is empty and column 6 holds Yellow, Red, Yellow, Yellow."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Timing: the video is 19.0 s long (±0.1 s); every processed line takes 0.6 s (the first red disc has landed in column 4 by about 1.4 s and the second disc, yellow, is falling at about 1.75 s); the banner appears at about 16.0 s."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Move log: at about 6.9 s it lists '8. Yellow → 7', then the grey '× Red → 4 (full)', then '9. Red → 7'; at the end it shows the last 10 processed lines ending with '24. Yellow → 6'."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Discs visibly fall with acceleration (a frame mid-fall, such as about 1.2 s, shows the disc between the top of the board and its cell, not teleported) and come to rest exactly in the holes."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Board, HUD and move log are separate and aligned; column numbers sit over their columns; the toast and banner do not hide the winning discs; nothing is clipped."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A polished game-broadcast look: the specified board and disc colours, crisp round holes and discs, clear Inter typography and a legible, well-structured log."
+   }
+  ]
+ },
+ {
+  "task_id": "video-open-14",
+  "category": "video",
+  "mode": "open_ended",
+  "title": "Broadcast alert lower-thirds with priority preemption and expiry",
+  "prompt": "Produce a 23-second broadcast graphics test for a city news channel that plays the alerts in alerts.json as lower-third banners. Each alert has an id, an arrival time (seconds into the video), a priority (1 = CRITICAL, 2 = WARNING, 3 = INFO), an on-air duration in seconds and a text. Only one banner can be on air at a time, so resolve the conflicts with these rules:\n- Waiting alerts form a line ordered by priority, then by arrival time.\n- When nothing is on air, the first waiting alert goes on air at once. An alert leaves the air when its total on-air time reaches its duration.\n- If the first waiting alert has a strictly higher priority than the one on air, it takes over, but only once the one on air has been on air for at least 1.0 s in its current airing; if it has been on for less, the switch happens exactly when it reaches 1.0 s. The interrupted alert goes back into the line with its remaining time and its original arrival time.\n- An INFO alert that has never been on air and is still waiting 8.0 s after its arrival expires and is dropped.\n- At the same instant: alerts leaving the air first, then arrivals, then expiries, then takeovers.\n\nFormat: 1280x720, 30 fps, exactly 23 s. Banner changes are instant cuts.\n\nFrame:\n- Background: a drawn night-city skyline standing in for the live feed (no photos), a 'LIVE' bug with a red dot at the top left and the programme clock at the top right as m:ss.t, truncated (0:07.4 at 7.45 s).\n- Lower third (bottom area, left 70% of the width): a colour block with the priority word (CRITICAL #DC2626, WARNING #F59E0B, INFO #2563EB), the alert id, its text, a countdown bar showing remaining / duration, and the remaining seconds with one decimal (like '2.7 s'). A small 'RESUMED' tag marks every airing after an alert's first.\n- 'Up next' panel on the right: the waiting line in order, one row per alert with a priority chip, the id and its remaining seconds. Above it, the counters 'Completed N' and 'Expired N'.\n- When nothing is on air the lower third is empty.\n- Half a second after the last alert leaves the air, a 'Rundown' table fades in over 0.5 s and stays to the end: one row per alert with its priority, arrival, first on air, finished (or 'expired at X') and the number of times it was interrupted.\n\nUse Inter, broadcast-safe margins of at least 48 px, and keep all text readable over the background.",
+  "artifact": {
+   "kind": "video",
+   "entry": "video.mp4"
+  },
+  "assets": [
+   "alerts.json"
+  ],
+  "video_spec": {
+   "width": 1280,
+   "height": 720,
+   "min_duration_s": 22.9,
+   "max_duration_s": 23.1,
+   "min_fps": 30
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "First takeover: at about 1.8 s A1 (INFO) is on air with 2.7 s left and A2 waits; at about 2.3 s A3 (WARNING) is on air with about 2.7 s left and Up next lists A1 (2.5 s) then A2 (3.0 s)."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Minimum on-air rule: at about 2.8 s A3 is still on air (2.2 s left) although A4 (CRITICAL, arrived 2.6 s) heads Up next; at about 3.2 s A4 is on air (2.3 s left) and Up next lists A3 2.0, A1 2.5, A2 3.0."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Equal priority does not interrupt: at about 6.5 s A3 is on air with a RESUMED tag and 1.0 s left while A6 (WARNING, arrived 6.0 s) waits first in line; Up next reads A6, A1, A2, A5."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "At about 7.5 s A7 (CRITICAL) is on air with 1.3 s left and A3 heads Up next with 0.2 s; at about 8.9 s A3 is briefly back on air (RESUMED, about 0.1 s left); at about 9.4 s A6 is on air with 2.1 s left and Completed reads 3."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Expiries: A2 is listed at 9.4 s and gone at 9.6 s with Expired 1; A5 is gone by 11.8 s with Expired 2 (at 11.8 s A1 is on air, RESUMED, 2.2 s left, with only A8 waiting); A8 never expires because it goes on air at 16.0 s."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "At about 13.5 s A9 (WARNING) is on air with 1.5 s left and Up next lists A1 (1.0 s) then A8 (2.0 s); at about 15.5 s A1 is on air (RESUMED) with 0.5 s left."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The rundown (fully shown by about 19.0 s) reads: A1 INFO, arrived 0.5, first 0.5, finished 16.0, interrupted 2; A2 expired at 9.5; A3 WARNING 2.0, 2.0, 9.0, 2; A4 CRITICAL 2.6, 3.0, 5.5, 0; A5 expired at 11.5; A6 WARNING 6.0, 9.0, 11.5, 0; A7 CRITICAL 7.3, 7.3, 8.8, 0; A8 INFO 9.0, 16.0, 18.0, 0; A9 WARNING 13.0, 13.0, 15.0, 0."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Idle and end: no banner before 0.5 s or after 18.0 s; at the end Completed reads 7 and Expired 2; the rundown is absent at 18.4 s."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Banner details: the specified priority words and colours, the id and exact text (e.g. 'Flash flood warning: River Lane closed' at about 4.0 s), a countdown bar proportional to remaining / duration, remaining seconds with one decimal, and the clock reading 0:07.4 at about 7.45 s."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The lower third stays in the left 70% above the bottom margin and never overlaps the Up next panel; the longest texts fit without clipping; all text keeps at least 48 px from the frame edges."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Broadcast-quality graphics a news designer would accept: a coherent skyline background that does not fight the text, consistent priority colours, clean Inter hierarchy and a tidy rundown table."
+   }
+  ]
+ },
+ {
+  "task_id": "video-open-15",
+  "category": "video",
+  "mode": "open_ended",
+  "title": "Huffman tree construction with strict tie-breaking and a code table",
+  "prompt": "Create an explainer that builds a Huffman code for a message whose letter counts are: E 13, T 9, A 8, O 8, N 6, S 5, R 5, H 4, D 3, L 2.\n\nConstruction rules (the tie-breaks matter):\n- Keep a forest of trees ordered by weight; among equal weights, single letters come before merged trees, letters among themselves alphabetically, and merged trees among themselves by creation order (older first).\n- Each step removes the first two trees in that order and joins them under a new node whose weight is their sum; the first becomes the left child (edge bit 0) and the second the right child (bit 1).\n- Repeat until one tree remains. A letter's code is the sequence of bits on the path from the root to its leaf.\n\nFormat: 1280x720, 30 fps, exactly 24 s.\n\nTimeline:\n- 0.0 to 1.5 s: the title 'Building a Huffman code', and the ten letters appear as leaf tiles (letter and count) in one row, in forest order.\n- Merge k (k = 1, 2, …) starts at 1.5 + 1.6 × (k − 1) s and lasts 1.6 s: the two chosen trees are highlighted for 0.5 s (the left one orange, the right one purple), then move together under their new parent node, which shows the sum (0.6 s), then the merged tree slides into its place in the forest row (0.5 s). A counter reads 'Merge k of 9'.\n- After the last merge the finished tree is laid out cleanly over 1.6 s and every edge gets its 0 or 1 label.\n- Then a code table fills in, one row every 0.3 s, sorted by count (highest first, ties alphabetically): letter, count, code, and bits (count × code length).\n- 0.3 s after the last row appears, a summary line appears: 'Total N bits vs M bits with a fixed 4-bit code (P% smaller)', with P rounded to a whole percent. Hold to the end.\n\nStyle: a dark chalkboard or a clean light look, Inter, leaf tiles clearly distinct from internal nodes, all counts legible.",
+  "artifact": {
+   "kind": "video",
+   "entry": "video.mp4"
+  },
+  "video_spec": {
+   "width": 1280,
+   "height": 720,
+   "min_duration_s": 23.9,
+   "max_duration_s": 24.1,
+   "min_fps": 30
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Leaf order and first merge: at about 1.0 s the leaves read L2, D3, H4, R5, S5, N6, A8, O8, T9, E13 from left to right; merge 1 (about 1.7 s) highlights L (left, orange) and D (right, purple), which join under a node of 5."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Tie-breaks: merge 2 (about 3.3 s) joins H4 and R5 (R before S alphabetically) into 9; merge 3 (about 4.9 s) joins the letter S5 (left) with the merged node 5 (right) into 10, because on equal weight a letter comes before a merged tree."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Middle merges: merge 4 (about 6.5 s) is N6 + A8 = 14; at the start of merge 5 (about 8.0 s) the forest row reads O8, T9, 9, 10, E13, 14 in that order with O and T highlighted, making 17; merge 6 (about 9.7 s) joins the 9 node (H, R) with the 10 node into 19."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Last merges: merge 7 (about 11.3 s) E13 + 14 = 27; merge 8 (about 12.9 s) 17 + 19 = 36; merge 9 (about 14.5 s) 27 + 36 = 63, with the counter reading 'Merge 9 of 9'."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The code table (complete by about 21 s) reads, in this order: E 13 00 26; T 9 101 27; A 8 011 24; O 8 100 24; N 6 010 18; R 5 1101 20; S 5 1110 20; H 4 1100 16; D 3 11111 15; L 2 11110 10."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The summary reads 'Total 200 bits vs 252 bits with a fixed 4-bit code (21% smaller)' and appears at about 20.5 s."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The finished tree (from about 17.5 s) has root 63 with left child 27 (E and 14) and right child 36 (17 and 19); edges are labelled 0 to the left and 1 to the right; E sits at depth 2 and D and L at depth 5, matching their codes."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Each merge shows its three phases: e.g. at about 2.4 s L and D are moving together under the new 5 node, and at about 2.9 s the 5 tree is sliding into the row between S5 and N6."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Table rows appear one by one every 0.3 s from about 17.5 s: at about 18.5 s exactly four rows (E, T, A, O) are shown."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "Trees in the forest row never overlap as they grow; the final tree fits in the frame with legible weights and edge bits; the table columns are aligned; nothing is clipped."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A clear teaching look: consistent node styles, the orange/purple highlight convention used throughout, readable Inter typography and smooth, eased motion."
+   }
+  ]
+ },
+ {
+  "task_id": "video-open-16",
+  "category": "video",
+  "mode": "open_ended",
+  "title": "Comet orbit with Kepler's equation, equal-area wedges and an Earth flyby",
+  "prompt": "Animate one orbit of the fictional comet 2030 Tessaro for an astronomy class, with positions computed from Kepler's laws.\n\nOrbit: the Sun sits at one focus. The orbital period is exactly 4.00 years and the eccentricity 0.72; derive the semi-major axis from Kepler's third law (AU and years). Perihelion lies to the right of the Sun and the comet moves counterclockwise on screen. Earth moves on a circular 1 AU orbit with a period of 1 year, also counterclockwise, starting at 45° (up and to the right of the Sun).\n\nFormat: 1280x720, 30 fps, exactly 24 s. Scale: 140 px per AU, with the Sun at pixel (720, 380).\n\nTimeline:\n- 0.0 to 1.0 s: the title 'One orbit of comet Tessaro' and the two orbit outlines draw in; the comet waits at aphelion and Earth at its start.\n- 1.0 to 21.0 s: exactly one orbit, starting at aphelion at 1.0 s. The date is 2030.00 + 0.2 × (t − 1) years. Place the comet on every frame by solving Kepler's equation for that frame's mean anomaly; Earth follows its own orbit on the same clock.\n- 21.0 to 24.0 s: everything stops and a summary card appears: perihelion and aphelion distances (AU, two decimals), maximum and minimum speed (km/s, one decimal), and the closest Earth–comet distance with its date.\n\nElements:\n- Equal-area wedges: starting at 2030.00, every 0.4 years close a wedge from the Sun to the arc the comet swept, filled in two alternating translucent colours; the current wedge grows with the comet. A legend states the area of each wedge in AU² with two decimals.\n- The comet: a bright nucleus with a tail pointing directly away from the Sun, 120 / r px long (r in AU), capped at 180 px.\n- Labels 'q = … AU' at perihelion and 'Q = … AU' at aphelion.\n- HUD with fixed-width digits: 'Year 2031.25', 'r = 1.23 AU' (comet–Sun distance), 'v = 12.3 km/s' from the vis-viva equation (v = 29.78 × √(2/r − 1/a) km/s, r and a in AU) and 'Earth–comet 1.23 AU'.\n- Closest approach: on the frame where the Earth–comet distance is smallest over the whole orbit, draw a dashed line between them labelled with that distance (two decimals) and date, and keep it until the end.\n\nStyle: deep space (dark navy, a faint static star field), a glowing yellow Sun, Inter.",
+  "artifact": {
+   "kind": "video",
+   "entry": "video.mp4"
+  },
+  "video_spec": {
+   "width": 1280,
+   "height": 720,
+   "min_duration_s": 23.9,
+   "max_duration_s": 24.1,
+   "min_fps": 30
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Kepler timing on the far side: at 6.0 s the HUD reads Year 2031.00, r = 3.54 AU, v = 12.2 km/s with the comet below and left of the Sun near pixel (268, 583); at 16.0 s Year 2033.00, r = 3.54 AU, v = 12.2 km/s at the mirror position near (268, 177)."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Perihelion at 11.0 s: Year 2032.00, the comet at the orbit's rightmost point about 99 px right of the Sun (near (819, 380)), r = 0.71 AU, v = 46.5 km/s; the orbit's leftmost point (aphelion) is near x = 113."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Fast inner passage: at 10.0 s the comet is almost straight below the Sun (near (696, 565); r = 1.34 AU, v = 31.2 km/s) and at 12.0 s almost straight above it (near (696, 195)), while from 1.0 to 9.0 s it stays on the far left part of the orbit (x below about 560)."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Equal-area wedges: ten wedges in alternating colours by 21 s; the two wedges on either side of perihelion (2031.60–2032.00 and 2032.00–2032.40) each span about 125° at the Sun while the two touching aphelion span only about 9°; the legend gives 1.38 AU² per wedge."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Earth runs on its 1 AU circle (140 px radius) once every 5 s: at 45° (near (819, 281)) at 1.0, 6.0, 11.0 and 16.0 s, and near 189° (left of the Sun, near (582, 402)) at 8.0 and 13.0 s."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Closest approach: absent at 11.4 s; from about 11.6 s a dashed line joins Earth (near (724, 240)) and the comet (near (760, 244)) labelled 0.25 AU and 2032.12, and it stays to the end."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The summary card from 21.0 s reads perihelion 0.71 AU, aphelion 4.33 AU, maximum speed 46.5 km/s, minimum speed 7.6 km/s, and closest approach 0.25 AU in 2032.12."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The tail always points directly away from the Sun and is much longer near perihelion (about 170 px) than near aphelion (about 28 px)."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Orbit geometry and labels: an ellipse reaching about 245 px above and below the Sun's horizontal line (y about 135 to 625) with the Sun at (720, 380) at its right focus; the labels read q = 0.71 AU and Q = 4.33 AU; the year reads 2034.00 at 21.0 s."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "HUD, legend, labels and the summary card never cover the Sun, the comet near perihelion or each other; nothing is clipped at the frame edges."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A polished planetarium look: dark navy space with a subtle static star field, a glowing Sun, clean orbit lines, translucent wedges that stay readable, and consistent Inter typography."
+   }
+  ]
+ },
+ {
+  "task_id": "video-rep-03",
+  "category": "video",
+  "mode": "replication",
+  "title": "Recreate a delivery-tracking map animation",
+  "prompt": "Recreate this delivery-tracking animation as an MP4: 1280x720, 30 fps, exactly 10 s (300 frames). The attached frames frame_1.png to frame_6.png were taken at 0.3, 1.4, 3.4, 5.2, 7.1 and 8.4 s. Measure the map, cards, positions, sizes and colours from them; the motion between them is not visible in stills, so follow the timeline below exactly.\n\nContent: a static street map (land #EEF1EA; a river band #A9D2F3 labelled 'Wren River'; three parks #CFE7B8 named 'Alder Field', 'Kestrel Park' and 'Juniper Green'; white major and minor streets with the labels NORTH ST, HARBOR AVE, QUAY ROAD and MILL LANE), zoom buttons and a '200 m' scale bar; a dark 'Depot' marker and a red 'Drop-off' pin, each with a dark label chip; a blue route (#2563EB, 6 px on a 12 px white casing) along the streets from the depot to the drop-off; and two white cards on the right: the order card ('Order #4821', the status, an ETA line, a progress bar and 'x.x km left') and the courier card for Mara Kowalski (Cargo e-bike · NB-204) with a three-step tracker 'Picked up · 14:20', 'On the way', 'Delivered'. Font: Inter (Bold, SemiBold, Medium, Regular).\n\nTimeline (u runs 0 to 1 over each interval):\n- 0.0 to 0.4 s: the depot marker scales up from 0 about its centre with easeOutBack (c1 = 1.70158) while its chip fades in; 0.2 to 0.6 s: the drop-off pin does the same about its tip.\n- 0.2 to 0.7 s, then 0.35 to 0.85 s: the order card and then the courier card fade in while sliding 40 px in from the right, easeOutCubic.\n- 0.6 to 2.0 s: the route draws from the depot to the drop-off at constant speed along its length.\n- 2.0 to 8.0 s: a white-ringed blue vehicle marker travels along the route; its distance from the depot is the route length × easeInOutSine(u). The route behind it turns grey #94A3B8. With p that fraction, the card shows 'Arriving in N min' with N = ceil(12 × (1 − p)), a bar filled to p, and 2.4 × (1 − p) km left with one decimal.\n- At 8.0 s the vehicle disappears at the pin; the status becomes 'Delivered' with 'Arrived at 14:32' in green, the bar turns green and full, and all three tracker steps become green checks with 'Delivered · 14:32' in bold. From 8.0 to 8.8 s a 3 px red ring expands around the pin head from radius 14 to 64 px (easeOutCubic) while fading from 60% opacity to 0.\n- 8.8 to 10.0 s: hold.",
+  "artifact": {
+   "kind": "video",
+   "entry": "video.mp4"
+  },
+  "golden": {
+   "entry": "video.mp4",
+   "script": "make_video.py"
+  },
+  "reference_frame_times": [
+   0.3,
+   1.4,
+   3.4,
+   5.2,
+   7.1,
+   8.4
+  ],
+  "reference_images": [
+   "frame_1.png",
+   "frame_2.png",
+   "frame_3.png",
+   "frame_4.png",
+   "frame_5.png",
+   "frame_6.png"
+  ],
+  "video_spec": {
+   "width": 1280,
+   "height": 720,
+   "min_duration_s": 9.9,
+   "max_duration_s": 10.1,
+   "min_fps": 30
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The static map matches the reference frames: street grid positions and widths (three major and two minor streets each way), the river band's shape and colour, the three named parks, the street labels including the rotated MILL LANE, the zoom buttons and the 200 m scale bar."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Route and markers match: the blue route with white casing along the same streets (east along Quay Road, north, east, north, east along Harbor Ave, then north to the pin), the dark ringed depot marker with its 'Depot' chip and the red teardrop pin with its 'Drop-off' chip."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The two cards match in position, size, rounded corners, soft shadow and typography: 'Order #4821', the large status, the blue ETA line, progress bar and 'x.x km left'; the MK avatar, courier name and vehicle, divider and three-step tracker."
+   },
+   {
+    "id": "T1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Route and vehicle timing: at 1.4 s the route is drawn only up to about (610, 465) with no vehicle and 'Arriving in 12 min'; at 3.4 s the vehicle is on Quay Road near x = 333 with 'Arriving in 11 min', 2.1 km left and the travelled part grey; at 5.2 s it is near (610, 483) with 'Arriving in 6 min' and 1.1 km left."
+   },
+   {
+    "id": "T2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Arrival: at 7.1 s the vehicle is on the last leg near (760, 257) with 'Arriving in 1 min' and 0.1 km left; at 8.4 s the card reads 'Delivered' and 'Arrived at 14:32' with a full green bar and 0.0 km left, all three steps are green checks, the vehicle is gone and a fading red ring surrounds the pin head."
+   },
+   {
+    "id": "T3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Intro: at 0.3 s the drop-off pin is still smaller than its final size, the order card is partly transparent and offset to the right, and the courier card is not visible yet."
+   },
+   {
+    "id": "T4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Holds: the map never moves, and nothing moves between about 8.8 and 10.0 s."
+   }
+  ]
+ },
+ {
+  "task_id": "video-rep-04",
+  "category": "video",
+  "mode": "replication",
+  "title": "Recreate a portrait kinetic-typography festival promo",
+  "prompt": "Recreate this vertical promo for Northside Jazz Week as an MP4: 720x1280 (portrait), 30 fps, exactly 10 s (300 frames). The attached frames frame_1.png to frame_6.png were taken at 0.5, 1.2, 2.5, 3.8, 6.3 and 9.0 s. Measure positions, sizes and colours from them and follow the timeline below exactly.\n\nContent: background #0B1026; the small letter-spaced label 'NORTHSIDE ARTS PRESENTS' (#94A3B8); a large amber (#F5A524) circle, partly cut off by the right edge, carrying a ring of navy text 'LIVE MUSIC · 12–18 MAY ·' that runs twice around the circle with the letter tops facing outward, around the centred words 'SEVEN' and 'NIGHTS'; three rounded bars in amber, pink #EF476F and cyan #4CC9F0; the title 'JAZZ' (white) over 'WEEK' (amber) in very large bold type; a lineup of five names with coloured dots (Ada Moreno Trio, The Kessler Five, Nia Okafor Quartet, Blue Harbor Big Band, Lior Sax Collective); and an amber ticket panel with 'TICKETS FROM €25', 'northsidejazz.eu' and a round navy arrow button. Font: Inter (Bold, SemiBold, Medium).\n\nTimeline (u runs 0 to 1 over each interval):\n- 0.0 to 0.8 s: the circle scales up from its centre, easeOutCubic. 0.2 to 0.6 s: the label fades in.\n- The bars grow from their left ends to full length with their rounded right ends leading, 0.4 s each with easeOutCubic, starting at 0.30, 0.45 and 0.60 s (amber, pink, cyan).\n- 'JAZZ' from 0.9 s and 'WEEK' from 1.1 s: each line rises 150 px into place over 0.5 s with easeOutCubic, revealed by a mask whose edge is 30 px below the line's baseline (anything below the mask edge is hidden).\n- 2.2 to 2.7 s: the text ring and the centre words pop in together, scaling from 60% to 100% about the circle centre with easeOutBack (c1 = 1.70158) while fading in linearly. At 2.2 s the ring's text starts at 12 o'clock (the first L just right of the top), and from 2.2 s the ring rotates clockwise at a constant 40° per second until the end; the centre words do not rotate.\n- The lineup names enter one by one at 3.0, 3.3, 3.6, 3.9 and 4.2 s, each fading in while sliding 30 px in from the left over 0.4 s, easeOutCubic.\n- 6.0 to 6.6 s: the ticket panel rises from the bottom edge to its final top edge with easeInOutCubic, carrying its content with it and covering the lineup.\n- 6.6 to 10.0 s: everything holds except the rotating ring.",
+  "artifact": {
+   "kind": "video",
+   "entry": "video.mp4"
+  },
+  "golden": {
+   "entry": "video.mp4",
+   "script": "make_video.py"
+  },
+  "reference_frame_times": [
+   0.5,
+   1.2,
+   2.5,
+   3.8,
+   6.3,
+   9.0
+  ],
+  "reference_images": [
+   "frame_1.png",
+   "frame_2.png",
+   "frame_3.png",
+   "frame_4.png",
+   "frame_5.png",
+   "frame_6.png"
+  ],
+  "video_spec": {
+   "width": 720,
+   "height": 1280,
+   "min_duration_s": 9.9,
+   "max_duration_s": 10.1,
+   "min_fps": 30
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The static composition matches the reference frames: navy background, the label at the top left, the amber circle's size and position (cut by the right edge), the three bars' positions and lengths, and the JAZZ / WEEK title's size, weight, position and colours."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The badge matches: navy 'LIVE MUSIC · 12–18 MAY ·' text running twice around inside the circle with letter tops facing outward, and 'SEVEN' over 'NIGHTS' centred in bold navy."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The lineup (five names with amber, pink, cyan, amber, pink dots) and the ticket panel ('TICKETS FROM €25', 'northsidejazz.eu', round navy arrow button) match in position, size and typography."
+   },
+   {
+    "id": "T1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Intro timing: at 0.5 s the circle is nearly full size, the amber bar is mostly drawn, the pink bar is short, the cyan bar is absent and there is no title; at 1.2 s 'JAZZ' is almost in place while 'WEEK' is only partly revealed above its mask edge."
+   },
+   {
+    "id": "T2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Ring rotation: at 2.5 s the badge is still scaling in and semi-transparent; at 3.8, 6.3 and 9.0 s the ring has turned 64°, 164° and 272° clockwise from its starting orientation, matching the reference frames, while the centre words stay upright."
+   },
+   {
+    "id": "T3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Lineup entry: at 3.8 s the first two names are fully in, the third is nearly in (still slightly transparent and offset left), and the fourth and fifth are absent."
+   },
+   {
+    "id": "T4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Ticket panel: at 6.3 s it is about halfway up (top edge near y = 1145) with its content moving with it and the lineup partly covered; from 6.6 s it rests with its top edge at y = 1010 and only the ring keeps moving."
+   }
+  ]
+ }
+]

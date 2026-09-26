@@ -1,0 +1,111 @@
+# Lattice Lab structures (simplified CIF). Every atom of one unit cell is listed;
+# fractional coordinates are already symmetry-expanded and lie in [0, 1).
+
+data_rocksalt
+_chemical_name_common 'Rock salt'
+_chemical_formula_sum 'Na Cl'
+_cell_length_a 5.640
+_cell_length_b 5.640
+_cell_length_c 5.640
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+Na1  Na 0.0000 0.0000 0.0000
+Na2  Na 0.0000 0.5000 0.5000
+Na3  Na 0.5000 0.0000 0.5000
+Na4  Na 0.5000 0.5000 0.0000
+Cl1  Cl 0.5000 0.0000 0.0000
+Cl2  Cl 0.0000 0.5000 0.0000
+Cl3  Cl 0.0000 0.0000 0.5000
+Cl4  Cl 0.5000 0.5000 0.5000
+
+data_cscl
+_chemical_name_common 'Caesium chloride'
+_chemical_formula_sum 'Cs Cl'
+_cell_length_a 4.123
+_cell_length_b 4.123
+_cell_length_c 4.123
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+Cs1  Cs 0.0000 0.0000 0.0000
+Cl1  Cl 0.5000 0.5000 0.5000
+
+data_diamond
+_chemical_name_common 'Diamond'
+_chemical_formula_sum 'C'
+_cell_length_a 3.567
+_cell_length_b 3.567
+_cell_length_c 3.567
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+C1   C  0.0000 0.0000 0.0000
+C2   C  0.0000 0.5000 0.5000
+C3   C  0.5000 0.0000 0.5000
+C4   C  0.5000 0.5000 0.0000
+C5   C  0.2500 0.2500 0.2500
+C6   C  0.2500 0.7500 0.7500
+C7   C  0.7500 0.2500 0.7500
+C8   C  0.7500 0.7500 0.2500
+
+data_perovskite
+_chemical_name_common 'Perovskite'
+_chemical_formula_sum 'Sr Ti O3'
+_cell_length_a 3.905
+_cell_length_b 3.905
+_cell_length_c 3.905
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+Sr1  Sr 0.0000 0.0000 0.0000
+Ti1  Ti 0.5000 0.5000 0.5000
+O1   O  0.5000 0.5000 0.0000
+O2   O  0.5000 0.0000 0.5000
+O3   O  0.0000 0.5000 0.5000
+
+data_rutile
+_chemical_name_common 'Rutile'
+_chemical_formula_sum 'Ti O2'
+_cell_length_a 4.594
+_cell_length_b 4.594
+_cell_length_c 2.959
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+Ti1  Ti 0.0000 0.0000 0.0000
+Ti2  Ti 0.5000 0.5000 0.5000
+O1   O  0.3048 0.3048 0.0000
+O2   O  0.6952 0.6952 0.0000
+O3   O  0.8048 0.1952 0.5000
+O4   O  0.1952 0.8048 0.5000

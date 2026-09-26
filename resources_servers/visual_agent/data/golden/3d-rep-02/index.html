@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Foggy harbor pier at dusk</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #6c6784; }
+  canvas { display: block; }
+</style>
+<script type="importmap">{"imports": {"three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/"}}</script>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const FOG = '#6c6784';
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(FOG);
+scene.fog = new THREE.FogExp2(FOG, 0.03);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 200);
+camera.position.set(0.6, 2.7, 7.5);
+camera.lookAt(-0.8, 1.3, -10);
+
+scene.add(new THREE.HemisphereLight('#b9b4d6', '#1f2a3a', 0.9));
+const moonLight = new THREE.DirectionalLight('#aebfff', 1.3);
+moonLight.position.set(12, 14, -10);
+moonLight.target.position.set(0, 0, -6);
+moonLight.castShadow = true;
+moonLight.shadow.mapSize.set(2048, 2048);
+Object.assign(moonLight.shadow.camera, { left: -14, right: 14, top: 14, bottom: -14, near: 1, far: 60 });
+moonLight.shadow.bias = -0.0005;
+scene.add(moonLight, moonLight.target);
+
+function add(geo, mat, x, y, z, { cast = true, receive = true } = {}) {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z);
+  m.castShadow = cast;
+  m.receiveShadow = receive;
+  scene.add(m);
+  return m;
+}
+
+// Calm water.
+const water = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.MeshStandardMaterial({ color: '#2b3c55', roughness: 0.18, metalness: 0.3 }));
+water.rotation.x = -Math.PI / 2;
+water.receiveShadow = true;
+scene.add(water);
+
+// Pier: planks running across, two rows of piles, a side rail on the left.
+const wood = new THREE.MeshStandardMaterial({ color: '#7a5a3f', roughness: 0.85 });
+const darkWood = new THREE.MeshStandardMaterial({ color: '#4a3526', roughness: 0.9 });
+const plankGeo = new THREE.BoxGeometry(3.2, 0.12, 0.46);
+for (let i = 0; i < 64; i++) add(plankGeo, i % 3 === 1 ? darkWood : wood, 0, 1.0, 5 - i * 0.52);
+const pileGeo = new THREE.CylinderGeometry(0.14, 0.16, 2.6, 16);
+for (let z = 4; z > -30; z -= 3) {
+  add(pileGeo, darkWood, -1.7, 0.35, z);
+  add(pileGeo, darkWood, 1.7, 0.35, z);
+}
+const railGeo = new THREE.BoxGeometry(0.08, 0.08, 34);
+add(railGeo, darkWood, -1.7, 1.75, -12.5);
+const postGeo = new THREE.BoxGeometry(0.1, 0.8, 0.1);
+for (let z = 4; z > -30; z -= 3) add(postGeo, darkWood, -1.7, 1.45, z);
+
+// Lamp posts along the right edge, each with a glowing lantern and a warm point light.
+const ironMat = new THREE.MeshStandardMaterial({ color: '#23252b', roughness: 0.5, metalness: 0.6 });
+const glowMat = new THREE.MeshStandardMaterial({ color: '#ffcf8a', emissive: '#ffb454', emissiveIntensity: 2.2 });
+const lampPoleGeo = new THREE.CylinderGeometry(0.05, 0.07, 2.4, 12);
+const lanternGeo = new THREE.SphereGeometry(0.17, 24, 16);
+const capGeo = new THREE.ConeGeometry(0.22, 0.18, 12);
+for (const z of [1, -6, -13, -20, -27]) {
+  add(lampPoleGeo, ironMat, 1.45, 2.26, z);
+  add(lanternGeo, glowMat, 1.45, 3.55, z, { cast: false });
+  add(capGeo, ironMat, 1.45, 3.78, z, { cast: false });
+  const bulb = new THREE.PointLight('#ffb25c', 14, 9, 2);
+  bulb.position.set(1.45, 3.3, z);
+  scene.add(bulb);
+}
+
+// Moored sailboat on the left of the pier.
+const boat = new THREE.Group();
+const hullShape = new THREE.Shape();
+hullShape.moveTo(-1.9, 0.5);
+hullShape.lineTo(1.9, 0.5);
+hullShape.lineTo(1.3, -0.2);
+hullShape.lineTo(-1.5, -0.2);
+hullShape.closePath();
+const hull = new THREE.Mesh(
+  new THREE.ExtrudeGeometry(hullShape, { depth: 1.3, bevelEnabled: false }),
+  new THREE.MeshStandardMaterial({ color: '#e9e4d8', roughness: 0.5 })
+);
+hull.position.z = -0.65;
+hull.castShadow = hull.receiveShadow = true;
+boat.add(hull);
+const stripe = new THREE.Mesh(new THREE.BoxGeometry(3.7, 0.1, 1.34), new THREE.MeshStandardMaterial({ color: '#2f5f8a', roughness: 0.5 }));
+stripe.position.y = 0.4;
+boat.add(stripe);
+const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 5.2, 12), ironMat);
+mast.position.set(0.2, 3.1, 0);
+mast.castShadow = true;
+boat.add(mast);
+const sailShape = new THREE.Shape();
+sailShape.moveTo(0, 0);
+sailShape.lineTo(1.7, 0);
+sailShape.lineTo(0, 4.3);
+sailShape.closePath();
+const sail = new THREE.Mesh(new THREE.ShapeGeometry(sailShape), new THREE.MeshStandardMaterial({ color: '#f1ece0', roughness: 0.8, side: THREE.DoubleSide }));
+sail.position.set(0.28, 0.85, 0);
+sail.castShadow = true;
+boat.add(sail);
+boat.position.set(-5.4, 0.05, -8.5);
+boat.rotation.y = 0.55;
+scene.add(boat);
+
+// Lighthouse on a rocky islet, back left.
+const rockMat = new THREE.MeshStandardMaterial({ color: '#5d606a', roughness: 0.95, flatShading: true });
+const rock = add(new THREE.DodecahedronGeometry(3.2, 0), rockMat, -17, -0.9, -25);
+rock.scale.set(1.4, 0.7, 1.1);
+add(new THREE.DodecahedronGeometry(1.6, 0), rockMat, -13.6, -0.3, -23.8);
+const red = new THREE.MeshStandardMaterial({ color: '#b8312f', roughness: 0.6 });
+const whiteMat = new THREE.MeshStandardMaterial({ color: '#efeae0', roughness: 0.6 });
+for (let i = 0; i < 4; i++) {
+  const r0 = 1.25 - i * 0.14;
+  add(new THREE.CylinderGeometry(r0 - 0.14, r0, 1.6, 24), i % 2 ? whiteMat : red, -17, 1.0 + i * 1.6, -25);
+}
+add(new THREE.CylinderGeometry(0.62, 0.62, 0.9, 20), new THREE.MeshStandardMaterial({ color: '#fff3c4', emissive: '#ffe08a', emissiveIntensity: 1.6 }), -17, 7.65, -25, { cast: false });
+add(new THREE.ConeGeometry(0.85, 1.0, 20), red, -17, 8.6, -25);
+
+// Distant hills.
+const hillMat = new THREE.MeshBasicMaterial({ color: '#615c7a', fog: false });
+const hillGeo = new THREE.SphereGeometry(1, 9, 6);
+for (const [x, z, s, h] of [[-44, -76, 26, 9], [-6, -84, 30, 12], [30, -78, 24, 8], [60, -70, 20, 6]]) {
+  const hill = add(hillGeo, hillMat, x, -h * 0.25, z, { cast: false, receive: false });
+  hill.scale.set(s, h, s * 0.5);
+}
+
+// Moon (not fogged).
+const moon = new THREE.Mesh(new THREE.CircleGeometry(3.2, 48), new THREE.MeshBasicMaterial({ color: '#f4eed6', fog: false }));
+moon.position.set(21, 21, -80);
+moon.lookAt(camera.position);
+scene.add(moon);
+
+function draw() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.render(scene, camera);
+}
+draw();
+window.addEventListener('resize', draw);
+</script>
+</body>
+</html>

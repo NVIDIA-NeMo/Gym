@@ -1,0 +1,27 @@
+{
+ "references": {
+  "slide_1.png": {
+   "distinct_coarse_colors": 45,
+   "dominant_color_fraction": 0.793,
+   "gray_std": 62.545,
+   "height": 720,
+   "width": 1280
+  },
+  "slide_2.png": {
+   "distinct_coarse_colors": 60,
+   "dominant_color_fraction": 0.4253,
+   "gray_std": 81.178,
+   "height": 720,
+   "width": 1280
+  },
+  "slide_3.png": {
+   "distinct_coarse_colors": 57,
+   "dominant_color_fraction": 0.5803,
+   "gray_std": 76.858,
+   "height": 720,
+   "width": 1280
+  }
+ },
+ "self_check_blank": false,
+ "self_similarity": 1.0
+}

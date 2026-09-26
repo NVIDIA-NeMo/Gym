@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SFO to JFK · Skyway</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { font-family: Inter, sans-serif; font-size: 14px; color: #0f172a; background: #f2f5f9; -webkit-font-smoothing: antialiased; }
+  button, input { font-family: inherit; font-size: inherit; color: inherit; }
+  button { cursor: pointer; }
+  svg { display: block; flex: none; }
+  .ico { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* Header */
+  header { height: 68px; background: #0b1f3a; color: #fff; }
+  .hwrap { max-width: 1232px; height: 100%; margin: 0 auto; padding: 0 16px; display: flex; align-items: center; gap: 28px; }
+  .logo { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 800; letter-spacing: -0.02em; }
+  .logo-mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, #38bdf8, #1d5bd8); display: grid; place-items: center; }
+  .pill { display: flex; align-items: center; height: 44px; border-radius: 22px; background: #fff; color: #0f172a; padding: 0 6px 0 18px; gap: 14px; font-size: 13px; font-weight: 600; }
+  .pill .seg { display: flex; align-items: center; gap: 8px; }
+  .pill .seg .ico { width: 16px; height: 16px; color: #1d5bd8; }
+  .pill .sep { width: 1px; height: 20px; background: #dbe3ee; }
+  .pill .route b { font-weight: 800; }
+  .edit { height: 32px; padding: 0 14px; border: 0; border-radius: 16px; background: #1d5bd8; color: #fff; font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+  .edit .ico { width: 14px; height: 14px; }
+  .hnav { margin-left: auto; display: flex; align-items: center; gap: 22px; font-size: 13px; font-weight: 600; color: #c7d4e6; }
+  .avatar { width: 34px; height: 34px; border-radius: 50%; background: #f59e0b; color: #0b1f3a; display: grid; place-items: center; font-weight: 800; font-size: 13px; }
+
+  /* Date strip */
+  .wrap { max-width: 1232px; margin: 0 auto; padding: 0 16px; }
+  .dates { margin-top: 20px; display: flex; align-items: stretch; background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; overflow: hidden; }
+  .darrow { width: 44px; border: 0; background: #fff; color: #64748b; display: grid; place-items: center; }
+  .darrow + .dscroll, .dscroll + .darrow { border-left: 1px solid #e2e8f0; }
+  .dscroll { flex: 1; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  .day { padding: 11px 8px 10px; text-align: center; border-left: 1px solid #eef2f7; position: relative; }
+  .day:first-child { border-left: 0; }
+  .day .dname { font-size: 12px; color: #64748b; font-weight: 600; }
+  .day .dprice { margin-top: 3px; font-size: 15px; font-weight: 700; }
+  .day .dprice.low { color: #0f8a4f; }
+  .day.sel { background: #eef4ff; }
+  .day.sel::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: #1d5bd8; }
+  .day.sel .dname { color: #1d5bd8; }
+
+  /* Layout */
+  .page { display: grid; grid-template-columns: 262px minmax(0, 1fr) 312px; gap: 22px; align-items: start; padding-top: 20px; padding-bottom: 32px; }
+  .panel { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; }
+
+  /* Filters */
+  .filters { padding: 18px 18px 8px; }
+  .f-head { display: flex; align-items: center; gap: 14px; margin-bottom: 4px; }
+  .f-head .reset { margin-left: auto; }
+  .f-head h2 { margin: 0; font-size: 16px; font-weight: 800; }
+  .reset { border: 0; background: none; padding: 0; color: #1d5bd8; font-weight: 700; font-size: 13px; }
+  .sheet-close, .sheet-foot { display: none; }
+  .fgroup { padding: 14px 0; border-bottom: 1px solid #eef2f7; }
+  .fgroup:last-of-type { border-bottom: 0; }
+  .fgroup h3 { margin: 0 0 10px; font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #64748b; }
+  .chk { display: flex; align-items: center; gap: 9px; padding: 5px 0; font-size: 14px; cursor: pointer; }
+  .chk input { width: 16px; height: 16px; margin: 0; accent-color: #1d5bd8; }
+  .chk .lbl { flex: 1; white-space: nowrap; }
+  .chk .cnt { color: #94a3b8; font-size: 12px; margin-left: 4px; }
+  .chk .from { font-size: 13px; font-weight: 600; color: #475569; white-space: nowrap; }
+  .amark-s { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; }
+  .chips { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .chip { border: 1px solid #dbe3ee; border-radius: 10px; background: #fff; padding: 8px 10px; text-align: left; }
+  .chip b { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; }
+  .chip b .ico { width: 15px; height: 15px; color: #f59e0b; }
+  .chip span { display: block; margin-top: 2px; font-size: 11px; color: #64748b; }
+  .chip.on { border-color: #1d5bd8; background: #eef4ff; box-shadow: inset 0 0 0 1px #1d5bd8; }
+  .chip.on b { color: #1d5bd8; }
+  .range-top { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; color: #475569; }
+  .range-top b { font-size: 14px; color: #0f172a; }
+  input[type=range] { width: 100%; margin: 10px 0 4px; accent-color: #1d5bd8; }
+  .range-ends { display: flex; justify-content: space-between; font-size: 11px; color: #94a3b8; }
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 14px; }
+  .toggle-row small { display: block; font-size: 12px; color: #64748b; margin-top: 2px; }
+  .switch { width: 40px; height: 24px; border-radius: 12px; border: 0; background: #cbd5e1; position: relative; padding: 0; flex: none; }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.3); }
+  .switch.on { background: #1d5bd8; }
+  .switch.on::after { left: 19px; }
+  .price-alert { margin-top: 16px; padding: 14px 16px; display: flex; gap: 12px; align-items: flex-start; font-size: 13px; color: #475569; }
+  .price-alert .ico { color: #1d5bd8; margin-top: 1px; }
+  .price-alert b { display: block; color: #0f172a; font-size: 14px; margin-bottom: 2px; }
+
+  /* Results */
+  .res-head { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 14px; }
+  .res-head h1 { margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.02em; }
+  .res-head p { margin: 4px 0 0; font-size: 13px; color: #64748b; }
+  .count { font-size: 13px; font-weight: 600; color: #475569; }
+  .tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; overflow: hidden; margin-bottom: 14px; }
+  .tab { border: 0; background: #fff; padding: 12px 16px 11px; text-align: left; position: relative; }
+  .tab + .tab { border-left: 1px solid #eef2f7; }
+  .tab .tname { font-size: 13px; font-weight: 700; color: #475569; }
+  .tab .tval { margin-top: 3px; font-size: 16px; font-weight: 800; }
+  .tab .tval small { font-size: 12px; font-weight: 600; color: #64748b; margin-left: 4px; }
+  .tab.active { background: #eef4ff; }
+  .tab.active::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: #1d5bd8; }
+  .tab.active .tname { color: #1d5bd8; }
+  .list { display: grid; gap: 12px; }
+  .flight { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 16px 18px; display: grid; grid-template-columns: minmax(0, 1fr) 128px; gap: 16px; align-items: center; }
+  .flight.sel { border-color: #1d5bd8; box-shadow: 0 0 0 1px #1d5bd8, 0 6px 18px rgba(29, 91, 216, 0.12); }
+  .f-top { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .amark { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; }
+  .aname { font-size: 13px; font-weight: 700; }
+  .aname small { font-weight: 500; color: #64748b; margin-left: 4px; }
+  .badge { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; }
+  .badge.cheap { background: #dcfce7; color: #0f7a45; }
+  .badge.fast { background: #e0ecff; color: #1d4fbf; }
+  .f-top .bags { margin-left: auto; display: flex; align-items: center; gap: 5px; font-size: 12px; color: #0f7a45; font-weight: 600; }
+  .f-top .bags .ico { width: 15px; height: 15px; }
+  .times { display: grid; grid-template-columns: 104px minmax(0, 1fr) 104px; align-items: center; gap: 12px; }
+  .t { white-space: nowrap; }
+  .t b { display: block; font-size: 19px; font-weight: 800; letter-spacing: -0.01em; }
+  .t b sup { font-size: 11px; color: #dc2626; font-weight: 700; margin-left: 2px; }
+  .t span { font-size: 12px; color: #64748b; font-weight: 600; }
+  .t.arr { text-align: right; }
+  .mid { text-align: center; }
+  .mid .dur { font-size: 12px; color: #475569; font-weight: 600; }
+  .mid .line { margin: 6px 0; height: 2px; background: #cbd5e1; position: relative; }
+  .mid .line::before, .mid .line::after { content: ""; position: absolute; top: -3px; width: 8px; height: 8px; border-radius: 50%; background: #fff; border: 2px solid #94a3b8; box-sizing: border-box; }
+  .mid .line::before { left: -2px; }
+  .mid .line::after { right: -2px; }
+  .mid .line i { position: absolute; top: -3px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: #f59e0b; }
+  .mid .stops { font-size: 12px; font-weight: 700; color: #b45309; }
+  .mid .stops.non { color: #0f8a4f; }
+  .f-foot { margin-top: 10px; display: flex; align-items: center; gap: 14px; font-size: 12px; color: #64748b; white-space: nowrap; }
+  .f-foot .fn { margin-left: auto; color: #94a3b8; }
+  .co2 { display: flex; align-items: center; gap: 5px; font-weight: 600; }
+  .co2 .ico { width: 14px; height: 14px; }
+  .co2.good { color: #0f8a4f; }
+  .co2.bad { color: #b45309; }
+  .buy { text-align: right; border-left: 1px dashed #e2e8f0; padding-left: 16px; align-self: stretch; display: flex; flex-direction: column; justify-content: center; align-items: flex-end; }
+  .buy .price { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; }
+  .buy small { font-size: 11px; color: #64748b; }
+  .select { margin-top: 10px; height: 36px; width: 100%; border: 1.5px solid #1d5bd8; border-radius: 10px; background: #fff; color: #1d5bd8; font-weight: 700; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px; }
+  .select .ico { width: 14px; height: 14px; stroke-width: 2.6; }
+  .flight.sel .select { background: #1d5bd8; color: #fff; }
+  .empty { display: none; background: #fff; border: 1px dashed #cbd5e1; border-radius: 14px; padding: 36px 20px; text-align: center; color: #64748b; }
+  .empty b { display: block; font-size: 16px; color: #0f172a; margin-bottom: 6px; }
+  .empty button { margin-top: 14px; height: 36px; padding: 0 16px; border: 0; border-radius: 10px; background: #1d5bd8; color: #fff; font-weight: 700; }
+  .empty.show { display: block; }
+
+  /* Summary */
+  .summary { position: sticky; top: 16px; padding: 18px 18px 20px; }
+  .summary h2 { margin: 0 0 14px; font-size: 16px; font-weight: 800; display: flex; align-items: center; justify-content: space-between; }
+  .summary h2 small { font-size: 12px; font-weight: 600; color: #64748b; }
+  .leg { display: grid; grid-template-columns: 30px 1fr; gap: 10px; padding: 12px; border-radius: 12px; background: #f6f8fb; }
+  .leg .ltag { font-size: 11px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: #1d5bd8; }
+  .leg .ltitle { margin-top: 2px; font-size: 13px; font-weight: 700; }
+  .leg .lsub { margin-top: 2px; font-size: 12px; color: #64748b; }
+  .leg.ret { margin-top: 8px; background: #fff; border: 1px dashed #cbd5e1; }
+  .leg.ret .ltag { color: #64748b; }
+  .leg .cal { width: 30px; height: 30px; border-radius: 8px; background: #eef2f7; display: grid; place-items: center; color: #64748b; }
+  .sub-h { margin: 16px 0 8px; font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #64748b; }
+  .tiers { display: grid; gap: 8px; }
+  .tier { display: grid; grid-template-columns: 18px 1fr auto; gap: 10px; align-items: center; padding: 10px 12px; border: 1px solid #dbe3ee; border-radius: 10px; background: #fff; text-align: left; }
+  .tier .dot { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid #94a3b8; }
+  .tier b { font-size: 13px; }
+  .tier span { display: block; font-size: 11px; color: #64748b; margin-top: 1px; }
+  .tier .tp { font-weight: 700; font-size: 13px; }
+  .tier.on { border-color: #1d5bd8; background: #eef4ff; }
+  .tier.on .dot { border: 5px solid #1d5bd8; }
+  .pax { display: flex; align-items: center; justify-content: space-between; }
+  .pax .who b { font-size: 14px; }
+  .pax .who span { display: block; font-size: 12px; color: #64748b; }
+  .stepper { display: flex; align-items: center; border: 1px solid #dbe3ee; border-radius: 10px; height: 34px; }
+  .stepper button { width: 32px; height: 32px; border: 0; background: none; font-size: 17px; color: #1d5bd8; display: grid; place-items: center; }
+  .stepper button:disabled { color: #cbd5e1; cursor: default; }
+  .stepper span { min-width: 24px; text-align: center; font-weight: 700; }
+  .rows { margin-top: 16px; padding-top: 12px; border-top: 1px solid #eef2f7; }
+  .r { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; color: #475569; }
+  .r.total { margin-top: 8px; padding-top: 12px; border-top: 1px solid #eef2f7; align-items: baseline; color: #0f172a; }
+  .r.total b { font-size: 15px; }
+  .r.total .amt { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; }
+  .cta { margin-top: 14px; width: 100%; height: 48px; border: 0; border-radius: 12px; background: #1d5bd8; color: #fff; font-size: 15px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 6px 16px rgba(29, 91, 216, 0.28); }
+  .fine { margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 12px; color: #64748b; }
+  .fine .ico { width: 14px; height: 14px; color: #0f8a4f; }
+
+  .m-only { display: none !important; }
+  .scrim { display: none; }
+
+  @media (max-width: 760px) {
+    .m-only { display: flex !important; }
+    .d-only { display: none !important; }
+    header { height: 60px; }
+    .hwrap { gap: 12px; padding: 0 14px; }
+    .logo-mark { width: 32px; height: 32px; }
+    .m-route { flex: 1; min-width: 0; flex-direction: column; }
+    .m-route b { font-size: 15px; font-weight: 800; }
+    .m-route span { font-size: 12px; color: #c7d4e6; margin-top: 1px; }
+    .m-edit { width: 36px; height: 36px; border-radius: 50%; border: 0; background: rgba(255, 255, 255, 0.12); color: #fff; align-items: center; justify-content: center; }
+    .wrap { padding: 0 12px; }
+    .dates { margin-top: 12px; border-radius: 12px; }
+    .darrow { display: none; }
+    .dscroll { display: flex; overflow-x: auto; scrollbar-width: none; }
+    .dscroll::-webkit-scrollbar { display: none; }
+    .day { flex: none; width: 84px; padding: 9px 6px 8px; }
+    .day .dprice { font-size: 14px; }
+    .page { display: block; padding-top: 12px; padding-bottom: 16px; }
+    .lay { display: none; }
+    .times { grid-template-columns: 84px minmax(0, 1fr) 84px; gap: 8px; }
+    .filters { display: none; }
+    .side-extra { display: none; }
+    .summary { display: none; }
+    .m-tools { gap: 8px; align-items: center; margin-bottom: 12px; }
+    .m-btn { height: 38px; padding: 0 14px; border: 1px solid #dbe3ee; border-radius: 19px; background: #fff; font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 7px; }
+    .m-btn .ico { width: 16px; height: 16px; color: #1d5bd8; }
+    .m-btn .n { min-width: 18px; height: 18px; border-radius: 9px; background: #1d5bd8; color: #fff; font-size: 11px; display: grid; place-items: center; padding: 0 5px; }
+    .m-tools .count { margin-left: auto; }
+    .sortwrap { position: relative; }
+    .sortmenu { position: absolute; z-index: 30; top: 44px; left: 0; background: #fff; border: 1px solid #dbe3ee; border-radius: 12px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.16); padding: 6px; display: none; min-width: 180px; }
+    .sortmenu.open { display: block; }
+    .sortmenu button { display: block; width: 100%; border: 0; background: none; text-align: left; padding: 10px 12px; border-radius: 8px; font-weight: 600; }
+    .sortmenu button.on { background: #eef4ff; color: #1d5bd8; }
+    .res-head, .tabs { display: none; }
+    .list { gap: 10px; }
+    .flight { grid-template-columns: 1fr; padding: 14px; gap: 10px; }
+    .f-top { margin-bottom: 10px; }
+    .t b { font-size: 16px; }
+    .f-foot { margin-top: 8px; }
+    .f-foot .fn { display: none; }
+    .buy { border-left: 0; border-top: 1px dashed #e2e8f0; padding: 10px 0 0; flex-direction: row; align-items: center; justify-content: space-between; }
+    .buy .pr { text-align: left; }
+    .buy .price { font-size: 20px; display: inline; }
+    .buy small { margin-left: 6px; }
+    .select { margin-top: 0; width: 104px; }
+    .app { overflow-x: hidden; display: flex; flex-direction: column; min-height: 100vh; }
+    .app > .wrap { width: 100%; min-width: 0; }
+    .bottom { margin-top: auto; position: sticky; bottom: 0; z-index: 20; height: 76px; background: #fff; border-top: 1px solid #e2e8f0; box-shadow: 0 -6px 20px rgba(15, 23, 42, 0.08); padding: 0 14px; align-items: center; gap: 12px; }
+    .bottom .bsel { flex: 1; min-width: 0; }
+    .bottom .bsel span { display: block; font-size: 12px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bottom .bsel b { font-size: 20px; font-weight: 800; letter-spacing: -0.02em; }
+    .bottom .bsel b small { font-size: 12px; font-weight: 600; color: #64748b; margin-left: 4px; letter-spacing: 0; }
+    .bottom .cta { margin: 0; width: 132px; height: 46px; box-shadow: none; }
+    /* Filters sheet */
+    .filters.open { display: block; position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; max-height: 88vh; overflow-y: auto; border-radius: 18px 18px 0 0; border: 0; padding: 18px 18px 0; }
+    .filters.open .sheet-close { display: grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: 50%; background: #eef2f7; }
+    .filters.open .sheet-foot { display: block; position: sticky; bottom: 0; background: #fff; padding: 12px 0 16px; border-top: 1px solid #eef2f7; }
+    .sheet-foot button { width: 100%; height: 46px; border: 0; border-radius: 12px; background: #1d5bd8; color: #fff; font-weight: 700; font-size: 15px; }
+    .scrim.open { display: block; position: fixed; inset: 0; z-index: 40; background: rgba(11, 31, 58, 0.45); }
+  }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-plane" viewBox="0 0 24 24"><path d="M10.5 20.5 12 14l-6.5 1.5-1.5-1.5 7-4.5V4a1.5 1.5 0 0 1 3 0v5.5l7 4.5-1.5 1.5L13 14l1.5 6.5-2 .5-.5-2-.5 2z"/></symbol>
+    <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.6"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></symbol>
+    <symbol id="i-left" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></symbol>
+    <symbol id="i-right" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/></symbol>
+    <symbol id="i-sunset" viewBox="0 0 24 24"><path d="M5 17a7 7 0 0 1 14 0"/><path d="M2.5 20.5h19M12 3.5v4M4.6 9.6l1.4 1.4M19.4 9.6 18 11"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></symbol>
+    <symbol id="i-sunrise" viewBox="0 0 24 24"><path d="M5 17a7 7 0 0 1 14 0"/><path d="M2.5 20.5h19M12 11V3.5M9 6.5l3-3 3 3"/></symbol>
+    <symbol id="i-bag" viewBox="0 0 24 24"><rect x="5" y="7" width="14" height="13" rx="2"/><path d="M9 7V4.5h6V7M9 11v5M15 11v5"/></symbol>
+    <symbol id="i-leaf" viewBox="0 0 24 24"><path d="M5 19c0-8 5-13 15-14-1 10-6 15-14 15"/><path d="M5 19 13 11"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.2 7.5 9.5 4.3-1.3 7.5-4.9 7.5-9.5V6z"/><path d="m8.8 12 2.2 2.2 4.2-4.4"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol>
+    <symbol id="i-sort" viewBox="0 0 24 24"><path d="M7 4v16M3.5 16.5 7 20l3.5-3.5M17 20V4M13.5 7.5 17 4l3.5 3.5"/></symbol>
+    <symbol id="i-pen" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15M13 6l6 6-6 6"/></symbol>
+  </defs>
+</svg>
+
+<div class="app">
+<header>
+  <div class="hwrap">
+    <div class="logo">
+      <div class="logo-mark"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M3 15.5c5-1 9.5-4.5 13-10 .6 3.2-.4 6.3-2.7 8.8L21 16l-1.2 1.6-8.2-1.1C9 18 6 18.6 3 17.8z" fill="#fff"/></svg></div>
+      <span class="d-only">Skyway</span>
+    </div>
+    <div class="pill d-only">
+      <div class="seg route"><svg class="ico"><use href="#i-plane"/></svg><b>SFO</b><svg class="ico" style="width:14px;height:14px;color:#64748b"><use href="#i-arrow"/></svg><b>JFK</b></div>
+      <span class="sep"></span>
+      <div class="seg"><svg class="ico"><use href="#i-cal"/></svg>Thu, Oct 15 – Sun, Oct 25</div>
+      <span class="sep"></span>
+      <div class="seg"><svg class="ico"><use href="#i-user"/></svg><span><span id="pax-pill">1 adult</span> · Economy</span></div>
+      <button class="edit"><svg class="ico"><use href="#i-search"/></svg>Edit search</button>
+    </div>
+    <div class="m-only m-route"><b>SFO → JFK</b><span>Oct 15 – 25 · <span id="pax-pill-m">1 adult</span> · Economy</span></div>
+    <button class="m-only m-edit" aria-label="Edit search"><svg class="ico"><use href="#i-pen"/></svg></button>
+    <nav class="hnav d-only"><span>Trips</span><span>Deals</span><span>Help</span><div class="avatar">JR</div></nav>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="dates">
+    <button class="darrow" aria-label="Earlier dates"><svg class="ico"><use href="#i-left"/></svg></button>
+    <div class="dscroll" id="dates"></div>
+    <button class="darrow" aria-label="Later dates"><svg class="ico"><use href="#i-right"/></svg></button>
+  </div>
+
+  <div class="page">
+    <aside>
+      <section class="panel filters" id="filters">
+        <div class="f-head"><h2>Filters</h2><button class="reset" id="reset">Reset all</button><button class="sheet-close" id="sheet-close" aria-label="Close filters"><svg class="ico"><use href="#i-x"/></svg></button></div>
+        <div class="fgroup">
+          <h3>Stops</h3>
+          <div id="f-stops"></div>
+        </div>
+        <div class="fgroup">
+          <h3>Airlines</h3>
+          <div id="f-air"></div>
+        </div>
+        <div class="fgroup">
+          <h3>Departure time</h3>
+          <div class="chips" id="f-time"></div>
+        </div>
+        <div class="fgroup">
+          <h3>Max price</h3>
+          <div class="range-top"><span>Up to</span><b class="num" id="max-label">$400</b></div>
+          <input type="range" id="max-price" min="150" max="400" step="10" value="400" aria-label="Max price">
+          <div class="range-ends"><span>$150</span><span>$400</span></div>
+        </div>
+        <div class="fgroup">
+          <div class="toggle-row"><div>Checked bag included<small>Only fares with a free bag</small></div><button class="switch" id="bags" role="switch" aria-checked="false" aria-label="Checked bag included"></button></div>
+        </div>
+        <div class="sheet-foot"><button id="sheet-show">Show 8 flights</button></div>
+      </section>
+      <div class="panel price-alert side-extra"><svg class="ico"><use href="#i-bell"/></svg><div><b>Track prices</b>Get an alert when SFO → JFK fares drop for these dates.</div></div>
+    </aside>
+
+    <main>
+      <div class="res-head">
+        <div><h1>San Francisco to New York</h1><p>Round-trip prices per traveler, before taxes and fees</p></div>
+        <div class="count" id="count">8 of 8 flights</div>
+      </div>
+      <div class="tabs" id="tabs">
+        <button class="tab active" data-sort="best"><div class="tname">Best</div><div class="tval num" id="tv-best"></div></button>
+        <button class="tab" data-sort="cheapest"><div class="tname">Cheapest</div><div class="tval num" id="tv-cheapest"></div></button>
+        <button class="tab" data-sort="fastest"><div class="tname">Fastest</div><div class="tval num" id="tv-fastest"></div></button>
+      </div>
+      <div class="m-only m-tools">
+        <button class="m-btn" id="m-filters"><svg class="ico"><use href="#i-sliders"/></svg>Filters<span class="n" id="m-fcount" style="display:none">0</span></button>
+        <div class="sortwrap"><button class="m-btn" id="m-sort"><svg class="ico"><use href="#i-sort"/></svg>Sort: <span id="m-sort-label">Best</span></button>
+          <div class="sortmenu" id="sortmenu"><button data-sort="best" class="on">Best</button><button data-sort="cheapest">Cheapest</button><button data-sort="fastest">Fastest</button></div></div>
+        <span class="count" id="m-count">8 of 8 flights</span>
+      </div>
+      <div class="list" id="list"></div>
+      <div class="empty" id="empty"><b>No flights match your filters</b>Try widening the price range or turning off a filter.<br><button id="clear">Clear all filters</button></div>
+    </main>
+
+    <aside>
+      <section class="panel summary" id="summary">
+        <h2>Your trip <small>Round trip</small></h2>
+        <div class="leg" id="leg-out"></div>
+        <div class="leg ret"><div class="cal"><svg class="ico" style="width:16px;height:16px"><use href="#i-cal"/></svg></div><div><div class="ltag">Return · Sun, Oct 25</div><div class="ltitle">JFK → SFO</div><div class="lsub">Choose your return on the next step</div></div></div>
+        <div class="sub-h">Fare</div>
+        <div class="tiers" id="tiers"></div>
+        <div class="sub-h">Travelers</div>
+        <div class="pax"><div class="who"><b id="pax-label">1 adult</b><span>Age 18+</span></div>
+          <div class="stepper"><button id="pax-dec" aria-label="Fewer travelers">−</button><span class="num" id="pax">1</span><button id="pax-inc" aria-label="More travelers">+</button></div></div>
+        <div class="rows num" id="rows"></div>
+        <button class="cta">Continue<svg class="ico"><use href="#i-arrow"/></svg></button>
+        <div class="fine"><svg class="ico"><use href="#i-shield"/></svg>Free cancellation within 24 hours</div>
+      </section>
+    </aside>
+  </div>
+</div>
+
+<div class="m-only bottom" id="bottom">
+  <div class="bsel"><span id="b-sel"></span><b class="num" id="b-total"></b></div>
+  <button class="cta">Continue</button>
+</div>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<script>
+const AIRLINES = {
+  Bluewing: { color: "#1e40af", tint: "#dbe6ff", glyph: '<path d="M4 15c6-1 10-4 13-9 .5 3-.6 5.6-2.6 7.6L20 15l-1 1.3-6.4-.8C10.5 17 7.5 17.5 4 16.6z" fill="#fff"/>' },
+  Coastline: { color: "#0d9488", tint: "#d5f3ef", glyph: '<path d="M3 14c2.5-2.5 4.5-2.5 6 0s3.5 2.5 6 0 4.5-2.5 6 0" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/><path d="M3 9.5c2.5-2.5 4.5-2.5 6 0s3.5 2.5 6 0 4.5-2.5 6 0" fill="none" stroke="#99f6e4" stroke-width="2.2" stroke-linecap="round"/>' },
+  Northstar: { color: "#dc2626", tint: "#fde2e2", glyph: '<path d="M12 3.5l2.1 5.6 5.9.3-4.6 3.7 1.6 5.8L12 15.6l-5 3.3 1.6-5.8L4 9.4l5.9-.3z" fill="#fff"/>' },
+  "Summit Air": { color: "#7c3aed", tint: "#ece4ff", glyph: '<path d="M2.5 18.5 9 8l3.2 5 2.3-3.3 7 8.8z" fill="#fff"/>' },
+};
+// dep and dur in minutes; arrival is shown in New York time (3 hours ahead of San Francisco).
+const FLIGHTS = [
+  { id: "BW412", airline: "Bluewing", code: "BW 412", dep: 6 * 60 + 5, dur: 332, via: [], price: 289, bag: false, co2: -8, plane: "A321neo" },
+  { id: "NS208", airline: "Northstar", code: "NS 208", dep: 7 * 60 + 40, dur: 325, via: [], price: 342, bag: true, co2: 0, plane: "737 MAX 9" },
+  { id: "CL1180", airline: "Coastline", code: "CL 1180", dep: 8 * 60 + 15, dur: 425, via: [["DEN", 70]], price: 214, bag: false, co2: 14, plane: "A220-300" },
+  { id: "SA77", airline: "Summit Air", code: "SA 77", dep: 11 * 60 + 30, dur: 340, via: [], price: 318, bag: true, co2: -5, plane: "A321neo" },
+  { id: "BW1506", airline: "Bluewing", code: "BW 1506", dep: 13 * 60 + 20, dur: 475, via: [["ORD", 95]], price: 236, bag: false, co2: 19, plane: "737-800" },
+  { id: "CL942", airline: "Coastline", code: "CL 942", dep: 15 * 60 + 45, dur: 620, via: [["DEN", 55], ["ATL", 80]], price: 178, bag: false, co2: 41, plane: "A220-300" },
+  { id: "NS530", airline: "Northstar", code: "NS 530", dep: 18 * 60 + 25, dur: 440, via: [["LAS", 65]], price: 259, bag: true, co2: 16, plane: "737 MAX 8" },
+  { id: "BW1822", airline: "Bluewing", code: "BW 1822", dep: 22 * 60 + 35, dur: 315, via: [], price: 264, bag: false, co2: -11, plane: "A321neo" },
+];
+const DAYS = [["Mon, Oct 12", 214], ["Tue, Oct 13", 196], ["Wed, Oct 14", 203], ["Thu, Oct 15", 178], ["Fri, Oct 16", 249], ["Sat, Oct 17", 231], ["Sun, Oct 18", 187]];
+const STOPS = [["0", "Nonstop"], ["1", "1 stop"], ["2", "2+ stops"]];
+const TIMES = [
+  ["morning", "Morning", "5 AM – 12 PM", "i-sunrise", (m) => m >= 300 && m < 720],
+  ["afternoon", "Afternoon", "12 PM – 6 PM", "i-sun", (m) => m >= 720 && m < 1080],
+  ["evening", "Evening", "6 PM – 10 PM", "i-sunset", (m) => m >= 1080 && m < 1320],
+  ["night", "Night", "10 PM – 5 AM", "i-moon", (m) => m >= 1320 || m < 300],
+];
+const TIERS = [["basic", "Basic", "Carry-on only, seat assigned at check-in", 0], ["standard", "Standard", "Seat selection and a checked bag", 45], ["flex", "Flex", "Free changes and priority boarding", 110]];
+const TAX = 38.2;
+
+const state = { sort: "best", stops: new Set(["0", "1", "2"]), air: new Set(Object.keys(AIRLINES)), times: new Set(), max: 400, bags: false, sel: "BW1822", tier: "standard", pax: 1 };
+
+const $ = (id) => document.getElementById(id);
+const money = (v) => "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const whole = (v) => "$" + v.toLocaleString("en-US");
+const dur = (m) => `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+const layover = (m) => (m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m` : `${m}m`);
+function clock(m) {
+  const day = Math.floor(m / 1440);
+  m = m % 1440;
+  const h = Math.floor(m / 60), mm = String(m % 60).padStart(2, "0");
+  return { text: `${((h + 11) % 12) + 1}:${mm} ${h < 12 ? "AM" : "PM"}`, plus: day };
+}
+const stopKey = (f) => String(Math.min(f.via.length, 2));
+const bestScore = (f) => f.price + 0.5 * f.dur;
+const SORTS = {
+  best: (a, b) => bestScore(a) - bestScore(b) || a.dep - b.dep,
+  cheapest: (a, b) => a.price - b.price || a.dep - b.dep,
+  fastest: (a, b) => a.dur - b.dur || a.price - b.price,
+};
+function visible() {
+  return FLIGHTS.filter((f) =>
+    state.stops.has(stopKey(f)) && state.air.has(f.airline) &&
+    (state.times.size === 0 || TIMES.some((t) => state.times.has(t[0]) && t[4](f.dep))) &&
+    f.price <= state.max && (!state.bags || f.bag));
+}
+const mark = (a, size) => `<div class="${size === "s" ? "amark-s" : "amark"}" style="background:${AIRLINES[a].color}"><svg viewBox="0 0 24 24" width="${size === "s" ? 14 : 20}" height="${size === "s" ? 14 : 20}">${AIRLINES[a].glyph}</svg></div>`;
+
+function renderStatic() {
+  const low = Math.min(...DAYS.map((d) => d[1]));
+  $("dates").innerHTML = DAYS.map(([d, p]) => `<div class="day${d === "Thu, Oct 15" ? " sel" : ""}"><div class="dname">${d}</div><div class="dprice num${p === low ? " low" : ""}">${whole(p)}</div></div>`).join("");
+  $("f-stops").innerHTML = STOPS.map(([k, label]) => {
+    const fl = FLIGHTS.filter((f) => stopKey(f) === k);
+    return `<label class="chk"><input type="checkbox" data-stop="${k}" checked><span class="lbl">${label}<span class="cnt">(${fl.length})</span></span><span class="from num">from ${whole(Math.min(...fl.map((f) => f.price)))}</span></label>`;
+  }).join("");
+  $("f-air").innerHTML = Object.keys(AIRLINES).map((a) => {
+    const fl = FLIGHTS.filter((f) => f.airline === a);
+    return `<label class="chk"><input type="checkbox" data-air="${a}" checked>${mark(a, "s")}<span class="lbl">${a}<span class="cnt">(${fl.length})</span></span><span class="from num">from ${whole(Math.min(...fl.map((f) => f.price)))}</span></label>`;
+  }).join("");
+  $("f-time").innerHTML = TIMES.map(([k, label, range, icon]) => `<button class="chip" data-time="${k}"><b><svg class="ico"><use href="#${icon}"/></svg>${label}</b><span>${range}</span></button>`).join("");
+}
+
+function renderList() {
+  const vis = visible();
+  const sorted = [...vis].sort(SORTS[state.sort]);
+  const cheapest = vis.length ? [...vis].sort(SORTS.cheapest)[0].id : null;
+  const fastest = vis.length ? [...vis].sort(SORTS.fastest)[0].id : null;
+  $("list").innerHTML = sorted.map((f) => {
+    const d = clock(f.dep), a = clock(f.dep + f.dur + 180);
+    const dots = f.via.map((_, i) => `<i style="left:${((i + 1) / (f.via.length + 1)) * 100}%"></i>`).join("");
+    const stops = f.via.length === 0 ? '<div class="stops non">Nonstop</div>'
+      : `<div class="stops">${f.via.length} stop${f.via.length > 1 ? "s" : ""} · ${f.via.map((v) => v[0]).join(", ")}</div>`;
+    const co2 = f.co2 < 0 ? `<span class="co2 good"><svg class="ico"><use href="#i-leaf"/></svg>−${-f.co2}% CO₂</span>`
+      : f.co2 === 0 ? '<span class="co2"><svg class="ico"><use href="#i-leaf"/></svg>Avg CO₂</span>'
+      : `<span class="co2 bad"><svg class="ico"><use href="#i-leaf"/></svg>+${f.co2}% CO₂</span>`;
+    const badges = (f.id === cheapest ? '<span class="badge cheap">Cheapest</span>' : "") + (f.id === fastest ? '<span class="badge fast">Fastest</span>' : "");
+    return `<article class="flight${f.id === state.sel ? " sel" : ""}" data-id="${f.id}">
+      <div>
+        <div class="f-top">${mark(f.airline)}<div class="aname">${f.airline}<small>${f.code}</small></div>${badges}${f.bag ? '<span class="bags"><svg class="ico"><use href="#i-bag"/></svg>Bag included</span>' : ""}</div>
+        <div class="times">
+          <div class="t"><b class="num">${d.text}</b><span>SFO</span></div>
+          <div class="mid"><div class="dur num">${dur(f.dur)}</div><div class="line">${dots}</div>${stops}</div>
+          <div class="t arr"><b class="num">${a.text}${a.plus ? "<sup>+1</sup>" : ""}</b><span>JFK</span></div>
+        </div>
+        <div class="f-foot">${co2}${f.via.length ? `<span class="lay">Layover${f.via.length > 1 ? "s" : ""} ${f.via.map((v) => `${v[0]} ${layover(v[1])}`).join(" · ")}</span>` : ""}<span class="fn">${f.plane}</span></div>
+      </div>
+      <div class="buy"><div class="pr"><div class="price num">${whole(f.price)}</div><small>round trip</small></div>
+        <button class="select" data-select="${f.id}">${f.id === state.sel ? '<svg class="ico"><use href="#i-check"/></svg>Selected' : "Select"}</button></div>
+    </article>`;
+  }).join("");
+  $("empty").classList.toggle("show", vis.length === 0);
+  const countText = `${vis.length} of ${FLIGHTS.length} flights`;
+  $("count").textContent = countText;
+  $("m-count").textContent = countText;
+  $("sheet-show").textContent = `Show ${vis.length} flight${vis.length === 1 ? "" : "s"}`;
+  for (const key of ["best", "cheapest", "fastest"]) {
+    const top = vis.length ? [...vis].sort(SORTS[key])[0] : null;
+    $("tv-" + key).innerHTML = top ? `${whole(top.price)}<small>${dur(top.dur)}</small>` : "—";
+  }
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.sort === state.sort));
+  document.querySelectorAll(".sortmenu button").forEach((t) => t.classList.toggle("on", t.dataset.sort === state.sort));
+  $("m-sort-label").textContent = { best: "Best", cheapest: "Cheapest", fastest: "Fastest" }[state.sort];
+  const active = (3 - state.stops.size) + (4 - state.air.size) + state.times.size + (state.max < 400 ? 1 : 0) + (state.bags ? 1 : 0);
+  $("m-fcount").textContent = active;
+  $("m-fcount").style.display = active ? "" : "none";
+}
+
+function renderSummary() {
+  const f = FLIGHTS.find((x) => x.id === state.sel);
+  const d = clock(f.dep), a = clock(f.dep + f.dur + 180);
+  $("leg-out").innerHTML = `${mark(f.airline)}<div><div class="ltag">Outbound · Thu, Oct 15</div><div class="ltitle">${f.airline} ${f.code}</div><div class="lsub num">${d.text} SFO → ${a.text}${a.plus ? " +1" : ""} JFK · ${dur(f.dur)} · ${f.via.length ? f.via.length + " stop" + (f.via.length > 1 ? "s" : "") : "Nonstop"}</div></div>`;
+  $("tiers").innerHTML = TIERS.map(([k, label, desc, add]) => `<button class="tier${k === state.tier ? " on" : ""}" data-tier="${k}"><span class="dot"></span><div><b>${label}</b><span>${desc}</span></div><span class="tp num">${whole(f.price + add)}</span></button>`).join("");
+  const tier = TIERS.find((t) => t[0] === state.tier);
+  const per = f.price + tier[3];
+  const fare = per * state.pax, taxes = Math.round(TAX * state.pax * 100) / 100, total = Math.round((fare + taxes) * 100) / 100;
+  const who = `${state.pax} adult${state.pax > 1 ? "s" : ""}`;
+  $("pax").textContent = state.pax;
+  $("pax-label").textContent = who;
+  $("pax-pill").textContent = who;
+  $("pax-pill-m").textContent = who;
+  $("pax-dec").disabled = state.pax <= 1;
+  $("pax-inc").disabled = state.pax >= 6;
+  $("rows").innerHTML = `<div class="r"><span>${tier[1]} fare × ${state.pax}</span><span>${money(fare)}</span></div>
+    <div class="r"><span>Taxes &amp; fees</span><span>${money(taxes)}</span></div>
+    <div class="r total"><b>Total</b><span class="amt">${money(total)}</span></div>`;
+  $("b-sel").textContent = `${f.airline} ${f.code} · ${tier[1]} · ${who}`;
+  $("b-total").innerHTML = `${money(total)}<small>total</small>`;
+}
+
+function render() { renderList(); renderSummary(); }
+
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("[data-sort],[data-select],[data-tier],[data-time],#pax-dec,#pax-inc,#bags,#reset,#clear,#m-filters,#m-sort,#sheet-close,#sheet-show,#scrim");
+  if (!t) { $("sortmenu").classList.remove("open"); return; }
+  if (t.dataset.sort) { state.sort = t.dataset.sort; $("sortmenu").classList.remove("open"); }
+  else if (t.dataset.select) state.sel = t.dataset.select;
+  else if (t.dataset.tier) state.tier = t.dataset.tier;
+  else if (t.dataset.time) {
+    state.times.has(t.dataset.time) ? state.times.delete(t.dataset.time) : state.times.add(t.dataset.time);
+    t.classList.toggle("on", state.times.has(t.dataset.time));
+  } else if (t.id === "pax-dec") state.pax = Math.max(1, state.pax - 1);
+  else if (t.id === "pax-inc") state.pax = Math.min(6, state.pax + 1);
+  else if (t.id === "bags") { state.bags = !state.bags; t.classList.toggle("on", state.bags); t.setAttribute("aria-checked", String(state.bags)); }
+  else if (t.id === "reset" || t.id === "clear") resetFilters();
+  else if (t.id === "m-filters") { $("filters").classList.add("open"); $("scrim").classList.add("open"); }
+  else if (t.id === "m-sort") { $("sortmenu").classList.toggle("open"); return; }
+  else if (["sheet-close", "sheet-show", "scrim"].includes(t.id)) { $("filters").classList.remove("open"); $("scrim").classList.remove("open"); }
+  render();
+});
+document.addEventListener("change", (e) => {
+  const t = e.target;
+  if (t.dataset.stop) t.checked ? state.stops.add(t.dataset.stop) : state.stops.delete(t.dataset.stop);
+  else if (t.dataset.air) t.checked ? state.air.add(t.dataset.air) : state.air.delete(t.dataset.air);
+  else return;
+  render();
+});
+$("max-price").addEventListener("input", (e) => {
+  state.max = Number(e.target.value);
+  $("max-label").textContent = whole(state.max);
+  render();
+});
+function resetFilters() {
+  state.stops = new Set(["0", "1", "2"]);
+  state.air = new Set(Object.keys(AIRLINES));
+  state.times.clear();
+  state.max = 400;
+  state.bags = false;
+  document.querySelectorAll("[data-stop],[data-air]").forEach((c) => (c.checked = true));
+  document.querySelectorAll(".chip").forEach((c) => c.classList.remove("on"));
+  $("max-price").value = 400;
+  $("max-label").textContent = "$400";
+  $("bags").classList.remove("on");
+  $("bags").setAttribute("aria-checked", "false");
+}
+renderStatic();
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+{
+  "title": "Nordvik energy balance 2025",
+  "unit": "TWh",
+  "notes": "Nodes are listed column by column in their top-to-bottom order. Flows are in no particular order.",
+  "nodes": [
+    {
+      "id": "hydro",
+      "label": "Hydro",
+      "column": 0,
+      "color": "#1f78b4",
+      "renewable": true
+    },
+    {
+      "id": "wind",
+      "label": "Wind",
+      "column": 0,
+      "color": "#33a3a0",
+      "renewable": true
+    },
+    {
+      "id": "solar",
+      "label": "Solar",
+      "column": 0,
+      "color": "#f2b134",
+      "renewable": true
+    },
+    {
+      "id": "gas",
+      "label": "Natural gas",
+      "column": 0,
+      "color": "#8c6d62",
+      "renewable": false
+    },
+    {
+      "id": "biomass",
+      "label": "Biomass",
+      "column": 0,
+      "color": "#5a9b3c",
+      "renewable": true
+    },
+    {
+      "id": "electricity",
+      "label": "Electricity",
+      "column": 1,
+      "color": "#4b5bb5"
+    },
+    {
+      "id": "heat",
+      "label": "District heat",
+      "column": 1,
+      "color": "#d9573b"
+    },
+    {
+      "id": "homes",
+      "label": "Homes",
+      "column": 2,
+      "color": "#6c7a89"
+    },
+    {
+      "id": "industry",
+      "label": "Industry",
+      "column": 2,
+      "color": "#6c7a89"
+    },
+    {
+      "id": "services",
+      "label": "Services",
+      "column": 2,
+      "color": "#6c7a89"
+    },
+    {
+      "id": "transport",
+      "label": "Transport",
+      "column": 2,
+      "color": "#6c7a89"
+    },
+    {
+      "id": "losses",
+      "label": "Conversion losses",
+      "column": 2,
+      "color": "#a0a4aa"
+    }
+  ],
+  "flows": [
+    {
+      "from": "heat",
+      "to": "services",
+      "value": 4.5
+    },
+    {
+      "from": "wind",
+      "to": "electricity",
+      "value": 31.5
+    },
+    {
+      "from": "electricity",
+      "to": "losses",
+      "value": 10.0
+    },
+    {
+      "from": "gas",
+      "to": "electricity",
+      "value": 9.0
+    },
+    {
+      "from": "biomass",
+      "to": "heat",
+      "value": 11.0
+    },
+    {
+      "from": "electricity",
+      "to": "industry",
+      "value": 34.5
+    },
+    {
+      "from": "solar",
+      "to": "heat",
+      "value": 0.0
+    },
+    {
+      "from": "hydro",
+      "to": "electricity",
+      "value": 46.0
+    },
+    {
+      "from": "heat",
+      "to": "homes",
+      "value": 11.5
+    },
+    {
+      "from": "electricity",
+      "to": "transport",
+      "value": 9.5
+    },
+    {
+      "from": "gas",
+      "to": "heat",
+      "value": 8.0
+    },
+    {
+      "from": "electricity",
+      "to": "homes",
+      "value": 28.0
+    },
+    {
+      "from": "biomass",
+      "to": "electricity",
+      "value": 3.0
+    },
+    {
+      "from": "heat",
+      "to": "losses",
+      "value": 3.0
+    },
+    {
+      "from": "solar",
+      "to": "electricity",
+      "value": 8.5
+    },
+    {
+      "from": "electricity",
+      "to": "services",
+      "value": 21.0
+    },
+    {
+      "from": "gas",
+      "to": "electricity",
+      "value": 5.0
+    }
+  ]
+}

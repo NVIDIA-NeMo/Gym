@@ -1,0 +1,241 @@
+location,month,item_id,quantity_sold
+Harbor Street,2026-04,M01,705
+Harbor Street,2026-04,M02,666
+Harbor Street,2026-04,M03,235
+Harbor Street,2026-04,M04,652
+Harbor Street,2026-04,M05,335
+Harbor Street,2026-04,G01,793
+Harbor Street,2026-04,G02,973
+Harbor Street,2026-04,G03,363
+Harbor Street,2026-04,G04,317
+Harbor Street,2026-04,G05,356
+Harbor Street,2026-04,G06,192
+Harbor Street,2026-04,N01,556
+Harbor Street,2026-04,N02,318
+Harbor Street,2026-04,N03,248
+Harbor Street,2026-04,N04,731
+Harbor Street,2026-04,N05,223
+Harbor Street,2026-04,D01,486
+Harbor Street,2026-04,D02,172
+Harbor Street,2026-04,D03,336
+Harbor Street,2026-04,D04,162
+Harbor Street,2026-05,M01,754
+Harbor Street,2026-05,M02,712
+Harbor Street,2026-05,M03,283
+Harbor Street,2026-05,M04,808
+Harbor Street,2026-05,M05,333
+Harbor Street,2026-05,G01,804
+Harbor Street,2026-05,G02,917
+Harbor Street,2026-05,G03,435
+Harbor Street,2026-05,G04,334
+Harbor Street,2026-05,G05,425
+Harbor Street,2026-05,G06,197
+Harbor Street,2026-05,N01,631
+Harbor Street,2026-05,N02,327
+Harbor Street,2026-05,N03,266
+Harbor Street,2026-05,N04,732
+Harbor Street,2026-05,N05,204
+Harbor Street,2026-05,D01,501
+Harbor Street,2026-05,D02,194
+Harbor Street,2026-05,D03,372
+Harbor Street,2026-05,D04,155
+Harbor Street,2026-06,M01,916
+Harbor Street,2026-06,M02,760
+Harbor Street,2026-06,M03,258
+Harbor Street,2026-06,M04,750
+Harbor Street,2026-06,M05,403
+Harbor Street,2026-06,G01,899
+Harbor Street,2026-06,G02,1098
+Harbor Street,2026-06,G03,419
+Harbor Street,2026-06,G04,349
+Harbor Street,2026-06,G05,457
+Harbor Street,2026-06,G06,215
+Harbor Street,2026-06,N01,672
+Harbor Street,2026-06,N02,337
+Harbor Street,2026-06,N03,287
+Harbor Street,2026-06,N04,832
+Harbor Street,2026-06,N05,234
+Harbor Street,2026-06,D01,538
+Harbor Street,2026-06,D02,193
+Harbor Street,2026-06,D03,335
+Harbor Street,2026-06,D04,164
+Midtown,2026-04,M01,917
+Midtown,2026-04,M02,752
+Midtown,2026-04,M03,263
+Midtown,2026-04,M04,895
+Midtown,2026-04,M05,402
+Midtown,2026-04,G01,986
+Midtown,2026-04,G02,1221
+Midtown,2026-04,G03,444
+Midtown,2026-04,G04,392
+Midtown,2026-04,G05,491
+Midtown,2026-04,G06,194
+Midtown,2026-04,N01,704
+Midtown,2026-04,N02,387
+Midtown,2026-04,N03,268
+Midtown,2026-04,N04,839
+Midtown,2026-04,N05,216
+Midtown,2026-04,D01,590
+Midtown,2026-04,D02,201
+Midtown,2026-04,D03,359
+Midtown,2026-04,D04,193
+Midtown,2026-05,M01,862
+Midtown,2026-05,M02,761
+Midtown,2026-05,M03,327
+Midtown,2026-05,M04,826
+Midtown,2026-05,M05,377
+Midtown,2026-05,G01,1096
+Midtown,2026-05,G02,1218
+Midtown,2026-05,G03,400
+Midtown,2026-05,G04,422
+Midtown,2026-05,G05,428
+Midtown,2026-05,G06,208
+Midtown,2026-05,N01,757
+Midtown,2026-05,N02,391
+Midtown,2026-05,N03,281
+Midtown,2026-05,N04,832
+Midtown,2026-05,N05,252
+Midtown,2026-05,D01,635
+Midtown,2026-05,D02,205
+Midtown,2026-05,D03,417
+Midtown,2026-05,D04,209
+Midtown,2026-06,M01,999
+Midtown,2026-06,M02,835
+Midtown,2026-06,M03,334
+Midtown,2026-06,M04,930
+Midtown,2026-06,M05,439
+Midtown,2026-06,G01,1154
+Midtown,2026-06,G02,1430
+Midtown,2026-06,G03,448
+Midtown,2026-06,G04,413
+Midtown,2026-06,G05,539
+Midtown,2026-06,G06,271
+Midtown,2026-06,N01,816
+Midtown,2026-06,N02,387
+Midtown,2026-06,N03,277
+Midtown,2026-06,N04,966
+Midtown,2026-06,N05,296
+Midtown,2026-06,D01,735
+Midtown,2026-06,D02,258
+Midtown,2026-06,D03,471
+Midtown,2026-06,D04,213
+Westfield,2026-04,M01,491
+Westfield,2026-04,M02,353
+Westfield,2026-04,M03,128
+Westfield,2026-04,M04,443
+Westfield,2026-04,M05,205
+Westfield,2026-04,G01,496
+Westfield,2026-04,G02,519
+Westfield,2026-04,G03,203
+Westfield,2026-04,G04,200
+Westfield,2026-04,G05,198
+Westfield,2026-04,G06,102
+Westfield,2026-04,N01,347
+Westfield,2026-04,N02,197
+Westfield,2026-04,N03,142
+Westfield,2026-04,N04,382
+Westfield,2026-04,N05,115
+Westfield,2026-04,D01,304
+Westfield,2026-04,D02,113
+Westfield,2026-04,D03,207
+Westfield,2026-04,D04,82
+Westfield,2026-05,M01,522
+Westfield,2026-05,M02,427
+Westfield,2026-05,M03,135
+Westfield,2026-05,M04,410
+Westfield,2026-05,M05,197
+Westfield,2026-05,G01,459
+Westfield,2026-05,G02,557
+Westfield,2026-05,G03,207
+Westfield,2026-05,G04,217
+Westfield,2026-05,G05,231
+Westfield,2026-05,G06,103
+Westfield,2026-05,N01,390
+Westfield,2026-05,N02,205
+Westfield,2026-05,N03,136
+Westfield,2026-05,N04,450
+Westfield,2026-05,N05,133
+Westfield,2026-05,D01,324
+Westfield,2026-05,D02,102
+Westfield,2026-05,D03,207
+Westfield,2026-05,D04,107
+Westfield,2026-06,M01,559
+Westfield,2026-06,M02,476
+Westfield,2026-06,M03,150
+Westfield,2026-06,M04,524
+Westfield,2026-06,M05,203
+Westfield,2026-06,G01,515
+Westfield,2026-06,G02,661
+Westfield,2026-06,G03,254
+Westfield,2026-06,G04,227
+Westfield,2026-06,G05,278
+Westfield,2026-06,G06,131
+Westfield,2026-06,N01,422
+Westfield,2026-06,N02,213
+Westfield,2026-06,N03,154
+Westfield,2026-06,N04,398
+Westfield,2026-06,N05,140
+Westfield,2026-06,D01,384
+Westfield,2026-06,D02,114
+Westfield,2026-06,D03,238
+Westfield,2026-06,D04,94
+Lakeside,2026-04,M01,626
+Lakeside,2026-04,M02,571
+Lakeside,2026-04,M03,216
+Lakeside,2026-04,M04,601
+Lakeside,2026-04,M05,267
+Lakeside,2026-04,G01,627
+Lakeside,2026-04,G02,750
+Lakeside,2026-04,G03,319
+Lakeside,2026-04,G04,250
+Lakeside,2026-04,G05,290
+Lakeside,2026-04,G06,162
+Lakeside,2026-04,N01,481
+Lakeside,2026-04,N02,227
+Lakeside,2026-04,N03,191
+Lakeside,2026-04,N04,622
+Lakeside,2026-04,N05,170
+Lakeside,2026-04,D01,412
+Lakeside,2026-04,D02,141
+Lakeside,2026-04,D03,267
+Lakeside,2026-04,D04,125
+Lakeside,2026-05,M01,646
+Lakeside,2026-05,M02,513
+Lakeside,2026-05,M03,224
+Lakeside,2026-05,M04,672
+Lakeside,2026-05,M05,301
+Lakeside,2026-05,G01,729
+Lakeside,2026-05,G02,830
+Lakeside,2026-05,G03,366
+Lakeside,2026-05,G04,285
+Lakeside,2026-05,G05,372
+Lakeside,2026-05,G06,145
+Lakeside,2026-05,N01,539
+Lakeside,2026-05,N02,297
+Lakeside,2026-05,N03,211
+Lakeside,2026-05,N04,560
+Lakeside,2026-05,N05,166
+Lakeside,2026-05,D01,519
+Lakeside,2026-05,D02,183
+Lakeside,2026-05,D03,266
+Lakeside,2026-05,D04,139
+Lakeside,2026-06,M01,795
+Lakeside,2026-06,M02,674
+Lakeside,2026-06,M03,209
+Lakeside,2026-06,M04,685
+Lakeside,2026-06,M05,305
+Lakeside,2026-06,G01,690
+Lakeside,2026-06,G02,987
+Lakeside,2026-06,G03,353
+Lakeside,2026-06,G04,302
+Lakeside,2026-06,G05,388
+Lakeside,2026-06,G06,169
+Lakeside,2026-06,N01,528
+Lakeside,2026-06,N02,281
+Lakeside,2026-06,N03,208
+Lakeside,2026-06,N04,702
+Lakeside,2026-06,N05,187
+Lakeside,2026-06,D01,553
+Lakeside,2026-06,D02,185
+Lakeside,2026-06,D03,309
+Lakeside,2026-06,D04,168

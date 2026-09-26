@@ -1,0 +1,121 @@
+patient_id,site,arm,baseline_hba1c,week12_hba1c,week24_hba1c,status,discontinuation_reason,max_ae_severity
+201-001,S02,NRP-24 20 mg,8.8,7.9,7.2,Completed,,Mild
+201-002,S01,NRP-24 10 mg,7.7,7.4,6.9,Completed,,Mild
+201-003,S04,NRP-24 10 mg,8.3,7.8,7.5,Completed,,Mild
+201-004,S02,NRP-24 10 mg,8.4,7.9,7.7,Completed,,None
+201-005,S05,Placebo,7.8,7.0,6.9,Completed,,Mild
+201-006,S01,Placebo,8.2,8.3,8.3,Completed,,None
+201-007,S01,NRP-24 20 mg,8.7,8.0,7.3,Completed,,Moderate
+201-008,S03,NRP-24 20 mg,9.2,8.2,7.3,Completed,,Mild
+201-009,S03,Placebo,8.3,8.0,8.0,Completed,,None
+201-010,S02,NRP-24 20 mg,8.5,7.4,7.2,Completed,,Mild
+201-011,S06,NRP-24 20 mg,7.8,7.0,6.3,Completed,,Mild
+201-012,S01,NRP-24 20 mg,8.0,7.5,7.1,Completed,,Mild
+201-013,S04,Placebo,8.3,8.1,7.8,Completed,,None
+201-014,S04,Placebo,7.8,7.9,8.1,Completed,,None
+201-015,S06,NRP-24 10 mg,8.1,7.2,7.0,Completed,,None
+201-016,S02,NRP-24 20 mg,9.0,,,Discontinued,Adverse event,None
+201-017,S05,NRP-24 10 mg,8.1,7.8,7.1,Completed,,Mild
+201-018,S01,NRP-24 10 mg,7.8,7.4,7.1,Completed,,None
+201-019,S02,NRP-24 10 mg,9.2,,,Discontinued,Withdrew consent,None
+201-020,S06,Placebo,9.2,8.6,8.9,Completed,,None
+201-021,S01,NRP-24 10 mg,8.5,7.7,7.4,Completed,,Mild
+201-022,S05,Placebo,8.3,7.9,7.8,Completed,,None
+201-023,S03,Placebo,9.4,9.2,8.7,Completed,,Mild
+201-024,S02,NRP-24 10 mg,8.7,8.3,8.0,Completed,,Mild
+201-025,S06,NRP-24 10 mg,8.9,8.4,8.4,Completed,,Mild
+201-026,S03,NRP-24 10 mg,8.5,8.4,8.1,Completed,,None
+201-027,S03,NRP-24 10 mg,7.8,7.0,6.5,Completed,,None
+201-028,S01,NRP-24 10 mg,8.2,7.6,7.2,Completed,,None
+201-029,S05,NRP-24 10 mg,8.4,7.1,6.8,Completed,,Mild
+201-030,S05,NRP-24 20 mg,9.9,8.5,7.7,Completed,,Mild
+201-031,S05,Placebo,7.7,7.3,7.2,Completed,,None
+201-032,S04,NRP-24 10 mg,8.9,8.2,7.8,Completed,,Mild
+201-033,S01,NRP-24 20 mg,8.4,7.4,7.1,Completed,,None
+201-034,S02,NRP-24 20 mg,9.3,8.0,7.2,Completed,,None
+201-035,S01,NRP-24 20 mg,9.0,7.5,6.8,Completed,,Severe
+201-036,S03,NRP-24 20 mg,8.6,8.2,7.6,Completed,,Mild
+201-037,S06,NRP-24 10 mg,7.5,6.3,6.1,Completed,,Moderate
+201-038,S05,NRP-24 20 mg,8.4,8.0,7.5,Completed,,None
+201-039,S03,Placebo,8.6,8.2,8.2,Completed,,None
+201-040,S05,NRP-24 20 mg,8.2,7.5,6.9,Completed,,Mild
+201-041,S04,NRP-24 20 mg,7.4,6.3,6.5,Completed,,Mild
+201-042,S04,NRP-24 20 mg,7.7,6.8,6.4,Completed,,Severe
+201-043,S03,NRP-24 20 mg,8.8,7.4,6.7,Completed,,None
+201-044,S06,NRP-24 10 mg,9.2,8.8,7.9,Completed,,Moderate
+201-045,S06,Placebo,9.1,9.2,9.1,Completed,,None
+201-046,S05,NRP-24 10 mg,8.4,,,Discontinued,Adverse event,None
+201-047,S05,NRP-24 10 mg,8.2,7.6,7.0,Completed,,Moderate
+201-048,S02,Placebo,9.2,9.0,8.8,Completed,,None
+201-049,S01,NRP-24 20 mg,8.4,7.6,7.1,Completed,,Severe
+201-050,S02,NRP-24 20 mg,8.1,7.5,,Discontinued,Lost to follow-up,Moderate
+201-051,S05,Placebo,7.9,7.8,7.9,Completed,,None
+201-052,S05,NRP-24 10 mg,8.6,8.0,7.5,Completed,,Mild
+201-053,S01,NRP-24 10 mg,9.0,8.5,8.2,Completed,,Mild
+201-054,S02,NRP-24 10 mg,8.3,7.3,7.6,Completed,,Moderate
+201-055,S06,Placebo,7.4,7.2,6.9,Completed,,Mild
+201-056,S01,NRP-24 20 mg,8.3,7.5,6.9,Completed,,Mild
+201-057,S06,Placebo,7.1,6.9,6.8,Completed,,Moderate
+201-058,S05,Placebo,8.2,7.9,7.6,Completed,,Mild
+201-059,S02,NRP-24 20 mg,9.1,7.6,7.1,Completed,,Mild
+201-060,S05,NRP-24 20 mg,8.4,7.3,,Discontinued,Adverse event,None
+201-061,S04,NRP-24 20 mg,8.5,7.4,6.8,Completed,,Mild
+201-062,S02,NRP-24 20 mg,7.7,7.4,7.1,Completed,,Moderate
+201-063,S02,Placebo,8.6,8.7,8.6,Completed,,None
+201-064,S01,Placebo,9.7,9.2,9.2,Completed,,Mild
+201-065,S04,NRP-24 10 mg,8.1,7.0,6.9,Completed,,Moderate
+201-066,S04,Placebo,8.1,8.1,7.7,Completed,,None
+201-067,S05,NRP-24 20 mg,8.6,7.9,7.6,Completed,,None
+201-068,S02,Placebo,8.2,8.4,8.5,Completed,,None
+201-069,S02,NRP-24 20 mg,8.4,7.1,7.0,Completed,,None
+201-070,S01,NRP-24 10 mg,8.2,7.4,7.2,Completed,,None
+201-071,S02,Placebo,8.7,8.7,8.9,Completed,,Mild
+201-072,S02,Placebo,8.7,,,Discontinued,Lack of efficacy,Mild
+201-073,S05,NRP-24 10 mg,9.6,8.8,8.1,Completed,,Moderate
+201-074,S03,NRP-24 20 mg,9.1,8.2,7.6,Completed,,Mild
+201-075,S04,Placebo,8.2,8.1,8.2,Completed,,Moderate
+201-076,S05,NRP-24 10 mg,8.5,7.6,7.4,Completed,,Severe
+201-077,S02,NRP-24 20 mg,7.3,,,Discontinued,Adverse event,Moderate
+201-078,S01,NRP-24 20 mg,7.1,6.3,6.4,Completed,,Mild
+201-079,S05,NRP-24 10 mg,8.4,8.1,8.2,Completed,,Mild
+201-080,S01,Placebo,7.4,7.3,7.4,Completed,,Mild
+201-081,S06,NRP-24 20 mg,7.8,7.4,6.9,Completed,,Severe
+201-082,S02,NRP-24 20 mg,8.1,6.9,6.6,Completed,,None
+201-083,S04,Placebo,8.2,8.2,8.0,Completed,,None
+201-084,S06,NRP-24 10 mg,7.9,7.3,6.8,Completed,,Mild
+201-085,S06,Placebo,8.0,,,Discontinued,Withdrew consent,None
+201-086,S03,Placebo,8.5,8.3,8.3,Completed,,Severe
+201-087,S02,NRP-24 20 mg,8.1,7.8,7.5,Completed,,Moderate
+201-088,S04,Placebo,7.6,7.6,7.2,Completed,,None
+201-089,S04,Placebo,8.6,9.0,8.5,Completed,,None
+201-090,S06,NRP-24 20 mg,9.4,8.0,7.4,Completed,,Mild
+201-091,S04,Placebo,8.8,9.2,9.0,Completed,,None
+201-092,S04,Placebo,8.3,7.9,7.8,Completed,,None
+201-093,S03,NRP-24 10 mg,7.1,6.7,6.5,Completed,,None
+201-094,S05,NRP-24 20 mg,8.1,7.5,6.7,Completed,,Moderate
+201-095,S05,NRP-24 10 mg,7.8,7.1,,Discontinued,Lost to follow-up,None
+201-096,S05,NRP-24 10 mg,8.4,7.3,7.1,Completed,,Severe
+201-097,S06,NRP-24 20 mg,8.6,7.7,7.0,Completed,,None
+201-098,S02,NRP-24 20 mg,8.0,7.0,6.7,Completed,,None
+201-099,S02,NRP-24 10 mg,8.7,8.4,7.9,Completed,,Mild
+201-100,S01,NRP-24 20 mg,8.6,7.8,7.3,Completed,,Moderate
+201-101,S05,NRP-24 10 mg,9.0,8.4,8.0,Completed,,None
+201-102,S04,Placebo,8.4,8.6,8.4,Completed,,Mild
+201-103,S01,Placebo,8.9,8.4,8.4,Completed,,Mild
+201-104,S03,NRP-24 20 mg,9.2,8.0,,Discontinued,Withdrew consent,Moderate
+201-105,S04,NRP-24 10 mg,9.6,8.9,8.3,Completed,,Mild
+201-106,S05,NRP-24 10 mg,8.5,7.6,7.2,Completed,,None
+201-107,S01,Placebo,7.9,7.8,7.5,Completed,,Moderate
+201-108,S06,Placebo,8.4,7.9,7.6,Completed,,Moderate
+201-109,S06,Placebo,9.1,9.2,9.1,Completed,,Mild
+201-110,S01,NRP-24 20 mg,8.1,7.2,6.8,Completed,,None
+201-111,S04,NRP-24 10 mg,8.7,8.1,7.2,Completed,,Mild
+201-112,S01,NRP-24 10 mg,8.5,8.3,8.0,Completed,,None
+201-113,S04,NRP-24 10 mg,8.1,8.0,7.7,Completed,,None
+201-114,S06,Placebo,8.7,8.4,,Discontinued,Lack of efficacy,Moderate
+201-115,S02,NRP-24 10 mg,9.8,8.7,8.0,Completed,,None
+201-116,S01,Placebo,8.4,7.7,7.7,Completed,,None
+201-117,S03,Placebo,9.3,8.8,,Discontinued,Lost to follow-up,Mild
+201-118,S05,NRP-24 10 mg,8.5,8.2,7.9,Completed,,None
+201-119,S02,Placebo,8.9,8.8,8.7,Completed,,None
+201-120,S05,NRP-24 20 mg,8.4,7.4,6.6,Completed,,None
