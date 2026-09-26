@@ -18,7 +18,9 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 from copy import deepcopy
+from pathlib import Path
 from threading import Lock
 from time import monotonic, time, time_ns
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Union, get_args
@@ -50,6 +52,7 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
+from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN, current_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
     current_capture_context,
@@ -212,6 +215,21 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # rollout keeps one unbroken chain; a harness-side step limit that rewrites the last request
     # (OpenCode's agent.steps) breaks the chain instead. None disables the cap.
     max_assistant_turns: Optional[int] = None
+
+    # Wall-clock budget per rollout, counted from the rollout's first model call through this server.
+    # A chat request of a rollout that arrives after this many seconds is answered with an empty
+    # "stop" completion without calling the model, like max_assistant_turns, so the harness ends its
+    # loop at a turn boundary and a token-captured rollout keeps one unbroken chain. Killing the
+    # harness at a deadline instead (an exec timeout) cancels its in-flight call through the
+    # client-disconnect middleware, which leaves a dispatched call without a record and masks the
+    # rollout. A call already in flight at the deadline completes. Requests that carry no rollout id
+    # are never limited. None disables the budget.
+    max_rollout_seconds: Optional[float] = Field(default=None, gt=0)
+
+    # Directory holding each rollout's start time for max_rollout_seconds. Every worker of this
+    # server must see the same directory; they run on one host, so the default is local:
+    # <tmpdir>/nemo_gym_rollout_clock/<server name>.
+    rollout_clock_dir: Optional[str] = None
 
     # Opt in to supplying a verified parent's exact tokens to the engine.
     # Prefix supply requires generation-time prompt_token_ids as proof.
@@ -391,6 +409,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        self._rollout_start_times: Dict[str, float] = dict()
+        self._rollout_budget_hits = 0
+        self._rollout_clock_path: Optional[Path] = None
+        if self.config.max_rollout_seconds is not None:
+            self._rollout_clock_path = Path(
+                self.config.rollout_clock_dir
+                or Path(tempfile.gettempdir()) / "nemo_gym_rollout_clock" / (self.config.name or "vllm_model")
+            )
+            self._rollout_clock_path.mkdir(parents=True, exist_ok=True)
         self._endpoint_file_mtime: Optional[float] = None
         self._endpoint_missing_since: Optional[float] = None
         self._endpoint_last_check_at: Optional[float] = None
@@ -910,7 +937,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        if self._assistant_turn_cap_reached(body):
+        if self._assistant_turn_cap_reached(body) or self._rollout_time_budget_spent():
             return self._create_empty_chat_completion()
 
         if self.config.use_completions_api:
@@ -1604,6 +1631,51 @@ class VLLMModel(SimpleResponsesAPIModel):
             return False
         messages = body.model_dump(exclude_unset=True).get("messages") or []
         return sum(1 for message in messages if message.get("role") == "assistant") >= self.config.max_assistant_turns
+
+    def _rollout_time_budget_spent(self) -> bool:
+        if self.config.max_rollout_seconds is None:
+            return False
+        context = current_capture_context()
+        rollout_id = context.rollout_id if context is not None else current_rollout_id()
+        # The id names a file below; only ids that survive a path round trip qualify.
+        if not rollout_id or not ROLLOUT_ID_PATTERN.match(rollout_id):
+            return False
+        spent = time() - self._rollout_start_time(rollout_id) >= self.config.max_rollout_seconds
+        if spent:
+            self._rollout_budget_hits += 1
+            if self._rollout_budget_hits == 1 or self._rollout_budget_hits % 100 == 0:
+                LOG.info(
+                    "`%s` max_rollout_seconds=%g: %d requests answered with an empty stop by this worker",
+                    self.config.name,
+                    self.config.max_rollout_seconds,
+                    self._rollout_budget_hits,
+                )
+        return spent
+
+    def _rollout_start_time(self, rollout_id: str) -> float:
+        """Return when the rollout first reached any worker of this server.
+
+        The first worker to see a rollout publishes the time with an atomic link, so every worker
+        reads the same start; each process caches what it read.
+        """
+        started = self._rollout_start_times.get(rollout_id)
+        if started is not None:
+            return started
+        assert self._rollout_clock_path is not None
+        path = self._rollout_clock_path / rollout_id
+        now = time()
+        # A leading dot keeps the staging name out of the id namespace (ids cannot start with one).
+        staging = self._rollout_clock_path / f".{rollout_id}.{os.getpid()}.{time_ns()}"
+        staging.write_text(repr(now))
+        try:
+            os.link(staging, path)
+            started = now
+        except FileExistsError:
+            started = float(path.read_text())
+        finally:
+            staging.unlink(missing_ok=True)
+        self._rollout_start_times[rollout_id] = started
+        return started
 
     def _create_empty_chat_completion(self) -> NeMoGymChatCompletion:
         return NeMoGymChatCompletion(

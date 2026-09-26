@@ -6457,3 +6457,142 @@ class TestAssistantTurnCap:
         model = self._server(max_assistant_turns=None)
         self._post(monkeypatch, model, assistant_turns=50)
         model._clients[0].create_chat_completion.assert_awaited_once()
+
+
+class TestRolloutTimeBudget:
+    """max_rollout_seconds ends a rollout's tool loop after a wall-clock budget without calling the model.
+
+    The start time is published once per rollout in a directory every worker shares, so the budget
+    holds across server workers, and the empty reply is never captured, so a token-captured rollout
+    keeps one chain.
+    """
+
+    APP_MODULE = "responses_api_models.vllm_model.app"
+
+    @staticmethod
+    def _server(tmp_path, max_rollout_seconds: float | None) -> VLLMModel:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            max_rollout_seconds=max_rollout_seconds,
+            rollout_clock_dir=str(tmp_path),
+        )
+        model = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        fake_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        fake_client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "dummy_model",
+                "choices": [
+                    {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "model reply"}}
+                ],
+            }
+        )
+        model._clients = [fake_client]
+        model._session_id_to_client = {}
+        return model
+
+    def _patch(self, monkeypatch: MonkeyPatch, clock: list[float], rollout_id: str | None) -> None:
+        monkeypatch.setattr(f"{self.APP_MODULE}.time", lambda: clock[0])
+        monkeypatch.setattr(f"{self.APP_MODULE}.current_rollout_id", lambda: rollout_id)
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+
+    @staticmethod
+    def _post(model: VLLMModel) -> dict:
+        resp = TestClient(model.setup_webserver()).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "fix the bug"}]},
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    def test_within_the_budget_the_model_is_called(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        clock = [1000.0]
+        self._patch(monkeypatch, clock, "rollout-1")
+        model = self._server(tmp_path, max_rollout_seconds=600)
+        self._post(model)
+        clock[0] = 1599.0
+        data = self._post(model)
+        assert model._clients[0].create_chat_completion.await_count == 2
+        assert data["choices"][0]["message"]["content"] == "model reply"
+
+    def test_after_the_budget_an_empty_stop_reply_ends_the_loop(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        clock = [1000.0]
+        self._patch(monkeypatch, clock, "rollout-1")
+        model = self._server(tmp_path, max_rollout_seconds=600)
+        self._post(model)
+        clock[0] = 1600.0
+        data = self._post(model)
+        model._clients[0].create_chat_completion.assert_awaited_once()
+        choice = data["choices"][0]
+        assert choice["finish_reason"] == "stop"
+        assert not choice["message"]["content"] and not choice["message"].get("tool_calls")
+
+    def test_the_start_is_shared_across_workers(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        clock = [1000.0]
+        self._patch(monkeypatch, clock, "rollout-1")
+        first_worker = self._server(tmp_path, max_rollout_seconds=600)
+        second_worker = self._server(tmp_path, max_rollout_seconds=600)
+        assert first_worker._rollout_time_budget_spent() is False
+        clock[0] = 1700.0
+        # The second worker sees the rollout for the first time, 700 s after it started elsewhere.
+        assert second_worker._rollout_time_budget_spent() is True
+        assert second_worker._rollout_start_time("rollout-1") == 1000.0
+
+    def test_each_rollout_has_its_own_clock(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        clock = [1000.0]
+        self._patch(monkeypatch, clock, "rollout-1")
+        model = self._server(tmp_path, max_rollout_seconds=600)
+        assert model._rollout_time_budget_spent() is False
+        clock[0] = 1700.0
+        monkeypatch.setattr(f"{self.APP_MODULE}.current_rollout_id", lambda: "rollout-2")
+        assert model._rollout_time_budget_spent() is False
+
+    def test_requests_without_a_rollout_id_are_never_limited(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        clock = [1000.0]
+        self._patch(monkeypatch, clock, None)
+        model = self._server(tmp_path, max_rollout_seconds=1)
+        clock[0] = 10_000.0
+        self._post(model)
+        model._clients[0].create_chat_completion.assert_awaited_once()
+
+    def test_an_id_that_is_not_a_path_segment_is_never_limited(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        clock = [1000.0]
+        self._patch(monkeypatch, clock, "../escape")
+        model = self._server(tmp_path, max_rollout_seconds=1)
+        assert model._rollout_time_budget_spent() is False
+        assert not any(tmp_path.iterdir())
+
+    def test_unset_never_limits(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        clock = [1000.0]
+        self._patch(monkeypatch, clock, "rollout-1")
+        model = self._server(tmp_path, max_rollout_seconds=None)
+        self._post(model)
+        clock[0] = 100_000.0
+        self._post(model)
+        assert model._clients[0].create_chat_completion.await_count == 2
+        assert not any(tmp_path.iterdir())
+
+    def test_a_non_positive_budget_is_rejected(self) -> None:
+        with raises(ValueError, match="max_rollout_seconds"):
+            VLLMModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                base_url="http://api.openai.com/v1",
+                api_key="dummy_key",  # pragma: allowlist secret
+                model="dummy_model",
+                entrypoint="",
+                name="",
+                return_token_id_information=False,
+                uses_reasoning_parser=False,
+                max_rollout_seconds=0,
+            )
