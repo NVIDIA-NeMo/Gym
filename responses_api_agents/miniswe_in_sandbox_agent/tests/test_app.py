@@ -268,8 +268,22 @@ async def test_provider_overrides_touch_only_this_agents_transport(tmp_path, mon
         "background_poll_initial_s": 5.0,
         "background_poll_interval_s": 30.0,
         "status_poll_timeout_s": 30.0,
+        "background_exec": True,
     }
     assert seeded.sandbox_provider["opensandbox"]["operations"] == {"retries": 3}  # the seed is not mutated
+
+
+async def test_provider_overrides_force_background_exec_and_reject_connection(tmp_path, monkeypatch):
+    sandbox = FakeSandbox(records=records())
+    agent, _ = make_agent(tmp_path, monkeypatch, sandbox)
+    seeded = seed(
+        sandbox_provider={"opensandbox": {"connection": {"domain": "x"}, "operations": {"background_exec": False}}}
+    )
+    merged = agent._provider_config(seeded)
+    assert merged["opensandbox"]["operations"]["background_exec"] is True
+    assert merged["opensandbox"]["connection"] == {"domain": "x"}
+    with pytest.raises(ValueError, match="connection is not allowed"):
+        make_config(tmp_path, provider_overrides={"opensandbox": {"connection": {"domain": "evil"}}})
 
 
 async def test_exec_wall_timeout_is_a_timeout_with_partial_records(tmp_path, monkeypatch):
