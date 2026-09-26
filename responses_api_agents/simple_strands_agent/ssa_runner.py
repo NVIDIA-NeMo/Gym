@@ -84,7 +84,8 @@ def _build_config(payload: dict[str, Any], output_dir: Path):
     cfg.env.timeout = payload["shell_timeout"]
     cfg.dataset.name = "gym"
     cfg.dataset.identifier = payload["rollout_id"]
-    cfg.dataset.issue_description = payload["instruction"]
+    # OmegaConf reads ${...} as interpolation; math prompts contain it.
+    cfg.dataset.issue_description = payload["instruction"].replace("${", "\\${")
     cfg.agent.model = payload["model"]
     cfg.agent.prompt_tag = payload["prompt_tag"]
     cfg.agent.invoker = "openai"
