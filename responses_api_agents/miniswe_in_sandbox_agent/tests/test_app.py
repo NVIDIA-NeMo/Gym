@@ -120,7 +120,7 @@ class FakeSandbox:
         Path(local).write_text(value if isinstance(value, str) else json.dumps(value))
 
 
-def records(exit_status="Submitted", items=ITEMS, usages=(USAGE, USAGE)):
+def records(exit_status="Submitted", items=ITEMS, usages=(USAGE, USAGE), finished=True):
     return {
         "trajectory.json": {
             "trajectory_format": "mini-swe-agent-1.1",
@@ -129,7 +129,14 @@ def records(exit_status="Submitted", items=ITEMS, usages=(USAGE, USAGE)):
         },
         "output_items.json": items,
         "usages.json": list(usages),
-        "result.json": {"exit_status": exit_status, "n_calls": 2, "steps": 1, "uid": 1000, "cwd": "/home/cam/job"},
+        "result.json": {
+            "exit_status": exit_status,
+            "n_calls": 2,
+            "steps": 1,
+            "uid": 1000,
+            "cwd": "/home/cam/job",
+            "finished": finished,
+        },
         "runner.log": "runner log\n",
     }
 
@@ -201,57 +208,72 @@ async def test_capture_prefix_and_no_chown_for_root_agent(tmp_path, monkeypatch)
     assert run_call["user"] is None
 
 
+OK = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+KILLED = SimpleNamespace(return_code=137, stdout="", stderr="", error_type=None)
+
+
 @pytest.mark.parametrize(
-    "exec_result,exit_status,reason,detail_part",
+    "exec_result,exit_status,finished,reason,detail_part,stopped",
     [
-        (
-            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
-            "LimitsExceeded",
-            "nonzero_exit",
-            "LimitsExceeded",
-        ),
-        (
-            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
-            "ContextWindowExceeded",
-            "nonzero_exit",
-            "ContextWindowExceeded",
-        ),
+        (OK, "LimitsExceeded", True, "nonzero_exit", "LimitsExceeded", False),
+        (OK, "ContextWindowExceeded", True, "nonzero_exit", "ContextWindowExceeded", False),
+        (OK, "TimeExceeded", True, "timeout", "TimeExceeded", False),
         (
             SimpleNamespace(return_code=1, stdout="", stderr="", error_type=None),
             "ModelServerError",
+            True,
             "infrastructure_error",
-            "Runner exited 1",
+            "ModelServerError",
+            False,
         ),
-        (SimpleNamespace(return_code=137, stdout="", stderr="", error_type="timeout"), "", "timeout", "budget"),
-        (
-            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
-            "TimeExceeded",
-            "timeout",
-            "TimeExceeded",
-        ),
+        # Budget kill: OpenSandbox gives no timeout marker, only a non-terminal record and a long elapsed time.
+        (KILLED, "", False, "timeout", "budget", True),
     ],
 )
-async def test_termination_mapping(tmp_path, monkeypatch, exec_result, exit_status, reason, detail_part):
-    sandbox = FakeSandbox(exec_result=exec_result, records=records(exit_status=exit_status))
-    agent, _ = make_agent(tmp_path, monkeypatch, sandbox)
+async def test_termination_mapping(
+    tmp_path, monkeypatch, exec_result, exit_status, finished, reason, detail_part, stopped
+):
+    sandbox = FakeSandbox(exec_result=exec_result, records=records(exit_status=exit_status, finished=finished))
+    agent, _ = make_agent(tmp_path, monkeypatch, sandbox, agent_max_timeout_sec=0.01)
     params = app_module.NeMoGymResponseCreateParamsNonStreaming(input=[])
     result = await agent.execute(seed(), params, rollout_id="r", capture_model_calls=False)
-    assert (
-        result.agent_started
-        and result.termination.reason == reason
-        and detail_part in (result.termination.detail or "")
-    )
+    assert result.agent_started and result.termination.reason == reason
+    assert detail_part in (result.termination.detail or "")
     # Whatever the termination, the partial trajectory still yields the response items collected so far.
     assert len(result.response.output) == 3
-    stops = [c for c, k in sandbox.calls if "kill -TERM" in c]
-    if exec_result.error_type == "timeout":
-        assert stops and all(k["user"] == "cam" for c, k in sandbox.calls if "kill -TERM" in c)
-    else:
-        assert not stops
+    stops = [(c, k) for c, k in sandbox.calls if "kill -TERM" in c]
+    assert bool(stops) is stopped and all(k["user"] == "cam" for c, k in stops)
+
+
+async def test_runner_killed_inside_the_sandbox_is_graded_not_masked(tmp_path, monkeypatch):
+    sandbox = FakeSandbox(exec_result=KILLED, records=records(exit_status="", finished=False))
+    agent, _ = make_agent(tmp_path, monkeypatch, sandbox, agent_max_timeout_sec=3600)
+    params = app_module.NeMoGymResponseCreateParamsNonStreaming(input=[])
+    result = await agent.execute(seed(), params, rollout_id="r", capture_model_calls=False)
+    assert result.termination.reason == "nonzero_exit" and result.termination.detail.startswith("RunnerKilled")
+
+
+async def test_provider_overrides_touch_only_this_agents_transport(tmp_path, monkeypatch):
+    sandbox = FakeSandbox(records=records())
+    agent, _ = make_agent(tmp_path, monkeypatch, sandbox)
+    seen = {}
+    monkeypatch.setattr(
+        app_module, "create_provider", lambda cfg: seen.setdefault("cfg", cfg) and SimpleNamespace(aclose=AsyncMock())
+    )
+    params = app_module.NeMoGymResponseCreateParamsNonStreaming(input=[])
+    seeded = seed(sandbox_provider={"opensandbox": {"connection": {"domain": "x"}, "operations": {"retries": 3}}})
+    await agent.execute(seeded, params, rollout_id="r", capture_model_calls=False)
+    assert seen["cfg"]["opensandbox"]["operations"] == {
+        "retries": 3,
+        "background_poll_initial_s": 5.0,
+        "background_poll_interval_s": 30.0,
+        "status_poll_timeout_s": 30.0,
+    }
+    assert seeded.sandbox_provider["opensandbox"]["operations"] == {"retries": 3}  # the seed is not mutated
 
 
 async def test_exec_wall_timeout_is_a_timeout_with_partial_records(tmp_path, monkeypatch):
-    sandbox = FakeSandbox(records=records(exit_status=""))
+    sandbox = FakeSandbox(records=records(exit_status="", finished=False))
 
     async def hang(command, **kwargs):
         if command.startswith("setsid --wait"):
@@ -291,11 +313,17 @@ async def test_preflight_and_mcp_failures_are_unstarted_infrastructure_errors(tm
 def test_classify_and_config_validation(tmp_path):
     ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
     assert classify(None, None, "").reason == "timeout"
-    assert classify(ok, None, "").reason == "infrastructure_error"
-    assert classify(ok, {"exit_status": "Submitted"}, "").reason == "completed"
-    assert classify(ok, {"exit_status": "TimeExceeded"}, "").reason == "timeout"
-    assert classify(ok, {"exit_status": "RepeatedFormatError"}, "") == Termination(
+    assert classify(ok, None, "", elapsed=10, budget=3600).reason == "infrastructure_error"
+    assert classify(ok, {"exit_status": "Submitted", "finished": True}, "").reason == "completed"
+    assert classify(ok, {"exit_status": "TimeExceeded", "finished": True}, "").reason == "timeout"
+    assert classify(ok, {"exit_status": "RepeatedFormatError", "finished": True}, "") == Termination(
         reason="nonzero_exit", exit_code=0, detail="RepeatedFormatError"
+    )
+    assert classify(ok, {"exit_status": "KeyError", "finished": True}, "boom").reason == "infrastructure_error"
+    killed = SimpleNamespace(return_code=137, stdout="", stderr="", error_type=None)
+    assert classify(killed, {"exit_status": "", "finished": False}, "", elapsed=3600, budget=3600).reason == "timeout"
+    assert (
+        classify(killed, {"exit_status": "", "finished": False}, "", elapsed=100, budget=3600).reason == "nonzero_exit"
     )
     with pytest.raises(ValidationError, match="origin"):
         make_config(tmp_path, model_gateway_url="http://gw:1/v1")
