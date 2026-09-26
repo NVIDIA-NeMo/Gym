@@ -79,7 +79,7 @@ async def test_real_default_agent_loop_uses_injected_model_and_existing_sandbox(
     schemas = {
         "browser": [{"name": "navigate", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}}}]
     }
-    full_output = "start" + "x" * 6000 + "MIDDLE_MUST_SURVIVE" + "y" * 6000 + "end"
+    full_output = "start" + "x" * 6000 + "MIDDLE_MUST_BE_ELIDED" + "y" * 6000 + "end"
 
     async def execute(command, **kwargs):
         commands.append((command, kwargs))
@@ -172,7 +172,16 @@ async def test_real_default_agent_loop_uses_injected_model_and_existing_sandbox(
     assert "Task skills are in /skills" in prompt
     tool_outputs = [item for item in requests[-1]["input"] if item.get("type") == "function_call_output"]
     assert [item["call_id"] for item in tool_outputs] == ["call_0", "call_1"]
-    assert tool_outputs[-1]["output"] == "<returncode>-1</returncode>\n" + full_output
+    observation = json.loads(tool_outputs[-1]["output"])
+    assert observation["returncode"] == -1
+    assert observation["output_head"] == full_output[:5000]
+    assert observation["output_tail"] == full_output[-5000:]
+    assert observation["elided_chars"] == len(full_output) - 10000
+    assert observation["exception_info"] == f"Command timed out after {step_timeout} seconds."
+    assert "MIDDLE_MUST_BE_ELIDED" not in tool_outputs[-1]["output"]
+    trajectory = json.loads((directory / "trajectory.json").read_text())
+    large_observation = next(message for message in trajectory["messages"] if message.get("tool_call_id") == "call_1")
+    assert large_observation["extra"]["raw_output"] == full_output
     calls = [item for item in requests[-1]["input"] if item.get("type") == "function_call"]
     assert [item["call_id"] for item in calls] == ["call_0", "call_1"]
     assert [item["id"] for item in requests[-1]["input"] if item.get("type") == "reasoning"] == ["rs_0", "rs_1"]
@@ -185,8 +194,73 @@ async def test_real_default_agent_loop_uses_injected_model_and_existing_sandbox(
         assert json.dumps(schemas) in prompt
         assert "call SERVER TOOL 'JSON_ARGUMENTS'" in prompt
         assert "client.py call browser navigate" in actions[0][0]
-        assert tool_outputs[0]["output"].endswith("MCP navigation succeeded")
+        assert json.loads(tool_outputs[0]["output"])["output"] == "MCP navigation succeeded"
         assert any("setsid --fork" in command and "server.sock" in command for command, _ in commands)
         assert sandbox.upload.await_count == 2
         assert json.loads((directory / "mcp.json").read_text()) == seed.mcp_servers
         assert sandbox.upload.await_args_list[1].args[0] == directory / "mcp.json"
+
+
+@pytest.mark.parametrize("reason", [None, "max_output_tokens", "content_filter"])
+@pytest.mark.parametrize("tool_arguments", [None, '{"command":', '{"command":"echo first"}'])
+async def test_output_limit_reminder_reaches_next_model_turn(tmp_path, reason, tool_arguments):
+    requests = []
+    commands = []
+
+    async def execute(command, **kwargs):
+        commands.append(command)
+        if command.startswith("uname"):
+            return SandboxExecResult("Linux\n6.1\nTask kernel\nx86_64\n", "", 0)
+        if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in command:
+            return SandboxExecResult("COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", "", 0)
+        return SandboxExecResult("first", "", 0)
+
+    async def query(params):
+        requests.append(params)
+        first = len(requests) == 1
+        arguments = tool_arguments if first else '{"command":"echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}'
+        return NeMoGymResponse.model_validate(
+            {
+                "id": f"resp_{len(requests)}",
+                "created_at": 0,
+                "object": "response",
+                "model": "test",
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+                "status": "incomplete" if first and reason else "completed",
+                "incomplete_details": {"reason": reason} if first and reason else None,
+                "output": [
+                    {
+                        "type": "function_call",
+                        "id": f"fc_{len(requests)}",
+                        "call_id": f"call_{len(requests)}",
+                        "name": "bash",
+                        "arguments": arguments,
+                    }
+                ]
+                if arguments is not None
+                else [],
+            }
+        )
+
+    harness = module.MiniSWEHarness(
+        sandbox=SimpleNamespace(exec=execute, upload=AsyncMock()),
+        context=module.HarnessContext(session_id="truncation", instruction="Solve task", workdir="/task"),
+        config=module.MiniSWEConfig(step_limit=3),
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        query=query,
+        model_name="model",
+        directory=tmp_path,
+    )
+    await harness.setup()
+    _, termination, _ = await harness.execute(30)
+    assert termination.reason == "completed"
+    assert len(requests) == 2
+    feedback = [item.get("content", "") for item in requests[1]["input"] if item.get("role") == "user"]
+    reminder = any("Respond more concisely" in text for text in feedback)
+    assert reminder == (reason == "max_output_tokens" and tool_arguments in (None, '{"command":'))
+    if tool_arguments in (None, '{"command":') and reason != "max_output_tokens":
+        assert "Tool call error:" in feedback[-1]
+    # Truncation does not reject an otherwise valid command: this matches mini-SWE.
+    assert any("echo first" in command for command in commands) == (tool_arguments == '{"command":"echo first"}')

@@ -50,7 +50,7 @@ from uuid import uuid4
 
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.telemetry.config import TelemetryConfig
+from nemo_gym.telemetry.config import MemoryProfilingConfig, TelemetryConfig
 
 
 if TYPE_CHECKING:
@@ -103,6 +103,11 @@ _ENV_FIELD_MAP = {
     "instrument_aiohttp": f"{_OTEL_PREFIX}_INSTRUMENT_AIOHTTP",
 }
 
+_MEMORY_PROFILING_ENV_FIELD_MAP = {
+    "enabled": f"{_OTEL_PREFIX}_MEMORY_PROFILING_ENABLED",
+    "interval_seconds": f"{_OTEL_PREFIX}_MEMORY_PROFILING_INTERVAL_SECONDS",
+}
+
 #: OTLP destination fields -> the standard (unprefixed) OTel SDK env vars they configure.
 #: Kept separate from _ENV_FIELD_MAP because these read back through the SDK itself, not
 #: through nemo-lens's NEMO_GYM_OTEL_*/NEMO_LENS_* prefix scheme.
@@ -134,6 +139,27 @@ def is_telemetry_env_enabled() -> bool:
         if raw:
             return raw in _TRUTHY
     return False
+
+
+def is_telemetry_metrics_enabled() -> bool:
+    """Return the effective metrics switch after Gym/Lens env precedence."""
+    for prefix in (_OTEL_PREFIX, _OTEL_FALLBACK_PREFIX):
+        raw = os.environ.get(f"{prefix}_METRICS_ENABLED", "").strip().lower()
+        if raw:
+            return raw in _TRUTHY
+    return True
+
+
+def memory_profiling_config_from_env(defaults: MemoryProfilingConfig) -> MemoryProfilingConfig:
+    """Resolve memory profiling after raw environment variables take precedence."""
+    enabled_env = _MEMORY_PROFILING_ENV_FIELD_MAP["enabled"]
+    interval_env = _MEMORY_PROFILING_ENV_FIELD_MAP["interval_seconds"]
+    return MemoryProfilingConfig.model_validate(
+        {
+            "enabled": _env_flag(enabled_env, defaults.enabled),
+            "interval_seconds": os.environ.get(interval_env, defaults.interval_seconds),
+        }
+    )
 
 
 def telemetry_config_from_global_config(global_config_dict: Any) -> TelemetryConfig:
@@ -193,6 +219,10 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
         value = getattr(telemetry_config, field, None)
         if value is None:
             continue
+        os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
+
+    for field, env_name in _MEMORY_PROFILING_ENV_FIELD_MAP.items():
+        value = getattr(telemetry_config.memory_profiling, field)
         os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
 
     for field, env_name in _OTLP_ENV_FIELD_MAP.items():

@@ -807,7 +807,10 @@ class TestApp:
         assert not self._setup_server(monkeypatch).config.propagate_context_overflow_errors
 
     @mark.parametrize("propagate", [False, True])
-    def test_context_overflow_propagation_flag(self, monkeypatch: MonkeyPatch, propagate: bool) -> None:
+    @mark.parametrize("responses_api", [False, True])
+    def test_context_overflow_propagation_flag(
+        self, monkeypatch: MonkeyPatch, propagate: bool, responses_api: bool
+    ) -> None:
         server = self._setup_server(monkeypatch, propagate_context_overflow_errors=propagate)
         request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
         error = ClientResponseError(request_info, (), status=400, message="Bad Request")
@@ -819,8 +822,10 @@ class TestApp:
         app = server.setup_webserver()
         server.setup_exception_middleware(app)
         response = TestClient(app).post(
-            "/v1/chat/completions",
-            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+            "/v1/responses" if responses_api else "/v1/chat/completions",
+            json={"model": "dummy_model", "input": [{"role": "user", "content": "hi"}]}
+            if responses_api
+            else {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
         )
 
         if propagate:
@@ -828,7 +833,10 @@ class TestApp:
             assert response.json() == {"error": {"message": "maximum context length", "code": 400}}
         else:
             assert response.status_code == 200
-            assert '"finish_reason": "length"' in response.text
+            if responses_api:
+                assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
+            else:
+                assert '"finish_reason": "length"' in response.text
 
     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
