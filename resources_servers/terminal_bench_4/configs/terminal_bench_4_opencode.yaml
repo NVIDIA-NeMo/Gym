@@ -1,0 +1,31 @@
+# TB4 resources server speaking the unmodified OpenCode sandboxed agent's contract (see README "OpenCode agent").
+# The agent code is untouched: everything below the agent instance is ordinary agent configuration.
+config_paths:
+- resources_servers/terminal_bench_4/configs/terminal_bench_4.yaml
+- responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+terminal_bench_4_opencode_resources:
+  _inherit_from: terminal_bench_4
+  resources_servers:
+    terminal_bench_4:
+      harness: opencode
+      opencode:
+        # Sandbox-reachable origin forwarding to this Gym's model server; null keeps OpenCode's own baseURL.
+        model_gateway: ${oc.select:tb4_opencode_model_gateway,null}
+        stage_dir: /tmp/tb4-opencode
+        require_instruction_in_prompt: true
+      environment:
+        # Agent-role egress for no-network tasks: the gateway host only. The verifier stays deny-all.
+        agent_egress_allow: ${oc.select:tb4_opencode_agent_egress_allow,[]}
+terminal_bench_4_opencode:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_4_opencode_resources
+      # The resources server stages this installer per session; it honours the cached-installer CLI below.
+      remote_opencode_install_script_path: /tmp/tb4-opencode/install.sh
+      remote_opencode_binary_path: ${oc.select:tb4_opencode_binary,/mnt/s3-data/data/bxyu/opencode/opencode-linux-x64}
+      remote_opencode_musl_binary_path: ${oc.select:tb4_opencode_musl_binary,/mnt/s3-data/data/bxyu/opencode/opencode-linux-x64-musl-v1.17.11}
+      # One exec budget for install + `opencode run`; the task's agent.timeout_sec is not read by this agent.
+      sandbox_timeout: ${oc.select:tb4_opencode_agent_timeout_sec,5400}

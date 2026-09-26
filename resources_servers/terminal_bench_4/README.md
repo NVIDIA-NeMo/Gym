@@ -183,6 +183,60 @@ solution failures from verifier errors; reward 1 is still required for a golden
 pass. `execution_mode: miniswe` is the default for ordinary rollouts. The resources
 server no longer owns a `/run` loop; model/harness settings belong to the agent.
 
+## OpenCode agent (sandbox-handle contract)
+
+`harness: opencode` makes this server drive the **unmodified** `opencode_sandboxed_agent`,
+which speaks the TB2.1-style contract rather than the split contract above: it reads
+`sandbox_handle` from `/seed_session`, reconnects with its own provider configuration,
+runs OpenCode through one `exec` as the sandbox's default identity (no `user`, `cwd`
+or `env`), and posts `/verify` with the dataset row plus its `response` — no
+`session_id`, no termination. The adaptation lives in `opencode.py`; the agent code is
+not touched. Profile: `configs/terminal_bench_4_opencode.yaml`.
+
+Seed. Rows must carry one distinct `rollout_id` per attempt (e.g. `<task>/attempt-<n>`):
+the agent sends no `client_session_id` and its first request carries no resources cookie,
+so the episode owner derives from `dataset_ref:task_ref:rollout_id` — a transport-level
+retry joins the in-flight provisioning instead of allocating a second sandbox, and an
+identical row cannot run twice against one artifacts directory (409; `num_repeats` must
+be expressed as distinct rows). Before provisioning, the pinned package is loaded and the row must carry exactly one user
+message containing the canary-stripped instruction verbatim
+(`opencode.require_instruction_in_prompt`); tasks declaring MCP servers are rejected
+(422). A provisioning failure or an already-verified episode is an HTTP error, never a
+seed without a handle (the agent would otherwise create an unrelated sandbox).
+
+Identity. The agent never passes a user, so the server stages a **launcher** in the
+sandbox (`opencode.stage_dir`, default `/tmp/tb4-opencode`, root-owned 0755 in
+root-started sandboxes): `install.sh` honours the agent's cached-installer CLI
+(`--glibc-binary`/`--musl-binary`/`--binary`), copies the libc-matching binary to
+`<stage_dir>/bin/opencode.real` and installs the launcher at `$HOME/.opencode/bin/opencode`,
+the path the agent puts on `PATH`. Point the agent's
+`remote_opencode_install_script_path` at `<stage_dir>/install.sh`. Every `opencode`
+invocation (`run`, `session list`, `export`) then switches to `agent.user`
+(`setpriv --reuid --regid --init-groups`), pins `HOME`/`USER`/`LOGNAME` to that account
+(falling back to a private `/tmp` home when the account's home is missing or read-only),
+starts `run` in its own session and registers the process group in
+`/tmp/<session>.pids` for `quiesce_agent`, and writes a launch record plus the observed
+uid to `/logs/agent/tb4-opencode/` (collected with the agent logs). A non-root task user
+in a non-root-started sandbox is an infrastructure error, never a silent root run; an
+omitted `agent.user` keeps the image default, as TB2.1 did.
+
+Model access. OpenCode calls the model from inside the sandbox, so the agent's
+`baseURL` (the Gym host's model server) is unreachable from a Cell-style deployment.
+Set `opencode.model_gateway` to a sandbox-reachable origin that forwards to the Gym
+model server; the launcher rewrites only the scheme/host/port of `OPENCODE_CONFIG_CONTENT`'s
+`provider.nemo_gym.options.baseURL`, keeping Gym's rollout-capture path. Allow that host
+for the agent role of `no-network` tasks with `environment.agent_egress_allow`; the
+verifier remains deny-all and public tasks keep the provider default.
+
+Verify. A body without `session_id` is bound from the cookie owner and `rollout_id`
+(row or cookie). The server synthesizes `termination: completed` (the agent reports no
+exit status), `agent_started: true` (a started agent is graded unconditionally, as
+above), `agent_timings.agent_execution` from seed-ready to verify, and
+`harness_metadata` with the response item count and usage; an identical retry reuses
+the first binding. Grading, collection, cleanup and the response model are unchanged;
+the row's extra fields (`task_name`, `task_ref`, …) ride along in the response.
+`execution_mode: oracle` is not available with this harness.
+
 ## Image startup: Compose and standalone
 
 `environment.compose_image_configs` is the shared OCI metadata catalog for both

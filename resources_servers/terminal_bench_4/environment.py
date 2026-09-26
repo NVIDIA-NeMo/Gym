@@ -57,6 +57,9 @@ class EnvironmentConfig(Settings):
     workdir: str | None
     efs_logs_host_path: str | None
     efs_logs_init_image: str
+    # Egress targets (IPs/CIDRs the OpenSandbox policy accepts) allowed for the AGENT role of no-network tasks only,
+    # e.g. the model gateway an in-sandbox harness such as OpenCode must reach. The verifier stays deny-all.
+    agent_egress_allow: list[str] = Field(default_factory=list)
 
 
 class HealthcheckError(RuntimeError):
@@ -242,7 +245,10 @@ class Environment:
             volumes.append(self.shared_logs.volume(self.log_role))
             options["volumes"] = volumes
         if settings.network_mode == "no-network":
-            options["network_policy"] = {"defaultAction": "deny", "egress": []}
+            egress = []
+            if self.log_role == "agent":
+                egress = [{"action": "allow", "target": target} for target in config.agent_egress_allow]
+            options["network_policy"] = {"defaultAction": "deny", "egress": egress}
         image = rewrite_image(settings.docker_image, config.image_rewrites)
         return SandboxSpec(
             image=image,

@@ -21,8 +21,18 @@ class AgentTermination(BaseModel):
     artifacts: list[str] = Field(default_factory=list)
 
 
-class SandboxedVerifyRequest(BaseVerifyRequest, SessionRequest):
-    termination: AgentTermination
+class SandboxedVerifyRequest(BaseVerifyRequest):
+    """Agent-side verification payload.
+
+    The mini-SWE agent binds its own session and reports termination. The unmodified OpenCode agent posts only the
+    row fields plus ``response`` (extra fields kept), so ``session_id`` and ``termination`` are optional at the wire
+    and the resources server binds them from the resources session cookie before finalization.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    session_id: str | None = None
+    termination: AgentTermination | None = None
     agent_started: bool = False
     agent_timings: dict[str, dict[str, str]] = Field(default_factory=dict)
     harness_metadata: dict[str, Any] = Field(default_factory=dict)
@@ -45,13 +55,17 @@ class TerminalBench4RunRequest(BaseRunRequest):
     task_name: str
     task_ref: str
     dataset_ref: str
-    rollout_id: str = Field(min_length=1, max_length=256)
+    # Optional at the wire so the server can answer a missing value with 422 in both contracts; OpenCode rows must
+    # carry one distinct value per attempt (it also keys the episode owner when the agent sends no client session).
+    rollout_id: str | None = Field(default=None, min_length=1, max_length=256)
     client_session_id: str | None = Field(default=None, min_length=1, max_length=256)
     artifact_directory: str | None = Field(default=None, min_length=1)
 
 
 class SeedSessionResponse(SessionRequest):
     task_id: str | None = None
+    # Provider sandbox id for agents that reconnect by handle (the OpenCode sandboxed agent).
+    sandbox_handle: str | None = None
     sandbox_descriptor: dict[str, Any] | None = None
     sandbox_provider: dict[str, Any] = Field(default_factory=dict)
     instruction: str = ""
