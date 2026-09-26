@@ -379,7 +379,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             --data-parallel-size $NUM_PREFILL_NODES \
             --data-parallel-address \$PREFILL_HEAD \
             --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
-            --api-server-count 16 \
+            --api-server-count 1 \
             &
         prefill_pid=\$!
         coupled_pids=("\$prefill_pid")
@@ -449,7 +449,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             --data-parallel-size $NUM_DECODE_NODES \
             --data-parallel-address \$DECODE_HEAD \
             --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
-            --api-server-count 16
+            --api-server-count 1
     else
         set_headless_args "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}"
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
