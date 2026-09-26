@@ -26,9 +26,9 @@ from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_con
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
+    get_server_url,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
-    rollout_path_prefix,
 )
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
     HarnessContext,
@@ -221,7 +221,6 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 params,
                 rollout_id=payload.get("_ng_rollout_id") or payload["rollout_id"],
                 capture_model_calls=capture_model_calls,
-                cookies=cookies,
                 artifact_directory=Path(payload["artifact_directory"]) if payload.get("artifact_directory") else None,
             )
         verify_body = SandboxedVerifyRequest(session_id=seed.session_id, **result.model_dump())
@@ -239,7 +238,6 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         *,
         rollout_id: str,
         capture_model_calls: bool,
-        cookies: dict,
         artifact_directory: Path | None = None,
     ) -> AgentExecutionResult:
         """Set up session state, invoke responses, and release the borrowed transport."""
@@ -277,21 +275,6 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         )
                         params.input = [NeMoGymEasyInputMessage(role="user", content=context.instruction)]
 
-                        async def query(model_params):
-                            prefix = rollout_path_prefix(
-                                rollout_id if capture_model_calls else None,
-                                token_capture=self._token_id_capture_enabled(),
-                            )
-                            model_response = await self.server_client.post(
-                                server_name=self.config.model_server.name,
-                                url_path=prefix + "/v1/responses",
-                                json=model_params,
-                                headers={"x-session-id": seed.session_id},
-                                cookies=cookies,
-                            )
-                            await raise_for_status(model_response)
-                            return NeMoGymResponse.model_validate(await get_response_json(model_response))
-
                         global_config = getattr(self.server_client, "global_config_dict", None)
                         harness = MiniSWEHarness(
                             sandbox=sandbox,
@@ -300,7 +283,11 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                             observability_enabled=isinstance(global_config, Mapping)
                             and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)),
                             params=params,
-                            query=query,
+                            model_base_url=self.base_url_for_run(
+                                base_url=get_server_url(self.config.model_server.name),
+                                body={"_ng_rollout_id": rollout_id},
+                            )
+                            + "/v1",
                             model_name=self.config.model_server.name,
                             directory=artifact_directory or self.config.artifacts_dir / seed.session_id,
                         )

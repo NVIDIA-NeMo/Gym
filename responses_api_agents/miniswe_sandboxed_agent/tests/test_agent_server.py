@@ -51,12 +51,13 @@ async def fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(module.AsyncSandbox, "connect", AsyncMock(return_value=sandbox))
     monkeypatch.setattr(module, "raise_for_status", AsyncMock())
     monkeypatch.setattr(module, "get_response_json", AsyncMock(side_effect=lambda r: r.value))
+    monkeypatch.setattr(module, "get_server_url", lambda name: "http://gym-model:8000")
     harnesses = []
 
     def harness(**kwargs):
         async def execute(budget):
             assert 0 < budget <= 60
-            response = await kwargs["query"](kwargs["params"].model_dump(mode="json"))
+            response = module.empty_response(kwargs["params"], "model")
             return response, HarnessOutcome(reason="completed"), {"harness_version": "test"}
 
         instance = SimpleNamespace(
@@ -74,11 +75,6 @@ async def fixture(tmp_path, monkeypatch):
             assert json["problem"] == {"id": 42}
             assert cookies == {"session": "incoming"}
             value = seed
-        elif url_path == "/v1/responses":
-            assert server_name == "model"
-            assert cookies == {"session": "seeded"}
-            assert kwargs["headers"]["x-session-id"] == "resource-session"
-            value = module.empty_response(body.responses_create_params, "model").model_dump(mode="json")
         elif url_path == "/verify":
             assert server_name == "other_resources"
             assert cookies == {"session": "seeded"}
@@ -122,8 +118,17 @@ async def test_run_with_unrelated_resource_schema(fixture):
     assert f.verification["termination"]["reason"] == "completed"
     assert f.verification["agent_started"]
     assert f.verification["harness_metadata"] == {"harness_version": "test"}
+    assert f.harnesses[0].model_base_url == "http://gym-model:8000/v1"
     f.provider.aclose.assert_awaited_once()
     assert f.body.responses_create_params.input == []
+
+
+async def test_run_passes_rollout_prefixed_gym_model_url(fixture):
+    f = fixture
+    f.agent.server_client.global_config_dict = {"observability_enabled": True}
+    body = f.body.model_copy(update={"capture_rollout_id": "rollout"})
+    await f.agent.run(f.request, body)
+    assert f.harnesses[0].model_base_url == "http://gym-model:8000/ng-rollout/rollout/v1"
 
 
 async def test_run_agent_borrowed_session_without_resource_calls(fixture):
@@ -135,11 +140,9 @@ async def test_run_agent_borrowed_session_without_resource_calls(fixture):
         f.body.responses_create_params.model_copy(deep=True),
         rollout_id="activation",
         capture_model_calls=False,
-        cookies={"session": "seeded"},
     )
     assert result.termination.reason == "completed" and result.agent_started
-    f.agent.server_client.post.assert_awaited_once()
-    assert f.agent.server_client.post.await_args.kwargs["server_name"] == "model"
+    f.agent.server_client.post.assert_not_awaited()
     assert f.harnesses[0].context.task_id is None
     f.provider.aclose.assert_awaited_once()
 

@@ -80,7 +80,7 @@ async def test_runner_stops_before_verification_and_retains_partial_trajectory(t
         }[stop]
     ), outcome
     assert len(response.output) == (1 if stop == "tool_cancel" else 2)
-    if stop not in ("step_limit", "tool_cancel"):
+    if stop == "model_failure":
         assert exited.is_set()
     assert extra["mini_swe_trajectory"]["messages"]
     assert (harness.directory / "trajectory.json").exists()

@@ -51,7 +51,7 @@ async def test_bootstrap_uploads_uv_without_sandbox_https(tmp_path, monkeypatch,
         context=module.HarnessContext(session_id="bootstrap", instruction="test", user=1000),
         config=module.MiniSWEConfig(),
         params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-        query=AsyncMock(),
+        model_base_url="http://model/v1",
         model_name="test",
         directory=tmp_path / "artifacts",
     )

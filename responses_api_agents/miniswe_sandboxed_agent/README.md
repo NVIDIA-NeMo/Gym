@@ -4,7 +4,7 @@ Generic mini-SWE 2.4.6 `DefaultAgent` execution on a caller-owned `AsyncSandbox`
 `harness.py` exposes `MiniSWEHarness`, `HarnessContext`, `MiniSWEConfig`, and
 `HarnessOutcome`. The caller supplies the sandbox, task instruction, execution
 user and working directory, setup budget, optional MCP/skills configuration,
-artifact directory, and an async model-query callback. The harness imports no
+artifact directory, and Gym's model-server URL. The harness imports no
 benchmark code and has no dataset, provisioning, verification, or sandbox lifecycle logic.
 
 The mini-SWE `DefaultAgent` and its shell commands run inside the task sandbox.
@@ -13,10 +13,11 @@ uploads `sandbox_runner.py`. The task image needs `python3`, `bash`, and `setsid
 plus network access to download Python and mini-SWE dependencies during setup.
 Gym downloads uv for the sandbox's architecture and uploads it, so bootstrap
 also works in task images without system CA certificates.
-Model requests travel over an atomic JSON file relay to the Gym agent server,
-which forwards them to the configured model server with the existing capture and
-session correlation. The sandbox does not need direct access to model credentials.
-Tool observations and the native trajectory return over the same sandbox transport.
+The agent calls the configured Gym model server directly at its rollout-prefixed
+`/v1/responses` URL, as OpenCode does. That URL retains model-call capture and
+training token capture through Gym's model wrapper; `x-session-id` correlates
+failed calls to the resource session. The sandbox saves its model and tool history
+as an artifact that the harness downloads after the single agent command exits.
 
 `app.py` owns the Gym `/run` loop: it calls the configured resources server's
 `/seed_session`, connects to the returned sandbox, and stores agent state under
@@ -25,8 +26,8 @@ state. It passes the same request and original create-params to `responses()`,
 which retrieves the state and executes the sandbox runner. `/run` sends the response and
 termination to `/verify` after execution stops and releases its session state and
 transport. The resources server retains provisioning, renewal, grading, and
-sandbox destruction. Retried runs share one execution, and seeded cookies are
-forwarded to model and verification calls.
+sandbox destruction. Retried runs share one execution; seeded cookies are
+forwarded to verification.
 
 `/v1/responses` requires an initialized mini-SWE session; it neither provisions
 nor verifies a benchmark. Separate agent-session endpoints are not needed for

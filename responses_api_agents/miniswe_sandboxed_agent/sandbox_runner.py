@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run pinned mini-SWE inside the task sandbox; relay inference to Gym."""
+"""Run pinned mini-SWE inside the task sandbox against Gym's model API."""
 
 import json
 import os
@@ -12,6 +12,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import yaml
 from minisweagent import __version__
@@ -19,7 +21,11 @@ from minisweagent.agents.default import DefaultAgent
 from minisweagent.config import builtin_config_dir
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.exceptions import LimitsExceeded
-from minisweagent.models.utils.actions_toolcall import format_toolcall_observation_messages, parse_toolcall_actions
+from minisweagent.models.utils.actions_toolcall import (
+    BASH_TOOL,
+    format_toolcall_observation_messages,
+    parse_toolcall_actions,
+)
 from openai.types.chat import ChatCompletionMessageToolCall
 
 
@@ -36,43 +42,63 @@ class RunnerCancelled(BaseException):
     pass
 
 
-class FileRelay:
-    def __init__(self, directory: Path) -> None:
-        self.directory = directory
-        self.index = 0
-
-    def call(self, kind: str, **payload: Any) -> dict:
-        index = self.index
-        self.index += 1
-        request = self.directory / f"request-{index}.json"
-        response = self.directory / f"response-{index}.json"
-        write_json(request, {"kind": kind, **payload})
-        while not response.exists():
-            time.sleep(0.025)
-        result = json.loads(response.read_text())
-        response.unlink()
-        request.unlink(missing_ok=True)
-        if error := result.get("error"):
-            if error["type"] == "ContextWindowExceeded":
-                raise LimitsExceeded(
-                    {
-                        "role": "exit",
-                        "content": error["detail"],
-                        "extra": {"exit_status": "ContextWindowExceeded", "submission": ""},
-                    }
-                )
-            # Preserve the model transport's error type in the native trajectory.
-            raise type(error["type"], (RuntimeError,), {})(error["detail"])
-        return result
+def responses_input(messages: list[dict]) -> list[dict]:
+    items = []
+    for message in messages:
+        if message["role"] == "tool":
+            items.append(
+                {"type": "function_call_output", "call_id": message["tool_call_id"], "output": message["content"]}
+            )
+        elif "response_output" in message.get("extra", {}):
+            items.extend(message["extra"]["response_output"])
+        else:
+            items.append({"role": message["role"], "content": message.get("content", "")})
+    return items
 
 
 class GymModel:
-    def __init__(self, relay: FileRelay) -> None:
-        self.relay = relay
+    def __init__(self, payload: dict, artifact: dict, checkpoint) -> None:
+        self.payload = payload
+        self.artifact = artifact
+        self.checkpoint = checkpoint
         self.length_limited: list[bool] = []
 
     def query(self, messages: list[dict]) -> dict:
-        response = self.relay.call("query", messages=messages)["response"]
+        params = self.payload["model_params"].copy()
+        params["input"] = responses_input(messages)
+        params["tools"] = [{"type": "function", **BASH_TOOL["function"], "strict": False}]
+        request = Request(
+            self.payload["model_base_url"].rstrip("/") + "/responses",
+            data=json.dumps(params).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer dummy_key",
+                "x-session-id": self.payload["session_id"],
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.payload["model_timeout_sec"]) as result:
+                response = json.load(result)
+        except HTTPError as error:
+            detail = error.read().decode(errors="replace")
+            overflow = error.code == 400 and (
+                "context_length_exceeded" in detail
+                or "context length" in detail.lower()
+                or "maximum model length" in detail.lower()
+                or ("max_tokens" in detail and "too large" in detail.lower())
+            )
+            if overflow:
+                raise LimitsExceeded(
+                    {
+                        "role": "exit",
+                        "content": detail,
+                        "extra": {"exit_status": "ContextWindowExceeded", "submission": ""},
+                    }
+                ) from error
+            raise RuntimeError(f"Model HTTP {error.code}: {detail}") from error
+        self.artifact["model_history"].append({"request": params, "response": response, "timestamp": time.time()})
+        self.checkpoint()
         length_limited = (response.get("incomplete_details") or {}).get("reason") == "max_output_tokens"
         self.length_limited.append(length_limited)
         output = response["output"]
@@ -133,11 +159,22 @@ class GymModel:
 class SandboxEnvironment:
     """Commands are local to this process, which runs inside the task sandbox."""
 
-    def __init__(self, relay: FileRelay, model: GymModel, payload: dict) -> None:
-        self.relay, self.model, self.payload = relay, model, payload
+    def __init__(self, model: GymModel, payload: dict, artifact: dict, checkpoint) -> None:
+        self.model, self.payload = model, payload
+        self.artifact, self.checkpoint = artifact, checkpoint
 
     def execute(self, action: dict) -> dict:
-        self.relay.call("tool_started", action=action, started_at=time.time())
+        tool = {
+            "tool_call_id": action["tool_call_id"],
+            "model_index": len(self.artifact["model_history"]),
+            "started_at": time.time(),
+            "status": "incomplete",
+        }
+        self.artifact["tool_history"].append(tool)
+        self.checkpoint()
+        # DefaultAgent saves after a step. Keep the assistant decision when a
+        # running shell command is interrupted before that step finishes.
+        self.agent.save(self.agent.config.output_path)
         started = time.monotonic()
         timeout = self.payload["step_timeout_sec"]
         process = subprocess.Popen(
@@ -148,7 +185,7 @@ class SandboxEnvironment:
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
-        for path in (self.relay.directory / "processes", Path(self.payload["process_registry"])):
+        for path in (Path(self.payload["artifact_directory"]) / "processes", Path(self.payload["process_registry"])):
             with path.open("a") as stream:
                 stream.write(f"{process.pid}\n")
         timed_out = False
@@ -158,6 +195,15 @@ class SandboxEnvironment:
             timed_out = True
             os.killpg(process.pid, signal.SIGKILL)
             stdout, stderr = process.communicate()
+        except RunnerCancelled:
+            tool.update(
+                completed_at=time.time(),
+                duration_ms=(time.monotonic() - started) * 1000,
+                status="cancelled",
+                error_type="cancelled",
+            )
+            self.checkpoint()
+            raise
         finally:
             if process.poll() is None:
                 try:
@@ -183,15 +229,14 @@ class SandboxEnvironment:
             "exception_info": f"Command timed out after {timeout} seconds." if timed_out else None,
         }
         messages = self.model.format_observation_messages({"extra": {"actions": [action]}}, [outcome])
-        self.relay.call(
-            "tool_finished",
-            action=action,
+        tool.update(
             message=messages[0],
             completed_at=time.time(),
             duration_ms=(time.monotonic() - started) * 1000,
             status="timeout" if timed_out else "failed" if process.returncode else "completed",
             error_type="timeout" if timed_out else None,
         )
+        self.checkpoint()
         LocalEnvironment._check_finished(self, outcome)
         return outcome
 
@@ -204,17 +249,24 @@ class SandboxEnvironment:
 
 def run(directory: Path) -> None:
     payload = json.loads((directory / "input.json").read_text())
-    relay = FileRelay(directory)
-    model = GymModel(relay)
+    payload["artifact_directory"] = str(directory)
+    artifact = {"model_history": [], "tool_history": []}
+
+    def checkpoint():
+        write_json(directory / "result.json", artifact)
+
+    model = GymModel(payload, artifact, checkpoint)
+    environment = SandboxEnvironment(model, payload, artifact, checkpoint)
     agent = DefaultAgent(
         model,
-        SandboxEnvironment(relay, model, payload),
+        environment,
         system_template=MINI_CONFIG["agent"]["system_template"],
         instance_template=MINI_CONFIG["agent"]["instance_template"],
         step_limit=payload["step_limit"],
         cost_limit=0,
         output_path=directory / "trajectory.json",
     )
+    environment.agent = agent
 
     def cancel(signum, frame):
         raise RunnerCancelled()
@@ -235,16 +287,13 @@ def run(directory: Path) -> None:
     except Exception as error:
         termination = {"reason": "infrastructure_error", "detail": f"{type(error).__name__}: {error}"}
     finally:
-        trajectory = agent.save(agent.config.output_path)
-        write_json(
-            directory / "output.json",
-            {
-                "termination": termination,
-                "mini_swe_trajectory": trajectory,
-                "harness_version": __version__,
-                "runtime": {"hostname": platform.node(), "pid": os.getpid(), "python": sys.executable},
-            },
+        agent.save(agent.config.output_path)
+        artifact.update(
+            termination=termination,
+            harness_version=__version__,
+            runtime={"hostname": platform.node(), "pid": os.getpid(), "python": sys.executable},
         )
+        checkpoint()
 
 
 if __name__ == "__main__":

@@ -96,7 +96,7 @@ async def test_context_overflow_stops_without_format_retries(
     _, outcome, extra = await harness.execute(15)
     query.assert_awaited_once()
     assert outcome.reason == ("nonzero_exit" if is_context_overflow else "infrastructure_error")
-    expected = "ContextWindowExceeded" if is_context_overflow else "ClientResponseError"
+    expected = "ContextWindowExceeded" if is_context_overflow else "RuntimeError"
     assert extra["mini_swe_trajectory"]["info"]["exit_status"] == expected
     assert json.loads((tmp_path / "trajectory.json").read_text())["info"]["exit_status"] == expected
     if is_context_overflow:

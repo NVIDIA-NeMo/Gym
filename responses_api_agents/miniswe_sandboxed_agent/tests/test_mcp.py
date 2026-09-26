@@ -99,7 +99,7 @@ async def test_mcp_session_preserves_tool_state_across_cli_calls(monkeypatch):
 
 
 def test_mcp_images_are_multimodal_model_inputs():
-    model = GymModel(None)
+    model = GymModel({}, {"model_history": [], "tool_history": []}, lambda: None)
     messages = model.format_observation_messages(
         {"extra": {"actions": [{"command": "screenshot", "tool_call_id": "call_image"}]}},
         [{"output": "Screenshot", "returncode": 0, "images": ["data:image/png;base64,AA=="]}],

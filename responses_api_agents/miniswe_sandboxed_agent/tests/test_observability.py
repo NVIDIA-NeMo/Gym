@@ -5,8 +5,11 @@
 
 import asyncio
 import json
+import socket
+import threading
 
 import pytest
+import uvicorn
 from fastapi import Body, FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -20,6 +23,82 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
+
+
+async def test_sandbox_calls_gym_model_capture_url_directly(tmp_path, runner_factory):
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def model(body: dict = Body()):
+        return {
+            "id": "direct-response",
+            "object": "response",
+            "model": "controlled",
+            "created_at": 0,
+            "parallel_tool_calls": False,
+            "tools": [],
+            "tool_choice": "auto",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "submit",
+                    "name": "bash",
+                    "arguments": '{"command":"echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}',
+                }
+            ],
+            "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        }
+
+    capture_dir = tmp_path / "model_calls"
+    install_model_call_capture(
+        app,
+        ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=capture_dir),
+        model_server_name="model",
+    )
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(128)
+    server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off"))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
+    thread.start()
+    try:
+        async with asyncio.timeout(5):
+            while not server.started:
+                await asyncio.sleep(0.01)
+
+        async def unexpected_query(params):
+            raise AssertionError("The sandbox used the host query callback")
+
+        harness = await runner_factory(
+            context=HarnessContext(session_id="direct-session", task_id="0", rollout_id="0-0", instruction="submit"),
+            config=MiniSWEConfig(step_limit=1),
+            params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            query=unexpected_query,
+            model_name="model",
+            directory=tmp_path / "artifacts",
+            observability_enabled=True,
+        )
+        harness.model_base_url = f"http://127.0.0.1:{listener.getsockname()[1]}/ng-rollout/0-0/v1"
+        response, outcome, extra = await harness.execute(15)
+        assert outcome.reason == "completed"
+        assert response.usage.total_tokens == 5
+        record = {"_ng_task_index": 0, "_ng_rollout_index": 0, **extra}
+        merge_model_call_capture_into_record(record, [capture_dir], include_payloads=True)
+        calls = record["ng_model_call_capture"]["calls"]
+        assert len(calls) == 1
+        assert calls[0]["response_id"] == "direct-response"
+        assert calls[0]["client_session_id"] == "direct-session"
+        assert extra["ng_agent_observations"]["records"][0]["model_calls"][0]["response_id"] == "direct-response"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+        listener.close()
 
 
 @pytest.mark.parametrize(
