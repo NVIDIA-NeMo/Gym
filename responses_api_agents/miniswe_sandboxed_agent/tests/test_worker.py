@@ -2,71 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
+import os
+from pathlib import Path
 
 import pytest
-from minisweagent.agents.default import DefaultAgent
 
-from responses_api_agents.miniswe_sandboxed_agent.harness import GymModel, SandboxEnvironment, WorkerBridge
-
-
-async def test_default_agent_submits_in_sandbox_environment(tmp_path):
-    bridge = WorkerBridge()
-    commands = []
-
-    async def query(messages):
-        return {"role": "assistant", "content": "Submit", "extra": {"actions": [{"command": "submit"}]}}
-
-    async def execute(command):
-        commands.append(command["command"])
-        return {"output": "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\nfinished", "returncode": 0}
-
-    agent = DefaultAgent(
-        GymModel(bridge, query),
-        SandboxEnvironment(bridge, execute, {"system": "Linux"}),
-        system_template="System",
-        instance_template="{{task}}",
-        cost_limit=0,
-        output_path=tmp_path / "trajectory.json",
-    )
-    result = await asyncio.to_thread(agent.run, "Generic task without SWE-bench fields")
-    bridge.close()
-    assert result["exit_status"] == "Submitted"
-    assert result["submission"] == "finished"
-    assert commands == ["submit"]
-    assert (tmp_path / "trajectory.json").is_file()
-    assert agent.messages[1]["content"] == "Generic task without SWE-bench fields"
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
 
 
-async def test_cancellation_stops_worker_before_verification():
-    bridge = WorkerBridge()
-    entered = asyncio.Event()
-    exited = asyncio.Event()
-
-    async def query():
-        entered.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            exited.set()
-
-    worker = asyncio.create_task(asyncio.to_thread(bridge.call, query))
-    await entered.wait()
-    bridge.close()
-    await asyncio.gather(worker, return_exceptions=True)
-    await exited.wait()
-    with pytest.raises(RuntimeError, match="closed"):
-        await asyncio.to_thread(bridge.call, query)
-
-
-@pytest.mark.parametrize("stop", ["timeout", "cancel", "model_failure", "step_limit"])
-async def test_harness_stops_real_worker_and_retains_partial_trajectory(tmp_path, stop):
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-
-    from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.sandbox import SandboxExecResult
-    from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig, MiniSWEHarness
-
+@pytest.mark.parametrize("stop", ["timeout", "cancel", "model_failure", "step_limit", "tool_cancel"])
+async def test_runner_stops_before_verification_and_retains_partial_trajectory(tmp_path, runner_factory, stop):
     entered, exited = asyncio.Event(), asyncio.Event()
     calls = 0
 
@@ -88,7 +35,9 @@ async def test_harness_stops_real_worker_and_retains_partial_trajectory(tmp_path
                         "id": "fc_1",
                         "call_id": "call_1",
                         "name": "bash",
-                        "arguments": '{"command": "echo inspected"}',
+                        "arguments": json.dumps(
+                            {"command": "echo $$ > tool.pid; sleep 60" if stop == "tool_cancel" else "echo inspected"}
+                        ),
                         "status": "completed",
                     }
                 ],
@@ -101,20 +50,23 @@ async def test_harness_stops_real_worker_and_retains_partial_trajectory(tmp_path
         finally:
             exited.set()
 
-    sandbox = SimpleNamespace(exec=AsyncMock(return_value=SandboxExecResult("inspected", "", 0)))
-    harness = MiniSWEHarness(
-        sandbox=sandbox,
-        context=HarnessContext(session_id="task", instruction="inspect"),
+    harness = await runner_factory(
+        context=HarnessContext(session_id="worker-test", instruction="inspect"),
         config=MiniSWEConfig(step_limit=1 if stop == "step_limit" else 0),
         params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         query=query,
         model_name="model",
-        directory=tmp_path,
+        directory=tmp_path / "artifacts",
+        observability_enabled=True,
     )
-    harness.system_info = {"system": "Linux", "release": "6", "version": "test", "machine": "x86_64"}
-    run = asyncio.create_task(harness.execute(0.2 if stop == "timeout" else 5))
+    run = asyncio.create_task(harness.execute(10 if stop == "timeout" else 15))
     if stop == "cancel":
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), 10)
+        run.cancel()
+    elif stop == "tool_cancel":
+        async with asyncio.timeout(10):
+            while not Path(harness.context.workdir, "tool.pid").exists():
+                await asyncio.sleep(0.025)
         run.cancel()
     response, outcome, extra = await run
     assert (
@@ -124,11 +76,59 @@ async def test_harness_stops_real_worker_and_retains_partial_trajectory(tmp_path
             "timeout": "timeout",
             "model_failure": "infrastructure_error",
             "step_limit": "nonzero_exit",
+            "tool_cancel": "cancelled",
         }[stop]
-    )
-    assert len(response.output) == 2
-    if stop != "step_limit":
+    ), outcome
+    assert len(response.output) == (1 if stop == "tool_cancel" else 2)
+    if stop == "model_failure":
         assert exited.is_set()
     assert extra["mini_swe_trajectory"]["messages"]
-    assert (tmp_path / "trajectory.json").exists()
-    sandbox.exec.assert_awaited_once()
+    assert (harness.directory / "trajectory.json").exists()
+    await asyncio.wait_for(harness.sandbox.runners[0].wait(), 2)
+    if stop == "tool_cancel":
+        pid = int(Path(harness.context.workdir, "tool.pid").read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        assert extra["ng_agent_observations"]["records"][1]["status"] == "cancelled"
+
+
+async def test_cleanup_transport_failure_keeps_captured_response(tmp_path, runner_factory, monkeypatch):
+    async def query(params):
+        return NeMoGymResponse(
+            id="submitted",
+            created_at=0,
+            object="response",
+            model="model",
+            parallel_tool_calls=False,
+            tools=[],
+            tool_choice="auto",
+            output=[
+                {
+                    "type": "function_call",
+                    "call_id": "submit",
+                    "name": "bash",
+                    "arguments": '{"command":"echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}',
+                }
+            ],
+        )
+
+    harness = await runner_factory(
+        context=HarnessContext(session_id="cleanup-test", instruction="submit"),
+        config=MiniSWEConfig(),
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        query=query,
+        model_name="model",
+        directory=tmp_path / "artifacts",
+    )
+    close = harness.close
+
+    async def fail_close():
+        await close()
+        raise ConnectionError("lost cleanup response")
+
+    monkeypatch.setattr(harness, "close", fail_close)
+    response, outcome, extra = await harness.execute(15)
+    assert outcome.reason == "infrastructure_error"
+    assert "lost cleanup response" in outcome.detail
+    assert len(response.output) == 2
+    assert extra["mini_swe_trajectory"]["info"]["exit_status"] == "Submitted"

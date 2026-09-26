@@ -26,6 +26,7 @@ from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
 
 @pytest.fixture
 async def fixture(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "get_server_url", lambda name: "http://gym-model:8000")
     server = TerminalBench4ResourcesServer(
         config=TerminalBench4Config(
             host="localhost",
@@ -403,29 +404,19 @@ async def test_setup_budget_covers_workdir_and_never_grades(fixture, monkeypatch
     assert all(env.closed for env in f.envs)
 
 
-async def test_live_model_callback_preserves_cookies_and_capture_route(fixture, monkeypatch):
+async def test_sandbox_model_url_keeps_training_capture_route(fixture, monkeypatch):
     f = fixture
     original = module.MiniSWEHarness
     model_response = module.empty_response(f.body.responses_create_params, "model")
-    post = f.agent.server_client.post.side_effect
-
-    async def model_post(**kwargs):
-        if kwargs["url_path"].endswith("/v1/responses"):
-            return SimpleNamespace(value=model_response.model_dump())
-        return await post(**kwargs)
-
-    f.agent.server_client.post.side_effect = model_post
-    monkeypatch.setattr(
-        module.MiniSWESandboxedAgent, "rollout_id_from_run", lambda self, body: body.capture_rollout_id
-    )
+    f.agent.server_client.global_config_dict = {"observability_enabled": True}
     monkeypatch.setattr(module.MiniSWESandboxedAgent, "_token_id_capture_enabled", lambda self: True)
 
     def harness(**kw):
         h = original(**kw)
 
         async def execute(budget):
-            response = await kw["query"]({"input": "task"})
-            return response, HarnessOutcome(reason="completed"), {}
+            assert kw["model_base_url"] == "http://gym-model:8000/ng-rollout/rollout-1/training-token-capture/v1"
+            return model_response, HarnessOutcome(reason="completed"), {}
 
         h.execute.side_effect = execute
         return h
@@ -435,12 +426,7 @@ async def test_live_model_callback_preserves_cookies_and_capture_route(fixture, 
         update={"capture_rollout_id": "rollout-1", "capture_model_calls": True, "capture_token_ids": True}
     )
     result = await f.agent.run(f.request, body)
-    call = next(
-        c.kwargs for c in f.agent.server_client.post.await_args_list if c.kwargs["url_path"].endswith("/v1/responses")
-    )
-    assert call["url_path"] == "/ng-rollout/rollout-1/training-token-capture/v1/responses"
-    assert call["cookies"] == {"session": "resource", "owner": "owner"}
-    assert call["headers"] == {"x-session-id": result.session_id}
+    assert [c.kwargs["url_path"] for c in f.agent.server_client.post.await_args_list] == ["/seed_session", "/verify"]
     assert result.response == model_response
     f.server._sessions.clear()
     f.server._by_identity.clear()

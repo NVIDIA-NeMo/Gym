@@ -4,22 +4,46 @@ Generic mini-SWE 2.4.6 `DefaultAgent` execution on a caller-owned `AsyncSandbox`
 `harness.py` exposes `MiniSWEHarness`, `HarnessContext`, `MiniSWEConfig`, and
 `HarnessOutcome`. The caller supplies the sandbox, task instruction, execution
 user and working directory, setup budget, optional MCP/skills configuration,
-artifact directory, and an async model-query callback. The harness imports no
+artifact directory, and Gym's model-server URL. The harness imports no
 benchmark code and has no dataset, provisioning, verification, or sandbox lifecycle logic.
 
-The synchronous mini-SWE loop uses a bridge to async model and sandbox operations.
-Cancellation closes pending I/O and joins the worker before returning its outcome,
-response, and trajectory metadata. The caller owns subsequent collection and
-cleanup. `app.py` owns the Gym `/run` loop: it calls the configured resources server's
-`/seed_session`, attaches to the returned sandbox, sets up and executes mini-SWE,
-then sends the response and termination to `/verify`. Cookies from seeding are
-forwarded to model and verification calls. Retried runs share one agent worker.
-The resource server retains provisioning, sandbox renewal, grading, and cleanup.
+The mini-SWE `DefaultAgent` and its shell commands run inside the task sandbox.
+Setup installs the pinned package into an isolated Python 3.13 environment and
+uploads `sandbox_runner.py`. The task image needs `python3`, `bash`, and `setsid`,
+plus network access to download Python and mini-SWE dependencies during setup.
+Gym downloads uv for the sandbox's architecture and uploads it, so bootstrap
+also works in task images without system CA certificates.
+The agent calls the configured Gym model server directly at its rollout-prefixed
+`/v1/responses` URL, as OpenCode does. That URL retains model-call capture and
+training token capture through Gym's model wrapper; `x-session-id` correlates
+failed calls to the resource session. The sandbox saves its model and tool history
+as an artifact that the harness downloads after the single agent command exits.
+For a remote sandbox, the model server must have an address reachable from that
+sandbox. If Gym's configured server address is host loopback, set
+`sandbox_model_base_url` to the sandbox-reachable HTTP(S) address of the same Gym
+model server. The TB4 profile exposes this as `++tb4_sandbox_model_base_url=...`.
+The address may end in `/v1`; the agent preserves its path prefix and appends the
+run's rollout and token-capture paths before `/v1`.
 
-`MiniSWESandboxedAgent.execute()` consumes a seeded sandbox and returns agent
-output without seeding or verifying a task. `/run` wraps that execution with the
-legacy seed/verify lifecycle. This keeps execution separate from orchestration so
-it can later use Gym's shared agent/task session contracts.
+`app.py` owns the Gym `/run` loop: it calls the configured resources server's
+`/seed_session`, connects to the returned sandbox, and stores agent state under
+the inbound request's client session ID, with the resource session ID inside the
+state. It passes the same request and original create-params to `responses()`,
+which retrieves the state and executes the sandbox runner. `/run` sends the response and
+termination to `/verify` after execution stops and releases its session state and
+transport. The resources server retains provisioning, renewal, grading, and
+sandbox destruction. Retried runs share one execution; seeded cookies are
+forwarded to verification.
+
+`/v1/responses` requires an initialized mini-SWE session; it neither provisions
+nor verifies a benchmark. Separate agent-session endpoints are not needed for
+this `/run` flow. In full swapping, an environment-server request to
+`/v1/responses` will replace the direct method call.
+
+Cancellation stops the runner and its tool process groups before verification.
+The adapter retains completed Responses items and downloads the native partial
+trajectory when available. Runtime metadata records the sandbox hostname, process
+ID, and Python executable so execution placement can be checked.
 
 `models.py` defines the agent's local view of the HTTP protocol; it imports no
 resources implementation. Seeding supplies `session_id`, `sandbox_descriptor`,
@@ -33,7 +57,7 @@ unchanged. Other harnesses can implement the same HTTP exchange without importin
 mini-SWE or TB4 code.
 
 Agent shutdown uses one `shutdown_timeout_sec` budget for finishing an in-flight
-seed request, joining the harness, and requesting verification or cleanup. If the
+seed request, stopping the sandbox runner, and requesting verification or cleanup. If the
 seed response remains unavailable, it cancels the local request and returns;
 the resources server's seeded-session deadline cleans up the abandoned sandbox.
 

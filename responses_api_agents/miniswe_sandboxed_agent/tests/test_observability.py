@@ -5,10 +5,11 @@
 
 import asyncio
 import json
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
+import socket
+import threading
 
 import pytest
+import uvicorn
 from fastapi import Body, FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -21,14 +22,89 @@ from nemo_gym.base_responses_api_model import (
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.sandbox import SandboxExecResult
-from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig, MiniSWEHarness
+from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
+
+
+async def test_sandbox_calls_gym_model_capture_url_directly(tmp_path, runner_factory):
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def model(body: dict = Body()):
+        return {
+            "id": "direct-response",
+            "object": "response",
+            "model": "controlled",
+            "created_at": 0,
+            "parallel_tool_calls": False,
+            "tools": [],
+            "tool_choice": "auto",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "submit",
+                    "name": "bash",
+                    "arguments": '{"command":"echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}',
+                }
+            ],
+            "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        }
+
+    capture_dir = tmp_path / "model_calls"
+    install_model_call_capture(
+        app,
+        ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=capture_dir),
+        model_server_name="model",
+    )
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(128)
+    server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off"))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
+    thread.start()
+    try:
+        async with asyncio.timeout(5):
+            while not server.started:
+                await asyncio.sleep(0.01)
+
+        async def unexpected_query(params):
+            raise AssertionError("The sandbox used the host query callback")
+
+        harness = await runner_factory(
+            context=HarnessContext(session_id="direct-session", task_id="0", rollout_id="0-0", instruction="submit"),
+            config=MiniSWEConfig(step_limit=1),
+            params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            query=unexpected_query,
+            model_name="model",
+            directory=tmp_path / "artifacts",
+            observability_enabled=True,
+        )
+        harness.model_base_url = f"http://127.0.0.1:{listener.getsockname()[1]}/ng-rollout/0-0/v1"
+        response, outcome, extra = await harness.execute(15)
+        assert outcome.reason == "completed"
+        assert response.usage.total_tokens == 5
+        record = {"_ng_task_index": 0, "_ng_rollout_index": 0, **extra}
+        merge_model_call_capture_into_record(record, [capture_dir], include_payloads=True)
+        calls = record["ng_model_call_capture"]["calls"]
+        assert len(calls) == 1
+        assert calls[0]["response_id"] == "direct-response"
+        assert calls[0]["client_session_id"] == "direct-session"
+        assert extra["ng_agent_observations"]["records"][0]["model_calls"][0]["response_id"] == "direct-response"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+        listener.close()
 
 
 @pytest.mark.parametrize(
-    "scenario", ["success", "rejection", "http_error", "missing_usage", "missing_details", "tool_error", "tool_cancel"]
+    "scenario", ["success", "rejection", "http_error", "missing_usage", "missing_details", "tool_error"]
 )
-async def test_captured_loop_preserves_evidence(tmp_path, scenario):
+async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenario):
     app = FastAPI()
     requests = []
 
@@ -44,7 +120,15 @@ async def test_captured_loop_preserves_evidence(tmp_path, scenario):
                 "type": "function_call",
                 "call_id": f"tool-{index}",
                 "name": "bash",
-                "arguments": json.dumps({"command": command}),
+                "arguments": json.dumps(
+                    {
+                        "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT; echo finished"
+                        if command == "submit"
+                        else "echo inspected; exit 7"
+                        if scenario == "tool_error"
+                        else "echo inspected"
+                    }
+                ),
             }
         ]
         if scenario == "rejection" and index == 1:
@@ -94,15 +178,7 @@ async def test_captured_loop_preserves_evidence(tmp_path, scenario):
         response.raise_for_status()
         return NeMoGymResponse.model_validate(response.json())
 
-    async def execute(command, **kwargs):
-        if scenario == "tool_cancel":
-            raise asyncio.CancelledError
-        if "submit" in command:
-            return SandboxExecResult("COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\nfinished", "", 0)
-        return SandboxExecResult("inspected", "", 7 if scenario == "tool_error" else 0)
-
-    harness = MiniSWEHarness(
-        sandbox=SimpleNamespace(exec=AsyncMock(side_effect=execute)),
+    harness = await runner_factory(
         context=HarnessContext(
             session_id="invocation", task_id="0", rollout_id="0-0", instruction="inspect then submit"
         ),
@@ -113,8 +189,7 @@ async def test_captured_loop_preserves_evidence(tmp_path, scenario):
         directory=tmp_path,
         observability_enabled=True,
     )
-    harness.system_info = {"system": "Linux", "release": "6", "version": "test", "machine": "x86_64"}
-    response, outcome, extra = await harness.execute(5)
+    response, outcome, extra = await harness.execute(15)
     client.close()
     record = {
         "_ng_task_index": 0,
@@ -152,9 +227,6 @@ async def test_captured_loop_preserves_evidence(tmp_path, scenario):
         assert trajectory["turns"][0]["answer"][0]["id"] == "rejected"
         assert trajectory["turns"][0]["step_count"] == 0
         assert "No tool calls" in requests[1]["input"][-1]["content"]
-    elif scenario == "tool_cancel":
-        assert trajectory["tool_calls"][0]["status"] == "cancelled"
-        assert trajectory["tool_calls"][0]["duration_ms"] is not None
     else:
         assert response.usage.total_tokens == 30
         assert response.usage.input_tokens_details.cached_tokens == 2
