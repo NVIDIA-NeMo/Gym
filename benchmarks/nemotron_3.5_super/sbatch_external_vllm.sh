@@ -83,6 +83,14 @@ ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
 ROUTER_POLICY="${ROUTER_POLICY:-cache_aware}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
 
+# Decode-engine watchdog (independent PD mode only): restart a decode engine that stops responding on
+# /metrics or stops generating while it has running requests. Off by default.
+VLLM_ENGINE_WATCHDOG="${VLLM_ENGINE_WATCHDOG:-0}"
+VLLM_ENGINE_WATCHDOG_INTERVAL_S="${VLLM_ENGINE_WATCHDOG_INTERVAL_S:-30}"
+VLLM_ENGINE_WATCHDOG_METRIC_FAILURES="${VLLM_ENGINE_WATCHDOG_METRIC_FAILURES:-3}"
+VLLM_ENGINE_WATCHDOG_STALL_S="${VLLM_ENGINE_WATCHDOG_STALL_S:-300}"
+VLLM_ENGINE_WATCHDOG_MAX_RESTARTS="${VLLM_ENGINE_WATCHDOG_MAX_RESTARTS:-3}"
+
 eval_command=$(cat <<EOF
 set -euo pipefail
 
@@ -398,13 +406,77 @@ else
         vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
             --host \$this_node_hostname \
             --port $WORKER_SERVER_PORT
-    else
+    elif (( ! $VLLM_ENGINE_WATCHDOG )); then
         # Decode
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
         vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
             --host \$this_node_hostname \
             --port $WORKER_SERVER_PORT
+    else
+        # Decode, supervised. A decode engine has been seen to freeze silently mid-run (API server stops
+        # logging, in-flight requests never return, no error). Detect that from /metrics, capture evidence,
+        # kill the engine's process group and restart it in place. Restarting here, instead of exiting,
+        # keeps --kill-on-bad-exit from tearing down the whole job. Killing the engine drops its connections,
+        # so the router fails the stuck requests and Gym's model server retries them on healthy engines.
+        wd_log() { echo "[engine-watchdog \$this_node_hostname \$(date -u +%H:%M:%SZ)] \$*"; }
+        metrics_url=http://localhost:$WORKER_SERVER_PORT/metrics
+        uv pip install --system -q py-spy >/dev/null 2>&1 || true
+        restarts=0
+        while true; do
+            VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+            VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+            setsid vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+                --host \$this_node_hostname \
+                --port $WORKER_SERVER_PORT &
+            engine_pid=\$!
+            wd_log "decode engine started pid=\$engine_pid (restart #\$restarts)"
+            serving=0; metric_failures=0; running=0
+            last_gen=""; last_progress=\$(date +%s); reason=""
+            while kill -0 "\$engine_pid" 2>/dev/null; do
+                sleep $VLLM_ENGINE_WATCHDOG_INTERVAL_S
+                if metrics=\$(curl -fs --max-time 10 "\$metrics_url"); then
+                    serving=1; metric_failures=0
+                    running=\$(awk '/^vllm:num_requests_running/ {s += \$2} END {printf "%d", s}' <<< "\$metrics")
+                    gen=\$(awk '/^vllm:generation_tokens_total/ {s += \$2} END {printf "%d", s}' <<< "\$metrics")
+                    if [[ "\$gen" != "\$last_gen" || "\$running" == 0 ]]; then
+                        last_gen=\$gen; last_progress=\$(date +%s)
+                    fi
+                elif (( serving )); then
+                    metric_failures=\$(( metric_failures + 1 ))
+                fi
+                stalled_s=\$(( \$(date +%s) - last_progress ))
+                if (( metric_failures >= $VLLM_ENGINE_WATCHDOG_METRIC_FAILURES )); then
+                    reason="/metrics unresponsive \$metric_failures probes in a row (last running=\$running)"
+                elif (( serving && stalled_s >= $VLLM_ENGINE_WATCHDOG_STALL_S )); then
+                    reason="no generated tokens for \${stalled_s}s with running=\$running"
+                fi
+                if [[ -n "\$reason" ]]; then
+                    wd_log "FROZEN: \$reason. Dumping stacks, then restarting."
+                    for p in \$(pgrep -g "\$engine_pid" 2>/dev/null | head -8); do
+                        timeout 60 py-spy dump --native --pid "\$p" 2>&1 | sed "s/^/[engine-watchdog py-spy \$p] /" || true
+                    done
+                    nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv 2>&1 | sed "s/^/[engine-watchdog] /" || true
+                    kill -9 -- "-\$engine_pid" 2>/dev/null || true
+                    break
+                fi
+            done
+            status=0; wait "\$engine_pid" || status=\$?
+            [[ -n "\$reason" ]] || wd_log "decode engine exited on its own (status=\$status)"
+            restarts=\$(( restarts + 1 ))
+            if (( restarts > $VLLM_ENGINE_WATCHDOG_MAX_RESTARTS )); then
+                wd_log "giving up after \$(( restarts - 1 )) restarts"
+                exit 1
+            fi
+            # Wait for every process in the engine's group (API server + TP workers) to exit and release GPU
+            # memory before relaunching. Match by process group, never by command line: this supervising shell
+            # carries "vllm serve" in its own argv.
+            for _ in \$(seq 60); do
+                pgrep -g "\$engine_pid" >/dev/null 2>&1 || break
+                kill -9 -- "-\$engine_pid" 2>/dev/null || true
+                sleep 2
+            done
+        done
     fi
 fi
 EOF
