@@ -18,10 +18,18 @@ CACHE_DIR = Path(gettempdir()) / "nemo-gym-miniswe-assets"
 _DOWNLOAD_LOCK = asyncio.Lock()
 # Matches uv 0.10.12's Python download manifest.
 PYTHON_SHA256 = {
-    ("aarch64", "gnu"): "0ebc0049121318b5de80b887d22abaed55dd302014f73cd6811c9981a83d960e",
-    ("aarch64", "musl"): "88fb902adca37099176fe5c94bb4483b8eb3242606e0a74fd50616a7c83bce63",
-    ("x86_64", "gnu"): "904adc9bc4371c01b20f7e75a19b10f07fb577889be02bf21f7f449229b97611",
-    ("x86_64", "musl"): "3c9db1ed094d6d08e474600b7a4eab7cab655b60f7f74c3a41f1d995eb53611a",
+    ("aarch64", "gnu"): (
+        "0ebc0049121318b5de80b887d22abaed55dd302014f73cd6811c9981a83d960e"  # pragma: allowlist secret
+    ),
+    ("aarch64", "musl"): (
+        "88fb902adca37099176fe5c94bb4483b8eb3242606e0a74fd50616a7c83bce63"  # pragma: allowlist secret
+    ),
+    ("x86_64", "gnu"): (
+        "904adc9bc4371c01b20f7e75a19b10f07fb577889be02bf21f7f449229b97611"  # pragma: allowlist secret
+    ),
+    ("x86_64", "musl"): (
+        "3c9db1ed094d6d08e474600b7a4eab7cab655b60f7f74c3a41f1d995eb53611a"  # pragma: allowlist secret
+    ),
 }
 
 
