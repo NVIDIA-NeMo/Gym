@@ -259,7 +259,9 @@ the row's extra fields (`task_name`, `task_ref`, …) ride along in the response
 Per-task agent budget. The agent's `sandbox_timeout` is one global exec budget, so
 `opencode.agent_timeout_floor_sec` (benchmark override
 `tb4_opencode_agent_timeout_floor_sec`, default null) lets the resources server
-enforce a per-task budget of `max(floor, task agent.timeout_sec)` seconds instead.
+enforce a per-task budget of `max(floor, task agent.timeout_sec)` seconds instead. A
+run row may only lower it (`agent_timeout_sec` in the run body, floor 600 s) — for a
+scheduler whose model server retires before the full budget; it can never raise it.
 `launcher.env` carries it as `TB4_AGENT_TIMEOUT_S`, and the launcher's `run` branch
 wraps the real binary inside the `setsid` session: coreutils `timeout -k 60 <budget>`
 when the image's `timeout` accepts `-k` (probed with `timeout -k 1 1 true`; busybox's

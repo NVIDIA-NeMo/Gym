@@ -280,10 +280,21 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             raise HTTPException(422, str(exc)) from exc
         return task
 
-    def _opencode_budget(self, task) -> int | None:
-        """Per-task agent budget: the configured floor or the task's own agent timeout, whichever is larger."""
+    def _opencode_budget(self, task, request: TerminalBench4RunRequest | None = None) -> int | None:
+        """Per-task agent budget: the configured floor or the task's own agent timeout, whichever is larger.
+
+        A row may ask for LESS (``agent_timeout_sec`` in the run body, at least 600 s): a scheduler that knows its
+        model server retires before the full budget cuts the attempt short cleanly instead of letting the server die
+        under it. A request can never raise the budget above the policy value.
+        """
         floor = self.config.opencode.agent_timeout_floor_sec
-        return None if floor is None else max(floor, math.ceil(task.config.agent.timeout_sec))
+        if floor is None:
+            return None
+        budget = max(floor, math.ceil(task.config.agent.timeout_sec))
+        requested = getattr(request, "agent_timeout_sec", None) if request is not None else None
+        if isinstance(requested, (int, float)) and not isinstance(requested, bool) and 0 < requested < budget:
+            budget = max(600, math.ceil(requested))
+        return budget
 
     async def _prepare_session(self, session: Session) -> None:
         session.started.set()
@@ -295,7 +306,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 if self.config.harness == "opencode":
                     # The launcher enforces the budget inside the sandbox; the seed reports the same number so the
                     # agent side and the controller agree on it.
-                    budget = self._opencode_budget(session.task)
+                    budget = self._opencode_budget(session.task, session.request)
                     session.result["opencode_launcher"] = await opencode_harness.stage_launcher(
                         session.environment.main,
                         self.config.opencode,

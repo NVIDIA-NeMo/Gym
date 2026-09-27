@@ -509,6 +509,27 @@ async def test_config_floor_makes_the_seed_budget_max_of_floor_and_task(tmp_path
     await finish(server)
 
 
+@pytest.mark.parametrize("requested,budget", [(7200, 7200), (100, 600), (50000, 28800), ("7200", 28800)])
+async def test_a_row_can_only_lower_the_seed_budget(tmp_path, monkeypatch, requested, budget):
+    manifest, ref = local_manifest(tmp_path)
+    server, box, prepared, staged = make_server(
+        tmp_path, manifest, monkeypatch, opencode={"agent_timeout_floor_sec": 14400}
+    )
+    body = row(ref) | {"agent_timeout_sec": requested}
+    seed = await server.seed_session(FakeRequest(), TerminalBench4RunRequest.model_validate(body))
+    assert seed.agent_timeout_sec == budget and staged[0][2]["agent_timeout_s"] == budget
+    await finish(server)
+
+
+async def test_without_a_floor_the_row_request_is_ignored(tmp_path, monkeypatch):
+    manifest, ref = local_manifest(tmp_path)
+    server, box, prepared, staged = make_server(tmp_path, manifest, monkeypatch)
+    body = row(ref) | {"agent_timeout_sec": 600}
+    seed = await server.seed_session(FakeRequest(), TerminalBench4RunRequest.model_validate(body))
+    assert seed.agent_timeout_sec == 28800 and staged[0][2]["agent_timeout_s"] is None
+    await finish(server)
+
+
 def test_agent_timeout_floor_must_be_positive():
     with pytest.raises(ValidationError):
         opencode.OpenCodeHarnessConfig(agent_timeout_floor_sec=0)
