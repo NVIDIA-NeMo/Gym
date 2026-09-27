@@ -318,14 +318,42 @@ class TestRunHelperServerReadiness:
         runner._head_server_instance = MagicMock()
         events = []
         runner.wait_for_spinup = MagicMock(side_effect=lambda: events.append("servers"))
+        runner._start_memory_profiler = MagicMock(side_effect=lambda: events.append("memory"))
         runner.wait_for_model_endpoints = MagicMock(side_effect=lambda _config: events.append("models"))
         runner._head_server_instance.mark_ready.side_effect = lambda: events.append("head")
         config = OmegaConf.create({})
 
         runner.wait_for_server_readiness(config)
 
-        assert events == ["servers", "models", "head"]
+        assert events == ["servers", "memory", "models", "head"]
         runner.wait_for_model_endpoints.assert_called_once_with(config)
+
+    def test_memory_profiler_uses_spawned_server_metadata(self, monkeypatch: MonkeyPatch) -> None:
+        from nemo_gym.telemetry.config import MemoryProfilingConfig
+
+        profiler = MagicMock()
+        profiler_type = MagicMock(return_value=profiler)
+        monkeypatch.setattr(nemo_gym.cli.env, "MemoryProfiler", profiler_type)
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "get_telemetry",
+            MagicMock(return_value=SimpleNamespace(is_exporting=True)),
+        )
+        runner = RunHelper()
+        runner._memory_profiling_config = MemoryProfilingConfig(enabled=True, interval_seconds=2.5)
+        runner._telemetry_metrics_enabled = True
+        runner._server_instance_display_configs = [
+            SimpleNamespace(process_name="weather", server_type="resources_servers", pid=123)
+        ]
+
+        runner._start_memory_profiler()
+
+        targets = profiler_type.call_args.args[0]
+        assert [(target.name, target.server_type, target.pid) for target in targets] == [
+            ("weather", "resources_servers", 123)
+        ]
+        assert profiler_type.call_args.kwargs["interval_seconds"] == 2.5
+        profiler.start.assert_called_once_with()
 
     @pytest.mark.parametrize("failing_method", ["wait_for_spinup", "wait_for_model_endpoints"])
     def test_readiness_failure_leaves_head_health_unready(self, failing_method: str) -> None:
@@ -412,6 +440,19 @@ class TestRunHelperShutdownReap:
         assert a.wait.call_count == 1
         assert b.wait.call_count == 1
         assert runner._processes == {}
+
+    def test_memory_profiler_stops_before_servers(self) -> None:
+        profiler = MagicMock()
+        process = MagicMock()
+        process.wait.return_value = 0
+        process.send_signal.side_effect = lambda _signal: profiler.stop.assert_called_once_with()
+        runner = self._make_runner_with_processes({"server": process})
+        runner._memory_profiler = profiler
+
+        runner.shutdown()
+
+        profiler.stop.assert_called_once_with()
+        assert runner._memory_profiler is None
 
 
 class TestExitCleanlyOnConfigError:

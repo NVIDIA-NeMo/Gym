@@ -259,6 +259,35 @@ varies by producer and execution path; the
 [trajectory capability matrix](/main/reference/trajectory-capabilities) records the evaluated
 coverage.
 
+## Framework-owned media staging
+
+Training frameworks using `nemo_gym.token_id_capture.staging` can hand a framework's
+processed media (for example an inference worker's pixel tensors) to
+`RolloutTokenCapture.complete_call` or `complete_call_from_response` through the
+keyword-only `attachments` mapping. Gym forwards the mapping unchanged to
+`StagingSink.stage(record, attachments=...)` so the media lands in the same durable
+write as the token record, and `staged` coordinates are returned only after that
+combined write succeeds. Attachments are opaque to Gym: they never enter
+`StagedCallRecord`, `extras`, or any digest, so `digest`, `extras_digest`, and
+`CommitCoords` are identical with or without them.
+
+The keyword is passed only when the caller supplies a mapping. A legacy `stage(record)`
+sink therefore keeps working for text-only calls; if it is given attachments it raises
+`TypeError`, which the capture boundary reports as `capture_failed`. Gym never retries a
+write with the attachments dropped. A sink that accepts the keyword must store every
+supplied attachment before returning success or reject the call. Validation of the
+attached tensors, their storage layout, and read-back belong to the framework.
+
+`VLLMCaptureAdapter` preserves optional `routed_experts` extras and passes through
+`media_spans`, small metadata that the RL vLLM worker uses to remap image/video
+placeholders when reusing a captured prefix. vLLM uses expanded token IDs and does not
+emit a separate compact token delta.
+
+This replaces both the experimental tensor-attachment sink extension and the
+digest-covered `media` summary. Deploy the paired RL changes with this adapter; rows and
+checkpoints written in either older format need a separate migration. Supported
+processors and modalities are enforced by the framework's inference worker.
+
 ## Limitations
 
 The model-server boundary observes model HTTP requests and responses. It can record tool calls,
