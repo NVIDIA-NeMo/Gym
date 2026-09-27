@@ -62,6 +62,11 @@ and `artifact-metadata/` stay; the per-artifact collection statuses that lived i
 `artifacts/manifest.json` go with the tree, while collection failures remain in the
 diagnostics.
 
+Links to absolute paths inside a declared artifact (venv interpreters, `node_modules` links)
+cannot be restored safely; the collector drops them, keeps the rest of the artifact, and
+records `skipped_links` on that artifact's collect diagnostic. Path traversal in member names
+still fails the collection. The EFS restore applies the same rule.
+
 Artifact transfer retains source numeric UID/GID and `0777` permission bits for
 files and directories, independently of the host's user and umask. Host-side
 metadata lives in the trial's `artifact-metadata/`, outside the collected tree.

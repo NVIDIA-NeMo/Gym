@@ -86,6 +86,7 @@ async def collect(
                         shared_archive = (
                             shared_logs.collection_archive(artifact, collected_artifacts) if shared_logs else None
                         )
+                        skipped_links: list[str] = []
                         digest = await download_dir(
                             sandbox,
                             artifact.source,
@@ -95,7 +96,11 @@ async def collect(
                             shared_archive=shared_archive,
                             metadata_path=metadata_path,
                             archive_workers=archive_workers,
+                            skipped=skipped_links,
                         )
+                        if skipped_links:
+                            record["skipped_links"] = skipped_links[:50]
+                            record["skipped_links_total"] = len(skipped_links)
                         if shared_archive:
                             shared_logs.retain_archive(digest)
                     else:

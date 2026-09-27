@@ -122,10 +122,9 @@ async def test_tar_headers_preserve_container_ids_not_host_ids_and_strip_setid(t
         assert tar.extractfile("./nested/tool").read() == b"payload"
 
 
-@pytest.mark.parametrize("unsafe", ["../escaped", "escape-link"])
-async def test_metadata_collection_keeps_archive_traversal_and_link_checks(tmp_path, unsafe):
+async def test_metadata_collection_keeps_archive_traversal_checks(tmp_path):
     archive = tmp_path / "unsafe.tar.gz"
-    synthetic_archive(archive, unsafe=unsafe)
+    synthetic_archive(archive, unsafe="../escaped")
     sandbox = SimpleNamespace(exec=AsyncMock(return_value=SimpleNamespace(return_code=0)))
 
     async def download(source, destination):
@@ -137,6 +136,25 @@ async def test_metadata_collection_keeps_archive_traversal_and_link_checks(tmp_p
         await download_dir(sandbox, "/app", tmp_path / "view", metadata_path=metadata)
     assert not metadata.exists()
     assert not (tmp_path / "escaped").exists()
+
+
+async def test_links_to_absolute_paths_are_dropped_not_fatal(tmp_path):
+    # Task workdirs hold venv interpreters and node_modules links to absolute paths; the artifact is still collected.
+    archive = tmp_path / "links.tar.gz"
+    synthetic_archive(archive, unsafe="escape-link")
+    sandbox = SimpleNamespace(exec=AsyncMock(return_value=SimpleNamespace(return_code=0)))
+
+    async def download(source, destination):
+        destination.write_bytes(archive.read_bytes())
+
+    sandbox.download = download
+    metadata = tmp_path / "metadata.json"
+    skipped = []
+    await download_dir(sandbox, "/app", tmp_path / "view", metadata_path=metadata, skipped=skipped)
+    assert skipped == ["escape-link"]
+    assert (tmp_path / "view" / "nested" / "tool").read_bytes() == b"payload"
+    assert not (tmp_path / "view" / "escape-link").exists() and not (tmp_path / "view" / "escape-link").is_symlink()
+    assert "escape-link" not in json.loads(metadata.read_text()) and "nested/tool" in json.loads(metadata.read_text())
 
 
 async def test_artifact_transfer_fails_instead_of_losing_metadata_without_tar(tmp_path):

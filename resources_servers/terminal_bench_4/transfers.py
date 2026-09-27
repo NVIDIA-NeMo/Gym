@@ -181,11 +181,20 @@ async def download_file(
         await run_local(partial(_write_metadata, metadata_path, metadata), archive_workers)
 
 
-def _extract_directory(archive: Path, target: Path, metadata_path: Path | None, *, digest: bool) -> str | None:
+def _extract_directory(
+    archive: Path, target: Path, metadata_path: Path | None, *, digest: bool, skipped: list[str] | None = None
+) -> str | None:
     metadata = {}
 
-    def data_filter(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo:
-        filtered = tarfile.data_filter(member, destination)
+    def data_filter(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None:
+        try:
+            filtered = tarfile.data_filter(member, destination)
+        except (tarfile.AbsoluteLinkError, tarfile.LinkOutsideDestinationError):
+            # Task workdirs routinely hold links to absolute paths (venv interpreters, node_modules). They cannot be
+            # restored safely, but the rest of the artifact can: drop the link, keep collecting, report it.
+            if skipped is not None:
+                skipped.append(member.name)
+            return None
         # Keep the safe host extraction, but never mistake host ownership
         # or umask-derived directory modes for the sandbox's metadata.
         # Set-ID/sticky bits are not propagated from untrusted artifacts.
@@ -212,6 +221,7 @@ async def download_dir(
     shared_archive: str | None = None,
     metadata_path: Path | None = None,
     archive_workers: ArchiveWorkers | None = None,
+    skipped: list[str] | None = None,
 ) -> str | None:
     target = Path(target)
     await run_local(partial(target.mkdir, parents=True, exist_ok=True), archive_workers)
@@ -241,7 +251,9 @@ async def download_dir(
             archive = Path(tmp) / "download.tar.gz"
             await sandbox.download(remote, archive)
             digest = await run_local(
-                partial(_extract_directory, archive, target, metadata_path, digest=bool(shared_archive)),
+                partial(
+                    _extract_directory, archive, target, metadata_path, digest=bool(shared_archive), skipped=skipped
+                ),
                 archive_workers,
             )
             if shared_archive:
