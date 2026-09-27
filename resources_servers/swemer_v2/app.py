@@ -57,6 +57,7 @@ from resources_servers.swemer_v2.verification import (
     VerificationInputs,
     VerificationResult,
     drop_patch_sections,
+    drop_test_patch_files,
     run_verification,
     verification_files,
 )
@@ -98,6 +99,7 @@ class SwemerV2SeedSessionRequest(SwemerV2InstanceRequest, BaseSeedSessionRequest
 
 class SwemerV2SeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str
+    workdir: str
 
 
 class SwemerV2VerifyRequest(SwemerV2InstanceRequest, BaseVerifyRequest):
@@ -116,6 +118,7 @@ class SwemerV2VerifyResponse(BaseVerifyResponse):
     error: str | None
     eval_sandbox_start_time_taken: float
     patch_verification_time_taken: float
+    test_patch_failed: bool = False
 
 
 class SwemerV2ResourcesServer(SimpleResourcesServer):
@@ -131,7 +134,7 @@ class SwemerV2ResourcesServer(SimpleResourcesServer):
         return VerificationInputs(
             instance_id=body.instance_id,
             workdir=body.workdir,
-            patch=patch,
+            patch=drop_test_patch_files(patch, body.test_patch),
             test_patch=body.test_patch,
             test_framework=body.test_framework,
             test_command=body.test_command,
@@ -247,7 +250,7 @@ class SwemerV2ResourcesServer(SimpleResourcesServer):
             sandbox, body.workdir
         )
         self._session_id_to_sandbox[session_id] = sandbox
-        return SwemerV2SeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
+        return SwemerV2SeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id), workdir=body.workdir)
 
     async def verify(self, request: Request, body: SwemerV2VerifyRequest) -> SwemerV2VerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
@@ -334,6 +337,7 @@ class SwemerV2ResourcesServer(SimpleResourcesServer):
                 "error": extraction_error or result.error,
                 "eval_sandbox_start_time_taken": start_time_taken,
                 "patch_verification_time_taken": verification_time_taken,
+                "test_patch_failed": result.test_patch_failed,
             }
         )
 
