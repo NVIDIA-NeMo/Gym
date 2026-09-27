@@ -55,6 +55,10 @@ class OpenCodeHarnessConfig(BaseModel):
     # max(floor, task agent.timeout_sec) and the seed's agent_timeout_sec reports that budget; None leaves the run
     # unbounded on the resources side (the agent's own exec timeout still applies).
     agent_timeout_floor_sec: int | None = Field(default=None, gt=0)
+    # Insert Gym's rollout correlation prefix (`/ng-rollout/<rollout_id>`) into the OpenCode baseURL path when the
+    # agent did not (it only does so with model-call or token capture on). A gateway that routes model calls by
+    # attempt needs the id in the path; the run's `rollout_id` must be a valid path id (letters, digits, . _ -).
+    gateway_rollout_prefix: bool = False
 
     @field_validator("stage_dir", "launch_record_dir")
     @classmethod
@@ -131,7 +135,8 @@ TB4_STAGE_DIR="__STAGE_DIR__"
 budget="${TB4_AGENT_TIMEOUT_S:-0}"
 case "$budget" in ''|*[!0-9]*) budget=0 ;; esac
 TB4_AGENT_TIMEOUT_S="$budget"
-export TB4_SESSION_ID TB4_AGENT_USER TB4_MODEL_GATEWAY TB4_WORKDIR TB4_STAGE_DIR TB4_AGENT_TIMEOUT_S
+TB4_MODEL_PATH_PREFIX="${TB4_MODEL_PATH_PREFIX:-}"
+export TB4_SESSION_ID TB4_AGENT_USER TB4_MODEL_GATEWAY TB4_WORKDIR TB4_STAGE_DIR TB4_AGENT_TIMEOUT_S TB4_MODEL_PATH_PREFIX
 real="$TB4_STAGE_DIR/bin/opencode.real"
 [ -x "$real" ] || { echo "tb4-opencode: real binary missing at $real (install step skipped?)" >&2; exit 96; }
 sub="${1:-}"
@@ -168,13 +173,15 @@ fi
 gateway_rewritten=0; gateway_error=""
 if [ -n "${TB4_MODEL_GATEWAY:-}" ] && [ -n "${OPENCODE_CONFIG_CONTENT:-}" ]; then
     if command -v python3 >/dev/null 2>&1; then
-        if rewritten="$(TB4_GW="$TB4_MODEL_GATEWAY" python3 -c '__PY_REWRITE__' 2>/dev/null)"; then
+        if rewritten="$(TB4_GW="$TB4_MODEL_GATEWAY" TB4_PFX="$TB4_MODEL_PATH_PREFIX" python3 -c '__PY_REWRITE__' 2>/dev/null)"; then
             OPENCODE_CONFIG_CONTENT="$rewritten"; export OPENCODE_CONFIG_CONTENT; gateway_rewritten=1
         else
             gateway_error="python rewrite failed"
         fi
     else
-        rewritten="$(printf %s "$OPENCODE_CONFIG_CONTENT" | sed -E "s#(\"baseURL\": *\")https?://[^/\"]+#\1$TB4_MODEL_GATEWAY#")" || rewritten=""
+        pfx="$TB4_MODEL_PATH_PREFIX"
+        case "$OPENCODE_CONFIG_CONTENT" in *'/ng-rollout/'*) pfx="" ;; esac
+        rewritten="$(printf %s "$OPENCODE_CONFIG_CONTENT" | sed -E "s#(\"baseURL\": *\")https?://[^/\"]+#\1$TB4_MODEL_GATEWAY$pfx#")" || rewritten=""
         if [ -n "$rewritten" ] && [ "$rewritten" != "$OPENCODE_CONFIG_CONTENT" ]; then
             OPENCODE_CONFIG_CONTENT="$rewritten"; export OPENCODE_CONFIG_CONTENT; gateway_rewritten=1
         else
@@ -189,9 +196,9 @@ records="$TB4_STAGE_DIR/records"
 mkdir -p "$records" 2>/dev/null || true
 record_dir="__RECORD_DIR__"
 now_ts="$(date +%s)"
-launch_record="$(printf '{"session_id":"%s","subcommand":"%s","caller_uid":%s,"requested_user":"%s","switch":%s,"uid":"%s","gid":"%s","home":"%s","home_fallback":%s,"cwd":"%s","workdir":"%s","gateway":"%s","gateway_rewritten":%s,"gateway_error":"%s","budget_s":%s}' \
+launch_record="$(printf '{"session_id":"%s","subcommand":"%s","caller_uid":%s,"requested_user":"%s","switch":%s,"uid":"%s","gid":"%s","home":"%s","home_fallback":%s,"cwd":"%s","workdir":"%s","gateway":"%s","gateway_rewritten":%s,"gateway_error":"%s","budget_s":%s,"gateway_prefix":"%s"}' \
     "${TB4_SESSION_ID:-}" "${sub:-}" "$caller_uid" "$target" "$switch" "$uid" "$gid" "$home" "$home_fallback" "$(pwd)" \
-    "${TB4_WORKDIR:-}" "${TB4_MODEL_GATEWAY:-}" "$gateway_rewritten" "$gateway_error" "$budget")"
+    "${TB4_WORKDIR:-}" "${TB4_MODEL_GATEWAY:-}" "$gateway_rewritten" "$gateway_error" "$budget" "${TB4_MODEL_PATH_PREFIX:-}")"
 printf '%s\n' "$launch_record" > "$records/$now_ts-$$-${sub:-none}.json" 2>/dev/null || true
 if mkdir -p "$record_dir" 2>/dev/null; then
     [ "$switch" = 1 ] && chown "$uid:$gid" "$record_dir" 2>/dev/null || true
@@ -270,12 +277,13 @@ exec sh -c "$enter"'exec "$0" "$@"' "$real" "$@"
 PY_REWRITE = (
     "import json,os,sys;from urllib.parse import urlsplit,urlunsplit;"
     'c=json.loads(os.environ["OPENCODE_CONFIG_CONTENT"]);g=urlsplit(os.environ["TB4_GW"]);'
-    'o=c["provider"]["nemo_gym"]["options"];u=urlsplit(o["baseURL"]);'
-    'o["baseURL"]=urlunsplit((g.scheme,g.netloc,u.path,u.query,u.fragment));sys.stdout.write(json.dumps(c))'
+    'o=c["provider"]["nemo_gym"]["options"];u=urlsplit(o["baseURL"]);x=os.environ.get("TB4_PFX","");'
+    'p=(x+u.path) if x and not u.path.startswith("/ng-rollout/") else u.path;'
+    'o["baseURL"]=urlunsplit((g.scheme,g.netloc,p,u.query,u.fragment));sys.stdout.write(json.dumps(c))'
 )
 
 
-def rewrite_gateway(config_json: str, gateway: str) -> str:
+def rewrite_gateway(config_json: str, gateway: str, prefix: str | None = None) -> str:
     """Host-side twin of the in-sandbox rewrite, used by tests and diagnostics."""
     from urllib.parse import urlunsplit
 
@@ -283,8 +291,21 @@ def rewrite_gateway(config_json: str, gateway: str) -> str:
     target = urlsplit(gateway)
     options = config["provider"]["nemo_gym"]["options"]
     current = urlsplit(options["baseURL"])
-    options["baseURL"] = urlunsplit((target.scheme, target.netloc, current.path, current.query, current.fragment))
+    path = current.path
+    if prefix and not path.startswith("/ng-rollout/"):
+        path = prefix + path
+    options["baseURL"] = urlunsplit((target.scheme, target.netloc, path, current.query, current.fragment))
     return json.dumps(config)
+
+
+ROLLOUT_PATH_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def gateway_prefix(config: OpenCodeHarnessConfig, rollout_id: str | None) -> str | None:
+    """`/ng-rollout/<rollout_id>` when configured and the id is a valid path id, else None."""
+    if not config.gateway_rollout_prefix or not rollout_id or not ROLLOUT_PATH_ID.match(rollout_id):
+        return None
+    return f"/ng-rollout/{rollout_id}"
 
 
 def render_scripts(config: OpenCodeHarnessConfig) -> dict[str, str]:
@@ -308,6 +329,7 @@ def launcher_env(
     gateway: str | None,
     workdir: str | None = None,
     agent_timeout_s: int | None = None,
+    model_path_prefix: str | None = None,
 ) -> str:
     if agent_timeout_s is not None and (isinstance(agent_timeout_s, bool) or int(agent_timeout_s) <= 0):
         raise ValueError(f"agent_timeout_s must be a positive whole number of seconds, got {agent_timeout_s!r}")
@@ -318,6 +340,7 @@ def launcher_env(
         "TB4_WORKDIR": workdir or "",
         # 0 = no resources-side budget; the launcher treats anything but digits the same way.
         "TB4_AGENT_TIMEOUT_S": "0" if agent_timeout_s is None else str(int(agent_timeout_s)),
+        "TB4_MODEL_PATH_PREFIX": model_path_prefix or "",
     }
     for key, value in values.items():
         if not re.fullmatch(r"[A-Za-z0-9_.:/@%+=-]*", value):
@@ -369,8 +392,10 @@ async def stage_launcher(
     scratch: Path,
     workdir: str | None = None,
     agent_timeout_s: int | None = None,
+    rollout_id: str | None = None,
 ) -> dict[str, Any]:
     """Upload install.sh, the launcher and launcher.env as the sandbox default user (root for root-started boxes)."""
+    prefix = gateway_prefix(config, rollout_id)
     resolved_uid = None
     if isinstance(agent_user, str) and agent_user != "root" and bootstrap_uid not in (None, 0):
         resolved_uid = await resolve_uid(sandbox, agent_user)
@@ -382,6 +407,7 @@ async def stage_launcher(
         gateway=config.model_gateway,
         workdir=workdir,
         agent_timeout_s=agent_timeout_s,
+        model_path_prefix=prefix,
     )
     stage = config.stage_dir
     quoted = shlex.quote(stage)
@@ -413,6 +439,7 @@ async def stage_launcher(
         "workdir": workdir,
         "model_gateway": config.model_gateway,
         "agent_timeout_s": agent_timeout_s,
+        "gateway_prefix": prefix,
     }
 
 

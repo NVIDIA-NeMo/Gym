@@ -278,6 +278,13 @@ budget or its kill lands first (no exit record, still a graded timeout). With th
 floor unset nothing changes: no in-sandbox budget, and the seed reports the task's own
 timeout.
 
+Gateway rollout prefix. The unmodified agent adds Gym's `/ng-rollout/<rollout_id>` path
+prefix to its model baseURL only when model-call or token capture is enabled. With
+`opencode.gateway_rollout_prefix: true` the launcher inserts that prefix itself (from the run's
+`rollout_id`, which must be a path-safe id: letters, digits, `.`, `_`, `-`) when the baseURL lacks
+one, so a gateway can route each attempt's model calls by id without capture overhead; the
+launch record carries `gateway_prefix`.
+
 ## Image startup: Compose and standalone
 
 `environment.compose_image_configs` is the shared OCI metadata catalog for both

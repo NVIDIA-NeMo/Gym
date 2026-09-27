@@ -316,6 +316,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                         scratch=session.directory / "sandbox" / "opencode",
                         workdir=session.task.config.environment.workdir,
                         agent_timeout_s=budget,
+                        rollout_id=session.request.rollout_id,
                     )
                     if session.task.config.environment.skills_dir:
                         session.diagnostics.append(

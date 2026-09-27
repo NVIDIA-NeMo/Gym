@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -204,7 +205,7 @@ def test_scripts_render_stage_dir_and_env_is_quoted():
     )
     assert env == (
         "TB4_SESSION_ID=tb4-1\nTB4_AGENT_USER=cam\nTB4_MODEL_GATEWAY=http://gw:1\nTB4_WORKDIR=/home/cam/job\n"
-        "TB4_AGENT_TIMEOUT_S=0\n"
+        "TB4_AGENT_TIMEOUT_S=0\nTB4_MODEL_PATH_PREFIX=''\n"
     )
     assert "TB4_AGENT_USER=1000\n" in opencode.launcher_env(session_id="s", agent_user=1000, gateway=None)
     assert "TB4_AGENT_USER=''\n" in opencode.launcher_env(session_id="s", agent_user=None, gateway=None)
@@ -214,8 +215,8 @@ def test_scripts_render_stage_dir_and_env_is_quoted():
 
 def test_launcher_env_carries_the_per_task_budget():
     env = opencode.launcher_env(session_id="s", agent_user=None, gateway=None, agent_timeout_s=14400)
-    assert env.endswith("TB4_AGENT_TIMEOUT_S=14400\n")
-    assert opencode.launcher_env(session_id="s", agent_user=None, gateway=None).endswith("TB4_AGENT_TIMEOUT_S=0\n")
+    assert env.endswith("TB4_AGENT_TIMEOUT_S=14400\nTB4_MODEL_PATH_PREFIX=''\n")
+    assert "TB4_AGENT_TIMEOUT_S=0\n" in opencode.launcher_env(session_id="s", agent_user=None, gateway=None)
     for bad in (0, -5, True):
         with pytest.raises(ValueError, match="positive whole number"):
             opencode.launcher_env(session_id="s", agent_user=None, gateway=None, agent_timeout_s=bad)
@@ -275,6 +276,52 @@ def test_launcher_enforces_the_budget_under_sh(tmp_path, budget, real, fake_time
     assert agent_started and termination.reason == (
         "timeout" if timed_out else "completed" if not status else "nonzero_exit"
     )
+
+
+def test_gateway_rewrite_can_insert_the_rollout_prefix():
+    config_json = json.dumps(
+        {"provider": {"nemo_gym": {"options": {"baseURL": "http://127.0.0.1:24713/v1", "apiKey": "k"}}}}
+    )
+    out = json.loads(opencode.rewrite_gateway(config_json, "http://10.109.22.242:24401", "/ng-rollout/abc123"))
+    assert out["provider"]["nemo_gym"]["options"]["baseURL"] == "http://10.109.22.242:24401/ng-rollout/abc123/v1"
+    already = json.dumps(
+        {"provider": {"nemo_gym": {"options": {"baseURL": "http://127.0.0.1:24713/ng-rollout/xyz/v1", "apiKey": "k"}}}}
+    )
+    out = json.loads(opencode.rewrite_gateway(already, "http://10.109.22.242:24401", "/ng-rollout/abc123"))
+    assert out["provider"]["nemo_gym"]["options"]["baseURL"] == "http://10.109.22.242:24401/ng-rollout/xyz/v1"
+    out = json.loads(opencode.rewrite_gateway(config_json, "http://10.109.22.242:24401", None))
+    assert out["provider"]["nemo_gym"]["options"]["baseURL"] == "http://10.109.22.242:24401/v1"
+    # The in-sandbox one-liner agrees with the host twin.
+    env = {
+        "OPENCODE_CONFIG_CONTENT": config_json,
+        "TB4_GW": "http://10.109.22.242:24401",
+        "TB4_PFX": "/ng-rollout/abc123",
+        "PATH": os.environ.get("PATH", ""),
+    }
+    result = subprocess.run([sys.executable, "-c", opencode.PY_REWRITE], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["provider"]["nemo_gym"]["options"]["baseURL"] == (
+        "http://10.109.22.242:24401/ng-rollout/abc123/v1"
+    )
+    env["TB4_PFX"] = ""
+    result = subprocess.run([sys.executable, "-c", opencode.PY_REWRITE], env=env, capture_output=True, text=True)
+    assert json.loads(result.stdout)["provider"]["nemo_gym"]["options"]["baseURL"] == "http://10.109.22.242:24401/v1"
+
+
+def test_gateway_prefix_requires_the_flag_and_a_path_safe_rollout_id():
+    on = opencode.OpenCodeHarnessConfig(gateway_rollout_prefix=True)
+    assert (
+        opencode.gateway_prefix(on, "d49b9774ba3f4b07965a89828cd21378")
+        == "/ng-rollout/d49b9774ba3f4b07965a89828cd21378"
+    )
+    assert opencode.gateway_prefix(on, "mobius/x/attempt-0") is None
+    assert opencode.gateway_prefix(on, None) is None
+    assert opencode.gateway_prefix(opencode.OpenCodeHarnessConfig(), "abc") is None
+    env = opencode.launcher_env(
+        session_id="s", agent_user=None, gateway="http://g:1", model_path_prefix="/ng-rollout/abc"
+    )
+    assert "TB4_MODEL_PATH_PREFIX=/ng-rollout/abc\n" in env
+    assert opencode.launcher_env(session_id="s", agent_user=None, gateway=None).endswith("TB4_MODEL_PATH_PREFIX=''\n")
 
 
 def test_gateway_rewrite_changes_only_the_origin():
@@ -384,6 +431,7 @@ async def test_stage_launcher_uploads_and_locks_down_as_root(tmp_path):
     assert set(uploads) == {"/tmp/stage/install.sh", "/tmp/stage/opencode-launcher", "/tmp/stage/launcher.env"}
     assert uploads["/tmp/stage/launcher.env"] == (
         "TB4_SESSION_ID=tb4-1\nTB4_AGENT_USER=cam\nTB4_MODEL_GATEWAY=http://gw:1\nTB4_WORKDIR=''\nTB4_AGENT_TIMEOUT_S=0\n"
+        "TB4_MODEL_PATH_PREFIX=''\n"
     )
     first, last = box.exec.await_args_list[0].args[0], box.exec.await_args_list[-1].args[0]
     assert "test ! -L /tmp/stage" in first and "mkdir -p /tmp/stage/bin /tmp/stage/records" in first
@@ -400,6 +448,7 @@ async def test_stage_launcher_uploads_and_locks_down_as_root(tmp_path):
         "workdir": None,
         "model_gateway": "http://gw:1",
         "agent_timeout_s": None,
+        "gateway_prefix": None,
     }
     # A non-root-started sandbox keeps its own ownership; a named task user is fine when it IS the default user.
     box.exec.reset_mock()
@@ -408,7 +457,7 @@ async def test_stage_launcher_uploads_and_locks_down_as_root(tmp_path):
     )
     assert "chown" not in box.exec.await_args_list[-1].args[0]
     assert budgeted["agent_timeout_s"] == 600 and uploads["/tmp/stage/launcher.env"].endswith(
-        "TB4_AGENT_TIMEOUT_S=600\n"
+        "TB4_AGENT_TIMEOUT_S=600\nTB4_MODEL_PATH_PREFIX=''\n"
     )
     box.exec = AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="1000\n", stderr=""))
     same = await opencode.stage_launcher(
@@ -483,6 +532,7 @@ async def test_opencode_seed_returns_handle_and_a_cookieless_retry_joins_the_epi
         "scratch": session.directory / "sandbox" / "opencode",
         "workdir": None,
         "agent_timeout_s": None,
+        "rollout_id": "terminal-bench/test/attempt-0",
     }
     assert seed.agent_timeout_sec == 28800  # no floor configured: the task's own agent timeout, as before
     assert "agent_ready_at" in session.deadlines
