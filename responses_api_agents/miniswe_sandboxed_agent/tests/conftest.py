@@ -76,9 +76,8 @@ async def runner_factory(tmp_path, monkeypatch):
         python = remote / "venv/bin/python"
         python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
         python.chmod(0o755)
-        await harness.sandbox.upload(Path(module.__file__).with_name("sandbox_runner.py"), str(remote / "runner.py"))
 
-    monkeypatch.setattr(module.MiniSWEHarness, "_install_runner", install)
+    monkeypatch.setattr(module.MiniSWEHarness, "_install_miniswe", install)
 
     async def make(**kwargs):
         query = kwargs.pop("query")

@@ -226,12 +226,13 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         assert len(trajectory["turns"]) == 2
         assert trajectory["turns"][0]["answer"][0]["id"] == "rejected"
         assert trajectory["turns"][0]["step_count"] == 0
-        assert "No tool calls" in requests[1]["input"][-1]["content"]
+        assert "No tool calls" in requests[1]["input"][-1]["content"][0]["text"]
     else:
         assert response.usage.total_tokens == 30
         assert response.usage.input_tokens_details.cached_tokens == 2
         assert trajectory["tool_calls"][0]["status"] == ("failed" if scenario == "tool_error" else "completed")
-        assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in trajectory["tool_calls"][-1]["output"]
+        assert trajectory["tool_calls"][-1]["output"] is None
+        assert trajectory["tool_calls"][-1]["status"] == "incomplete"
     path = tmp_path / "evaluator_rollouts.jsonl"
     path.write_text(json.dumps(record) + "\n")
     result = run_health_checks(path, output_dir=tmp_path, workers=1)

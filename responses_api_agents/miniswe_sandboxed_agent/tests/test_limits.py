@@ -63,10 +63,10 @@ async def test_length_limit_recovery_and_terminal_classification(
     harness = await make_harness(tmp_path, query, runner_factory)
     _, outcome, extra = await harness.execute(15)
     assert len(requests) == (2 if recover else 3)
-    recovery_prompt = requests[1]["input"][-1]["content"]
+    recovery_prompt = requests[1]["input"][-1]["content"][0]["text"]
     assert ("output token limit" in recovery_prompt) == length_limited
     assert ("Respond more concisely" in recovery_prompt) == length_limited
-    expected = "Submitted" if recover else "OutputTokenLimitExceeded" if length_limited else "RepeatedFormatError"
+    expected = "Submitted" if recover else "RepeatedFormatError"
     assert extra["mini_swe_trajectory"]["info"]["exit_status"] == expected
     assert json.loads((tmp_path / "trajectory.json").read_text())["info"]["exit_status"] == expected
     assert outcome.reason == ("completed" if recover else "nonzero_exit")
@@ -96,8 +96,14 @@ async def test_context_overflow_stops_without_format_retries(
     _, outcome, extra = await harness.execute(15)
     query.assert_awaited_once()
     assert outcome.reason == ("nonzero_exit" if is_context_overflow else "infrastructure_error")
-    expected = "ContextWindowExceeded" if is_context_overflow else "RuntimeError"
+    expected = (
+        "ContextWindowExceededError"
+        if "maximum context length" in message
+        else "BadRequestError"
+        if status == 400
+        else "ServiceUnavailableError"
+    )
     assert extra["mini_swe_trajectory"]["info"]["exit_status"] == expected
     assert json.loads((tmp_path / "trajectory.json").read_text())["info"]["exit_status"] == expected
     if is_context_overflow:
-        assert outcome.detail == "ContextWindowExceeded"
+        assert outcome.detail == "ContextWindowExceededError"

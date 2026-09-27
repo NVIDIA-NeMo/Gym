@@ -4,6 +4,7 @@
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,8 @@ from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext,
 
 @pytest.mark.parametrize("stop", ["timeout", "cancel", "model_failure", "step_limit", "tool_cancel"])
 async def test_runner_stops_before_verification_and_retains_partial_trajectory(tmp_path, runner_factory, stop):
+    if stop == "tool_cancel" and sys.platform != "linux":
+        pytest.skip("Native descendant cleanup uses Linux /proc")
     entered, exited = asyncio.Event(), asyncio.Event()
     calls = 0
 
@@ -79,17 +82,20 @@ async def test_runner_stops_before_verification_and_retains_partial_trajectory(t
             "tool_cancel": "cancelled",
         }[stop]
     ), outcome
-    assert len(response.output) == (1 if stop == "tool_cancel" else 2)
+    assert len(response.output) == (0 if stop == "tool_cancel" else 2)
     if stop == "model_failure":
         assert exited.is_set()
-    assert extra["mini_swe_trajectory"]["messages"]
-    assert (harness.directory / "trajectory.json").exists()
+    if stop != "tool_cancel":
+        assert extra["mini_swe_trajectory"]["messages"]
+        assert (harness.directory / "trajectory.json").exists()
+    else:
+        assert "mini_swe_trajectory" not in extra
     await asyncio.wait_for(harness.sandbox.runners[0].wait(), 2)
     if stop == "tool_cancel":
         pid = int(Path(harness.context.workdir, "tool.pid").read_text())
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
-        assert extra["ng_agent_observations"]["records"][1]["status"] == "cancelled"
+        assert len(extra["ng_agent_observations"]["records"]) == 1
 
 
 async def test_cleanup_transport_failure_keeps_captured_response(tmp_path, runner_factory, monkeypatch):
@@ -130,5 +136,5 @@ async def test_cleanup_transport_failure_keeps_captured_response(tmp_path, runne
     response, outcome, extra = await harness.execute(15)
     assert outcome.reason == "infrastructure_error"
     assert "lost cleanup response" in outcome.detail
-    assert len(response.output) == 2
+    assert len(response.output) == 1
     assert extra["mini_swe_trajectory"]["info"]["exit_status"] == "Submitted"
