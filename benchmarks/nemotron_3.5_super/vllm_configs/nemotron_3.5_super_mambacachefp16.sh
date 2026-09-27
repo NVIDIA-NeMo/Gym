@@ -1,7 +1,6 @@
 #!/bin/bash
 
 GYM_MODEL_PARAMS=(
-    "++model_endpoint_readiness_timeout_seconds=1200"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
 )
@@ -29,8 +28,11 @@ VLLM_COMMON_ARGS=(
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
     --block-size 128
+    --mamba-backend flashinfer
+    --mamba-ssm-cache-dtype float16
+    --enable-mamba-cache-stochastic-rounding
+    --mamba-cache-philox-rounds 5
     --mamba-cache-mode align
-    --mamba-ssm-cache-dtype float32
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --skip-mm-profiling
@@ -40,14 +42,13 @@ VLLM_COMMON_ARGS=(
     --api-server-count 1
 )
 VLLM_PREFILL_ARGS=(
-    --max-cudagraph-capture-size 1200
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
     --max-num-batched-tokens 33920
-    --max-num-seqs 128
+    --max-num-seqs 1024
 )
 VLLM_DECODE_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --max-num-batched-tokens 33920
-    --max-num-seqs 128
+    --max-num-seqs 1024
 )

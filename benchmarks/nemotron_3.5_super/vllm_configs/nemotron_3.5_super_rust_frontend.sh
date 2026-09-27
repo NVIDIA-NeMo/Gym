@@ -1,7 +1,6 @@
 #!/bin/bash
 
 GYM_MODEL_PARAMS=(
-    "++model_endpoint_readiness_timeout_seconds=1200"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
 )
@@ -12,6 +11,8 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
 # @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
 export VLLM_USE_V2_MODEL_RUNNER=0
+
+export VLLM_USE_RUST_FRONTEND=1
 
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 VLLM_COMMON_ARGS=(
@@ -40,14 +41,13 @@ VLLM_COMMON_ARGS=(
     --api-server-count 1
 )
 VLLM_PREFILL_ARGS=(
-    --max-cudagraph-capture-size 1200
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
     --max-num-batched-tokens 33920
-    --max-num-seqs 128
+    --max-num-seqs 1024
 )
 VLLM_DECODE_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --max-num-batched-tokens 33920
-    --max-num-seqs 128
+    --max-num-seqs 1024
 )
