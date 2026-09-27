@@ -400,6 +400,10 @@ class Environment:
         persistent = self.task_env if main and not self.uses_compose else {}
         if main:
             user = execution_user(user)
+            # A sandbox that starts as the image's own user cannot switch identity (OpenSandbox drops
+            # CAP_SETUID/CAP_SETGID); every role there IS that user, so the request runs as the default identity.
+            if user is not None and self.bootstrap_uid not in (None, 0):
+                user = None
         return await self.sandbox(service).exec(
             command,
             cwd=cwd,

@@ -52,17 +52,33 @@ async def stage_trusted_directory(
         await run_local(partial(_pack_trusted_directory, source, target, archive), archive_workers)
         await sandbox.upload(archive, remote)
     try:
-        result = await sandbox.exec(
+        result = await _exec_as_root_or_default(
+            sandbox,
             f"test ! -L {target} && mkdir -p {target} && "
             f"find {target} -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} + && "
             f"tar --no-same-owner --same-permissions -xzf {remote} -C {target}",
-            user="root",
             timeout_s=600,
         )
         if result.return_code:
             raise RuntimeError(f"Trusted staging into {target} failed: {result.stderr}")
     finally:
-        await sandbox.exec(f"rm -f {remote}", user="root", timeout_s=60)
+        await _exec_as_root_or_default(sandbox, f"rm -f {remote}", timeout_s=60)
+
+
+def _identity_switch_refused(result: SandboxExecResult) -> bool:
+    text = (getattr(result, "stderr", None) or "") + (getattr(result, "stdout", None) or "")
+    return bool(getattr(result, "return_code", 0)) and (
+        "CAP_SETUID" in text or "operation not permitted" in text.lower()
+    )
+
+
+async def _exec_as_root_or_default(sandbox: AsyncSandbox, command: str, *, timeout_s: int) -> SandboxExecResult:
+    """Run as root where the sandbox allows it; a sandbox started as the image's own user cannot switch identity
+    (OpenSandbox drops CAP_SETUID/CAP_SETGID), so the command then runs as that default identity."""
+    result = await sandbox.exec(command, user="root", timeout_s=timeout_s)
+    if _identity_switch_refused(result):
+        result = await sandbox.exec(command, timeout_s=timeout_s)
+    return result
 
 
 def artifact_metadata_path(directory: Path, host_path: Path) -> Path:

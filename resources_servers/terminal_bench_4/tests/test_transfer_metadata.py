@@ -18,6 +18,7 @@ from resources_servers.terminal_bench_4.transfers import (
     artifact_metadata_path,
     download_dir,
     download_file,
+    stage_trusted_directory,
     upload_dir,
     upload_file,
 )
@@ -136,6 +137,27 @@ async def test_metadata_collection_keeps_archive_traversal_checks(tmp_path):
         await download_dir(sandbox, "/app", tmp_path / "view", metadata_path=metadata)
     assert not metadata.exists()
     assert not (tmp_path / "escaped").exists()
+
+
+async def test_trusted_staging_falls_back_to_the_default_identity_when_root_is_refused(tmp_path):
+    source = tmp_path / "tests"
+    source.mkdir()
+    (source / "test.sh").write_text("#!/bin/sh\nexit 0\n")
+    calls = []
+
+    async def exec_(command, *, user=None, timeout_s=None, **kwargs):
+        calls.append(user)
+        if user == "root":
+            return SimpleNamespace(
+                return_code=255,
+                stdout=None,
+                stderr="fork/exec /usr/bin/bash: operation not permitted (switching to uid=0 gid=0 requires CAP_SETUID/CAP_SETGID)",
+            )
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    sandbox = SimpleNamespace(exec=AsyncMock(side_effect=exec_), upload=AsyncMock())
+    await stage_trusted_directory(sandbox, source, "/tests")
+    assert calls == ["root", None, "root", None]  # staging and the cleanup each retried as the default identity
 
 
 async def test_links_to_absolute_paths_are_dropped_not_fatal(tmp_path):
