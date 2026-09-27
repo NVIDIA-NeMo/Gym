@@ -90,6 +90,7 @@ VLLM_ENGINE_WATCHDOG_INTERVAL_S="${VLLM_ENGINE_WATCHDOG_INTERVAL_S:-30}"
 VLLM_ENGINE_WATCHDOG_METRIC_FAILURES="${VLLM_ENGINE_WATCHDOG_METRIC_FAILURES:-3}"
 VLLM_ENGINE_WATCHDOG_STALL_S="${VLLM_ENGINE_WATCHDOG_STALL_S:-300}"
 VLLM_ENGINE_WATCHDOG_MAX_RESTARTS="${VLLM_ENGINE_WATCHDOG_MAX_RESTARTS:-3}"
+VLLM_ROUTER_HEALTH_CHECK_INTERVAL_S="${VLLM_ROUTER_HEALTH_CHECK_INTERVAL_S:-10}"
 
 eval_command=$(cat <<EOF
 set -euo pipefail
@@ -342,6 +343,17 @@ else
             --log-level error
         )
 
+        if (( $VLLM_ENGINE_WATCHDOG )); then
+            # The default health check (every 60s, unhealthy after 3 misses) keeps routing to a frozen or
+            # restarting decode engine for ~3 min. Eject it within ~20s and re-admit it once it serves again.
+            router_args+=( \
+                --health-check-interval-secs $VLLM_ROUTER_HEALTH_CHECK_INTERVAL_S \
+                --health-failure-threshold 2 \
+                --health-success-threshold 2 \
+                --health-check-timeout-secs 5
+            )
+        fi
+
         if [[ "$VLLM_MODE" == pd ]]; then
             router_args+=( \
                 --prefill-policy $ROUTER_PREFILL_POLICY \
@@ -420,7 +432,8 @@ else
         # keeps --kill-on-bad-exit from tearing down the whole job. Killing the engine drops its connections,
         # so the router fails the stuck requests and Gym's model server retries them on healthy engines.
         wd_log() { echo "[engine-watchdog \$this_node_hostname \$(date -u +%H:%M:%SZ)] \$*"; }
-        metrics_url=http://localhost:$WORKER_SERVER_PORT/metrics
+        # vllm serve binds --host \$this_node_hostname, not loopback.
+        metrics_url=http://\$this_node_hostname:$WORKER_SERVER_PORT/metrics
         uv pip install --system -q py-spy >/dev/null 2>&1 || true
         restarts=0
         while true; do
