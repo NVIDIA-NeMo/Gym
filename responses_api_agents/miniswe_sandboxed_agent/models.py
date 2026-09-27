@@ -3,13 +3,14 @@
 
 """Agent-owned views of the legacy seed/verify wire protocol.
 
-Resources servers validate their own models at the HTTP boundary. Keep this
-adapter local until Gym's shared agent/task session contracts are available.
+Resources servers validate their own models at the HTTP boundary. This adapter
+retains the /run lifecycle while reusing Gym's shared sandbox access contract.
 """
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.sandbox.access import SandboxAccess
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
 
 
@@ -30,6 +31,8 @@ class SeedSessionResponse(BaseModel):
 
     session_id: str
     task_id: str | None = None
+    sandbox_access: SandboxAccess | None = None
+    workdir: str | None = None
     sandbox_descriptor: dict[str, JsonValue] | None = None
     sandbox_provider: dict[str, JsonValue] = Field(default_factory=dict)
     instruction: str = ""

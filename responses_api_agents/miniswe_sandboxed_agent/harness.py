@@ -161,6 +161,8 @@ class MiniSWEHarness:
         self.observability_enabled = observability_enabled
         self.extra_instruction = ""
         self.result = None
+        self._processes_started = False
+        self._closed = False
         self.remote_directory = f"/tmp/nemo-gym-miniswe-{uuid4().hex}"
 
     async def setup(self) -> None:
@@ -190,8 +192,10 @@ class MiniSWEHarness:
             cli = f"{remote}/bin/python {remote}/client.py"
             daemon = (
                 f"echo $$ >> /tmp/{self.context.session_id}.pids; "
-                f"echo $$ >> {self.remote_directory}/processes; exec {cli} serve"
+                f"echo $$ >> {self.remote_directory}/processes; "
+                f"export MSWEA_GLOBAL_CONFIG_DIR={quote(self.remote_directory + '/config')}; exec {cli} serve"
             )
+            self._processes_started = True
             started = await self.sandbox.exec(
                 "bash -c "
                 + quote(
@@ -259,42 +263,80 @@ class MiniSWEHarness:
             raise asyncio.CancelledError
 
     async def _close(self) -> None:
-        # Native LocalEnvironment gives each command its own process group.
-        # An inherited per-run marker also finds those groups after their parent
-        # exits, including children orphaned by a cancelled sandbox exec.
-        script = """
+        if self._closed:
+            return
+        if not self._processes_started:
+            self._closed = True
+            return
+        # Native commands can detach from the CLI process group. Re-scan their
+        # inherited marker as well as registered groups until no live process remains.
+        script = r"""
 import os, signal, time
 from pathlib import Path
 marker = MARKER
-pids = set()
-for entry in (Path('/proc').iterdir() if Path('/proc').exists() else []):
-    if not entry.name.isdigit():
-        continue
-    try:
-        if marker in (entry / 'environ').read_bytes().split(b'\\0'):
-            pids.add(int(entry.name))
-    except (FileNotFoundError, PermissionError, ProcessLookupError):
-        pass
-for sig in (signal.SIGTERM, signal.SIGKILL):
-    for pid in pids:
+registry = Path(REGISTRY)
+groups = {int(line) for line in registry.read_text().splitlines()} if registry.exists() else set()
+if any(group <= 1 or group == os.getpgrp() for group in groups):
+    raise RuntimeError("Invalid mini-SWE process group")
+
+def targets():
+    found = set()
+    if not Path('/proc').is_dir():
+        for group in groups:
+            try:
+                os.killpg(group, 0)
+                found.add(-group)
+            except ProcessLookupError:
+                pass
+        return found
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        stat = None
         try:
-            os.kill(pid, sig)
+            stat = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+            if stat[0] == 'Z':
+                continue
+            if int(stat[2]) in groups or marker in (entry / 'environ').read_bytes().split(b'\0'):
+                found.add(int(entry.name))
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+        except PermissionError:
+            # Other users' processes are not ours. Registered groups are still
+            # checked using signal permissions below.
+            if stat is not None and int(stat[2]) in groups:
+                raise
+    return found
+
+for group in groups:
+    try:
+        os.killpg(group, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+deadline = time.monotonic() + 5
+while True:
+    live = targets()
+    if not live:
+        break
+    for pid in live:
+        try:
+            os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    time.sleep(0.2)
-""".replace("MARKER", repr(f"MSWEA_GLOBAL_CONFIG_DIR={self.remote_directory}/config".encode()))
-        registry = f"{self.remote_directory}/processes"
+    if time.monotonic() >= deadline:
+        raise RuntimeError("mini-SWE processes did not exit: " + str(sorted(live)))
+    time.sleep(0.05)
+""".replace("MARKER", repr(f"MSWEA_GLOBAL_CONFIG_DIR={self.remote_directory}/config".encode())).replace(
+            "REGISTRY", repr(f"{self.remote_directory}/processes")
+        )
         result = await self.sandbox.exec(
-            f"{quote(self.remote_directory + '/venv/bin/python')} -c {quote(script)} && "
-            f"if [ -f {quote(registry)} ]; then "
-            f"while read pid; do kill -TERM -- -$pid 2>/dev/null || true; done < {quote(registry)}; "
-            "sleep 0.2; "
-            f"while read pid; do kill -KILL -- -$pid 2>/dev/null || true; done < {quote(registry)}; fi",
+            f"{quote(self.remote_directory + '/venv/bin/python')} -c {quote(script)}",
             user=self.context.user,
             timeout_s=10,
         )
-        if result.return_code:
-            raise RuntimeError(f"mini-SWE process cleanup failed: {result.stderr}")
+        if result.return_code or result.error_type:
+            raise RuntimeError(f"mini-SWE process cleanup failed: {result.stderr or result.error_type}")
+        self._closed = True
 
     async def _download_artifact(self, name: str) -> dict:
         local = self.directory / name
@@ -357,6 +399,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             await self.sandbox.upload(local_config, f"{remote}/config.yaml")
             # --wait keeps this single exec open until mini-SWE exits. There is
             # no host-side request loop or sandbox polling between model calls.
+            self._processes_started = True
             run_result = await self.sandbox.exec(
                 f"setsid --fork --wait bash -c {quote(command)}",
                 user=self.context.user,
@@ -382,7 +425,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             except asyncio.CancelledError:
                 termination = HarnessOutcome(reason="cancelled")
             except Exception as error:
-                LOGGER.exception("Failed to stop mini-SWE processes; resources must quiesce the sandbox")
+                LOGGER.exception("Failed to stop mini-SWE processes; session close must retry before verification")
                 termination = HarnessOutcome(reason="infrastructure_error", detail=f"Process cleanup failed: {error}")
 
         try:

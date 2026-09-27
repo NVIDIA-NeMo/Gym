@@ -88,6 +88,8 @@ async def fixture(tmp_path, monkeypatch):
             build_spec=lambda: None,
             resource_identities=lambda: [],
             provider_config={"local": {}},
+            provider_config_ref=None,
+            agent_workdir=AsyncMock(return_value="/task"),
             main=SimpleNamespace(
                 serialize=AsyncMock(return_value={"sandbox_id": session_id}),
                 exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/task\n")),
@@ -117,6 +119,7 @@ async def fixture(tmp_path, monkeypatch):
         instance = SimpleNamespace(
             **kwargs,
             setup=AsyncMock(side_effect=lambda: events.append("setup")),
+            close=AsyncMock(side_effect=lambda: events.append("close")),
             execute=AsyncMock(side_effect=execute),
         )
         harnesses.append(instance)
@@ -192,6 +195,7 @@ async def test_agent_owns_loop_and_replays_exact_result(fixture):
         "agent_start",
         "setup",
         "execute",
+        "close",
         "quiesce",
         "collect",
         "agent_stop",
@@ -301,7 +305,7 @@ async def test_failures_cleanup_and_do_not_grade_failed_setup(fixture, monkeypat
             if stage == "provision":
                 env.start.side_effect = RuntimeError(stage)
             if stage == "workdir":
-                env.main.exec.side_effect = RuntimeError(stage)
+                env.agent_workdir.side_effect = RuntimeError(stage)
         return env
 
     def harness(**kw):
@@ -383,20 +387,20 @@ async def test_shutdown_cancels_worker_before_collection_and_cleans_up(fixture, 
         assert not result.evaluation_completed
 
 
-async def test_setup_budget_covers_workdir_and_never_grades(fixture, monkeypatch):
+async def test_setup_budget_covers_harness_setup_and_never_grades(fixture, monkeypatch):
     f = fixture
     f.agent.config.setup_timeout_sec = 0.01
-    original = lifecycle.Environment
+    original = module.MiniSWEHarness
 
     async def block(*args, **kwargs):
         await asyncio.Event().wait()
 
-    def environment(*a, **kw):
-        env = original(*a, **kw)
-        env.main.exec.side_effect = block
-        return env
+    def harness(**kwargs):
+        h = original(**kwargs)
+        h.setup.side_effect = block
+        return h
 
-    monkeypatch.setattr(lifecycle, "Environment", environment)
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
     result = await f.agent.run(f.request, f.body)
     assert result.termination["reason"] == "timeout"
     assert result.infrastructure_error == "AgentSetupTimeoutError"
@@ -842,3 +846,25 @@ async def test_shutdown_finishes_seeding_and_requests_cleanup_within_budget(fixt
     session = next(iter(f.server._sessions.values()))
     assert session.expiry_task.cancelled()
     f.grade.assert_not_awaited()
+
+
+async def test_tb4_seed_serializes_shared_sandbox_access(fixture, monkeypatch):
+    f = fixture
+    create = lifecycle.Environment
+
+    def named_environment(*args, **kwargs):
+        env = create(*args, **kwargs)
+        env.provider_config_ref = "task_sandbox"
+        return env
+
+    monkeypatch.setattr(lifecycle, "Environment", named_environment)
+    f.agent.server_client.global_config_dict = {"task_sandbox": {"local": {}}}
+    result = await f.agent.run(f.request, f.body)
+    assert result.evaluation_completed
+    seed = f.server._sessions[result.session_id].seed_response
+    assert seed.sandbox_access.connection.provider_config_ref == "task_sandbox"
+    assert seed.sandbox_access.connection.descriptor == {"sandbox_id": result.session_id}
+    assert seed.sandbox_access.workdir == "/task"
+    f.envs[0].agent_workdir.assert_awaited_once()
+    f.envs[0].main.exec.assert_not_awaited()
+    assert f.events.index("close") < f.events.index("grade")

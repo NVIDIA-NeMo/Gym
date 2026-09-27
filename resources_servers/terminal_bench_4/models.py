@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.sandbox.access import SandboxAccess
 
 
 class SessionRequest(BaseModel):
@@ -52,6 +53,8 @@ class TerminalBench4RunRequest(BaseRunRequest):
 
 class SeedSessionResponse(SessionRequest):
     task_id: str | None = None
+    sandbox_access: SandboxAccess | None = None
+    workdir: str | None = None
     sandbox_descriptor: dict[str, Any] | None = None
     sandbox_provider: dict[str, Any] = Field(default_factory=dict)
     instruction: str = ""
