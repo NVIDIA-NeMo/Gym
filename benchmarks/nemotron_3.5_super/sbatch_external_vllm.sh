@@ -467,7 +467,7 @@ else
                 if [[ -n "\$reason" ]]; then
                     wd_log "FROZEN: \$reason. Dumping stacks, then restarting."
                     for p in \$(pgrep -g "\$engine_pid" 2>/dev/null | head -8); do
-                        timeout 60 py-spy dump --native --pid "\$p" 2>&1 | sed "s/^/[engine-watchdog py-spy \$p] /" || true
+                        timeout 60 py-spy dump --nonblocking --native --pid "\$p" 2>&1 | sed "s/^/[engine-watchdog py-spy \$p] /" || true
                     done
                     nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv 2>&1 | sed "s/^/[engine-watchdog] /" || true
                     kill -9 -- "-\$engine_pid" 2>/dev/null || true
