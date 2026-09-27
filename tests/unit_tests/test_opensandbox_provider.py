@@ -933,8 +933,13 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
         async def write_file(self, target_path: str, data: str | bytes) -> None:
             self.writes.append((target_path, data))
 
-        async def read_bytes(self, source_path: str) -> bytes:
-            return f"bytes:{source_path}".encode()
+        async def read_bytes(self, source_path: str, *, range_header: str | None = None) -> bytes:
+            # Mirrors the SDK signature; the provider downloads in byte ranges.
+            content = f"bytes:{source_path}".encode()
+            if range_header is None:
+                return content
+            start, end = (int(x) for x in range_header.removeprefix("bytes=").split("-"))
+            return content[start : end + 1]
 
     class FakeRaw:
         def __init__(self) -> None:

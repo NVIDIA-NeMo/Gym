@@ -293,6 +293,14 @@ def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
     return "sandbox_not_found" in message or ("sandbox" in message and "not found" in message)
 
 
+def _is_range_not_satisfiable_error(exception: BaseException) -> bool:
+    """Match a byte-range read that starts at or past the end of the file (HTTP 416)."""
+    if _exception_status_code(exception) == 416:
+        return True
+    message = str(exception).lower()
+    return "416" in message and ("range" in message or "satisfiable" in message)
+
+
 def _log_create_retry(retry_state: Any) -> None:
     exception = retry_state.outcome.exception() if retry_state.outcome else None
     sleep_s = retry_state.next_action.sleep if retry_state.next_action else None
@@ -2046,25 +2054,77 @@ class OpenSandboxProvider:
             else None,
         )
 
-    async def _read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
-        """Read one file from an OpenSandbox sandbox."""
+    async def _read_file(self, handle: SandboxHandle, source_path: str, range_header: str | None = None) -> bytes:
+        """Read one file (or one byte range of it) from an OpenSandbox sandbox."""
+        if range_header is None:
+            operation_factory = lambda: handle.raw.files.read_bytes(source_path)  # noqa: E731
+        else:
+            operation_factory = lambda: handle.raw.files.read_bytes(source_path, range_header=range_header)  # noqa: E731
         return await self._await_sdk_operation(
-            lambda: handle.raw.files.read_bytes(source_path),
-            operation=f"read_file({source_path})",
+            operation_factory,
+            operation=f"read_file({source_path})" if range_header is None else f"read_file({source_path}, {range_header})",
             sandbox_id=handle.sandbox_id,
             timeout_s=float(self._connection.request_timeout_s)
             if self._connection.request_timeout_s is not None
             else None,
         )
 
+    # Whole-file transfers hold the entire payload in this process; a resources
+    # server finalizing hundreds of sessions at once moved tens of GB of artifact
+    # tarballs through memory that way. Files above this size move in pieces.
+    TRANSFER_CHUNK_BYTES = 64 * 1024 * 1024
+
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
-        """Upload one local file into an OpenSandbox sandbox."""
-        await self._write_file(handle, target_path, source_path.read_bytes())
+        """Upload one local file into an OpenSandbox sandbox, in parts when it is large."""
+        chunk = self.TRANSFER_CHUNK_BYTES
+        size = source_path.stat().st_size
+        if size <= chunk:
+            await self._write_file(handle, target_path, await asyncio.to_thread(source_path.read_bytes))
+            return
+        parts: list[str] = []
+        with source_path.open("rb") as source:
+            while True:
+                data = await asyncio.to_thread(source.read, chunk)
+                if not data:
+                    break
+                part = f"{target_path}.nemo-gym-part{len(parts):04d}"
+                await self._write_file(handle, part, data)
+                parts.append(part)
+        quoted = " ".join(shlex.quote(part) for part in parts)
+        # The parts may be owned by the upload identity while this runs as the sandbox default user, so a
+        # failed cleanup must not fail the assembly.
+        result = await self.exec(
+            handle,
+            f"cat {quoted} > {shlex.quote(target_path)}; rc=$?; rm -f {quoted} 2>/dev/null; exit $rc",
+            timeout_s=600,
+        )
+        if result.return_code:
+            raise RuntimeError(f"Failed to assemble {target_path} from {len(parts)} uploaded parts: {result.stderr}")
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
-        """Download one file from an OpenSandbox sandbox."""
+        """Download one file from an OpenSandbox sandbox, in byte ranges so large files never sit whole in memory."""
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_bytes(await self._read_file(handle, source_path))
+        chunk = self.TRANSFER_CHUNK_BYTES
+        start = 0
+        with target_path.open("wb") as target:
+            while True:
+                try:
+                    data = await self._read_file(handle, source_path, range_header=f"bytes={start}-{start + chunk - 1}")
+                except Exception as e:
+                    if _is_range_not_satisfiable_error(e):
+                        # The previous piece ended exactly at the end of the file (or the file is empty).
+                        break
+                    raise
+                if len(data) > chunk:
+                    # The server ignored the Range header and sent the whole file.
+                    if start:
+                        raise RuntimeError(f"Range download of {source_path} returned an unranged body after {start} bytes")
+                    await asyncio.to_thread(target.write, data)
+                    break
+                await asyncio.to_thread(target.write, data)
+                if len(data) < chunk:
+                    break
+                start += len(data)
 
     async def close(self, handle: SandboxHandle) -> None:
         """Terminate the sandbox and close local SDK resources."""
