@@ -203,67 +203,6 @@ export NCCL_NVLS_ENABLE=1
 export ENABLE_MOONCAKE=$ENABLE_MOONCAKE
 source "$VLLM_CONFIG"
 
-if (( ENABLE_MOONCAKE )); then
-    kv_load_failure_policy=fail
-    mooncake_kv_role=kv_consumer
-    if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
-        kv_load_failure_policy=recompute
-        mooncake_kv_role=kv_both
-    fi
-    # Preserve each model's connector settings while adding the shared KV store.
-    add_mooncake_to_args() {
-        mooncake_args=()
-        local arg config
-        while (( \$# )); do
-            arg=\$1
-            shift
-            if [[ "\$arg" == --kv-transfer-config ]]; then
-                config=\${1:?Missing value for --kv-transfer-config}
-                shift
-            elif [[ "\$arg" == --kv-transfer-config=* ]]; then
-                config=\${arg#*=}
-            else
-                mooncake_args+=("\$arg")
-                continue
-            fi
-            config=\$(python3 - "\$config" "\$kv_load_failure_policy" "\$mooncake_kv_role" <<'MOONCAKE_CONNECTOR'
-import json
-import sys
-
-config = json.loads(sys.argv[1])
-if config["kv_connector"] != "MultiConnector":
-    config = {
-        "kv_connector": "MultiConnector",
-        "kv_role": "kv_both",
-        "kv_connector_extra_config": {"connectors": [config]},
-    }
-config["kv_load_failure_policy"] = sys.argv[2]
-connectors = config["kv_connector_extra_config"]["connectors"]
-if not any(connector["kv_connector"] == "MooncakeStoreConnector" for connector in connectors):
-    connectors.append({
-        "kv_connector": "MooncakeStoreConnector",
-        "kv_role": "kv_both",
-        "kv_connector_extra_config": {"load_async": True, "lookup_async": True},
-    })
-for connector in connectors:
-    if connector["kv_connector"] == "MooncakeStoreConnector":
-        connector["kv_role"] = sys.argv[3]
-        if sys.argv[3] == "kv_consumer":
-            connector.setdefault("kv_connector_extra_config", {})["save_decode_cache"] = False
-print(json.dumps(config))
-MOONCAKE_CONNECTOR
-)
-            mooncake_args+=(--kv-transfer-config "\$config")
-        done
-    }
-    add_mooncake_to_args "\${VLLM_COMMON_ARGS[@]}"
-    VLLM_COMMON_ARGS=("\${mooncake_args[@]}")
-    add_mooncake_to_args "\${VLLM_PREFILL_ARGS[@]}"
-    VLLM_PREFILL_ARGS=("\${mooncake_args[@]}")
-    add_mooncake_to_args "\${VLLM_DECODE_ARGS[@]}"
-    VLLM_DECODE_ARGS=("\${mooncake_args[@]}")
-fi
-
 # Increase the number of file descriptors to 65k
 if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
   ulimit -Sn 65535
