@@ -51,7 +51,7 @@ from resources_servers.gdpval.judge_panel import (
     merge_create_kwargs,
     sample_judge,
 )
-from resources_servers.gdpval.preconvert import preconvert_dir_async, sidecar_pdf
+from resources_servers.gdpval.preconvert import OFFICE_EXTENSIONS, preconvert_dir_async, sidecar_pdf
 
 
 _BINARY_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -257,18 +257,69 @@ def _requested_filenames(checks: list[dict[str, Any]]) -> list[str]:
     return sorted(names)
 
 
-def _stage_submission(source_dir: Optional[str], filenames: list[str], stack: ExitStack) -> tuple[Path, list[str]]:
-    """Create a disposable artifact view without mutating submitted files."""
+def _existing_render(office_file: Path) -> Optional[Path]:
+    """An existing PDF render of *office_file*, or None when it has none.
+
+    Preconversion writes ``<stem>.pdf`` and switches to the injective
+    ``<name>.pdf`` sidecar only when two Office files share a stem, so both
+    names count. A plain ``<stem>.pdf`` is attributable to one source only when
+    a single Office file carries that stem; otherwise it is left out rather
+    than risk grading an unrelated document as the deliverable.
+    """
+
+    sidecar = sidecar_pdf(office_file)
+    if sidecar.is_file():
+        return sidecar
+    plain = office_file.with_suffix(".pdf")
+    if not plain.is_file():
+        return None
+    same_stem = [
+        sibling
+        for sibling in office_file.parent.iterdir()
+        if sibling.suffix.lower() in OFFICE_EXTENSIONS and sibling.stem == office_file.stem
+    ]
+    return plain if len(same_stem) == 1 else None
+
+
+def _stage_submission(
+    source_dir: Optional[str], filenames: list[str], stack: ExitStack, *, carry_renders: bool
+) -> tuple[Path, list[str]]:
+    """Create a disposable artifact view without mutating submitted files.
+
+    With ``carry_renders`` the caller does not convert Office deliverables, so an
+    existing render is carried in and one is required: without it the judge would
+    receive a filename-only stub and score a deliverable it never saw. When the
+    caller does convert, renders are left out, so the judge always sees our
+    conversion of the Office file rather than a PDF the model wrote itself.
+    """
 
     stage = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="aa_bclite_judge_")))
     source = Path(source_dir) if source_dir else None
     missing: list[str] = []
+    staged: list[Path] = []
     for name in filenames:
         candidate = source / name if source is not None else None
         if candidate is None or not candidate.is_file():
             missing.append(name)
             continue
         (stage / name).symlink_to(candidate.resolve())
+        staged.append(candidate)
+    if not carry_renders:
+        return stage, missing
+    # The Office original stays the deliverable; the render is how the judge reads it.
+    for candidate in staged:
+        if candidate.suffix.lower() not in OFFICE_EXTENSIONS:
+            continue
+        render = _existing_render(candidate)
+        if render is None:
+            raise RuntimeError(
+                f"{candidate.name} has no PDF render beside it and Office-to-PDF conversion is "
+                "off, so the judge would receive a filename-only stub. Place a render next to "
+                "the deliverable, or set preconvert_office_to_pdf=true on a host with LibreOffice."
+            )
+        if (stage / render.name).exists():
+            continue
+        (stage / render.name).symlink_to(render.resolve())
     return stage, missing
 
 
@@ -315,7 +366,34 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             raise ValueError(f"expected 63 AA-Briefcase-Lite checks, found {len(self._aa_checks)}")
         self._aa_binary_system = (root / "prompts" / "judge_system.txt").read_text(encoding="utf-8")
         self._aa_binary_user = (root / "prompts" / "judge_user.txt").read_text(encoding="utf-8")
+        self._require_office_rendering()
         super().model_post_init(context)
+
+    @property
+    def _carry_renders(self) -> bool:
+        """Renders beside a deliverable are used only when we do not convert ourselves."""
+
+        return not self.config.preconvert_office_to_pdf
+
+    def _require_office_rendering(self) -> None:
+        """Refuse to start when Office deliverables could not be rendered for the judge.
+
+        GDPval only guards comparison mode, so binary and pairwise grading would
+        otherwise reach the judge with filename-only stubs after the rollouts are
+        already spent.
+        """
+
+        if not self.config.preconvert_office_to_pdf:
+            return
+        from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
+
+        if not ensure_libreoffice():
+            raise RuntimeError(
+                "preconvert_office_to_pdf=True but libreoffice could not be ensured on the host. "
+                "Office deliverables would reach the judge as filename-only stubs. Install "
+                "libreoffice, or place a PDF render beside every Office deliverable and set "
+                "preconvert_office_to_pdf=false."
+            )
 
     def _checks_for_task(self, task_id: str, scoring_type: str) -> list[dict[str, Any]]:
         checks = [
@@ -471,7 +549,9 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             for check in checks:
                 filenames = tuple(_requested_filenames([check]))
                 if filenames not in stages:
-                    stages[filenames] = _stage_submission(body.deliverables_dir, list(filenames), stack)
+                    stages[filenames] = _stage_submission(
+                        body.deliverables_dir, list(filenames), stack, carry_renders=self._carry_renders
+                    )
                     await self._preconvert(stages[filenames][0])
                 stage, missing = stages[filenames]
                 eligible = judges
@@ -557,7 +637,9 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                 # Not every shipped reference covers every task (o3 has no w1_t1).
                 results.append(_skipped_reference(reference_id, reference, "no_submission_for_task"))
                 continue
-            ref_stage, ref_missing = _stage_submission(str(ref_source), filenames, stack)
+            ref_stage, ref_missing = _stage_submission(
+                str(ref_source), filenames, stack, carry_renders=self._carry_renders
+            )
             await self._preconvert(ref_stage)
             matchup_judges = _judges_for_reference(reference, resolved_judges)
             if not matchup_judges:
@@ -649,7 +731,9 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             pairwise_results: list[dict[str, Any]] = []
             wins = losses = ties = pairwise_invalid = 0
             if self.config.reward_mode in {"pairwise", "all"}:
-                eval_stage, missing = _stage_submission(body.deliverables_dir, filenames, stack)
+                eval_stage, missing = _stage_submission(
+                    body.deliverables_dir, filenames, stack, carry_renders=self._carry_renders
+                )
                 await self._preconvert(eval_stage)
                 modalities = dir_media_modalities(eval_stage)
                 if modalities:

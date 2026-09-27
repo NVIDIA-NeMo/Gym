@@ -23,6 +23,7 @@ from resources_servers.aa_briefcase_lite.app import (
     _stage_submission,
 )
 from resources_servers.gdpval.judge_panel import ResolvedJudge
+from resources_servers.gdpval.preconvert import find_convertible_files
 
 
 @pytest.mark.parametrize("passed", [True, False])
@@ -110,7 +111,7 @@ def test_stage_submission_is_read_only_view_and_records_missing(tmp_path: Path) 
     artifact = tmp_path / "report.pdf"
     artifact.write_bytes(b"pdf")
     with ExitStack() as stack:
-        stage, missing = _stage_submission(str(tmp_path), ["report.pdf", "notes.txt"], stack)
+        stage, missing = _stage_submission(str(tmp_path), ["report.pdf", "notes.txt"], stack, carry_renders=False)
         assert (stage / "report.pdf").is_symlink()
         assert (stage / "report.pdf").read_bytes() == b"pdf"
         assert missing == ["notes.txt"]
@@ -296,3 +297,16 @@ async def test_binary_empty_answers_retry_only_the_affected_check(monkeypatch, t
     assert all("transport_attempt=1 status=200" in record for record in records)
     for attempt, record in enumerate(records[1:], 1):
         assert f"format_attempt={attempt} " in record
+
+
+def _office_with_render(root: Path, office_name: str, render_name: str) -> None:
+    (root / office_name).write_bytes(b"office")
+    (root / render_name).write_bytes(b"%PDF-1.4 render")
+
+
+def test_staged_render_leaves_nothing_to_convert(tmp_path: Path) -> None:
+    _office_with_render(tmp_path, "budget.xlsx", "budget.pdf")
+    with ExitStack() as stack:
+        stage, _missing = _stage_submission(str(tmp_path), ["budget.xlsx"], stack, carry_renders=True)
+        # No conversion candidate means LibreOffice is never invoked.
+        assert find_convertible_files(stage) == []

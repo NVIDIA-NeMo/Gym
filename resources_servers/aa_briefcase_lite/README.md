@@ -18,6 +18,14 @@ diagnostic. `all` mode reports binary and pairwise metrics separately and also
 returns a non-official convenience average. No output from this server is
 AA-Briefcase leaderboard comparable.
 
+Office deliverables are graded through a PDF rendering. The host needs LibreOffice, or
+every Office deliverable needs a PDF render beside it (`budget.pdf`, or `plan.pptx.pdf`
+when two Office files share a stem) with `preconvert_office_to_pdf=false`. With neither,
+grading fails loudly rather than sending filename-only stubs to the judge: the server
+refuses to start when conversion is on, and staging raises when it is off. With
+conversion on, a render found beside a deliverable is ignored, so the judge always sees
+our conversion of the Office file and never a PDF the model wrote itself.
+
 ## Public-reference example validation
 
 The five example rows cover the four released Lite tasks and repeat the video
