@@ -2,13 +2,19 @@
 terminal_bench_2_1_resources_server:          # instance name — how agents/CLI refer to this server
   resources_servers:                    # server type: resources_servers | responses_api_agents | responses_api_models
     terminal_bench_2_1:                      # implementation directory under resources_servers/
-      allowed_agents: [opencode_sandboxed_agent, terminus_2_sandboxed_agent]
+      allowed_agents: [opencode_sandboxed_agent, terminus_2_sandboxed_agent, miniswe_in_sandbox_agent]
       entrypoint: app.py                # server entry module
       domain: other                     # task domain; change to the closest supported domain
       verified: false                   # set true once the benchmark has been baselined and reviewed
 
       evaluation_timeout: 1800
       is_verifying_golden_patch: false
+      # Debian/apt source preparation after the sandbox starts; turn off for self-contained images or
+      # deny-all network policies (no egress -> apt-get update only burns time).
+      prepare_apt_sources: true
+      # Directory for one small JSON record per session (open at seed, closed at verify) so a campaign
+      # driver can resume after a restart; null disables.
+      session_records_dir: null
 
       sandbox_provider: sandbox
       sandbox_config:

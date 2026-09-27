@@ -84,3 +84,24 @@ memory instead. Do not run the runner as root to "fix" this: the resources serve
 
 Task MCP servers (`mcp_servers` in the seed → unstarted infrastructure error); images without
 `python3` ≥ 3.9 or `setsid`; multimodal tool output; the `mode: confirm` interactive path.
+
+## Terminal-Bench 2.1 resources (same-sandbox verification)
+
+The agent also runs on `resources_servers/terminal_bench_2_1`, which serves the same
+seed/verify session contract next to its original handle contract (profile
+`benchmarks/terminal_bench_2_1/miniswe_in_sandbox.yaml`). Differences from TB4 that matter here:
+
+- One sandbox per episode: the agent runs in it and the resources server then uploads the task's
+  `tests/` and runs `bash /tests/test.sh` in the same sandbox, so the workspace is graded in place
+  (no artifact declarations, no separate verifier image). Rows carry `task_name`, `docker_image`,
+  `task_folder`, the instruction as the single user message, and optionally `agent_timeout_sec`,
+  `agent_user`, `verifier_timeout_sec`, `verifier_env`, `rollout_id`.
+- Identity: `seed.user` is the row's `agent_user` (absent for root images), so TB2 tasks run as the
+  image default unless the row says otherwise. No `mcp_servers` / `skills_dir`.
+- An `infrastructure_error` or `cancelled` termination, or an agent that never started, releases the
+  sandbox WITHOUT running the tests (`mask_sample: true`, `failure_kind: agent_run_error`); every other
+  termination is graded as it stands, as on TB4.
+- Network: TB2.1 sandboxes are created without a network policy unless the resources block sets
+  `sandbox_config.provider_options.network_policy`; for `allow_internet = false` tasks use a deny-all
+  policy with one egress allow for the model gateway (the verifier shares the sandbox, so it sees the
+  same policy).

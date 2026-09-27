@@ -1,0 +1,36 @@
+config_paths:
+- responses_api_agents/miniswe_in_sandbox_agent/configs/miniswe_in_sandbox_agent.yaml
+- resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
+
+terminal_bench_2_1_miniswe_in_sandbox_resources_server:
+  _inherit_from: terminal_bench_2_1_resources_server
+  resources_servers:
+    terminal_bench_2_1:
+      allowed_agents: [miniswe_in_sandbox_agent]
+      session_records_dir: ${oc.select:tb21_session_records_dir,null}
+
+terminal_bench_2_1_miniswe_in_sandbox:
+  _inherit_from: miniswe_in_sandbox_agent
+  responses_api_agents:
+    miniswe_in_sandbox_agent:
+      domain: agent
+      description: mini-SWE 2.4.6 templates, harness running inside the sandbox, on Terminal-Bench 2.1 resources.
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_2_1_miniswe_in_sandbox_resources_server
+      datasets:
+      - name: terminal_bench_2_1
+        type: benchmark
+        jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
+        prepare_script: benchmarks/terminal_bench_2_1/prepare.py
+        num_repeats: 8
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Sandbox-reachable origin that forwards to this Gym's model server; see the agent README.
+      model_gateway_url: ${oc.select:tb21_model_gateway_url,???}
+      harness:
+        step_limit: ${oc.select:tb21_max_steps,500}
+        step_timeout_sec: ${oc.select:tb21_step_timeout_sec,30}
+      agent_max_timeout_sec: ${oc.select:tb21_agent_max_timeout_sec,null}
+      artifacts_dir: ${oc.select:tb21_agent_artifacts_dir,results/terminal_bench_2_1/agent}
