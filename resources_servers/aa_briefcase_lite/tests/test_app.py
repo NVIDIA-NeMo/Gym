@@ -111,7 +111,7 @@ def test_stage_submission_is_read_only_view_and_records_missing(tmp_path: Path) 
     artifact = tmp_path / "report.pdf"
     artifact.write_bytes(b"pdf")
     with ExitStack() as stack:
-        stage, missing = _stage_submission(str(tmp_path), ["report.pdf", "notes.txt"], stack)
+        stage, missing = _stage_submission(str(tmp_path), ["report.pdf", "notes.txt"], stack, carry_renders=False)
         assert (stage / "report.pdf").is_symlink()
         assert (stage / "report.pdf").read_bytes() == b"pdf"
         assert missing == ["notes.txt"]
@@ -304,43 +304,9 @@ def _office_with_render(root: Path, office_name: str, render_name: str) -> None:
     (root / render_name).write_bytes(b"%PDF-1.4 render")
 
 
-def test_stage_submission_carries_unambiguous_pdf_render(tmp_path: Path) -> None:
-    _office_with_render(tmp_path, "budget.xlsx", "budget.pdf")
-    with ExitStack() as stack:
-        stage, missing = _stage_submission(str(tmp_path), ["budget.xlsx"], stack)
-        assert missing == []
-        assert sorted(entry.name for entry in stage.iterdir()) == ["budget.pdf", "budget.xlsx"]
-        # The Office original remains the deliverable.
-        assert (stage / "budget.xlsx").read_bytes() == b"office"
-
-
-def test_stage_submission_carries_sidecar_render(tmp_path: Path) -> None:
-    _office_with_render(tmp_path, "plan.pptx", "plan.pptx.pdf")
-    with ExitStack() as stack:
-        stage, _missing = _stage_submission(str(tmp_path), ["plan.pptx"], stack)
-        assert sorted(entry.name for entry in stage.iterdir()) == ["plan.pptx", "plan.pptx.pdf"]
-
-
-def test_stage_submission_skips_render_shared_by_two_office_sources(tmp_path: Path) -> None:
-    # ``plan.pdf`` cannot be attributed to either source, so it stays out.
-    _office_with_render(tmp_path, "plan.pptx", "plan.pdf")
-    (tmp_path / "plan.xlsx").write_bytes(b"office")
-    with ExitStack() as stack:
-        stage, _missing = _stage_submission(str(tmp_path), ["plan.pptx"], stack)
-        assert [entry.name for entry in stage.iterdir()] == ["plan.pptx"]
-
-
-def test_stage_submission_ignores_unrelated_pdf(tmp_path: Path) -> None:
-    _office_with_render(tmp_path, "budget.xlsx", "budget.pdf")
-    (tmp_path / "notes.pdf").write_bytes(b"%PDF-1.4 unrelated")
-    with ExitStack() as stack:
-        stage, _missing = _stage_submission(str(tmp_path), ["budget.xlsx"], stack)
-        assert "notes.pdf" not in {entry.name for entry in stage.iterdir()}
-
-
 def test_staged_render_leaves_nothing_to_convert(tmp_path: Path) -> None:
     _office_with_render(tmp_path, "budget.xlsx", "budget.pdf")
     with ExitStack() as stack:
-        stage, _missing = _stage_submission(str(tmp_path), ["budget.xlsx"], stack)
+        stage, _missing = _stage_submission(str(tmp_path), ["budget.xlsx"], stack, carry_renders=True)
         # No conversion candidate means LibreOffice is never invoked.
         assert find_convertible_files(stage) == []

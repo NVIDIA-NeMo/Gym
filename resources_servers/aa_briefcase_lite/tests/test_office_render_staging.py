@@ -14,6 +14,11 @@ from resources_servers.aa_briefcase_lite.app import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_dataset_on_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(AABriefcaseLiteResourcesServer, "model_post_init", lambda self, context: None)
+
+
 def _deliverable(tmp_path, render=None):
     (tmp_path / "budget.xlsx").write_bytes(b"xlsx")
     if render is not None:
@@ -43,6 +48,24 @@ def test_a_missing_render_raises_instead_of_stubbing_the_judge(tmp_path):
     with ExitStack() as stack:
         with pytest.raises(RuntimeError, match="filename-only stub"):
             _stage_submission(source, ["budget.xlsx"], stack, carry_renders=True)
+
+
+def test_a_render_shared_by_two_office_sources_raises(tmp_path):
+    # ``plan.pdf`` cannot be attributed to either source, so there is no usable render.
+    (tmp_path / "plan.pptx").write_bytes(b"pptx")
+    (tmp_path / "plan.xlsx").write_bytes(b"xlsx")
+    (tmp_path / "plan.pdf").write_bytes(b"%PDF-1.4")
+    with ExitStack() as stack:
+        with pytest.raises(RuntimeError, match="filename-only stub"):
+            _stage_submission(str(tmp_path), ["plan.pptx"], stack, carry_renders=True)
+
+
+def test_an_unrelated_pdf_is_never_staged(tmp_path):
+    source = _deliverable(tmp_path, "budget.pdf")
+    (tmp_path / "notes.pdf").write_bytes(b"%PDF-1.4")
+    with ExitStack() as stack:
+        stage, _missing = _stage_submission(source, ["budget.xlsx"], stack, carry_renders=True)
+        assert "notes.pdf" not in {path.name for path in stage.iterdir()}
 
 
 def test_a_model_written_pdf_never_replaces_our_conversion(tmp_path):
