@@ -40,6 +40,8 @@ untouched.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import re
@@ -635,3 +637,46 @@ async def preconvert_dir_async(
     max_concurrent: int = DEFAULT_MAX_CONCURRENT,
 ) -> tuple[int, int, list[str]]:
     return await asyncio.to_thread(preconvert_dir, root_dir, max_concurrent)
+
+
+def office(root: Path) -> None:
+    ok, failed, errors = preconvert_dir(root, max_concurrent=4)
+    print(f"Office: converted={ok}, failed={failed}", flush=True)
+    for error in errors:
+        print(f"Office render skipped: {error}", flush=True)
+
+
+def check_reference_inputs(
+    rows: Iterable[dict], source: Path, candidate: Path, missing_task_ids: set[str] | None = None
+) -> None:
+    """Check declared benchmark inputs against the existing conversion receipt."""
+    receipt = candidate.with_name(candidate.name + ".media.json")
+    entries = (
+        {entry["source"]: entry for entry in json.loads(receipt.read_text())["entries"]} if receipt.exists() else {}
+    )
+    for row in rows:
+        if row["task_id"] in (missing_task_ids or set()):
+            continue
+        inputs = row.get("reference_files") or []
+        if isinstance(inputs, str):
+            inputs = json.loads(inputs)
+        for name in inputs:
+            relative = Path(name)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError(f"invalid benchmark input path: {name}")
+            if relative.parts[0] != "reference_files":
+                relative = Path("reference_files") / relative
+            relative = Path(f"task_{row['task_id']}") / "repeat_0" / relative
+            entry = entries.get(relative.as_posix())
+            if entry is None:
+                raise ValueError(f"benchmark input has no conversion receipt: {relative}")
+            for root, path_key, hash_key in (
+                (source, "source", "source_sha256"),
+                (candidate, "output", "output_sha256"),
+            ):
+                path = root / entry[path_key]
+                if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+                    raise ValueError(f"missing prepared benchmark input: {path}")
+                with path.open("rb") as stream:
+                    if hashlib.file_digest(stream, "sha256").hexdigest() != entry[hash_key]:
+                        raise ValueError(f"benchmark input changed since preparation: {path}")

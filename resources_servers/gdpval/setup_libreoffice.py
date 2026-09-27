@@ -16,6 +16,7 @@ preconversion in ``preconvert.py`` actually produces sibling PDFs.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -43,7 +44,11 @@ _APT_PACKAGES = (
     "libreoffice-java-common",
 )
 
-_APT_INSTALL_TIMEOUT_S = 600
+# A cold install pulls ~500 MB. 600 s was enough for one run at a time, but a
+# seven-campaign sweep has every leg re-pulling it concurrently and blew past
+# it on 2026-09-12, taking the whole leg down. Raised with headroom rather
+# than tuned to the observed failure.
+_APT_INSTALL_TIMEOUT_S = 1800
 
 
 def _run(cmd: list[str], *, timeout: int) -> tuple[int, str, str]:
@@ -74,6 +79,34 @@ def _java_runs() -> bool:
     return rc == 0
 
 
+def _javaldx_works() -> bool:
+    """Return True iff libreoffice can actually find a JRE through `javaldx`.
+
+    This is the capability the v1-v3 early-exits kept failing to detect. Each
+    of them tested a proxy — `which("libreoffice")`, then `which("java")`, then
+    `java -version` — and each proxy passed on an image where `javaldx` still
+    could not load a JVM, so chart and formula documents produced no PDF.
+
+    `javaldx` is the bridge itself: it loads libjvm.so via JNI and prints the
+    JRE path it resolved. Running it answers the real question instead of an
+    adjacent one. On failure it prints "failed to launch" / "Could not find a
+    Java Runtime" and yields no path.
+    """
+    exe = "/usr/lib/libreoffice/program/javaldx"
+    if not os.path.exists(exe):
+        # Ships in libreoffice-java-common, which the libreoffice metapackage
+        # does not depend on. Absent means the bridge was never installed.
+        return False
+    try:
+        rc, out, err = _run([exe], timeout=30)
+    except Exception:
+        return False
+    blob = f"{out}\n{err}".lower()
+    if "failed to launch" in blob or "could not find a java runtime" in blob:
+        return False
+    return rc == 0 and bool(out.strip())
+
+
 def ensure_libreoffice() -> bool:
     """Make sure libreoffice + a *functional* JRE are present. ALWAYS run apt-install on Linux.
 
@@ -91,7 +124,7 @@ def ensure_libreoffice() -> bool:
            but libreoffice's `javaldx` (which loads libjvm.so via JNI) still
            can't find a usable JRE. Concrete signal: 10 `failed to launch
            javaldx` errors at 35 rollouts on slurm 2621556.
-      v4 (this) — drop the early-exit entirely. ALWAYS run apt-update +
+      v4 — drop the early-exit entirely. ALWAYS run apt-update +
            apt-install of the full package list. `apt-get install` is
            idempotent on already-installed packages (a few seconds when
            everything is present), and the only configuration that
@@ -110,6 +143,10 @@ def ensure_libreoffice() -> bool:
             sys.platform,
         )
         return False
+
+    if shutil.which("libreoffice") and _java_runs() and _javaldx_works():
+        LOGGER.info("libreoffice, a working JRE and javaldx are already present; skipping apt-get.")
+        return True
 
     if not shutil.which("apt-get"):
         LOGGER.warning("apt-get is unavailable; GDPVal preconvert will be a no-op.")

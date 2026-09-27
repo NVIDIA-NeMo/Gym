@@ -13,10 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import zipfile
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
+from omegaconf import OmegaConf
+from openai import OpenAI
 
+from nemo_gym import server_utils
+from resources_servers.gdpval import app as gdpval_app
+from resources_servers.gdpval import setup_libreoffice
 from resources_servers.gdpval.comparison import (
     B_WIN_RESPONSE,
     FILE_TYPE_MAP,
@@ -24,6 +31,7 @@ from resources_servers.gdpval.comparison import (
     Judge,
     parse_judgement,
     run_trials,
+    send_judge_request,
 )
 from resources_servers.gdpval.judge_panel import (
     AUDIO_EXTS,
@@ -40,6 +48,108 @@ from resources_servers.gdpval.judge_panel import (
     sample_judge,
     select_av_judges,
 )
+from responses_api_models.openai_model import app as proxy_app
+
+
+@pytest.mark.parametrize("gemini_key", [None, "gemini-fixture-key"])
+@pytest.mark.parametrize("custom_models", [False, True])
+def test_benchmark_panel_reaches_intended_upstream_models_and_credentials(monkeypatch, gemini_key, custom_models):
+    """Resolve the benchmark, then traverse the real judge request and fixed-model proxy."""
+    monkeypatch.setattr(setup_libreoffice, "ensure_libreoffice", lambda: True)
+    shared_key = "shared-fixture-key"
+    monkeypatch.setenv("JUDGE_API_KEY", shared_key)
+    monkeypatch.setenv("JUDGE_BASE_URL", "https://upstream.invalid/v1")
+    if gemini_key is None:
+        monkeypatch.delenv("JUDGE_GEMINI_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("JUDGE_GEMINI_API_KEY", gemini_key)
+    expected_models = {
+        "gpt-5.5": ("JUDGE_GPT_MODEL", "openai/openai/gpt-5.5"),
+        "gemini-3.1-pro": ("JUDGE_GEMINI_MODEL", "gcp/google/gemini-3.1-pro-preview"),
+        "claude-opus-4.8": ("JUDGE_CLAUDE_MODEL", "aws/anthropic/bedrock-claude-opus-4-8"),
+    }
+    for name, (variable, model) in list(expected_models.items()):
+        monkeypatch.delenv(variable, raising=False)
+        if custom_models:
+            model += "-fixture-override"
+            monkeypatch.setenv(variable, model)
+        expected_models[name] = model
+    monkeypatch.delenv("JUDGE_MODEL_NAME", raising=False)
+    monkeypatch.delenv("GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS", raising=False)
+    config = OmegaConf.to_container(
+        OmegaConf.load(Path(__file__).resolve().parents[3] / "benchmarks/gdpval/config.yaml"), resolve=True
+    )
+
+    class CapturingClient:
+        def __init__(self, **connection):
+            self.connection = connection
+            self.requests = []
+
+        async def create_chat_completion(self, **body):
+            self.requests.append(body)
+            return {
+                "id": "chatcmpl-fixture",
+                "object": "chat.completion",
+                "created": 0,
+                "model": body["model"],
+                "choices": [
+                    {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "BOXED[B]"}}
+                ],
+            }
+
+    monkeypatch.setattr(proxy_app, "NeMoGymAsyncOpenAI", CapturingClient)
+    proxies = {}
+    for name, block in config.items():
+        if not isinstance(block, dict) or "responses_api_models" not in block:
+            continue
+        fields = block["responses_api_models"]["openai_model"]
+        fields.update(host="127.0.0.1", port=12000 + len(proxies), name=name)
+        proxy = proxy_app.SimpleModelServer(
+            config=proxy_app.SimpleModelServerConfig(**fields),
+            server_client=MagicMock(spec=server_utils.ServerClient, global_config_dict=config),
+        )
+        proxies[f"http://{fields['host']}:{fields['port']}/v1"] = proxy
+    monkeypatch.setattr(server_utils, "get_global_config_dict", lambda: config)
+    resource = gdpval_app.GDPValResourcesServer.model_construct(
+        config=gdpval_app.GDPValResourcesServerConfig(
+            host="127.0.0.1",
+            port=13000,
+            name="gdpval_resources_server",
+            **config["gdpval_resources_server"]["resources_servers"]["gdpval"],
+        )
+    )
+    panel = resource._resolve_judges()
+    assert {judge.name for judge in panel} == set(expected_models)
+    for judge in panel:
+        proxy = proxies[judge.base_url]
+        with TestClient(proxy.setup_webserver()) as transport:
+            with OpenAI(
+                base_url=judge.base_url, api_key=judge.api_key, http_client=transport, max_retries=0
+            ) as client:
+                assert (
+                    send_judge_request(
+                        client,
+                        judge.model,
+                        [{"role": "user", "content": "fixture"}],
+                        max_output_tokens=16,
+                        create_overrides=judge.create_overrides,
+                    )
+                    == "BOXED[B]"
+                )
+        body = proxy._client.requests[-1]
+        assert body["model"] == expected_models[judge.name]
+        assert proxy._client.connection["base_url"] == "https://upstream.invalid/v1"
+        expected_key = (gemini_key or shared_key) if judge.name == "gemini-3.1-pro" else shared_key
+        assert proxy._client.connection["api_key"] == expected_key
+        if judge.name == "gpt-5.5":
+            assert body["reasoning_effort"] == "medium"
+        elif judge.name == "gemini-3.1-pro":
+            assert body["reasoning_effort"] == "high"
+        else:
+            assert body["thinking"] == {"type": "adaptive"}
+            assert body["output_config"] == {"effort": "high"}
+            assert body["timeout"] == body["request_timeout"] == 900
+            assert "temperature" not in body
 
 
 class TestMediaExtensionSetsAgree:

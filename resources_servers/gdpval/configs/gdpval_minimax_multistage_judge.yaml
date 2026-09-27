@@ -98,7 +98,7 @@ gdpval_resources_server:
       reference_models:
         deepseek_v4_flash_0731:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/deepseek_v4_flash_0731
-          elo: 1468
+          elo: 1442
         deepseek_v4_pro:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/deepseek_v4_pro
           elo: 1223
@@ -110,7 +110,7 @@ gdpval_resources_server:
           elo: 1181
         kimi_k26:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/kimi_k26
-          elo: 1115
+          elo: 1096
         nemotron3_ultra:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/nemotron3_ultra
           elo: 1091
@@ -128,10 +128,35 @@ gdpval_resources_server:
           elo: 745
         gemma4_26b:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/gemma4_26b
-          elo: 713
+          elo: 693
         qwen3_30b_thinking:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/qwen3_30b_thinking
           elo: 274
+        # Sep-2026 Super-3.5 baseline field. Anchors read from the AA
+        # GDPval-AA v2 board 2026-09-17; effort is part of the row, so the
+        # key carries it where AA scores efforts separately.
+        kimi_k3_max:
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/kimi_k3_max
+          elo: 1548
+        qwen38_27b_medium:
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/qwen38_27b_medium
+          elo: 1430
+        gpt55_high:
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/gpt55_high
+          elo: 1372
+        claude_sonnet5_high:
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/claude_sonnet5_high
+          elo: 1308
+        minimax_m3:
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/minimax_m3
+          elo: 1304
+        # 0813 release at MAX effort, matching AA's only 0813 row (1493).
+        # An earlier high-effort collection was discarded: the board has no
+        # 0813 high row. Not a duplicate of deepseek_v4_pro (1223), which is
+        # the older unversioned/0424 release.
+        deepseek_v4_pro_0813_max:
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/deepseek_v4_pro_0813_max
+          elo: 1493
       # Pairwise trials per (task x reference x repeat). 4 debiases position with
       # swap/no-swap; lower to 2 for a faster smoke test.
       num_comparison_trials: 4
