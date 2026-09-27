@@ -10,9 +10,9 @@ The OpenCode agent (``responses_api_agents/opencode_sandboxed_agent``) speaks th
 side, so the agent stays byte-identical:
 
 * an in-sandbox **launcher** staged as root that switches to the task's ``agent.user`` (``setpriv`` → ``runuser`` →
-  ``su``), pins ``HOME`` to that account, and, when configured, rewrites the model ``baseURL`` origin in
+  ``su``), pins ``HOME`` to that account, when configured rewrites the model ``baseURL`` origin in
   ``OPENCODE_CONFIG_CONTENT`` to a sandbox-reachable gateway (the path, including Gym's rollout-capture prefix, is
-  kept);
+  kept), and enforces the per-task agent budget (``agent_timeout_floor_sec``) on the ``run`` session;
 * an **install script** honouring the agent's cached-installer CLI (``--glibc-binary``/``--musl-binary``/``--binary``)
   that places the real binary under the stage directory and the launcher at ``$HOME/.opencode/bin/opencode`` — the
   exact path the agent puts on ``PATH``;
@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nemo_gym.sandbox import AsyncSandbox
 from resources_servers.terminal_bench_4.models import AgentTermination
@@ -51,6 +51,10 @@ class OpenCodeHarnessConfig(BaseModel):
     require_instruction_in_prompt: bool = True
     # Launch/identity evidence written inside the sandbox; collected with /logs/agent into the trial directory.
     launch_record_dir: str = "/logs/agent/tb4-opencode"
+    # Per-task agent budget floor (seconds). When set, the launcher kills the `opencode run` session after
+    # max(floor, task agent.timeout_sec) and the seed's agent_timeout_sec reports that budget; None leaves the run
+    # unbounded on the resources side (the agent's own exec timeout still applies).
+    agent_timeout_floor_sec: int | None = Field(default=None, gt=0)
 
     @field_validator("stage_dir", "launch_record_dir")
     @classmethod
@@ -120,11 +124,14 @@ echo "Installed TB4 OpenCode launcher ($libc binary from $source_binary) at $ins
 LAUNCHER_SCRIPT = r"""#!/bin/sh
 # TB4 resources-owned OpenCode launcher. The agent runs `opencode ...` as the sandbox default user; this switches to
 # the task's agent identity, pins HOME, optionally re-points the model baseURL at the sandbox-reachable gateway,
-# records the launch, and execs the real binary. Exit status is OpenCode's own.
+# records the launch, and execs the real binary. Exit status is OpenCode's own (124 when the budget killed a run).
 set -eu
 TB4_STAGE_DIR="__STAGE_DIR__"
 . "$TB4_STAGE_DIR/launcher.env"
-export TB4_SESSION_ID TB4_AGENT_USER TB4_MODEL_GATEWAY TB4_WORKDIR TB4_STAGE_DIR
+budget="${TB4_AGENT_TIMEOUT_S:-0}"
+case "$budget" in ''|*[!0-9]*) budget=0 ;; esac
+TB4_AGENT_TIMEOUT_S="$budget"
+export TB4_SESSION_ID TB4_AGENT_USER TB4_MODEL_GATEWAY TB4_WORKDIR TB4_STAGE_DIR TB4_AGENT_TIMEOUT_S
 real="$TB4_STAGE_DIR/bin/opencode.real"
 [ -x "$real" ] || { echo "tb4-opencode: real binary missing at $real (install step skipped?)" >&2; exit 96; }
 sub="${1:-}"
@@ -182,9 +189,9 @@ records="$TB4_STAGE_DIR/records"
 mkdir -p "$records" 2>/dev/null || true
 record_dir="__RECORD_DIR__"
 now_ts="$(date +%s)"
-launch_record="$(printf '{"session_id":"%s","subcommand":"%s","caller_uid":%s,"requested_user":"%s","switch":%s,"uid":"%s","gid":"%s","home":"%s","home_fallback":%s,"cwd":"%s","workdir":"%s","gateway":"%s","gateway_rewritten":%s,"gateway_error":"%s"}' \
+launch_record="$(printf '{"session_id":"%s","subcommand":"%s","caller_uid":%s,"requested_user":"%s","switch":%s,"uid":"%s","gid":"%s","home":"%s","home_fallback":%s,"cwd":"%s","workdir":"%s","gateway":"%s","gateway_rewritten":%s,"gateway_error":"%s","budget_s":%s}' \
     "${TB4_SESSION_ID:-}" "${sub:-}" "$caller_uid" "$target" "$switch" "$uid" "$gid" "$home" "$home_fallback" "$(pwd)" \
-    "${TB4_WORKDIR:-}" "${TB4_MODEL_GATEWAY:-}" "$gateway_rewritten" "$gateway_error")"
+    "${TB4_WORKDIR:-}" "${TB4_MODEL_GATEWAY:-}" "$gateway_rewritten" "$gateway_error" "$budget")"
 printf '%s\n' "$launch_record" > "$records/$now_ts-$$-${sub:-none}.json" 2>/dev/null || true
 if mkdir -p "$record_dir" 2>/dev/null; then
     [ "$switch" = 1 ] && chown "$uid:$gid" "$record_dir" 2>/dev/null || true
@@ -221,11 +228,33 @@ enter='if [ -n "${TB4_WORKDIR:-}" ]; then cd "$TB4_WORKDIR" || exit 95; fi; '
 if [ "$sub" = run ]; then
     # Own session + process group (registered for the resources server's quiesce step), and this launcher stays
     # alive to record the exit status: the resources server derives the agent's termination from these records.
+    # The per-task budget (TB4_AGENT_TIMEOUT_S, 0 = none) signals only that session: coreutils `timeout -k 60`
+    # inside it when the image has one (probed: busybox's lacks -k), else a watchdog owned by this launcher that
+    # signals the session's process group, which the inner shell publishes before it execs. Its stdio is detached
+    # so an orphaned sleep can never hold the agent's exec pipes open.
+    TB4_TIMEOUT_BIN=""; watchdog=""; fired="$records/$now_ts-$$-watchdog.fired"
+    TB4_RUN_PGID="/tmp/${TB4_SESSION_ID:-tb4}.$$.pgid"; export TB4_TIMEOUT_BIN TB4_RUN_PGID
+    rm -f "$TB4_RUN_PGID" 2>/dev/null || true
+    if [ "$budget" -gt 0 ]; then
+        if timeout -k 1 1 true >/dev/null 2>&1; then
+            TB4_TIMEOUT_BIN="$(command -v timeout)"
+        else
+            # No `--` before the negative pid: dash and busybox ash reject it, every sh accepts `kill -SIG -pgid`.
+            ( set +e; sleep "$budget"; : > "$fired"; pgid="$(cat "$TB4_RUN_PGID" 2>/dev/null)"
+              [ -n "$pgid" ] && kill -TERM "-$pgid" 2>/dev/null; sleep 60
+              [ -n "$pgid" ] && kill -KILL "-$pgid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+            watchdog=$!
+        fi
+    fi
     set +e
-    as_agent setsid --wait sh -c "$enter"'echo $$ >> "$TB4_PIDS"; id -u >> "$TB4_IDENTITY" 2>/dev/null || true; exec "$0" "$@"' "$real" "$@"
+    as_agent setsid --wait sh -c "$enter"'echo $$ >> "$TB4_PIDS"; echo $$ > "$TB4_RUN_PGID"; id -u >> "$TB4_IDENTITY" 2>/dev/null || true; if [ -n "${TB4_TIMEOUT_BIN:-}" ]; then exec "$TB4_TIMEOUT_BIN" -k 60 "$TB4_AGENT_TIMEOUT_S" "$0" "$@"; fi; exec "$0" "$@"' "$real" "$@"
     status=$?
     set -e
-    exit_record="$(printf '{"session_id":"%s","pid":%s,"exit_code":%s,"wall_s":%s}' "${TB4_SESSION_ID:-}" "$$" "$status" "$(( $(date +%s) - now_ts ))")"
+    [ -z "$watchdog" ] || kill "$watchdog" 2>/dev/null || true
+    rm -f "$TB4_RUN_PGID" 2>/dev/null || true
+    timed_out=0
+    if [ "$budget" -gt 0 ] && { [ "$status" = 124 ] || [ -e "$fired" ]; }; then timed_out=1; fi
+    exit_record="$(printf '{"session_id":"%s","pid":%s,"exit_code":%s,"wall_s":%s,"timed_out":%s}' "${TB4_SESSION_ID:-}" "$$" "$status" "$(( $(date +%s) - now_ts ))" "$timed_out")"
     printf '%s\n' "$exit_record" > "$records/$now_ts-$$-run-exit.json" 2>/dev/null || true
     printf '%s\n' "$exit_record" > "$record_dir/$now_ts-$$-run-exit.json" 2>/dev/null || true
     exit "$status"
@@ -273,13 +302,22 @@ def render_scripts(config: OpenCodeHarnessConfig) -> dict[str, str]:
 
 
 def launcher_env(
-    *, session_id: str, agent_user: str | int | None, gateway: str | None, workdir: str | None = None
+    *,
+    session_id: str,
+    agent_user: str | int | None,
+    gateway: str | None,
+    workdir: str | None = None,
+    agent_timeout_s: int | None = None,
 ) -> str:
+    if agent_timeout_s is not None and (isinstance(agent_timeout_s, bool) or int(agent_timeout_s) <= 0):
+        raise ValueError(f"agent_timeout_s must be a positive whole number of seconds, got {agent_timeout_s!r}")
     values = {
         "TB4_SESSION_ID": session_id,
         "TB4_AGENT_USER": "" if agent_user is None else str(agent_user),
         "TB4_MODEL_GATEWAY": gateway or "",
         "TB4_WORKDIR": workdir or "",
+        # 0 = no resources-side budget; the launcher treats anything but digits the same way.
+        "TB4_AGENT_TIMEOUT_S": "0" if agent_timeout_s is None else str(int(agent_timeout_s)),
     }
     for key, value in values.items():
         if not re.fullmatch(r"[A-Za-z0-9_.:/@%+=-]*", value):
@@ -330,6 +368,7 @@ async def stage_launcher(
     bootstrap_uid: int | None,
     scratch: Path,
     workdir: str | None = None,
+    agent_timeout_s: int | None = None,
 ) -> dict[str, Any]:
     """Upload install.sh, the launcher and launcher.env as the sandbox default user (root for root-started boxes)."""
     resolved_uid = None
@@ -338,7 +377,11 @@ async def stage_launcher(
     check_identity(agent_user=agent_user, bootstrap_uid=bootstrap_uid, resolved_uid=resolved_uid)
     files = render_scripts(config)
     files["launcher.env"] = launcher_env(
-        session_id=session_id, agent_user=agent_user, gateway=config.model_gateway, workdir=workdir
+        session_id=session_id,
+        agent_user=agent_user,
+        gateway=config.model_gateway,
+        workdir=workdir,
+        agent_timeout_s=agent_timeout_s,
     )
     stage = config.stage_dir
     quoted = shlex.quote(stage)
@@ -369,6 +412,7 @@ async def stage_launcher(
         "resolved_uid": resolved_uid,
         "workdir": workdir,
         "model_gateway": config.model_gateway,
+        "agent_timeout_s": agent_timeout_s,
     }
 
 
@@ -411,13 +455,14 @@ async def quiesce_agent_user(sandbox: AsyncSandbox, agent_user: str | int | None
     """Stop every process of a distinct task user before collection.
 
     OpenCode's bash tool starts commands in their own process groups, so the pids-file quiesce (OpenCode's own
-    session) can leave a tool command mutating the workspace while it is tarred. ``kill -- -1`` as the task user
-    reaches all of them without procps; the caller shell itself is excluded by POSIX.
+    session) can leave a tool command mutating the workspace while it is tarred. ``kill -1`` as the task user
+    reaches all of them without procps; the caller shell itself is excluded by POSIX. The provider runs this under
+    ``su -s /bin/sh``, and dash/busybox ``kill`` reject a ``--`` before the negative pid, so none is used.
     """
     if agent_user in (None, "root", 0) or bootstrap_uid != 0:
         return
     result = await sandbox.exec(
-        "kill -TERM -- -1 2>/dev/null; sleep 1; kill -KILL -- -1 2>/dev/null; true", user=agent_user, timeout_s=30
+        "kill -TERM -1 2>/dev/null; sleep 1; kill -KILL -1 2>/dev/null; true", user=agent_user, timeout_s=30
     )
     if result.return_code:
         raise RuntimeError(f"Could not stop the task user's processes before collection: {result.stderr}")
@@ -454,7 +499,8 @@ def derive_termination(records: dict[str, Any]) -> tuple[AgentTermination, bool]
     Returns ``(termination, agent_started)``. No run record means OpenCode never launched (install, launcher or
     identity failure) and the episode is an infrastructure error that is not graded. A run record without its exit
     record means the launcher was killed before OpenCode returned: the agent's exec timeout or a sandbox death,
-    reported as a timeout and graded like any TB4 agent timeout. Otherwise the recorded exit status decides.
+    reported as a timeout and graded like any TB4 agent timeout. An exit record marked ``timed_out`` is the
+    launcher's own per-task budget kill, also a graded timeout. Otherwise the recorded exit status decides.
     """
     runs = sorted(
         ((int(m.group(1)), int(m.group(2)), name) for name in records if (m := RUN_RECORD.match(name))),
@@ -467,7 +513,7 @@ def derive_termination(records: dict[str, Any]) -> tuple[AgentTermination, bool]
             ),
             False,
         )
-    epoch, pid, _ = runs[-1]
+    epoch, pid, run_name = runs[-1]
     exit_record = records.get(f"{epoch}-{pid}-run-exit.json")
     if not isinstance(exit_record, dict) or not isinstance(exit_record.get("exit_code"), int):
         return (
@@ -478,6 +524,17 @@ def derive_termination(records: dict[str, Any]) -> tuple[AgentTermination, bool]
             True,
         )
     code = exit_record["exit_code"]
+    if exit_record.get("timed_out") == 1:
+        run_record = records.get(run_name)
+        budget = run_record.get("budget_s") if isinstance(run_record, dict) else None
+        return (
+            AgentTermination(
+                reason="timeout",
+                exit_code=code,
+                detail=f"OpenCode run exceeded its {budget} s per-task budget and was killed by the launcher (exit {code})",
+            ),
+            True,
+        )
     if code == 0:
         return AgentTermination(reason="completed", exit_code=0, detail="OpenCode run exited 0"), True
     return (

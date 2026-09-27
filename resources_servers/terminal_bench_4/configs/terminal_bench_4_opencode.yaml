@@ -13,6 +13,9 @@ terminal_bench_4_opencode_resources:
         model_gateway: ${oc.select:tb4_opencode_model_gateway,null}
         stage_dir: /tmp/tb4-opencode
         require_instruction_in_prompt: true
+        # Per-task agent budget floor (seconds): the launcher kills `opencode run` after
+        # max(floor, task agent.timeout_sec) and the seed reports that budget; null leaves the run unbounded here.
+        agent_timeout_floor_sec: ${oc.select:tb4_opencode_agent_timeout_floor_sec,null}
       environment:
         # Agent-role egress for no-network tasks: the gateway host only. The verifier stays deny-all.
         agent_egress_allow: ${oc.select:tb4_opencode_agent_egress_allow,[]}
@@ -27,5 +30,6 @@ terminal_bench_4_opencode:
       remote_opencode_install_script_path: /tmp/tb4-opencode/install.sh
       remote_opencode_binary_path: ${oc.select:tb4_opencode_binary,/mnt/s3-data/data/bxyu/opencode/opencode-linux-x64}
       remote_opencode_musl_binary_path: ${oc.select:tb4_opencode_musl_binary,/mnt/s3-data/data/bxyu/opencode/opencode-linux-x64-musl-v1.17.11}
-      # One exec budget for install + `opencode run`; the task's agent.timeout_sec is not read by this agent.
+      # One exec budget for install + `opencode run`; the task's agent.timeout_sec is not read by this agent. With
+      # agent_timeout_floor_sec set, keep this above the largest per-task budget so the launcher's kill lands first.
       sandbox_timeout: ${oc.select:tb4_opencode_agent_timeout_sec,5400}

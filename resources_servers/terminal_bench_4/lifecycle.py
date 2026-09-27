@@ -4,12 +4,15 @@
 """Resource-owned preparation, deadlines, one finalizer, and cleanup."""
 
 import asyncio
+import os
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
-from resources_servers.terminal_bench_4.archive_workers import ArchiveWorkers
+from resources_servers.terminal_bench_4.archive_workers import ArchiveWorkers, run_local
 from resources_servers.terminal_bench_4.collection import collect
 from resources_servers.terminal_bench_4.environment import Environment
 from resources_servers.terminal_bench_4.models import AgentTermination
@@ -65,6 +68,20 @@ def exception(session, error, error_type=None):
     session.diagnostics.append({"phase": session.phase, "subphase": session.subphase, **record})
 
 
+def discard_tree(path: Path) -> dict[str, int]:
+    """Remove a host tree, returning how many regular files and bytes it held (blocking; run in a worker)."""
+    files = size = 0
+    for root, _, names in os.walk(path):
+        for name in names:
+            try:
+                size += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                continue
+            files += 1
+    shutil.rmtree(path)
+    return {"files": files, "bytes": size}
+
+
 async def cleanup(session):
     if session.expiry_task is not None:
         session.expiry_task.cancel()
@@ -87,6 +104,16 @@ async def cleanup(session):
             )
         except Exception as exc:
             exception(session, exc)
+    # The collected workspace only carries the task's declared artifacts from the agent sandbox to the verifier's.
+    # Declared workdirs reach hundreds of MB per attempt, so once both sandboxes are gone it is discarded, always.
+    artifacts = session.directory / "artifacts"
+    if artifacts.exists():
+        record = {"operation": "artifacts_discarded"}
+        try:
+            record.update(await run_local(partial(discard_tree, artifacts), session.archive_workers))
+        except Exception as exc:
+            record["error"] = str(exc)
+        session.diagnostics.append(record)
     if session.owns_slot:
         session.slots.release()
         session.owns_slot = False

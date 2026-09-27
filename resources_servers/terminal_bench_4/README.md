@@ -44,8 +44,23 @@ death stops renewal; provider TTL is the sandbox cleanup fallback.
 
 Model-call capture and harness trajectories belong to the agent server. Resource
 artifacts, including collected remote `/logs/agent` files, remain under the trial
-directory. The seed's connection configuration is used only for the internal
-agent/resource exchange and is not persisted in session records.
+directory, except the collected task workspace (next paragraph). The seed's
+connection configuration is used only for the internal agent/resource exchange and
+is not persisted in session records.
+
+Workspace artifacts are discarded after grading. The task's declared `artifacts`
+exist on the host only to move from the agent sandbox to the separate verifier
+sandbox: `/verify` collects them into `<trial>/artifacts/` and restores them into
+the verifier container. Task authors commonly declare their whole working directory,
+hundreds of MB and thousands of files per attempt, and nothing needs the host copy
+once the verifier has it. Cleanup therefore removes `<trial>/artifacts` after both
+sandboxes are stopped, unconditionally (there is no retention option), and appends
+`{"operation": "artifacts_discarded", "files": n, "bytes": m}` to the session
+diagnostics (`"error": ...` instead when the removal failed; the session still
+closes). `agent/`, `verifier/`, the reward files, `result.json`, `gym-agent.json`
+and `artifact-metadata/` stay; the per-artifact collection statuses that lived in
+`artifacts/manifest.json` go with the tree, while collection failures remain in the
+diagnostics.
 
 Artifact transfer retains source numeric UID/GID and `0777` permission bits for
 files and directories, independently of the host's user and umask. Host-side
@@ -81,6 +96,10 @@ images. The manifest has `format: "gym-tb4-local-v1"`, a dataset `ref`, and
 absolute host `path`. Names are used verbatim in this mode. Each package uses
 the same strict task schema and content-hash check as public packages; rows
 cannot supply arbitrary package paths. Shared-verifier tasks remain unsupported.
+The manifest may grow while the server runs: a seed naming a task absent from the
+loaded table re-reads it and adds the new entries (same `ref` and `format` only;
+entries are never removed or replaced), so tasks can be appended to a campaign
+without a restart.
 
 Local packages follow the verifier build-layout convention: `tests/Dockerfile`
 or `tests/docker-compose.yaml` means the verifier image already contains its
@@ -236,6 +255,26 @@ above), `agent_timings.agent_execution` from seed-ready to verify, and
 the first binding. Grading, collection, cleanup and the response model are unchanged;
 the row's extra fields (`task_name`, `task_ref`, …) ride along in the response.
 `execution_mode: oracle` is not available with this harness.
+
+Per-task agent budget. The agent's `sandbox_timeout` is one global exec budget, so
+`opencode.agent_timeout_floor_sec` (benchmark override
+`tb4_opencode_agent_timeout_floor_sec`, default null) lets the resources server
+enforce a per-task budget of `max(floor, task agent.timeout_sec)` seconds instead.
+`launcher.env` carries it as `TB4_AGENT_TIMEOUT_S`, and the launcher's `run` branch
+wraps the real binary inside the `setsid` session: coreutils `timeout -k 60 <budget>`
+when the image's `timeout` accepts `-k` (probed with `timeout -k 1 1 true`; busybox's
+does not), otherwise a launcher-owned watchdog that TERMs the session's process group
+at the budget and KILLs it 60 s later. Only the session is signalled, so the launcher
+survives to write its exit record, which gains `timed_out: 1` (exit status 124 from
+`timeout`, or the watchdog fired); the run record gains `budget_s`. `/verify` maps a
+`timed_out` exit to `termination.reason: timeout` with the exit status kept — graded
+like any TB4 agent timeout — and both fields ride in
+`harness_metadata.launch_records`. The seed's `agent_timeout_sec` reports the same
+budget so the agent side and a controller agree on it; `seeded_session_timeout_sec`
+is unchanged and, like the agent's `sandbox_timeout`, must stay above the largest
+budget or its kill lands first (no exit record, still a graded timeout). With the
+floor unset nothing changes: no in-sandbox budget, and the seed reports the task's own
+timeout.
 
 ## Image startup: Compose and standalone
 

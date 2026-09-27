@@ -6,6 +6,7 @@
 import asyncio
 import hashlib
 import json
+import math
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -181,10 +182,35 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         session.persist = lambda: self._persist(session)
         return session
 
+    def _refresh_tasks(self) -> None:
+        """Add-only re-read of the manifest so tasks appended during a campaign are seedable without a restart.
+
+        Only the same dataset pin and format extend the loaded table; nothing is ever removed or replaced, and an
+        unreadable or half-written manifest leaves the table as it was.
+        """
+        try:
+            manifest = json.loads(self.config.manifest_path.read_text())
+        except (OSError, ValueError):
+            return
+        if manifest.get("ref") != self._manifest["ref"] or manifest.get("format") != self._manifest.get("format"):
+            return
+        prefix = "" if self.config.local_task_packages else "terminal-bench/"
+        for task in manifest.get("tasks") or []:
+            name = prefix + task["name"]
+            if name in self._tasks:
+                continue
+            if self._loader.local_paths is not None:
+                self._loader.local_paths[name] = Path(task["path"])
+            self._tasks[name] = task
+        self._manifest["tasks"] = list(self._tasks.values())
+
     async def seed_session(self, request: Request, body: TerminalBench4RunRequest) -> SeedSessionResponse:
         if self._closing:
             raise HTTPException(503, "Resources server is shutting down")
         task = self._tasks.get(body.task_name)
+        if task is None:
+            self._refresh_tasks()
+            task = self._tasks.get(body.task_name)
         if task is None or body.task_ref != task["ref"] or body.dataset_ref != self._manifest["ref"]:
             raise HTTPException(422, "Task identity does not match the configured dataset pin")
         opencode = self.config.harness == "opencode"
@@ -254,13 +280,22 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             raise HTTPException(422, str(exc)) from exc
         return task
 
+    def _opencode_budget(self, task) -> int | None:
+        """Per-task agent budget: the configured floor or the task's own agent timeout, whichever is larger."""
+        floor = self.config.opencode.agent_timeout_floor_sec
+        return None if floor is None else max(floor, math.ceil(task.config.agent.timeout_sec))
+
     async def _prepare_session(self, session: Session) -> None:
         session.started.set()
         with rollout_context(session.request.capture_rollout_id):
             try:
                 await lifecycle.prepare_session(session, self._loader)
                 session.result["harness"] = self.config.harness
+                budget = None
                 if self.config.harness == "opencode":
+                    # The launcher enforces the budget inside the sandbox; the seed reports the same number so the
+                    # agent side and the controller agree on it.
+                    budget = self._opencode_budget(session.task)
                     session.result["opencode_launcher"] = await opencode_harness.stage_launcher(
                         session.environment.main,
                         self.config.opencode,
@@ -269,6 +304,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                         bootstrap_uid=session.environment.bootstrap_uid,
                         scratch=session.directory / "sandbox" / "opencode",
                         workdir=session.task.config.environment.workdir,
+                        agent_timeout_s=budget,
                     )
                     if session.task.config.environment.skills_dir:
                         session.diagnostics.append(
@@ -284,7 +320,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     instruction=session.task.instruction,
                     user=session.environment.role_user,
                     execution_mode=self.config.execution_mode,
-                    agent_timeout_sec=session.task.config.agent.timeout_sec,
+                    agent_timeout_sec=session.task.config.agent.timeout_sec if budget is None else budget,
                     mcp_servers=[s.model_dump() for s in session.task.config.environment.mcp_servers],
                     skills_dir=session.task.config.environment.skills_dir,
                 )

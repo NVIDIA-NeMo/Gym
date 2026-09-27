@@ -6,6 +6,10 @@
 import asyncio
 import hashlib
 import json
+import os
+import shutil
+import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -17,7 +21,7 @@ from pydantic import ValidationError
 
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_4 import app as app_module
-from resources_servers.terminal_bench_4 import opencode
+from resources_servers.terminal_bench_4 import lifecycle, opencode
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
 from resources_servers.terminal_bench_4.models import SandboxedVerifyRequest, TerminalBench4RunRequest
 from resources_servers.terminal_bench_4.task import content_hash
@@ -190,16 +194,87 @@ def test_scripts_render_stage_dir_and_env_is_quoted():
         if "setpriv --reuid" in line:
             assert '"$groups_flag"' in line, line
     assert "-f /etc/alpine-release" not in scripts["install.sh"] and "ld-musl-" in scripts["install.sh"]
+    # The budget is enforced inside the run session (probed coreutils timeout, else the launcher's watchdog) and
+    # both records carry it; dash/busybox `kill` reject `--`, so the watchdog must not use it.
+    assert "timeout -k 1 1 true" in launcher and '-k 60 "$TB4_AGENT_TIMEOUT_S" "$0" "$@"' in launcher
+    assert '"budget_s":%s' in launcher and '"timed_out":%s' in launcher and "-watchdog.fired" in launcher
+    assert 'kill -TERM "-$pgid"' in launcher and 'kill -KILL "-$pgid"' in launcher and "kill -TERM --" not in launcher
     env = opencode.launcher_env(
         session_id="tb4-1", agent_user="cam", gateway=cfg.model_gateway, workdir="/home/cam/job"
     )
-    assert (
-        env == "TB4_SESSION_ID=tb4-1\nTB4_AGENT_USER=cam\nTB4_MODEL_GATEWAY=http://gw:1\nTB4_WORKDIR=/home/cam/job\n"
+    assert env == (
+        "TB4_SESSION_ID=tb4-1\nTB4_AGENT_USER=cam\nTB4_MODEL_GATEWAY=http://gw:1\nTB4_WORKDIR=/home/cam/job\n"
+        "TB4_AGENT_TIMEOUT_S=0\n"
     )
     assert "TB4_AGENT_USER=1000\n" in opencode.launcher_env(session_id="s", agent_user=1000, gateway=None)
     assert "TB4_AGENT_USER=''\n" in opencode.launcher_env(session_id="s", agent_user=None, gateway=None)
     with pytest.raises(ValueError, match="cannot carry"):
         opencode.launcher_env(session_id="s", agent_user="a b", gateway=None)
+
+
+def test_launcher_env_carries_the_per_task_budget():
+    env = opencode.launcher_env(session_id="s", agent_user=None, gateway=None, agent_timeout_s=14400)
+    assert env.endswith("TB4_AGENT_TIMEOUT_S=14400\n")
+    assert opencode.launcher_env(session_id="s", agent_user=None, gateway=None).endswith("TB4_AGENT_TIMEOUT_S=0\n")
+    for bad in (0, -5, True):
+        with pytest.raises(ValueError, match="positive whole number"):
+            opencode.launcher_env(session_id="s", agent_user=None, gateway=None, agent_timeout_s=bad)
+
+
+def rendered_launcher(stage: Path, records: Path, tmp: Path) -> str:
+    # The launcher's own /tmp files (pids, pgid, xdg, fallback home) are redirected so the test never touches /tmp.
+    return (
+        opencode.LAUNCHER_SCRIPT.replace('"/tmp/', f'"{tmp}/')
+        .replace("__STAGE_DIR__", str(stage))
+        .replace("__RECORD_DIR__", str(records))
+        .replace("__PY_REWRITE__", opencode.PY_REWRITE)
+    )
+
+
+@pytest.mark.skipif(
+    not all(shutil.which(tool) for tool in ("sh", "setsid", "timeout")), reason="needs sh, util-linux setsid, timeout"
+)
+@pytest.mark.parametrize(
+    "budget,real,fake_timeout,status,timed_out",
+    [
+        (None, "exit 0", False, 0, 0),  # no budget: untouched
+        (1, "sleep 30", False, 124, 1),  # coreutils timeout inside the session
+        (1, "sleep 30", True, 143, 1),  # image `timeout` lacks -k: the launcher's watchdog TERMs the session group
+        (5, "exit 3", True, 3, 0),  # under budget: the watchdog is stopped and OpenCode's status is kept
+    ],
+)
+def test_launcher_enforces_the_budget_under_sh(tmp_path, budget, real, fake_timeout, status, timed_out):
+    stage, records, tmp = tmp_path / "stage", tmp_path / "agent-records", tmp_path / "tmp"
+    for directory in (stage / "bin", stage / "records", records, tmp):
+        directory.mkdir(parents=True)
+    (stage / "opencode-launcher").write_text(rendered_launcher(stage, records, tmp))
+    (stage / "launcher.env").write_text(
+        opencode.launcher_env(session_id="tb4-t", agent_user=None, gateway=None, agent_timeout_s=budget)
+    )
+    (stage / "bin" / "opencode.real").write_text(f"#!/bin/sh\n{real}\n")
+    (stage / "bin" / "opencode.real").chmod(0o755)
+    env = dict(os.environ)
+    if fake_timeout:
+        (tmp_path / "fakebin").mkdir()
+        (tmp_path / "fakebin" / "timeout").write_text("#!/bin/sh\nexit 1\n")
+        (tmp_path / "fakebin" / "timeout").chmod(0o755)
+        env["PATH"] = f"{tmp_path / 'fakebin'}:{env['PATH']}"
+    started = time.monotonic()
+    # A detached watchdog must not keep the launcher's stdout/stderr open after the launcher exits.
+    result = subprocess.run(
+        ["sh", str(stage / "opencode-launcher"), "run", "--", "prompt"], env=env, capture_output=True, timeout=25
+    )
+    assert result.returncode == status and time.monotonic() - started < 15
+    records = {path.name: json.loads(path.read_text()) for path in (stage / "records").glob("*.json")}
+    run = next(record for name, record in records.items() if name.endswith("-run.json"))
+    exit_record = next(record for name, record in records.items() if name.endswith("-run-exit.json"))
+    assert run["budget_s"] == (budget or 0)
+    assert exit_record["exit_code"] == status and exit_record["timed_out"] == timed_out
+    assert list(tmp.glob("*.pgid")) == []
+    termination, agent_started = opencode.derive_termination(records)
+    assert agent_started and termination.reason == (
+        "timeout" if timed_out else "completed" if not status else "nonzero_exit"
+    )
 
 
 def test_gateway_rewrite_changes_only_the_origin():
@@ -284,7 +359,9 @@ async def test_quiesce_agent_user_only_for_a_distinct_root_started_identity():
     box = MagicMock()
     box.exec = AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr=""))
     await opencode.quiesce_agent_user(box, "cam", 0)
-    assert box.exec.await_args.kwargs["user"] == "cam" and "kill -TERM -- -1" in box.exec.await_args.args[0]
+    command = box.exec.await_args.args[0]
+    # Runs under `su -s /bin/sh`: dash's kill has no `--`, so the negative pid must follow the signal directly.
+    assert box.exec.await_args.kwargs["user"] == "cam" and "kill -TERM -1" in command and " -- " not in command
     box.exec.reset_mock()
     for user, uid in ((None, 0), ("root", 0), ("agent", 1000)):
         await opencode.quiesce_agent_user(box, user, uid)
@@ -305,9 +382,8 @@ async def test_stage_launcher_uploads_and_locks_down_as_root(tmp_path):
         box, cfg, session_id="tb4-1", agent_user="cam", bootstrap_uid=0, scratch=tmp_path / "scratch"
     )
     assert set(uploads) == {"/tmp/stage/install.sh", "/tmp/stage/opencode-launcher", "/tmp/stage/launcher.env"}
-    assert (
-        uploads["/tmp/stage/launcher.env"]
-        == "TB4_SESSION_ID=tb4-1\nTB4_AGENT_USER=cam\nTB4_MODEL_GATEWAY=http://gw:1\nTB4_WORKDIR=''\n"
+    assert uploads["/tmp/stage/launcher.env"] == (
+        "TB4_SESSION_ID=tb4-1\nTB4_AGENT_USER=cam\nTB4_MODEL_GATEWAY=http://gw:1\nTB4_WORKDIR=''\nTB4_AGENT_TIMEOUT_S=0\n"
     )
     first, last = box.exec.await_args_list[0].args[0], box.exec.await_args_list[-1].args[0]
     assert "test ! -L /tmp/stage" in first and "mkdir -p /tmp/stage/bin /tmp/stage/records" in first
@@ -323,13 +399,17 @@ async def test_stage_launcher_uploads_and_locks_down_as_root(tmp_path):
         "resolved_uid": None,
         "workdir": None,
         "model_gateway": "http://gw:1",
+        "agent_timeout_s": None,
     }
     # A non-root-started sandbox keeps its own ownership; a named task user is fine when it IS the default user.
     box.exec.reset_mock()
-    await opencode.stage_launcher(
-        box, cfg, session_id="tb4-2", agent_user=None, bootstrap_uid=1000, scratch=tmp_path / "s2"
+    budgeted = await opencode.stage_launcher(
+        box, cfg, session_id="tb4-2", agent_user=None, bootstrap_uid=1000, scratch=tmp_path / "s2", agent_timeout_s=600
     )
     assert "chown" not in box.exec.await_args_list[-1].args[0]
+    assert budgeted["agent_timeout_s"] == 600 and uploads["/tmp/stage/launcher.env"].endswith(
+        "TB4_AGENT_TIMEOUT_S=600\n"
+    )
     box.exec = AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="1000\n", stderr=""))
     same = await opencode.stage_launcher(
         box, cfg, session_id="tb4-4", agent_user="agent", bootstrap_uid=1000, scratch=tmp_path / "s4"
@@ -402,7 +482,9 @@ async def test_opencode_seed_returns_handle_and_a_cookieless_retry_joins_the_epi
         "bootstrap_uid": 0,
         "scratch": session.directory / "sandbox" / "opencode",
         "workdir": None,
+        "agent_timeout_s": None,
     }
+    assert seed.agent_timeout_sec == 28800  # no floor configured: the task's own agent timeout, as before
     assert "agent_ready_at" in session.deadlines
     # The agent's HTTP client retries a lost first request without any resources cookie: same episode, no second box.
     again = await server.seed_session(FakeRequest(), TerminalBench4RunRequest.model_validate(row(ref)))
@@ -412,6 +494,63 @@ async def test_opencode_seed_returns_handle_and_a_cookieless_retry_joins_the_epi
         FakeRequest(), TerminalBench4RunRequest.model_validate(row(ref, rollout_id="terminal-bench/test/attempt-1"))
     )
     assert other.session_id != seed.session_id and len(prepared) == 2
+    await finish(server)
+
+
+@pytest.mark.parametrize("floor,budget", [(100, 28800), (40000, 40000)])
+async def test_config_floor_makes_the_seed_budget_max_of_floor_and_task(tmp_path, monkeypatch, floor, budget):
+    manifest, ref = local_manifest(tmp_path)
+    server, box, prepared, staged = make_server(
+        tmp_path, manifest, monkeypatch, opencode={"agent_timeout_floor_sec": floor}
+    )
+    seed = await server.seed_session(FakeRequest(), TerminalBench4RunRequest.model_validate(row(ref)))
+    # The launcher enforces exactly what the seed reports (the task's task.toml has the 28800 s default).
+    assert seed.agent_timeout_sec == budget and staged[0][2]["agent_timeout_s"] == budget
+    await finish(server)
+
+
+def test_agent_timeout_floor_must_be_positive():
+    with pytest.raises(ValidationError):
+        opencode.OpenCodeHarnessConfig(agent_timeout_floor_sec=0)
+    assert opencode.OpenCodeHarnessConfig().agent_timeout_floor_sec is None
+
+
+def named_package(path, name):
+    source = package(path)
+    (source / "task.toml").write_text((source / "task.toml").read_text().replace("terminal-bench/test", name))
+    return source, "sha256:" + content_hash(source)
+
+
+async def test_seed_picks_up_tasks_appended_to_the_manifest_without_removing_any(tmp_path, monkeypatch):
+    manifest, ref = local_manifest(tmp_path)
+    server, box, prepared, staged = make_server(tmp_path, manifest, monkeypatch)
+    second, second_ref = named_package(tmp_path / "second", "terminal-bench/second")
+    appended = json.loads(manifest.read_text())
+    appended["tasks"].append({"name": "terminal-bench/second", "ref": second_ref, "path": str(second)})
+    manifest.write_text(json.dumps(appended))
+    seed = await server.seed_session(
+        FakeRequest(),
+        TerminalBench4RunRequest.model_validate(
+            row(second_ref, task_name="terminal-bench/second", rollout_id="terminal-bench/second/attempt-0")
+        ),
+    )
+    assert seed.sandbox_handle == "owned-box" and prepared[0].task.name == "terminal-bench/second"
+    # A later manifest that drops a task, or carries another dataset pin, changes nothing already loaded.
+    manifest.write_text(json.dumps(appended | {"tasks": appended["tasks"][1:]}))
+    seed = await server.seed_session(FakeRequest(), TerminalBench4RunRequest.model_validate(row(ref)))
+    assert seed.sandbox_handle == "owned-box" and len(prepared) == 2
+    third, third_ref = named_package(tmp_path / "third", "terminal-bench/third")
+    other_pin = appended | {"ref": "sha256:" + "e" * 64}
+    other_pin["tasks"].append({"name": "terminal-bench/third", "ref": third_ref, "path": str(third)})
+    manifest.write_text(json.dumps(other_pin))
+    with pytest.raises(HTTPException) as error:
+        await server.seed_session(
+            FakeRequest(),
+            TerminalBench4RunRequest.model_validate(
+                row(third_ref, task_name="terminal-bench/third", rollout_id="terminal-bench/third/attempt-0")
+            ),
+        )
+    assert error.value.status_code == 422 and set(server._tasks) == {"terminal-bench/test", "terminal-bench/second"}
     await finish(server)
 
 
@@ -536,6 +675,21 @@ async def test_opencode_verify_without_an_exit_record_is_a_graded_timeout(tmp_pa
     await finish(server)
 
 
+async def test_opencode_verify_budget_kill_is_a_graded_timeout(tmp_path, monkeypatch):
+    records = {
+        "100-7-run.json": {"subcommand": "run", "budget_s": 14400},
+        "100-7-run-exit.json": {"exit_code": 124, "wall_s": 14401, "timed_out": 1},
+    }
+    server, seed, request, payload, finalized = await run_episode(tmp_path, monkeypatch, records=records)
+    response = await server.verify(request, SandboxedVerifyRequest.model_validate(payload))
+    assert finalized == [True] and response.reward == 1.0
+    assert response.termination.reason == "timeout" and response.termination.exit_code == 124
+    assert "14400 s" in response.termination.detail and response.infrastructure_error is None
+    launch_records = server._sessions[seed.session_id].verify_body.harness_metadata["launch_records"]
+    assert launch_records["100-7-run.json"]["budget_s"] == 14400 and launch_records["100-7-run-exit.json"]["timed_out"]
+    await finish(server)
+
+
 async def test_opencode_verify_records_a_nonzero_exit(tmp_path, monkeypatch):
     records = {"100-7-run.json": {}, "100-7-run-exit.json": {"exit_code": 3, "wall_s": 5}}
     server, seed, request, payload, finalized = await run_episode(tmp_path, monkeypatch, records=records)
@@ -573,6 +727,23 @@ def test_derive_termination_uses_the_latest_run_record():
     assert (termination.reason, started) == ("timeout", True)
     termination, started = opencode.derive_termination({"100-8-session.json": {}})
     assert (termination.reason, started) == ("infrastructure_error", False)
+
+
+def test_derive_termination_maps_a_budget_kill_to_a_graded_timeout():
+    run = {"100-7-run.json": {"budget_s": 600}}
+    for code in (124, 143, 137):
+        termination, started = opencode.derive_termination(
+            run | {"100-7-run-exit.json": {"exit_code": code, "timed_out": 1}}
+        )
+        assert (termination.reason, termination.exit_code, started) == ("timeout", code, True)
+        assert "600 s" in termination.detail
+    # Without the launcher's mark, an exit status of 124 is OpenCode's own and stays a nonzero exit.
+    termination, started = opencode.derive_termination(
+        run | {"100-7-run-exit.json": {"exit_code": 124, "timed_out": 0}}
+    )
+    assert (termination.reason, termination.exit_code, started) == ("nonzero_exit", 124, True)
+    termination, _ = opencode.derive_termination(run | {"100-7-run-exit.json": {"exit_code": 0, "timed_out": 0}})
+    assert termination.reason == "completed"
 
 
 async def test_observe_launch_parses_one_record_per_line():
@@ -634,3 +805,44 @@ def test_row_extras_never_override_resources_owned_response_fields(tmp_path, mon
         and response.session_id == "tb4-x"
         and response.artifacts == {"trial": str(session.directory)}
     )
+
+
+# --- cleanup ---------------------------------------------------------------------------------------------------------
+
+
+def closed_session(tmp_path):
+    trial = tmp_path / "trial"
+    for relative, size in (("artifacts/app/a.txt", 3), ("artifacts/logs/artifacts/b.bin", 5)):
+        (trial / relative).parent.mkdir(parents=True, exist_ok=True)
+        (trial / relative).write_bytes(b"x" * size)
+    (trial / "artifacts" / "empty").mkdir()
+    (trial / "artifact-metadata").mkdir()
+    (trial / "artifact-metadata" / "m.json").write_text("{}")
+    session = lifecycle.Session("identity", "owner", None, "tb4-x", trial)
+    session.environment = SimpleNamespace(closed=True)
+    session.verifier_environment = SimpleNamespace(closed=True)
+    session.result = {"verifier_result": {"rewards": {"reward": 1.0}}}
+    return session, trial
+
+
+async def test_cleanup_discards_the_collected_artifacts_after_grading(tmp_path):
+    session, trial = closed_session(tmp_path)
+    await lifecycle.cleanup(session)
+    assert not (trial / "artifacts").exists() and (trial / "artifact-metadata" / "m.json").exists()
+    assert session.diagnostics == [{"operation": "artifacts_discarded", "files": 2, "bytes": 8}]
+    assert session.phase == "closed" and session.result["verifier_result"]["rewards"]["reward"] == 1.0
+    # A second cleanup (verify after an expired seed, shutdown) finds nothing to discard and records nothing more.
+    await lifecycle.cleanup(session)
+    assert len(session.diagnostics) == 1
+
+
+async def test_cleanup_records_a_failed_discard_and_still_closes(tmp_path, monkeypatch):
+    session, trial = closed_session(tmp_path)
+
+    def broken(path):
+        raise OSError("lustre hiccup")
+
+    monkeypatch.setattr(lifecycle.shutil, "rmtree", broken)
+    await lifecycle.cleanup(session)
+    assert (trial / "artifacts" / "app" / "a.txt").exists() and session.phase == "closed"
+    assert session.diagnostics == [{"operation": "artifacts_discarded", "error": "lustre hiccup"}]
