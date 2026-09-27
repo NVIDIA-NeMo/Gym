@@ -22,15 +22,21 @@ from warnings import warn
 
 import orjson
 from fastapi import Body, FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym._checkpoint.agent import (
+    AGENT_COMPLETION_RECEIPT_HEADER,
     AGENT_EXECUTION_GENERATION_HEADER,
     COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE,
+    COMPLETED_RESULT_BULK_ACKNOWLEDGEMENT_FEATURE,
+    COMPLETION_RECEIPT_IN_RUN_RESPONSE_FEATURE,
     DISCARD_RESTORED_CONTINUATION_FEATURE,
     AgentBoundaryRecord,
     AgentCheckpointParticipant,
     AgentExecution,
+    encode_agent_completion_receipt,
     install_agent_checkpoint,
 )
 from nemo_gym._checkpoint.artifacts import (
@@ -196,7 +202,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         run = traced_rollout_endpoint(self.run, agent_attributes)
 
         @wraps(run)
-        async def run_with_rollout_context(*args: Any, **kwargs: Any) -> BaseVerifyResponse:
+        async def run_with_rollout_context(*args: Any, **kwargs: Any) -> BaseVerifyResponse | JSONResponse:
             body = kwargs.get("body")
             if body is None:
                 body = next((arg for arg in args if isinstance(arg, BaseRunRequest)), None)
@@ -215,7 +221,18 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     task=asyncio.current_task(),
                 )
                 if execution.terminal_result is not None:
-                    return execution.terminal_result
+                    receipt = self._checkpoint_participant.completion_receipt(
+                        logical_rollout_id,
+                        attempt_index,
+                    )
+                    return JSONResponse(
+                        content=jsonable_encoder(execution.terminal_result),
+                        headers={
+                            AGENT_COMPLETION_RECEIPT_HEADER: encode_agent_completion_receipt(
+                                receipt
+                            )
+                        },
+                    )
                 token = self._checkpoint_participant.bind(execution)
                 continuation = self._checkpoint_participant.continuation(execution)
                 parent_context = (
@@ -242,7 +259,18 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 finally:
                     self._checkpoint_participant.unbind(token)
                 await self._checkpoint_participant.finish(execution, outcome="completed", result=result)
-                return result
+                receipt = self._checkpoint_participant.completion_receipt(
+                    logical_rollout_id,
+                    attempt_index,
+                )
+                return JSONResponse(
+                    content=jsonable_encoder(result),
+                    headers={
+                        AGENT_COMPLETION_RECEIPT_HEADER: encode_agent_completion_receipt(
+                            receipt
+                        )
+                    },
+                )
 
         app.post("/run")(run_with_rollout_context)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
@@ -292,7 +320,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if self.checkpoint_control_auth_token() is not None:
             capabilities.checkpoint_mode = "export_restore"
             capabilities.concurrency_contract = "serialized_per_session"
-            capabilities.features = [COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE]
+            capabilities.features = [
+                COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE,
+                COMPLETED_RESULT_BULK_ACKNOWLEDGEMENT_FEATURE,
+                COMPLETION_RECEIPT_IN_RUN_RESPONSE_FEATURE,
+            ]
             if self.checkpoint_continuation_supported:
                 capabilities.features.extend(
                     [

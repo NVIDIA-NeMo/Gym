@@ -213,6 +213,7 @@ class AdmissionLimiter:
         self._checkpoint_id: Optional[str] = None
         self._checkpoint_tickets: dict[str, AdmissionTicket] = {}
         self._checkpoint_ready_ticket_ids: set[str] = set()
+        self._checkpoint_pending_ticket_ids: set[str] = set()
         self._generation_cut_receipt: GenerationCutReceipt | None = None
         self._cut_lock = asyncio.Lock()
         self._admission_tombstones: set[tuple[str, int]] = set()
@@ -289,16 +290,28 @@ class AdmissionLimiter:
                     ticket.mark_no_generation()
                 elif response_egress_completed:
                     self.mark_prepare_safe(ticket, "response_complete")
-            self._after_inflight_change()
+            self._after_inflight_change(ticket)
 
-    def _after_inflight_change(self) -> None:
-        if self.is_prepare_safe():
+    def _after_inflight_change(self, ticket: AdmissionTicket | None = None) -> None:
+        if ticket is not None:
+            self._refresh_checkpoint_ticket_readiness(ticket)
+        prepare_safe = self.is_prepare_safe()
+        if prepare_safe:
             self._drained.set()
         else:
             self._drained.clear()
         if self.state in (AdmissionState.DRAINING, AdmissionState.PAUSED):
-            self.state = AdmissionState.PAUSED if self.is_prepare_safe() else AdmissionState.DRAINING
+            self.state = AdmissionState.PAUSED if prepare_safe else AdmissionState.DRAINING
         self._notify_listeners()
+
+    def _refresh_checkpoint_ticket_readiness(self, ticket: AdmissionTicket) -> None:
+        """Update the active checkpoint's pending index for one changed ticket."""
+        if ticket.ticket_id not in self._checkpoint_tickets:
+            return
+        if self._ticket_checkpoint_ready(ticket):
+            self._checkpoint_pending_ticket_ids.discard(ticket.ticket_id)
+        else:
+            self._checkpoint_pending_ticket_ids.add(ticket.ticket_id)
 
     # -- control -------------------------------------------------------------
 
@@ -308,6 +321,14 @@ class AdmissionLimiter:
             self._checkpoint_id = checkpoint_id
             self._checkpoint_tickets = dict(self._inflight)
             self._checkpoint_ready_ticket_ids.clear()
+            if self._generation_cut_backend is None:
+                self._checkpoint_pending_ticket_ids.clear()
+            else:
+                self._checkpoint_pending_ticket_ids = {
+                    ticket.ticket_id
+                    for ticket in self._checkpoint_tickets.values()
+                    if not self._ticket_checkpoint_ready(ticket)
+                }
             self._generation_cut_receipt = None
             if self._generation_cut_backend is not None:
                 self._egress_open.clear()
@@ -322,6 +343,7 @@ class AdmissionLimiter:
         self._checkpoint_id = None
         self._checkpoint_tickets.clear()
         self._checkpoint_ready_ticket_ids.clear()
+        self._checkpoint_pending_ticket_ids.clear()
         self._generation_cut_receipt = None
         self._checkpoint_exclusions.clear()
         self._egress_open.set()
@@ -345,18 +367,18 @@ class AdmissionLimiter:
             return
         ticket.prepare_safe = True
         ticket.prepare_safe_reason = reason
-        self._after_inflight_change()
+        self._after_inflight_change(ticket)
 
     def is_prepare_safe(self) -> bool:
         """Return whether every ticket frozen into the active cut is safe."""
         if self._generation_cut_backend is None:
             return not self._inflight
-        return all(self._ticket_checkpoint_ready(ticket) for ticket in self._checkpoint_tickets.values())
+        return not self._checkpoint_pending_ticket_ids
 
     def generation_pending(self) -> int:
         if self._generation_cut_backend is None:
             return len(self._inflight)
-        return sum(not self._ticket_checkpoint_ready(ticket) for ticket in self._checkpoint_tickets.values())
+        return len(self._checkpoint_pending_ticket_ids)
 
     def _ticket_checkpoint_ready(self, ticket: AdmissionTicket) -> bool:
         if ticket.checkpoint_abort_pending:
@@ -414,7 +436,7 @@ class AdmissionLimiter:
 
     def mark_response_egress_completed(self, ticket: AdmissionTicket) -> None:
         ticket.response_egress_completed = True
-        self._after_inflight_change()
+        self._after_inflight_change(ticket)
 
     def generation_cut_inventory(self, checkpoint_id: str, *, server_name: str) -> GenerationCutInventory:
         """Build the deterministic active-prefix inventory for one frozen cut."""
@@ -472,6 +494,7 @@ class AdmissionLimiter:
                 if ticket is None or result.ticket_id not in by_id:
                     raise ValueError(f"generation-cut ack named unknown ticket {result.ticket_id!r}")
                 self._checkpoint_ready_ticket_ids.add(ticket.ticket_id)
+                self._refresh_checkpoint_ticket_readiness(ticket)
             self._generation_cut_receipt = receipt
             self._after_inflight_change()
             return self.is_prepare_safe()
@@ -499,7 +522,7 @@ class AdmissionLimiter:
             if not ticket.response_active:
                 ticket.exclude()
             else:
-                self._after_inflight_change()
+                self._after_inflight_change(ticket)
             if ticket.task is not None and not ticket.task.done():
                 ticket.task.cancel()
         return aborted

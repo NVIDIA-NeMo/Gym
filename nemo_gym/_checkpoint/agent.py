@@ -15,6 +15,7 @@
 """Shared checkpoint participant for whitebox agent servers."""
 
 import asyncio
+import base64
 import hashlib
 import io
 import json
@@ -51,7 +52,11 @@ AGENT_CHECKPOINT_SCHEMA_VERSION = 2
 AGENT_STATE_MANIFEST_SCHEMA_VERSION = 2
 AGENT_EXECUTION_GENERATION_HEADER = "x-nemo-gym-agent-execution-generation"
 COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE = "completed_result_acknowledgement"
+COMPLETED_RESULT_BULK_ACKNOWLEDGEMENT_FEATURE = "completed_result_bulk_acknowledgement_v1"
+COMPLETION_RECEIPT_IN_RUN_RESPONSE_FEATURE = "completion_receipt_in_run_response_v1"
 DISCARD_RESTORED_CONTINUATION_FEATURE = "discard_restored_continuation_v1"
+AGENT_ACKNOWLEDGEMENT_BATCH_MAX_RECEIPTS = 512
+AGENT_COMPLETION_RECEIPT_HEADER = "x-nemo-gym-agent-completion-receipt"
 _AGENT_ARCHIVE_PATTERN = r"^agent-part-[0-9]{6}\.tar$"
 _AGENT_ARCHIVE_MAX_MEMBERS = 512
 _AGENT_ARCHIVE_MAX_PAYLOAD_BYTES = 64 << 20
@@ -274,6 +279,53 @@ class AgentAcknowledgeRequest(BaseModel):
         return self
 
 
+def agent_acknowledgement_batch_digest(receipts: Sequence[AgentAcknowledgeRequest]) -> str:
+    payload = json.dumps(
+        [receipt.model_dump(mode="json") for receipt in receipts],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def encode_agent_completion_receipt(receipt: AgentAcknowledgeRequest) -> str:
+    payload = json.dumps(
+        receipt.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def decode_agent_completion_receipt(value: str) -> AgentAcknowledgeRequest:
+    padding = "=" * (-len(value) % 4)
+    try:
+        payload = base64.urlsafe_b64decode((value + padding).encode())
+        decoded = json.loads(payload)
+    except (ValueError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError("invalid encoded agent completion receipt") from error
+    return AgentAcknowledgeRequest.model_validate(decoded)
+
+
+class AgentAcknowledgeBatchRequest(BaseModel):
+    receipts: list[AgentAcknowledgeRequest] = Field(
+        min_length=1,
+        max_length=AGENT_ACKNOWLEDGEMENT_BATCH_MAX_RECEIPTS,
+    )
+    batch_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def validate_batch(self) -> "AgentAcknowledgeBatchRequest":
+        keys = [(receipt.rollout_id, receipt.attempt_index) for receipt in self.receipts]
+        if len(keys) != len(set(keys)):
+            raise ValueError("bulk completion acknowledgements must have unique execution identities")
+        if self.batch_digest != agent_acknowledgement_batch_digest(self.receipts):
+            raise ValueError("bulk completion acknowledgement digest does not match receipts")
+        return self
+
+
 class AgentRetireRequest(CheckpointControlRequest):
     rollout_id: str = Field(pattern=ROLLOUT_ID_PATTERN.pattern)
     attempt_index: int = Field(ge=0)
@@ -439,6 +491,39 @@ class AgentCheckpointParticipant:
 
     async def acknowledge(self, receipt: AgentAcknowledgeRequest) -> dict[str, Any]:
         """Release one retained result only when its complete receipt matches."""
+        key, expected, execution = self._validate_acknowledgement(receipt)
+        if execution is None:
+            return {"acknowledged": False, "idempotent": True}
+        self._apply_acknowledgement(key, expected, execution)
+        await self._notify()
+        return {"acknowledged": True, "idempotent": False}
+
+    async def acknowledge_batch(self, batch: AgentAcknowledgeBatchRequest) -> dict[str, Any]:
+        """Atomically release a bounded batch of receipt-bound terminal results."""
+        validated = [self._validate_acknowledgement(receipt) for receipt in batch.receipts]
+        newly_acknowledged = 0
+        for key, expected, execution in validated:
+            if execution is None:
+                continue
+            self._apply_acknowledgement(key, expected, execution)
+            newly_acknowledged += 1
+        if newly_acknowledged:
+            await self._notify()
+        return {
+            "accepted_count": len(validated),
+            "newly_acknowledged_count": newly_acknowledged,
+            "idempotent_count": len(validated) - newly_acknowledged,
+            "batch_digest": batch.batch_digest,
+        }
+
+    def _validate_acknowledgement(
+        self,
+        receipt: AgentAcknowledgeRequest,
+    ) -> tuple[
+        tuple[str, int],
+        tuple[int, str, str, Optional[str], Optional[str]],
+        Optional[AgentExecution],
+    ]:
         key = (receipt.rollout_id, receipt.attempt_index)
         expected = (
             receipt.execution_generation,
@@ -454,7 +539,7 @@ class AgentCheckpointParticipant:
                     f"acknowledgment does not match rollout {receipt.rollout_id!r} "
                     f"attempt {receipt.attempt_index}'s completed receipt"
                 )
-            return {"acknowledged": False, "idempotent": True}
+            return key, expected, None
 
         execution = self._executions.get(key)
         if execution is None or execution.state != AgentExecutionState.COMPLETED:
@@ -472,14 +557,19 @@ class AgentCheckpointParticipant:
             raise AgentCompletionAcknowledgmentError(
                 f"acknowledgment receipt mismatch for rollout {receipt.rollout_id!r} attempt {receipt.attempt_index}"
             )
+        return key, expected, execution
 
+    def _apply_acknowledgement(
+        self,
+        key: tuple[str, int],
+        expected: tuple[int, str, str, Optional[str], Optional[str]],
+        execution: AgentExecution,
+    ) -> None:
         self._executions.pop(key)
         execution.state = AgentExecutionState.RETIRED
         execution.terminal_result = None
         self._acknowledged[key] = expected
         self._tombstones.add(key)
-        await self._notify()
-        return {"acknowledged": True, "idempotent": False}
 
     def continuation(self, execution: AgentExecution) -> Optional[AgentBoundaryRecord]:
         if not self._owns(execution):
@@ -1423,7 +1513,12 @@ def install_agent_checkpoint(
                     "agent prepare is incomplete: "
                     f"running={result['running']}, "
                     f"parked_without_boundary={result['parked_without_boundary']}, "
-                    f"completed_unacknowledged={result['completed_unacknowledged']}"
+                    f"completed_unacknowledged={result['completed_unacknowledged']}",
+                    metadata={
+                        "running": result["running"],
+                        "parked_without_boundary": result["parked_without_boundary"],
+                        "completed_unacknowledged": result["completed_unacknowledged"],
+                    },
                 )
             return result
 
@@ -1459,6 +1554,30 @@ def install_agent_checkpoint(
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
         return await participant.acknowledge(body)
+
+    @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/acknowledge-batch")
+    async def acknowledge_batch(
+        body: AgentAcknowledgeBatchRequest,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
+        started = time.monotonic()
+        result = await participant.acknowledge_batch(body)
+        print(
+            json.dumps(
+                {
+                    "event": "agent_completion_bulk_ack_completed",
+                    "participant": participant.instance_name,
+                    "accepted_count": result["accepted_count"],
+                    "newly_acknowledged_count": result["newly_acknowledged_count"],
+                    "idempotent_count": result["idempotent_count"],
+                    "duration_seconds": round(time.monotonic() - started, 6),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return result
 
     @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/commit")
     async def commit(

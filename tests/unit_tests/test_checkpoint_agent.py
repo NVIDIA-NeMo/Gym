@@ -32,11 +32,14 @@ from nemo_gym._checkpoint import (
     AGENT_MANIFEST_NAME,
     AGENT_RECORD_INDEX_NAME,
     AGENT_STATE_SUBDIR,
+    AgentAcknowledgeBatchRequest,
+    AgentAcknowledgeRequest,
     AgentAdmissionClosedError,
     AgentBoundaryKind,
     AgentBoundaryRecord,
     AgentCheckpointError,
     AgentCheckpointParticipant,
+    AgentCompletionAcknowledgmentError,
     AgentContinuationRoot,
     AgentStaleAttemptError,
     CheckpointArtifactReference,
@@ -46,7 +49,10 @@ from nemo_gym._checkpoint import (
     DuplicateExecutionError,
     MultiProcessCapability,
     PendingModelPayload,
+    agent_acknowledgement_batch_digest,
     commit_agent_state,
+    decode_agent_completion_receipt,
+    encode_agent_completion_receipt,
     install_agent_checkpoint,
     install_control_plane,
     read_jsonl_artifact,
@@ -706,6 +712,11 @@ async def test_prepare_route_rejects_completed_unacknowledged_result() -> None:
 
     assert prepare.status_code == 409
     assert "completed_unacknowledged=1" in prepare.json()["error"]["detail"]
+    assert prepare.json()["error"]["metadata"] == {
+        "running": 0,
+        "parked_without_boundary": 0,
+        "completed_unacknowledged": 1,
+    }
     assert fence.phase == CheckpointPhase.IDLE
     assert status.json()["completed_unacknowledged"] == 1
 
@@ -766,6 +777,67 @@ async def test_completed_result_acknowledgment_is_receipt_bound_and_idempotent()
     assert participant.status()["acknowledged_completed"] == 1
     with pytest.raises(AgentStaleAttemptError):
         await participant.begin("rollout-a", 0, task=None)
+
+
+@pytest.mark.asyncio
+async def test_bulk_acknowledgment_is_atomic_and_idempotent() -> None:
+    participant = AgentCheckpointParticipant()
+    for rollout_id in ("rollout-a", "rollout-b"):
+        execution = await participant.begin(rollout_id, 0, task=asyncio.current_task())
+        await participant.finish(
+            execution,
+            outcome="completed",
+            result={"id": f"result-{rollout_id}"},
+        )
+    receipts = [
+        AgentAcknowledgeRequest.model_validate(item["completion_receipt"])
+        for item in participant.status()["completed_unacknowledged_attempts"]
+    ]
+    conflicting = receipts[1].model_copy(update={"result_digest": "0" * 64})
+    conflicting_receipts = [receipts[0], conflicting]
+    conflicting_batch = AgentAcknowledgeBatchRequest(
+        receipts=conflicting_receipts,
+        batch_digest=agent_acknowledgement_batch_digest(conflicting_receipts),
+    )
+
+    with pytest.raises(AgentCompletionAcknowledgmentError):
+        await participant.acknowledge_batch(conflicting_batch)
+    assert participant.status()["completed_unacknowledged"] == 2
+
+    batch = AgentAcknowledgeBatchRequest(
+        receipts=receipts,
+        batch_digest=agent_acknowledgement_batch_digest(receipts),
+    )
+    assert await participant.acknowledge_batch(batch) == {
+        "accepted_count": 2,
+        "newly_acknowledged_count": 2,
+        "idempotent_count": 0,
+        "batch_digest": batch.batch_digest,
+    }
+    assert await participant.acknowledge_batch(batch) == {
+        "accepted_count": 2,
+        "newly_acknowledged_count": 0,
+        "idempotent_count": 2,
+        "batch_digest": batch.batch_digest,
+    }
+    assert participant.status()["completed_unacknowledged"] == 0
+
+
+def test_completion_receipt_header_encoding_round_trips() -> None:
+    receipt = AgentAcknowledgeRequest(
+        rollout_id="rollout-a",
+        attempt_index=2,
+        execution_generation=3,
+        result_identity="result-rollout-a-2",
+        result_digest="1" * 64,
+        manifest_capture_key="rollout-a_a2",
+        terminal_model_call_id="call-1",
+    )
+
+    encoded = encode_agent_completion_receipt(receipt)
+
+    assert "=" not in encoded
+    assert decode_agent_completion_receipt(encoded) == receipt
 
 
 @pytest.mark.asyncio
