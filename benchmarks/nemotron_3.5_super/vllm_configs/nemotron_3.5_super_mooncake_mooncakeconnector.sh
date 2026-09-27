@@ -87,7 +87,8 @@ VLLM_DECODE_ARGS=(
                     "kv_role": "kv_consumer",
                     "kv_connector_extra_config": {
                         "load_async": true,
-                        "lookup_async": true
+                        "lookup_async": true,
+                        "enable_lookup": false
                     }
                 }
             ]
