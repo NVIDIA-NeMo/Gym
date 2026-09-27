@@ -94,9 +94,15 @@ class ControlError(Exception):
     status_code = 409
     code = "control_error"
 
-    def __init__(self, detail: str) -> None:
+    def __init__(
+        self,
+        detail: str,
+        *,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         super().__init__(detail)
         self.detail = detail
+        self.metadata = dict(metadata) if metadata is not None else None
 
 
 class StaleCheckpointError(ControlError):
@@ -380,9 +386,12 @@ def install_control_plane(app: FastAPI, *, capabilities: ControlCapabilities, fe
         return {**capabilities.model_dump(), **fence.snapshot()}
 
     async def control_error_handler(request: Any, exc: ControlError) -> JSONResponse:
+        error: dict[str, Any] = {"code": exc.code, "detail": exc.detail}
+        if exc.metadata is not None:
+            error["metadata"] = exc.metadata
         return JSONResponse(
             status_code=exc.status_code,
-            content={"error": {"code": exc.code, "detail": exc.detail}},
+            content={"error": error},
         )
 
     app.add_exception_handler(ControlError, control_error_handler)

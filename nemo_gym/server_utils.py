@@ -105,6 +105,7 @@ from nemo_gym.telemetry.span_groups import GymSpanGroup
 logger = logging.getLogger(__name__)
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
+_GLOBAL_AIOHTTP_CONTROL_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
 # Bound both the raw request prefix and its escaped representation to 4 KiB.
@@ -259,6 +260,12 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit: int = 100 * 1024
     global_aiohttp_connector_limit_per_host: int = 1024
 
+    # Checkpoint and admission requests must not queue behind long-lived rollout
+    # requests. These limits back a separate connector used only when callers
+    # explicitly select the control traffic class.
+    global_aiohttp_control_connector_limit: int = 256
+    global_aiohttp_control_connector_limit_per_host: int = 64
+
     global_aiohttp_client_request_debug: bool = False
 
     global_aiohttp_tcp_keepalive_idle_seconds: int = Field(
@@ -291,6 +298,25 @@ def get_global_aiohttp_client(
     cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
 
     return set_global_aiohttp_client(cfg)
+
+
+def get_global_aiohttp_control_client(
+    global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
+    global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
+) -> ClientSession:  # pragma: no cover
+    """Return the process-wide client reserved for short control-plane calls."""
+    global _GLOBAL_AIOHTTP_CONTROL_CLIENT
+
+    if _GLOBAL_AIOHTTP_CONTROL_CLIENT is not None:
+        return _GLOBAL_AIOHTTP_CONTROL_CLIENT
+
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=global_config_dict_parser_config,
+        global_config_dict_parser_cls=global_config_dict_parser_cls,
+    )
+    cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
+
+    return set_global_aiohttp_control_client(cfg)
 
 
 def _make_keepalive_socket_factory(
@@ -345,8 +371,48 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     return _GLOBAL_AIOHTTP_CLIENT
 
 
+def set_global_aiohttp_control_client(
+    cfg: GlobalAIOHTTPAsyncClientConfig,
+) -> ClientSession:  # pragma: no cover
+    """Create the connector reserved for checkpoint and admission control calls."""
+    assert not is_global_aiohttp_control_client_setup(), (
+        "There is already a global aiohttp control client setup. Please refactor "
+        "your code or call `global_aiohttp_control_client_exit` if you want to "
+        "explicitly re-make the client!"
+    )
+
+    num_workers = get_nemo_gym_fastapi_num_workers()
+    client_session = ClientSession(
+        connector=TCPConnector(
+            # The configuration is an aggregate budget across uvicorn workers.
+            # Keep at least one reserved permit in every process.
+            limit=max(1, cfg.global_aiohttp_control_connector_limit // num_workers),
+            limit_per_host=max(
+                1,
+                cfg.global_aiohttp_control_connector_limit_per_host // num_workers,
+            ),
+            keepalive_timeout=15.0,
+            socket_factory=_make_keepalive_socket_factory(
+                idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+                interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+                probes=cfg.global_aiohttp_tcp_keepalive_probes,
+            ),
+        ),
+        timeout=ClientTimeout(),
+        cookie_jar=DummyCookieJar(),
+    )
+
+    global _GLOBAL_AIOHTTP_CONTROL_CLIENT
+    _GLOBAL_AIOHTTP_CONTROL_CLIENT = client_session
+    return _GLOBAL_AIOHTTP_CONTROL_CLIENT
+
+
 def is_global_aiohttp_client_setup() -> bool:  # pragma: no cover
     return _GLOBAL_AIOHTTP_CLIENT is not None
+
+
+def is_global_aiohttp_control_client_setup() -> bool:  # pragma: no cover
+    return _GLOBAL_AIOHTTP_CONTROL_CLIENT is not None
 
 
 def is_global_aiohttp_client_request_debug_enabled() -> bool:
@@ -363,7 +429,18 @@ def global_aiohttp_client_exit():  # pragma: no cover
     _GLOBAL_AIOHTTP_CLIENT = None
 
 
+def global_aiohttp_control_client_exit():  # pragma: no cover
+    if not is_global_aiohttp_control_client_setup():
+        return
+
+    global _GLOBAL_AIOHTTP_CONTROL_CLIENT
+    asyncio.run(_GLOBAL_AIOHTTP_CONTROL_CLIENT.close())
+
+    _GLOBAL_AIOHTTP_CONTROL_CLIENT = None
+
+
 atexit.register(global_aiohttp_client_exit)
+atexit.register(global_aiohttp_control_client_exit)
 
 
 # This is not intended to be changed. If you want to increase this, we should probably figure out how to improve server-side robustness.
@@ -386,13 +463,15 @@ async def request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _traffic_class: Literal["data", "control"] = "data",
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
-    """Make an outbound HTTP call through Gym's shared aiohttp client.
+    """Make an outbound HTTP call through Gym's selected aiohttp traffic class.
 
     This is the only place Gym talks to another server, so it is also the only place
     trace context has to be injected: every agent -> model and agent -> resources hop goes
-    through here. `CLAUDE.md` bans httpx precisely to keep it that way.
+    through here. `CLAUDE.md` bans httpx precisely to keep it that way. Data traffic uses
+    the shared high-capacity connector; checkpoint control traffic uses reserved capacity.
     """
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
@@ -404,10 +483,20 @@ async def request(
     # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
     if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
         return await _traced_request(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_connection_retries=_max_connection_retries,
+            _traffic_class=_traffic_class,
+            **kwargs,
         )
     return await _request_with_retries(
-        method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        method,
+        url,
+        _internal=_internal,
+        _max_connection_retries=_max_connection_retries,
+        _traffic_class=_traffic_class,
+        **kwargs,
     )
 
 
@@ -416,6 +505,7 @@ async def _traced_request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _traffic_class: Literal["data", "control"] = "data",
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -451,7 +541,12 @@ async def _traced_request(
             safe_set_span_attributes(span, attributes)
 
         response = await _request_with_retries(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_connection_retries=_max_connection_retries,
+            _traffic_class=_traffic_class,
+            **kwargs,
         )
 
         if span is not None:
@@ -500,9 +595,10 @@ async def _request_with_retries(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _traffic_class: Literal["data", "control"] = "data",
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
-    client = get_global_aiohttp_client()
+    client = get_global_aiohttp_control_client() if _traffic_class == "control" else get_global_aiohttp_client()
     num_tries = 1
     retries = 0
     retry_start = time.monotonic()
@@ -649,7 +745,13 @@ class ServerClient(BaseModel):
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
     async def request(
-        self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
+        self,
+        server_name: str,
+        url_path: str,
+        method: str,
+        *,
+        traffic_class: Literal["data", "control"] = "data",
+        **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         request_path = url_path.partition("?")[0]
         model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
@@ -728,7 +830,13 @@ class ServerClient(BaseModel):
             headers[PARENT_MODEL_CALL_ID_HEADER] = parent_model_call_id
             kwargs["headers"] = headers
 
-        return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
+        return await request(
+            method=method,
+            url=f"{base_url}{url_path}",
+            _internal=True,
+            _traffic_class=traffic_class,
+            **kwargs,
+        )
 
     async def get(
         self,

@@ -188,6 +188,7 @@ async def test_generation_cut_routes_each_call_to_its_owning_vllm_worker(
 
     assert sent["url"] == ("http://worker-0:8000/ng-control/v1/generation-cut")
     assert sent["headers"] == {"Authorization": "Bearer test-control-token"}
+    assert sent["_traffic_class"] == "control"
     assert isinstance(sent["json"], dict)
     assert receipt.inventory == inventory
     assert receipt.prefixes[0].staging_keys == ("prefix-1",)

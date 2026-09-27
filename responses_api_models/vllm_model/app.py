@@ -95,6 +95,19 @@ _STRUCTURED_GENERATION_FIELDS = (
     "structured_outputs",
 )
 
+
+def _generation_cut_telemetry(event: str, **fields: Any) -> None:
+    print(
+        "gym_checkpoint_telemetry "
+        + json.dumps(
+            {"event": event, "timestamp": time(), **fields},
+            sort_keys=True,
+            default=str,
+        ),
+        flush=True,
+    )
+
+
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
     "adapter": "x-nemo-gym-log-adapter",
@@ -445,6 +458,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if not self._generation_prefix_cuts_enabled or self._generation_cut_control_token is None:
             raise RuntimeError("generation-prefix cuts are not enabled for this model server")
 
+        cut_started = monotonic()
         by_client: dict[str, tuple[NeMoGymAsyncOpenAI, list[GenerationCutPrefix]]] = {}
         acknowledgements: list[GenerationCutPrefixAck] = []
         for prefix in inventory.active_prefixes:
@@ -461,6 +475,16 @@ class VLLMModel(SimpleResponsesAPIModel):
                 continue
             by_client.setdefault(client.base_url, (client, []))[1].append(prefix)
 
+        _generation_cut_telemetry(
+            "gym_generation_cut_fanout_started",
+            checkpoint_id=inventory.checkpoint_id,
+            server_name=inventory.server_name,
+            active_prefix_count=len(inventory.active_prefixes),
+            missing_route_count=len(acknowledgements),
+            backend_server_count=len(by_client),
+            backend_prefix_counts={base_url: len(prefixes) for base_url, (_, prefixes) in sorted(by_client.items())},
+        )
+
         semaphore = asyncio.Semaphore(_GENERATION_CUT_RPC_MAX_CONCURRENCY)
 
         async def checkpoint_client(
@@ -472,17 +496,47 @@ class VLLMModel(SimpleResponsesAPIModel):
                 server_name=inventory.server_name,
                 active_prefixes=prefixes,
             )
-            async with semaphore:
-                response = await http_request(
-                    method="POST",
-                    url=f"{client.base_url.removesuffix('/v1')}/ng-control/v1/generation-cut",
-                    headers={"Authorization": f"Bearer {self._generation_cut_control_token}"},
-                    json=worker_inventory.model_dump(mode="json"),
-                    _internal=True,
+            backend_started = monotonic()
+            _generation_cut_telemetry(
+                "gym_generation_cut_backend_started",
+                checkpoint_id=inventory.checkpoint_id,
+                server_name=inventory.server_name,
+                backend_url=client.base_url,
+                prefix_count=len(prefixes),
+            )
+            try:
+                async with semaphore:
+                    response = await http_request(
+                        method="POST",
+                        url=f"{client.base_url.removesuffix('/v1')}/ng-control/v1/generation-cut",
+                        headers={"Authorization": f"Bearer {self._generation_cut_control_token}"},
+                        json=worker_inventory.model_dump(mode="json"),
+                        _internal=True,
+                        _traffic_class="control",
+                    )
+                    await raise_for_status(response)
+                    receipt = GenerationCutReceipt.model_validate(await get_response_json(response))
+            except Exception as error:
+                _generation_cut_telemetry(
+                    "gym_generation_cut_backend_failed",
+                    checkpoint_id=inventory.checkpoint_id,
+                    server_name=inventory.server_name,
+                    backend_url=client.base_url,
+                    prefix_count=len(prefixes),
+                    duration_seconds=monotonic() - backend_started,
+                    error_type=type(error).__name__,
+                    error=str(error),
                 )
-                await raise_for_status(response)
-                receipt = GenerationCutReceipt.model_validate(await get_response_json(response))
+                raise
             receipt.validate_for(worker_inventory)
+            _generation_cut_telemetry(
+                "gym_generation_cut_backend_completed",
+                checkpoint_id=inventory.checkpoint_id,
+                server_name=inventory.server_name,
+                backend_url=client.base_url,
+                prefix_count=len(prefixes),
+                duration_seconds=monotonic() - backend_started,
+            )
             return receipt
 
         tasks: list[asyncio.Task[GenerationCutReceipt]] = []
@@ -510,6 +564,21 @@ class VLLMModel(SimpleResponsesAPIModel):
             prefixes=tuple(sorted(acknowledgements, key=lambda ack: ack.ticket_id)),
         )
         receipt.validate_for(inventory)
+        durable_prefixes = [prefix for prefix in acknowledgements if prefix.disposition == "durable_prefix"]
+        _generation_cut_telemetry(
+            "gym_generation_cut_fanout_completed",
+            checkpoint_id=inventory.checkpoint_id,
+            server_name=inventory.server_name,
+            duration_seconds=monotonic() - cut_started,
+            active_prefix_count=len(inventory.active_prefixes),
+            durable_prefix_count=len(durable_prefixes),
+            durable_failure_count=len(acknowledgements) - len(durable_prefixes),
+            prefix_tokens_total=sum(prefix.prefix_token_count or 0 for prefix in durable_prefixes),
+            prefix_tokens_max=max(
+                (prefix.prefix_token_count or 0 for prefix in durable_prefixes),
+                default=0,
+            ),
+        )
         return receipt
 
     async def restore_generation_cut(

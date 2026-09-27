@@ -87,6 +87,35 @@ def test_resume_reopens_admission() -> None:
     limiter.release(limiter.admit(rollout_id="4-2", attempt_index=0))
 
 
+def test_generation_readiness_updates_incrementally(monkeypatch: pytest.MonkeyPatch) -> None:
+    limiter = AdmissionLimiter(MagicMock())
+    tickets = [limiter.admit(rollout_id=f"rollout-{index}", attempt_index=0) for index in range(128)]
+    readiness_checks = 0
+    original = limiter._ticket_checkpoint_ready
+
+    def counted_readiness(ticket) -> bool:
+        nonlocal readiness_checks
+        readiness_checks += 1
+        return original(ticket)
+
+    monkeypatch.setattr(limiter, "_ticket_checkpoint_ready", counted_readiness)
+    limiter.close("checkpoint-1")
+    assert readiness_checks == len(tickets)
+    assert limiter.generation_pending() == len(tickets)
+
+    readiness_checks = 0
+    for ticket in tickets:
+        ticket.mark_durable_completed()
+        # Status polling must not rescan the frozen membership.
+        assert limiter.generation_pending() >= 0
+        limiter.is_prepare_safe()
+
+    assert readiness_checks == len(tickets)
+    assert limiter.generation_pending() == 0
+    assert limiter.is_prepare_safe()
+    assert limiter.state == AdmissionState.PAUSED
+
+
 def test_abort_inflight_tombstones_but_waits_for_request_exit() -> None:
     limiter = AdmissionLimiter()
     stuck = limiter.admit(rollout_id="7-1", attempt_index=2)

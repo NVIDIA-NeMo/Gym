@@ -490,7 +490,11 @@ def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["name"] == "agent"
     assert body["checkpoint_mode"] == "export_restore"
     assert body["concurrency_contract"] == "serialized_per_session"
-    assert body["features"] == ["completed_result_acknowledgement"]
+    assert body["features"] == [
+        "completed_result_acknowledgement",
+        "completed_result_bulk_acknowledgement_v1",
+        "completion_receipt_in_run_response_v1",
+    ]
     assert agent._checkpoint_participant is not None
 
     class _WhiteboxAgent(_Agent):
@@ -507,6 +511,8 @@ def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     assert whitebox_body["concurrency_contract"] == "serialized_per_session"
     assert whitebox_body["features"] == [
         "completed_result_acknowledgement",
+        "completed_result_bulk_acknowledgement_v1",
+        "completion_receipt_in_run_response_v1",
         "agent_continuation_index_v1",
         "discard_restored_continuation_v1",
         "agent_resource_dependency_index_v1",

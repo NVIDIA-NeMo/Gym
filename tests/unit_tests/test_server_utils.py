@@ -607,9 +607,44 @@ class TestServerUtils:
 
     def test_GlobalAIOHTTPAsyncClientConfig_keepalive_defaults(self) -> None:
         cfg = GlobalAIOHTTPAsyncClientConfig()
+        assert cfg.global_aiohttp_control_connector_limit == 256
+        assert cfg.global_aiohttp_control_connector_limit_per_host == 64
         assert cfg.global_aiohttp_tcp_keepalive_idle_seconds == 60
         assert cfg.global_aiohttp_tcp_keepalive_interval_seconds == 10
         assert cfg.global_aiohttp_tcp_keepalive_probes == 3
+
+    async def test_ServerClient_routes_control_traffic_to_reserved_client(self, monkeypatch: MonkeyPatch) -> None:
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=80),
+            global_config_dict=DictConfig(
+                {"agent": {"responses_api_agents": {"agent": {"host": "agent", "port": 8080}}}}
+            ),
+        )
+        data_client = MagicMock()
+        data_client.request = AsyncMock(return_value="data-response")
+        control_client = MagicMock()
+        control_client.request = AsyncMock(return_value="control-response")
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_aiohttp_client",
+            lambda: data_client,
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_aiohttp_control_client",
+            lambda: control_client,
+        )
+
+        response = await server_client.request(
+            server_name="agent",
+            url_path="/ng-control/v1/agent-checkpoint/status",
+            method="GET",
+            traffic_class="control",
+        )
+
+        assert response == "control-response"
+        control_client.request.assert_awaited_once()
+        data_client.request.assert_not_awaited()
 
     def test_keepalive_socket_factory_uses_configured_values(self, monkeypatch: MonkeyPatch) -> None:
         mock_sock = MagicMock()

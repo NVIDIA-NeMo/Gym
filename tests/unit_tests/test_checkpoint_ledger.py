@@ -217,6 +217,73 @@ def test_commit_restore_preserves_only_token_free_custody(tmp_path) -> None:
     assert (restored_root / "rollout-a.lineage.jsonl").read_bytes() == expected
 
 
+def test_archive_restore_does_not_fsync_or_reopen_each_installed_member(tmp_path, monkeypatch) -> None:
+    import nemo_gym._checkpoint.ledger as ledger_module
+
+    source = tmp_path / "source"
+    receipt = _generation_cut_receipt()
+    checkpoint = tmp_path / "checkpoint"
+    CaptureLedgerCheckpointer(source, server_name="policy").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        continuation_roots=[],
+        generation_cut_receipts=(receipt,),
+    )
+    restored = tmp_path / "restored"
+    real_read_bytes = Path.read_bytes
+
+    def reject_per_member_fsync(*_args, **_kwargs):
+        raise AssertionError("archive restore must not fsync each lineage member")
+
+    def reject_restored_member_reopen(path: Path) -> bytes:
+        if path.parent == restored and path.name.endswith(".lineage.jsonl"):
+            raise AssertionError("archive restore must rebuild cut receipts from the streamed payload")
+        return real_read_bytes(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger_module, "_write_payload_fsynced", reject_per_member_fsync)
+        patch.setattr(Path, "read_bytes", reject_restored_member_reopen)
+        result = CaptureLedgerCheckpointer(restored, server_name="policy").restore(checkpoint)
+
+    rebuilt = GenerationCutReceipt.model_validate(result["generation_cut_receipts"][0])
+    assert rebuilt.prefixes == receipt.prefixes
+    assert (restored / "rollout-a.lineage.jsonl").is_file()
+
+
+def test_archive_restore_failure_does_not_publish_partial_namespace(tmp_path, monkeypatch) -> None:
+    import nemo_gym._checkpoint.ledger as ledger_module
+
+    source = tmp_path / "source"
+    _write_custody(source, "rollout-a")
+    _write_custody(source, "rollout-b")
+    checkpoint = tmp_path / "checkpoint"
+    CaptureLedgerCheckpointer(source).commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        continuation_roots=[_continuation_root("rollout-a"), _continuation_root("rollout-b")],
+    )
+    restored = tmp_path / "restored"
+    restored.mkdir()
+    sentinel = restored / "unrelated.tokens.lock"
+    sentinel.write_text("preserve")
+    real_parse = ledger_module._parse_lineage_payload
+
+    def fail_second_member(source_name: str, payload: bytes):
+        if source_name == "rollout-b.lineage.jsonl":
+            raise LedgerMismatchError("injected restore failure")
+        return real_parse(source_name, payload)
+
+    monkeypatch.setattr(ledger_module, "_parse_lineage_payload", fail_second_member)
+    with pytest.raises(LedgerMismatchError, match="injected restore failure"):
+        CaptureLedgerCheckpointer(restored).restore(checkpoint)
+
+    assert sentinel.read_text() == "preserve"
+    assert not list(restored.glob("*.lineage.jsonl"))
+    assert not list(tmp_path.glob(f".{restored.name}.restore-*"))
+
+
 def test_commit_packages_only_active_continuations_without_scanning_store(tmp_path, monkeypatch) -> None:
     source = tmp_path / "source"
     expected = _write_custody(source, "rollout-a", call_count=3)
@@ -265,8 +332,12 @@ def test_commit_packages_only_active_continuations_without_scanning_store(tmp_pa
 def test_cut_only_first_call_is_archived_and_rebuilt_from_lineage(tmp_path) -> None:
     source = tmp_path / "source"
     receipt = _generation_cut_receipt()
-    asyncio.run(FileLineageStore(source).record_generation_cut(receipt))
     checkpoint = tmp_path / "checkpoint"
+
+    # Multi-worker prepare persists this receipt in one worker journal. The
+    # live per-rollout lineage file is intentionally absent until checkpoint
+    # packaging merges the journal row into the archive payload.
+    assert not (source / "rollout-a.lineage.jsonl").exists()
 
     summary = CaptureLedgerCheckpointer(source, server_name="policy").commit(
         checkpoint,
@@ -278,6 +349,7 @@ def test_cut_only_first_call_is_archived_and_rebuilt_from_lineage(tmp_path) -> N
 
     assert summary["rollouts"] == 1
     assert summary["generation_cut_records"] == 1
+    assert not (source / "rollout-a.lineage.jsonl").exists()
     archived = _read_archived_custody(checkpoint, "rollout-a", server_name="policy")
     assert json.loads(archived)["event"] == "generation_cut"
     references = read_jsonl_artifact(
@@ -296,8 +368,7 @@ def test_cut_only_first_call_is_archived_and_rebuilt_from_lineage(tmp_path) -> N
 def test_completed_call_supersedes_older_generation_cut(tmp_path) -> None:
     source = tmp_path / "source"
     receipt = _generation_cut_receipt(model_call_id="rollout-a-call-0")
-    store = FileLineageStore(source)
-    asyncio.run(store.record_generation_cut(receipt))
+    source.mkdir()
     completed = {
         "model_call_id": "rollout-a-call-0",
         "staging_key": "opaque-rollout-a-0",
@@ -307,14 +378,6 @@ def test_completed_call_supersedes_older_generation_cut(tmp_path) -> None:
     }
     with (source / "rollout-a.lineage.jsonl").open("a") as handle:
         handle.write(json.dumps(completed, sort_keys=True) + "\n")
-    commit_receipts = asyncio.run(
-        store.load_generation_cut_receipts(
-            ("rollout-a",),
-            checkpoint_id="checkpoint-1",
-            server_name="policy",
-        )
-    )
-    assert commit_receipts[0].prefixes == receipt.prefixes
     checkpoint = tmp_path / "checkpoint"
 
     summary = CaptureLedgerCheckpointer(source, server_name="policy").commit(
@@ -1455,6 +1518,33 @@ def test_namespaced_restore_validates_the_shared_model_ledger_union(tmp_path) ->
     CaptureLedgerCheckpointer(restored, server_name="policy-model-reasoning-off").restore(checkpoint)
 
     assert (restored / "rollout-a.lineage.jsonl").read_bytes() == expected
+
+
+def test_first_namespaced_restore_publishes_the_complete_model_ledger_union(tmp_path) -> None:
+    first = tmp_path / "first"
+    first_expected = _write_custody(first, "rollout-a")
+    second = tmp_path / "second"
+    second_expected = _write_custody(second, "rollout-b")
+    checkpoint = tmp_path / "checkpoint"
+
+    CaptureLedgerCheckpointer(first, server_name="policy-a").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        continuation_roots=[_continuation_root("rollout-a")],
+    )
+    CaptureLedgerCheckpointer(second, server_name="policy-b").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        continuation_roots=[_continuation_root("rollout-b")],
+    )
+
+    restored = tmp_path / "restored"
+    CaptureLedgerCheckpointer(restored, server_name="policy-a").restore(checkpoint)
+
+    assert (restored / "rollout-a.lineage.jsonl").read_bytes() == first_expected
+    assert (restored / "rollout-b.lineage.jsonl").read_bytes() == second_expected
 
 
 def test_namespaced_restore_deduplicates_matching_shared_lineage(tmp_path) -> None:

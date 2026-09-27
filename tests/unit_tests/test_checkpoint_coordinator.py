@@ -72,7 +72,6 @@ from nemo_gym._checkpoint.coordinator import (
 )
 from nemo_gym._checkpoint.ledger import (
     MODEL_LEDGER_SUBDIR,
-    LedgerMismatchError,
     PolicyModelCheckpointCoordinatorService,
 )
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
@@ -1005,7 +1004,7 @@ async def test_coordinator_aggregates_complete_sequenced_worker_cut_proof(sock_d
 
 
 @pytest.mark.asyncio
-async def test_worker_writes_large_cut_to_lineage_before_publishing_compact_index(sock_dir) -> None:
+async def test_worker_writes_large_cut_to_checkpoint_scoped_journal(sock_dir) -> None:
     large_staging_key = f"prefix/{'x' * (128 * 1024)}"
 
     class CutBackend:
@@ -1064,21 +1063,20 @@ async def test_worker_writes_large_cut_to_lineage_before_publishing_compact_inde
 
         worker = coordinator._workers["worker-0"]
         assert worker.cut_artifact is not None
-        assert worker.cut_artifact.bytes < 1024
+        assert worker.cut_artifact.bytes > len(large_staging_key)
         index = coordinator._worker_checkpoint_index(worker)
-        assert index is not None and len(index) == 1
-        assert index[0].cut_recorded is True
-        assert "staging_keys" not in index[0].model_dump()
-
-        receipts = await lineage.load_generation_cut_receipts(
-            ("rollout-large",),
-            checkpoint_id="ckpt-large",
-            server_name="policy",
-        )
-        assert receipts[0].prefixes[0].staging_keys == (large_staging_key,)
+        assert index is not None and len(index) == 2
+        ticket_row = next(row for row in index if row.record_type == "ticket")
+        receipt_row = next(row for row in index if row.record_type == "receipt")
+        assert ticket_row.cut_recorded is True
+        assert receipt_row.generation_cut_receipt is not None
+        assert receipt_row.generation_cut_receipt.prefixes[0].staging_keys == (large_staging_key,)
+        assert not (lineage.checkpoint_root / "rollout-large.lineage.jsonl").exists()
 
         evidence = await coordinator.checkpoint_evidence()
-        assert len(await service._load_generation_cut_receipts(lineage, evidence)) == 1
+        receipts = await service._load_generation_cut_receipts(lineage, evidence)
+        assert len(receipts) == 1
+        assert receipts[0].prefixes[0].staging_keys == (large_staging_key,)
         commit_result = await agent.service_client().request(
             "model_checkpoint_commit",
             {
@@ -1092,10 +1090,7 @@ async def test_worker_writes_large_cut_to_lineage_before_publishing_compact_inde
         assert "generation_cut_proof" not in commit_result
         assert len(json.dumps(commit_result)) < 4096
         assert not (sock_dir / "checkpoint" / MODEL_LEDGER_SUBDIR / "policy" / "generation-cut-workers.json").exists()
-
-        (lineage.checkpoint_root / "rollout-large.lineage.jsonl").unlink()
-        with pytest.raises(LedgerMismatchError, match="lineage does not match"):
-            await service._load_generation_cut_receipts(lineage, evidence)
+        assert not (lineage.checkpoint_root / "rollout-large.lineage.jsonl").exists()
     finally:
         limiter.release(ticket)
         await agent.stop()
@@ -1103,7 +1098,10 @@ async def test_worker_writes_large_cut_to_lineage_before_publishing_compact_inde
 
 
 @pytest.mark.asyncio
-async def test_worker_lineage_failure_is_reported_without_publishing_index(sock_dir) -> None:
+async def test_worker_journal_failure_is_reported_without_publishing_index(
+    sock_dir,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class CutBackend:
         async def checkpoint_generation_cut(self, inventory: GenerationCutInventory) -> GenerationCutReceipt:
             prefix = inventory.active_prefixes[0]
@@ -1127,13 +1125,6 @@ async def test_worker_lineage_failure_is_reported_without_publishing_index(sock_
                 ),
             )
 
-    class BrokenLineage:
-        async def record_generation_cut(self, receipt):
-            raise OSError("lineage disk unavailable")
-
-        async def load_generation_cut_receipts(self, capture_keys, *, checkpoint_id, server_name):
-            return ()
-
     coordinator = AdmissionCoordinator(sock_dir / "control.sock", expected_workers=1)
     await coordinator.start()
     limiter = AdmissionLimiter(CutBackend())
@@ -1141,7 +1132,7 @@ async def test_worker_lineage_failure_is_reported_without_publishing_index(sock_
         coordinator.socket_path,
         "worker-0",
         limiter,
-        capture_ledger=BrokenLineage(),
+        capture_ledger=None,
     )
     await agent.start()
     ticket = limiter.admit(rollout_id="rollout-fail", attempt_index=0)
@@ -1159,6 +1150,11 @@ async def test_worker_lineage_failure_is_reported_without_publishing_index(sock_
         ack_timeout_s=2.0,
     )
 
+    def fail_journal_write(*args, **kwargs):
+        raise OSError("worker journal unavailable")
+
+    monkeypatch.setattr(coordinator_module, "write_jsonl_artifact", fail_journal_write)
+
     try:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
@@ -1173,7 +1169,7 @@ async def test_worker_lineage_failure_is_reported_without_publishing_index(sock_
         assert response.json()["state"] == "draining"
         worker = coordinator._workers["worker-0"]
         assert worker.cut_artifact is None
-        assert worker.proof_error == "OSError: lineage disk unavailable"
+        assert worker.proof_error == "OSError: worker journal unavailable"
     finally:
         limiter.release(ticket)
         await agent.stop()
