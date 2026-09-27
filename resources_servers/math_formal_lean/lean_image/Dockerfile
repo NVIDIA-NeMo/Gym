@@ -11,7 +11,7 @@
 # Pinning follows responses_api_agents/opencode_sandboxed_agent/offline_science_image:
 # the Lean tarball by sha256, Mathlib by commit, and the final `lake build` runs with
 # --network=none so an incomplete cache fails the build instead of the benchmark.
-FROM debian:bookworm-slim@sha256:40b107342c492725bc7aacbe93a49945445191ae58e9b2ef7fdb95d7a5b3ea3e AS base
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS base
 
 ARG DEBIAN_SNAPSHOT=20260916T000000Z
 RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources && \
@@ -55,10 +55,13 @@ COPY --from=lean /opt/mathlib /opt/mathlib
 COPY --from=lean /opt/image-provenance/ /opt/image-provenance/
 ENV PATH=/opt/lean/bin:$PATH
 
-# The verifier execs `lake env lean` through a non-login shell, which reads no profile, so
-# the binaries have to resolve without one. Asserted here, not discovered mid-run.
-RUN env -i /opt/lean/bin/lake --version && \
-    env -i /opt/lean/bin/lean --version
+# Compile a Mathlib-importing file exactly as the verifier will: `lake env lean` on a file
+# in the project, under `env -i` (the verifier execs through a non-login shell, which reads no
+# profile). A `--version` check would pass on an image whose Mathlib does not import.
+RUN printf 'import Mathlib\n#eval Lean.versionString\n' > /tmp/smoke.lean && \
+    cd /opt/mathlib && \
+    env -i PATH=/opt/lean/bin:/usr/bin:/bin lake env lean /tmp/smoke.lean && \
+    rm /tmp/smoke.lean
 
 WORKDIR /opt/mathlib
 CMD ["sleep", "infinity"]
