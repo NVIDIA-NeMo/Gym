@@ -44,8 +44,12 @@ death stops renewal; provider TTL is the sandbox cleanup fallback.
 
 Model-call capture and harness trajectories belong to the agent server. Resource
 artifacts, including collected remote `/logs/agent` files, remain under the trial
-directory. The seed's connection configuration is used only for the internal
-agent/resource exchange and is not persisted in session records.
+directory, except the workspace snapshot: the task-declared artifact paths are
+copied out of the agent sandbox only so the separate verifier can restore them,
+and `<trial>/artifacts` is removed during cleanup once both sandboxes are stopped
+(diagnostics record `workspace_snapshot_discarded` with the file count). The
+seed's connection configuration is used only for the internal agent/resource
+exchange and is not persisted in session records.
 
 Artifact transfer retains source numeric UID/GID and `0777` permission bits for
 files and directories, independently of the host's user and umask. Host-side

@@ -4,6 +4,7 @@
 """Resource-owned preparation, deadlines, one finalizer, and cleanup."""
 
 import asyncio
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +66,31 @@ def exception(session, error, error_type=None):
     session.diagnostics.append({"phase": session.phase, "subphase": session.subphase, **record})
 
 
+async def discard_workspace_snapshot(session):
+    """Remove ``<trial>/artifacts`` once the verifier can no longer need it.
+
+    The snapshot holds the task-declared artifact paths (for the mobius tasks: the agent's whole workspace, bundled
+    toolchains included), copied out of the agent sandbox by ``collect`` only so ``restore`` can hand them to the
+    separate verifier sandbox. After verification nothing reads it again; the reference kept it anyway, at hundreds
+    of files per trial. Agent logs, verifier output, identity records, artifact metadata and result.json stay.
+    """
+    directory = Path(session.directory) / "artifacts"
+    if not directory.is_dir():
+        return
+
+    def work():
+        files = sum(1 for path in directory.rglob("*") if path.is_file() or path.is_symlink())
+        shutil.rmtree(directory, ignore_errors=True)
+        return files
+
+    record = {"operation": "workspace_snapshot_discarded"}
+    try:
+        record["files"] = await asyncio.to_thread(work)
+    except Exception as exc:
+        record["error"] = str(exc)
+    session.diagnostics.append(record)
+
+
 async def cleanup(session):
     if session.expiry_task is not None:
         session.expiry_task.cancel()
@@ -77,6 +103,8 @@ async def cleanup(session):
             await env.stop()
         except Exception as exc:
             exception(session, exc)
+    # Both sandboxes are stopped: the verifier has consumed the workspace snapshot, so drop the host copy.
+    await discard_workspace_snapshot(session)
     if session.shared_logs is not None:
         try:
             # A failed sandbox deletion must not race removal of its live mount.
