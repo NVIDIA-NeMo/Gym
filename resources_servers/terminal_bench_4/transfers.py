@@ -34,7 +34,7 @@ def _pack_trusted_directory(source: Path, target: str, archive: Path) -> None:
             member.mode |= 0o555 if member.isdir() else 0o444
         return member
 
-    with tarfile.open(archive, "w:gz") as tar:
+    with tarfile.open(archive, "w:gz", compresslevel=1) as tar:
         tar.add(source, arcname=".", filter=metadata)
 
 
@@ -136,7 +136,7 @@ def _pack_directory(source: Path, archive: Path, metadata_path: Path | None) -> 
             member.uname = member.gname = ""
         return member
 
-    with tarfile.open(archive, "w:gz") as tar:
+    with tarfile.open(archive, "w:gz", compresslevel=1) as tar:
         tar.add(source, arcname=".", filter=headers)
 
 
