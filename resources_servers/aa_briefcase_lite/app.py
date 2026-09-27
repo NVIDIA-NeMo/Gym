@@ -51,7 +51,7 @@ from resources_servers.gdpval.judge_panel import (
     merge_create_kwargs,
     sample_judge,
 )
-from resources_servers.gdpval.preconvert import preconvert_dir_async, sidecar_pdf
+from resources_servers.gdpval.preconvert import OFFICE_EXTENSIONS, preconvert_dir_async, sidecar_pdf
 
 
 _BINARY_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -241,18 +241,54 @@ def _requested_filenames(checks: list[dict[str, Any]]) -> list[str]:
     return sorted(names)
 
 
+def _existing_render(office_file: Path) -> Optional[Path]:
+    """An existing PDF render of *office_file*, or None when it has none.
+
+    Preconversion writes ``<stem>.pdf`` and switches to the injective
+    ``<name>.pdf`` sidecar only when two Office files share a stem, so both
+    names count. A plain ``<stem>.pdf`` is attributable to one source only when
+    a single Office file carries that stem; otherwise it is left out rather
+    than risk grading an unrelated document as the deliverable.
+    """
+
+    sidecar = sidecar_pdf(office_file)
+    if sidecar.is_file():
+        return sidecar
+    plain = office_file.with_suffix(".pdf")
+    if not plain.is_file():
+        return None
+    same_stem = [
+        sibling
+        for sibling in office_file.parent.iterdir()
+        if sibling.suffix.lower() in OFFICE_EXTENSIONS and sibling.stem == office_file.stem
+    ]
+    return plain if len(same_stem) == 1 else None
+
+
 def _stage_submission(source_dir: Optional[str], filenames: list[str], stack: ExitStack) -> tuple[Path, list[str]]:
     """Create a disposable artifact view without mutating submitted files."""
 
     stage = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="aa_bclite_judge_")))
     source = Path(source_dir) if source_dir else None
     missing: list[str] = []
+    staged: list[Path] = []
     for name in filenames:
         candidate = source / name if source is not None else None
         if candidate is None or not candidate.is_file():
             missing.append(name)
             continue
         (stage / name).symlink_to(candidate.resolve())
+        staged.append(candidate)
+    # Office deliverables are graded through a PDF rendering. Carry an existing
+    # render into the stage so conversion is skipped instead of failing on a
+    # host without LibreOffice; the Office original stays the deliverable.
+    for candidate in staged:
+        if candidate.suffix.lower() not in OFFICE_EXTENSIONS:
+            continue
+        render = _existing_render(candidate)
+        if render is None or (stage / render.name).exists():
+            continue
+        (stage / render.name).symlink_to(render.resolve())
     return stage, missing
 
 
@@ -284,6 +320,19 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             raise ValueError(f"expected 63 AA-Briefcase-Lite checks, found {len(self._aa_checks)}")
         self._aa_binary_system = (root / "prompts" / "judge_system.txt").read_text(encoding="utf-8")
         self._aa_binary_user = (root / "prompts" / "judge_user.txt").read_text(encoding="utf-8")
+        # GDPval only guards comparison mode, so binary and pairwise grading
+        # would reach the judge with filename-only stubs after the rollouts are
+        # already spent. Fail at startup instead.
+        if self.config.preconvert_office_to_pdf:
+            from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
+
+            if not ensure_libreoffice():
+                raise RuntimeError(
+                    "preconvert_office_to_pdf=True but libreoffice could not be ensured on the host. "
+                    "Office deliverables would reach the judge as filename-only stubs. Install "
+                    "libreoffice, or place a PDF render beside every Office deliverable and set "
+                    "preconvert_office_to_pdf=false."
+                )
         super().model_post_init(context)
 
     def _checks_for_task(self, task_id: str, scoring_type: str) -> list[dict[str, Any]]:
