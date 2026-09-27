@@ -220,7 +220,17 @@ async def finalize_session(session, *, grade):
             error_type = (
                 "AgentTimeoutError" if session.termination.reason == "timeout" else "NonZeroAgentExitCodeError"
             )
-            exception(session, session.termination.detail or session.termination.reason, error_type)
+            # Diagnostics only. The termination is reported on its own field; if collection, restore or the
+            # verifier fails afterwards, that failure must become the reported failure_reason instead of the
+            # run's exit (39 verifier/collect failures of a 6 h budget pulse were labelled AgentTimeoutError).
+            session.diagnostics.append(
+                {
+                    "phase": session.phase,
+                    "subphase": session.subphase,
+                    "exception_type": error_type,
+                    "exception_message": session.termination.detail or session.termination.reason,
+                }
+            )
         session.subphase = "collect"
         session.persist()
         try:
