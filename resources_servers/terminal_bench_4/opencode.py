@@ -543,6 +543,20 @@ def derive_termination(records: dict[str, Any]) -> tuple[AgentTermination, bool]
     epoch, pid, run_name = runs[-1]
     exit_record = records.get(f"{epoch}-{pid}-run-exit.json")
     if not isinstance(exit_record, dict) or not isinstance(exit_record.get("exit_code"), int):
+        run_record = records.get(run_name)
+        budget = run_record.get("budget_s") if isinstance(run_record, dict) else None
+        if isinstance(budget, int) and budget > 0:
+            # The launcher itself ends a run at the budget and records it; a missing exit record therefore means the
+            # sandbox died or the exec tracking was lost before OpenCode returned — an infrastructure loss, not a
+            # graded timeout. The attempt is still collected and graded by the caller (agent_started).
+            return (
+                AgentTermination(
+                    reason="infrastructure_error",
+                    detail=f"OpenCode run started but recorded no exit although the launcher enforces a {budget} s budget: "
+                    "sandbox death or lost exec tracking",
+                ),
+                True,
+            )
         return (
             AgentTermination(
                 reason="timeout",

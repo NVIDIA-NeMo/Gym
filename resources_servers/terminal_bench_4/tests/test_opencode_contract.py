@@ -800,6 +800,17 @@ def test_derive_termination_uses_the_latest_run_record():
     assert (termination.reason, started) == ("infrastructure_error", False)
 
 
+def test_derive_termination_without_exit_record_is_infra_when_the_launcher_enforces_a_budget():
+    run = {"session_id": "s", "subcommand": "run", "budget_s": 28800}
+    termination, started = opencode.derive_termination({"1-7-run.json": run})
+    assert started is True and termination.reason == "infrastructure_error" and "28800 s budget" in termination.detail
+    # Without a resources-side budget the old contract holds: only the agent's exec timeout can kill the run.
+    termination, started = opencode.derive_termination({"1-7-run.json": {**run, "budget_s": 0}})
+    assert started is True and termination.reason == "timeout"
+    termination, started = opencode.derive_termination({"1-7-run.json": {"session_id": "s", "subcommand": "run"}})
+    assert started is True and termination.reason == "timeout"
+
+
 def test_derive_termination_maps_a_budget_kill_to_a_graded_timeout():
     run = {"100-7-run.json": {"budget_s": 600}}
     for code in (124, 143, 137):
