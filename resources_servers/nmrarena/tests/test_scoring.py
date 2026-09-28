@@ -56,12 +56,19 @@ class TestCanonical:
     def test_length_cap_is_applied_before_rdkit(self, monkeypatch) -> None:
         import scoring
 
-        def boom(*a, **k):
-            raise AssertionError("RDKit must not see an oversize string")
+        # Record rather than raise: both callers wrap RDKit in ``except Exception``, so an
+        # injected exception would be swallowed and the probe would pass either way.
+        seen: list[str] = []
 
-        monkeypatch.setattr(scoring.Chem, "MolFromSmiles", boom)
+        def record(s, *a, **k):
+            seen.append(s)
+            return None
+
+        monkeypatch.setattr(scoring.Chem, "MolFromSmiles", record)
         assert canonical("C" * 501, max_chars=500) is None
+        assert seen == [], "RDKit must not see an oversize string"
         assert tanimoto("C" * 501, "C") is None
+        assert seen == [], "RDKit must not see an oversize string"
 
 
 class TestExtraction:
