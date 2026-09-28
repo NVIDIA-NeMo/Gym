@@ -37,6 +37,8 @@ from nemo_gym.token_id_capture.staging.capture import (
     StreamingUnsupportedError,
     install_capture,
 )
+from nemo_gym.token_id_capture.staging.digest import compute_extras_digest
+from nemo_gym.token_id_capture.staging.routes import encode_routed_experts
 
 
 class _MemorySink:
@@ -600,6 +602,73 @@ def test_staging_package_no_longer_exports_the_media_summary_helpers() -> None:
     ):
         assert not hasattr(staging, name), name
         assert name not in staging.__all__
+
+
+def test_vllm_boundary_routes_and_index_are_committed_without_changing_delta() -> None:
+    capture, sink = _capture(adapter=VLLMCaptureAdapter())
+    extras = {
+        "routed_experts": encode_routed_experts([[[10, 11]], [[12, 13]], [[0, 1]]]),
+        "routed_experts_boundary": encode_routed_experts([[[20, 21]]]),
+        "routed_experts_boundary_index": 2,
+    }
+    payload = {
+        "prompt_token_ids": [10, 11, 12, 20],
+        "choices": [
+            {
+                "message": {
+                    "generation_token_ids": [21, 22],
+                    "generation_log_probs": [-0.5, -0.25],
+                    **extras,
+                }
+            }
+        ],
+    }
+    coords = capture.complete_call_from_response(capture.begin_call(_child()), payload)
+    assert coords.disposition == "staged"
+    record = sink.records[0]
+    assert record.token_ids_delta == [20, 21, 22]
+    assert record.token_mask_delta == [0.0, 1.0, 1.0]
+    assert record.extras == extras
+    assert record.extras_digest == compute_extras_digest(extras)
+    assert record.extras_digest != compute_extras_digest(extras | {"routed_experts_boundary_index": 1})
+    assert record.extras_digest != compute_extras_digest(
+        extras | {"routed_experts_boundary": encode_routed_experts([[[22, 23]]])}
+    )
+
+
+@pytest.mark.parametrize(
+    "boundary,index",
+    [(None, None), (None, 2), ([], 2), ("encoded", None), ("encoded", -1), ("encoded", True)],
+)
+def test_vllm_adapter_rejects_malformed_boundary_metadata(boundary: Any, index: Any) -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "routed_experts": "encoded-delta",
+                    "routed_experts_boundary": boundary,
+                    "routed_experts_boundary_index": index,
+                }
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="boundary"):
+        VLLMCaptureAdapter().extract_extras(payload)
+
+
+def test_vllm_adapter_rejects_boundary_without_delta() -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "routed_experts_boundary": "encoded-boundary",
+                    "routed_experts_boundary_index": 2,
+                }
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="requires the delta routes"):
+        VLLMCaptureAdapter().extract_extras(payload)
 
 
 def test_vllm_extraction_failure_returns_poisoned_coords() -> None:
