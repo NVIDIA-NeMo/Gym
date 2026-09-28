@@ -218,6 +218,6 @@ class TestAggregate:
         assert "mean/tanimoto_top1" not in key and "tanimoto_top1/answered_only" not in key
         agent = metrics.agent_metrics
         # Two rows have a parseable position-1 candidate: gold (1.0) and the bromide.
-        assert agent["count/answered"] == 2 and agent["count/rows"] == 4
+        assert agent["count/tanimoto_defined"] == 2 and agent["count/rows"] == 4
         assert agent["tanimoto_top1/answered_only"] == pytest.approx((1.0 + 0.4117647058823529) / 2)
         assert agent["mean/tanimoto_top1"] == pytest.approx(agent["tanimoto_top1/answered_only"])

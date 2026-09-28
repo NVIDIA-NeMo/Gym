@@ -143,7 +143,7 @@ class NMRArenaResourcesServer(SimpleResourcesServer):
         """Make the Tanimoto denominator explicit next to the conditional mean the profiler computes."""
         rows = [r for rollouts in tasks for r in rollouts]
         answered = [r for r in rows if isinstance(r.get("tanimoto_top1"), (int, float))]
-        out: dict[str, Any] = {"count/rows": len(rows), "count/answered": len(answered)}
+        out: dict[str, Any] = {"count/rows": len(rows), "count/tanimoto_defined": len(answered)}
         if answered:
             out["tanimoto_top1/answered_only"] = sum(r["tanimoto_top1"] for r in answered) / len(answered)
         return out
@@ -155,7 +155,7 @@ class NMRArenaResourcesServer(SimpleResourcesServer):
         "conditional on valid outputs", and a model that answers only when confident is
         paid for its silence (upstream's own footnote shows 0.89 on 9 of 315 answers). It
         stays in ``agent_metrics`` as ``mean/tanimoto_top1`` and
-        ``tanimoto_top1/answered_only`` next to ``count/answered``.
+        ``tanimoto_top1/answered_only`` next to ``count/tanimoto_defined``.
         """
         keep = {
             "mean/reward",

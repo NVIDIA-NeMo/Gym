@@ -113,7 +113,7 @@ means. The conditional Tanimoto is deliberately not a headline: a model that
 answers only when confident is paid for its silence (upstream's own footnote
 reports 0.89 for a model that answered 9 of 315 times). It stays in
 `agent_metrics` as `mean/tanimoto_top1` and `tanimoto_top1/answered_only`, next
-to `count/answered`, so it is read with its denominator.
+to `count/tanimoto_defined`, so it is read with its denominator.
 
 ### Departures from upstream
 

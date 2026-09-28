@@ -130,7 +130,7 @@ def aggregate(results: list[dict]) -> dict:
         "key_metrics": metrics.key_metrics,
         "mean/tanimoto_top1": agent.get("mean/tanimoto_top1"),
         "tanimoto_top1/answered_only": agent.get("tanimoto_top1/answered_only"),
-        "count/answered": agent.get("count/answered"),
+        "count/tanimoto_defined": agent.get("count/tanimoto_defined"),
     }
 
 
@@ -419,7 +419,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     print(json.dumps({k: v for k, v in report.items() if k != "controls"}, indent=2)[:4000])
     for c in report["controls"]:
         print(
-            f"{c['control']:32s} top1 {c['top1_hits']:3d}/{c['n']} top10 {c['top10_hits']:3d} ok={c['as_expected']} {c['statuses']} tani_cond={c['aggregate']['tanimoto_top1/answered_only']} answered={c['aggregate']['count/answered']}"
+            f"{c['control']:32s} top1 {c['top1_hits']:3d}/{c['n']} top10 {c['top10_hits']:3d} ok={c['as_expected']} {c['statuses']} tani_cond={c['aggregate']['tanimoto_top1/answered_only']} tani_n={c['aggregate']['count/tanimoto_defined']}"
         )
 
 
