@@ -594,7 +594,7 @@ def _render_collector_health_check(config: SubmitConfig, driver_node: int | None
 
 def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path) -> str:
     """Run after the driver: one more scrape interval so the final counters are seen, then a
-    graceful stop. The caller saves and restores the driver's exit code.
+    graceful stop, keeping the driver's exit code.
 
     The TERM goes to the collector process itself, matched by its unique `--config` path. Sent to
     `srun` instead, TERM makes Slurm kill the step outright and INT is treated as a console
@@ -606,10 +606,12 @@ def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path) -> 
     binary = re.escape(config.otel.binary)
     pattern = shlex.quote(f"^{binary} --config {re.escape(str(collector_config_path(remote_bench_dir)))}")
     return (
+        "DRIVER_RC=$?\n"
         f"sleep {FINAL_SCRAPE_GRACE_SECONDS}\n"
         f'pkill -TERM -u "$USER" -f -- {pattern} || true\n'
         f"for _i in $(seq 1 {SHUTDOWN_WAIT_SECONDS}); do kill -0 {pid} 2>/dev/null || break; sleep 1; done\n"
-        f"kill -TERM {pid} 2>/dev/null || true"
+        f"kill -TERM {pid} 2>/dev/null || true\n"
+        "exit $DRIVER_RC"
     )
 
 
@@ -830,19 +832,16 @@ def build_sbatch_script(
     # checkout instead of the job directory -- the run completes, exits 0, and
     # leaves nothing behind. Making the OUTPUT absolute is what keeps artifacts
     # in the job directory without constraining cwd.
+    output_path = f"+output_jsonl_fpath={remote_bench_dir}/artifacts/rollouts.jsonl"
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
-    run_args = {
-        "output_jsonl_fpath": str(remote_bench_dir / "artifacts/rollouts.jsonl"),
-        **_with_default_capture_dir(benchmark.run, remote_bench_dir),
-    }
-    output_path = run_args["output_jsonl_fpath"]
-    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", extra_flags + flatten_run_args(run_args))
+    run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
+    run_args["require_complete"] = True
+    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
     entrypoint = render_driver_entrypoint(
         repo=gi.repo if gi else None,
         ref=gi.ref if gi else None,
         prepare_cmd=prepare_cmd,
-        output_jsonl_fpath=output_path,
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
@@ -860,20 +859,14 @@ def build_sbatch_script(
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
-    failure_notice = shlex.quote(f"EVAL FAILED: benchmark {benchmark_name}. See logs/driver.log for details.")
     driver_command = (
         f"{gym_cmd}\n"
         f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
         f" --container-image={shlex.quote(config.driver.container)} "
-        f"--output=logs/driver.log {entrypoint}\n"
-        "DRIVER_RC=$?\n"
-        'if [ "$DRIVER_RC" -ne 0 ]; then\n'
-        f"    echo {failure_notice} >&2\n"
-        "fi"
+        f"--output=logs/driver.log {entrypoint}"
     )
     if observed:
         driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir)
-    driver_command += "\nexit $DRIVER_RC"
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,

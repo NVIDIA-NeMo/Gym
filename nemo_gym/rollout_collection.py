@@ -69,7 +69,7 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, materialized_inputs_path_for
+from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -605,6 +605,7 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
 
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
+    require_complete: bool = Field(default=False, description="Fail on missing rollouts; enforced by eval submit.")
     num_samples_in_parallel: Optional[int] = Field(
         default=None, description="Limit the number of concurrent samples running at once."
     )
@@ -666,6 +667,23 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
             "When unset, the standard single-pass collection runs."
         ),
     )
+
+    def check_completion(self, *, expected: int, results: List[Dict[str, Any]]) -> None:
+        """Reject incomplete submitted runs after saving their partial artifacts."""
+        if not self.require_complete:
+            return
+        completed = len(
+            {
+                (r.get("stage_index"), r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
+                for r in results
+                if r.get(NG_FAILURE_CLASS_KEY) is None and not r.get(NG_NO_PERSIST_KEY)
+            }
+        )
+        if completed < expected:
+            raise RuntimeError(
+                f"EVAL FAILED: {completed}/{expected} samples completed. "
+                f"Partial artifacts retained at {self.output_jsonl_fpath}."
+            )
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -848,7 +866,8 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     @property
     def materialized_jsonl_fpath(self) -> Path:
-        return materialized_inputs_path_for(Path(self.output_jsonl_fpath))
+        output_fpath = Path(self.output_jsonl_fpath)
+        return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
 
 
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -1708,6 +1727,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             else:
                 print(format_health_report(health_result))
 
+        config.check_completion(expected=expected_rollouts, results=persisted_results)
         return results
 
     async def _call_aggregate_metrics(

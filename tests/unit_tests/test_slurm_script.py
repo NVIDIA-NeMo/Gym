@@ -589,14 +589,12 @@ def test_driver_policy_model_type_empty_composes_nothing(submit_config, bench_di
 
 
 def test_render_driver_entrypoint_no_install_no_prepare():
-    out = render_driver_entrypoint(None, None, None, output_jsonl_fpath="artifacts/rollouts.jsonl")
-    assert "nemo_gym.orchestration.completion -- artifacts/rollouts.jsonl" in out
+    out = render_driver_entrypoint(None, None, None)
+    assert out == '"${GYM_CMD[@]}"'
 
 
 def test_render_driver_entrypoint_with_gym_install():
-    out = render_driver_entrypoint(
-        "https://github.com/NVIDIA-NeMo/gym", "main", None, output_jsonl_fpath="artifacts/rollouts.jsonl"
-    )
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
     assert "git clone" in out
     # `git -C "$GYM_SRC/gym" checkout`, not `git checkout`: the clone is
     # out-of-tree. See test_gym_install_does_not_clone_into_the_job_directory.
@@ -606,38 +604,29 @@ def test_render_driver_entrypoint_with_gym_install():
     assert "uv pip install -e ." in out
     assert "--system" not in out
     assert "--break-system-packages" not in out
-    assert '"$@"' in out
-    assert "exec python -m nemo_gym.orchestration.completion" in out
+    assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
 
 
 def test_render_driver_entrypoint_installs_git_if_missing():
     # The driver container (e.g. a minimal python image) may not bundle git.
-    out = render_driver_entrypoint(
-        "https://github.com/NVIDIA-NeMo/gym", "main", None, output_jsonl_fpath="artifacts/rollouts.jsonl"
-    )
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
     assert "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)" in out
     assert out.index("command -v git") < out.index("git clone")
 
 
 def test_render_driver_entrypoint_with_prepare():
-    out = render_driver_entrypoint(
-        None, None, "gym eval prepare +foo=bar", output_jsonl_fpath="artifacts/rollouts.jsonl"
-    )
+    out = render_driver_entrypoint(None, None, "gym eval prepare +foo=bar")
     assert "gym eval prepare +foo=bar" in out
-    assert '"$@"' in out
-    assert "exec python -m nemo_gym.orchestration.completion" in out
+    assert 'exec "$@"' in out
 
 
 def test_render_driver_entrypoint_install_and_prepare():
-    out = render_driver_entrypoint(
-        "https://github.com/NVIDIA-NeMo/gym", "v1.0", "gym eval prepare", output_jsonl_fpath="artifacts/rollouts.jsonl"
-    )
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "v1.0", "gym eval prepare")
     assert "git clone" in out
     assert "checkout v1.0" in out
     assert "gym eval prepare" in out
-    assert '"$@"' in out
-    assert "exec python -m nemo_gym.orchestration.completion" in out
+    assert 'exec "$@"' in out
 
 
 def test_worker_command_drops_api_server_count():
@@ -702,30 +691,23 @@ def test_render_driver_entrypoint_prepare_arg_with_spaces_survives_the_shell():
     string would not catch that -- only running it through a shell does.
     """
     arg = "+multistage.stages=[{num_tasks: 45, waivable: [timeout, transient]}]"
-    out = render_driver_entrypoint(
-        None, None, f"printf '%s\\n' {shlex.quote(arg)}", output_jsonl_fpath="artifacts/rollouts.jsonl"
-    )
+    out = render_driver_entrypoint(None, None, f"printf '%s\\n' {shlex.quote(arg)}")
 
-    script = (
-        out.replace('"$@"', ":")
-        .replace("exec python -m nemo_gym.orchestration.completion -- artifacts/rollouts.jsonl", ":")
-        .replace('"${GYM_CMD[@]}"', "''")
-    )
+    script = out.replace('exec "$@"', ":").replace('"${GYM_CMD[@]}"', "''")
     printed = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout.splitlines()
 
     assert printed == [arg]
 
 
-def test_render_driver_entrypoint_no_install_no_prepare_sets_e():
-    # Even a preinstalled driver must stop on eval failure before validation.
-    out = render_driver_entrypoint(None, None, None, output_jsonl_fpath="artifacts/rollouts.jsonl")
-    assert "set -euo pipefail" in out
+def test_render_driver_entrypoint_no_install_no_prepare_has_no_set_e():
+    # The trivial path isn't wrapped in bash -c at all, so there's no
+    # preamble for a failure to silently fall through in the first place.
+    out = render_driver_entrypoint(None, None, None)
+    assert "set -euo pipefail" not in out
 
 
 def test_render_driver_entrypoint_with_gym_install_sets_e():
-    out = render_driver_entrypoint(
-        "https://github.com/NVIDIA-NeMo/gym", "main", None, output_jsonl_fpath="artifacts/rollouts.jsonl"
-    )
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
     assert "set -euo pipefail" in out
     # Must be the first statement, ahead of the clone/checkout/install, so a
     # failure anywhere in the preamble aborts instead of falling through to
@@ -736,9 +718,7 @@ def test_render_driver_entrypoint_with_gym_install_sets_e():
 
 
 def test_render_driver_entrypoint_with_prepare_sets_e():
-    out = render_driver_entrypoint(
-        None, None, "gym eval prepare +foo=bar", output_jsonl_fpath="artifacts/rollouts.jsonl"
-    )
+    out = render_driver_entrypoint(None, None, "gym eval prepare +foo=bar")
     assert "set -euo pipefail" in out
 
 
@@ -844,9 +824,12 @@ def test_build_sbatch_script_contains_vllm_srun(submit_config, bench_dir):
 
 def test_build_sbatch_script_driver_output_flag(submit_config, bench_dir):
     benchmark = submit_config.driver.benchmarks["gsm8k"]
+    benchmark.run["require_complete"] = False
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
     assert "--output=logs/driver.log" in script
+    assert "+require_complete=True" in script
+    assert "+require_complete=False" not in script
 
 
 def test_build_sbatch_script_output_jsonl_fpath(submit_config, bench_dir):
@@ -1600,12 +1583,7 @@ def test_gym_install_does_not_clone_into_the_job_directory():
     """The driver's cwd is the job directory. A clone there gives Gym a second
     copy of every built-in asset, and named lookups (`--model-type
     openai_model`) then abort as ambiguous against the installed copy."""
-    entrypoint = render_driver_entrypoint(
-        repo="https://github.com/NVIDIA-NeMo/gym",
-        ref="abc123",
-        prepare_cmd=None,
-        output_jsonl_fpath="artifacts/rollouts.jsonl",
-    )
+    entrypoint = render_driver_entrypoint(repo="https://github.com/NVIDIA-NeMo/gym", ref="abc123", prepare_cmd=None)
 
     assert "mktemp -d /tmp/gym-install-" in entrypoint
     assert 'git clone https://github.com/NVIDIA-NeMo/gym "$GYM_SRC/gym"' in entrypoint
@@ -1616,17 +1594,12 @@ def test_gym_install_runs_from_the_install_root():
     Gym, so the driver has to run from the clone or `gym eval prepare` cannot find
     its own script. Safe because the clone is outside the job directory and the
     driver's output path is absolute."""
-    entrypoint = render_driver_entrypoint(
-        repo="https://github.com/NVIDIA-NeMo/gym",
-        ref="abc123",
-        prepare_cmd=None,
-        output_jsonl_fpath="artifacts/rollouts.jsonl",
-    )
+    entrypoint = render_driver_entrypoint(repo="https://github.com/NVIDIA-NeMo/gym", ref="abc123", prepare_cmd=None)
 
     # Assert the behaviour, not the line layout: the `cd` is chained onto the
     # checkout with && rather than standing on its own line.
     assert 'cd "$GYM_SRC/gym"' in entrypoint
-    assert entrypoint.index('cd "$GYM_SRC/gym"') < entrypoint.index('"$@"')
+    assert entrypoint.index('cd "$GYM_SRC/gym"') < entrypoint.index('exec "$@"')
     # The only `cd` is into the clone -- nothing else may move cwd.
     assert entrypoint.count("cd ") == entrypoint.count('cd "$GYM_SRC/gym"')
 

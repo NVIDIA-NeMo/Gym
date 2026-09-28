@@ -374,8 +374,7 @@ def test_script_flushes_the_collector_after_the_driver_and_keeps_the_driver_exit
 def test_script_has_no_collector_when_disabled():
     script = _script(_config(otel={"enabled": False}))
     assert "otel_collector" not in script
-    assert "pkill -TERM" not in script
-    assert script.rstrip().endswith("exit $DRIVER_RC")
+    assert "DRIVER_RC" not in script
 
 
 def test_script_has_no_collector_without_a_model_service():

@@ -177,13 +177,11 @@ def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,
     prepare_cmd: str | None,
-    *,
-    output_jsonl_fpath: str,
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
-    Install, prepare, run and mandatory completion validation share one container
-    and working directory. Preserve an earlier failure instead of validating it.
+    When either gym_install or prepare is needed, wraps everything in a single
+    bash -c so prepare and run happen in the same srun step and container.
     """
     preamble: list[str] = []
 
@@ -211,10 +209,10 @@ def render_driver_entrypoint(
     if prepare_cmd:
         preamble.append(prepare_cmd)
 
-    preamble += [
-        '"$@"',
-        f"exec python -m nemo_gym.orchestration.completion -- {shlex.quote(output_jsonl_fpath)}",
-    ]
+    if not preamble:
+        return '"${GYM_CMD[@]}"'
+
+    preamble.append('exec "$@"')
     body = "\n    ".join(["set -euo pipefail", *preamble])
     body = escape_for_single_quoted_block(body)
     return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""

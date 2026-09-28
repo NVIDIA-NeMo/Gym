@@ -348,7 +348,6 @@ async def run_multistage_stages(
     *,
     rng: Optional[random.Random] = None,
     on_event: Optional[Callable[[str, dict], None]] = None,
-    on_expected_rows: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     resume: Optional[StageResume] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Run every stage and return ``(all_result_rows, stage_summaries)``.
@@ -361,10 +360,6 @@ async def run_multistage_stages(
     selection). ``all_result_rows`` is the concatenation of every stage's tagged
     results (ready to write as the standard rollouts file); ``stage_summaries`` is
     one dict per stage for logging.
-
-    ``on_expected_rows`` records every stage's expected inputs before any execution
-    or retry filtering. These include stage_index but precede adaptive reference
-    assignment; cached stages use their saved task plans rather than result counts.
 
     ``rng`` seeds task sampling (defaults to ``multistage_config.seed``); per-task
     reference assignment is seeded independently per stage via
@@ -394,19 +389,6 @@ async def run_multistage_stages(
     )
     total_stages = len(multistage_config.stages)
 
-    if on_expected_rows is not None:
-        # Record ALL stages up front: an interruption between stages must not look
-        # like a complete evaluation merely because earlier stages have results.
-        for index, task_ids in enumerate(stage_task_sets):
-            if resume is not None:
-                if index in resume.outcomes and index not in resume.plans:
-                    raise ValueError(f"Cannot establish expected samples for cached stage {index}: missing stage plan")
-                if index in resume.plans:
-                    task_ids = resume.plans[index]["task_ids"]
-            on_expected_rows(
-                [dict(row, stage_index=index) for task_id in task_ids for row in rows_by_task.get(task_id, [])]
-            )
-
     def _emit(name: str, **data: object) -> None:
         if on_event is not None:
             on_event(name, data)
@@ -430,6 +412,7 @@ async def run_multistage_stages(
                 all_results,
                 stage_summaries,
                 _emit,
+                rows_by_task=rows_by_task,
             )
             continue
 
@@ -575,6 +558,8 @@ def _resume_complete_stage(
     all_results: List[Dict[str, Any]],
     stage_summaries: List[Dict[str, Any]],
     emit: Callable[..., None],
+    *,
+    rows_by_task: Mapping[str, List[Dict[str, Any]]],
 ) -> Optional[float]:
     """Reuse a completed stage's cached rows without dispatch; return threaded ELO.
 
@@ -583,9 +568,9 @@ def _resume_complete_stage(
     threaded to later stages is always consistent with the persisted rows.
     """
     cached_rows = list(resume.rows_by_stage.get(index, []))
-    plan = resume.plans.get(index, {})
+    plan = resume.plans[index]
     reference_ids = list(plan.get("reference_ids", []))
-    task_ids = list(plan.get("task_ids", []))
+    task_ids = list(plan["task_ids"])
 
     for row in cached_rows:
         tid = row_task_id(row)
@@ -609,7 +594,8 @@ def _resume_complete_stage(
         {
             "stage_index": index,
             "num_tasks": len(task_ids),
-            "num_rollouts": len(cached_rows),
+            # Cached results can be incomplete even when the stage was marked complete.
+            "num_rollouts": sum(len(rows_by_task[task_id]) for task_id in task_ids),
             "num_reused": 0,
             "reference_ids": reference_ids,
             "eval_elo": stage_elo,
@@ -892,27 +878,15 @@ async def run_e2e_multistage(
     fingerprint = compute_fingerprint(multistage_config, reference_elos, distribution)
     resume = _prepare_resume(rollout_collection_config, output_fpath, journal_fpath, fingerprint)
 
-    # Rebuild from plans on every invocation, including cached stages. Results and
-    # terminal/max-attempt gating must never shrink the expected sample set.
-    materialized_fpath = rollout_collection_config.materialized_jsonl_fpath
-    materialized_fpath.parent.mkdir(parents=True, exist_ok=True)
-    with materialized_fpath.open("wb") as inputs_file:
-
-        def record_stage_rows(rows: List[Dict[str, Any]]) -> None:
-            for row in rows:
-                inputs_file.write(orjson.dumps(row) + b"\n")
-            inputs_file.flush()
-
-        all_results, stage_summaries = await run_multistage_stages(
-            multistage_config,
-            reference_elos,
-            distribution,
-            materialized_rows,
-            run_rollouts,
-            on_event=_log_event,
-            on_expected_rows=record_stage_rows,
-            resume=resume,
-        )
+    all_results, stage_summaries = await run_multistage_stages(
+        multistage_config,
+        reference_elos,
+        distribution,
+        materialized_rows,
+        run_rollouts,
+        on_event=_log_event,
+        resume=resume,
+    )
 
     write_rollouts(all_results, output_fpath)
 
@@ -923,6 +897,9 @@ async def run_e2e_multistage(
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}
 Stages: {orjson.dumps(stage_summaries, option=orjson.OPT_INDENT_2).decode()}"""
+    )
+    rollout_collection_config.check_completion(
+        expected=sum(stage["num_rollouts"] for stage in stage_summaries), results=all_results
     )
     return aggregate_metrics_fpath
 
