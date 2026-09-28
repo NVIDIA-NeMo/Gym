@@ -383,7 +383,6 @@ class TestRunHelperServerReadiness:
         )
         runner._server_instance_display_configs = [SimpleNamespace(process_name="broken")]
         runner.poll = MagicMock()
-        runner.shutdown = MagicMock()
         runner.check_http_server_statuses = MagicMock(return_value=[("broken", "connection_error")])
         monotonic_mock = MagicMock(side_effect=[0.0, 2.0])
         monkeypatch.setattr(nemo_gym.cli.env, "monotonic", monotonic_mock)
@@ -392,7 +391,39 @@ class TestRunHelperServerReadiness:
             runner.wait_for_spinup()
 
         runner.poll.assert_called_once_with()
+
+
+class TestRunHelperStartUnwind:
+    """Every caller calls start() outside its own try, so start() must release what it acquired."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            RuntimeError("Process `broken` finished unexpectedly!"),
+            ConfigError("model endpoint never answered"),
+            KeyboardInterrupt(),
+        ],
+        ids=["server_crash", "endpoint_timeout", "interrupt"],
+    )
+    def test_startup_failure_shuts_down_and_reraises(self, error: BaseException) -> None:
+        runner = RunHelper()
+        runner._start = MagicMock(side_effect=error)
+        runner.shutdown = MagicMock()
+
+        with raises(type(error)) as excinfo:
+            runner.start(None)
+
+        assert excinfo.value is error
         runner.shutdown.assert_called_once_with()
+
+    def test_successful_start_leaves_servers_running(self) -> None:
+        runner = RunHelper()
+        runner._start = MagicMock()
+        runner.shutdown = MagicMock()
+
+        runner.start(None)
+
+        runner.shutdown.assert_not_called()
 
 
 class TestRunHelperShutdownReap:
@@ -471,6 +502,28 @@ class TestRunHelperShutdownReap:
 
         profiler.stop.assert_called_once_with()
         assert runner._memory_profiler is None
+
+    def test_second_shutdown_does_not_repeat_teardown(self) -> None:
+        process = MagicMock()
+        process.wait.return_value = 0
+        runner = self._make_runner_with_processes({"server": process})
+        head_server_thread = runner._head_server_thread
+
+        runner.shutdown()
+        runner.shutdown()
+
+        process.send_signal.assert_called_once()
+        head_server_thread.join.assert_called_once_with()
+        assert runner._head_server is None
+
+    def test_shutdown_before_head_server_started(self) -> None:
+        runner = RunHelper()
+        runner._processes = {}
+        runner._head_server = None
+
+        runner.shutdown()
+
+        assert runner._processes == {}
 
 
 class TestExitCleanlyOnConfigError:

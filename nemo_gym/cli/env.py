@@ -383,6 +383,21 @@ class RunHelper:  # pragma: no cover
     _telemetry_metrics_enabled: bool
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+        """Start the head server and every configured server, and wait until all of them are ready.
+
+        Any failure or interrupt before readiness shuts down everything started so far, then re-raises.
+        Callers reach their own `shutdown()` only after this returns.
+        The spawned servers have no process group or atexit handler, so nothing else would stop them.
+        """
+        self._processes = dict()
+        self._head_server = None
+        try:
+            self._start(global_config_dict_parser_config)
+        except BaseException:
+            self.shutdown()
+            raise
+
+    def _start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
         # Fail fast before starting Ray if nothing is configured to run (covers env run and the
@@ -412,7 +427,6 @@ class RunHelper:  # pragma: no cover
 
         top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
-        self._processes: Dict[str, Popen] = dict()
         self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
 
         start_time = time()
@@ -612,7 +626,6 @@ Process `{process_name}` stderr:
 
             if len(successful_servers) != total_servers:
                 if deadline is not None and monotonic() >= deadline:
-                    self.shutdown()
                     raise RuntimeError(
                         f"Timed out after {timeout_seconds}s waiting for Gym servers to become ready: "
                         f"{', '.join(waiting)}"
@@ -676,8 +689,10 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
             )
         self._processes = dict()
 
-        self._head_server.should_exit = True
-        self._head_server_thread.join()
+        # None before the head server starts and after an earlier shutdown.
+        if self._head_server is not None:
+            self._head_server.should_exit = True
+            self._head_server_thread.join()
 
         self._head_server = None
         self._head_server_thread = None
@@ -710,10 +725,7 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
         each came from. It raises rather than exits because `RunHelper` is imported and driven as a
         library, so the caller decides what an unreachable endpoint means; the CLI entrypoints turn
         it into an exit.
-
-        The servers spawned above are shut down first. They hold ports and have neither a process
-        group nor an atexit handler, and every caller reaches its own `shutdown()` only after
-        `start()` returns.
+        `start()` shuts down the servers it already spawned before the error reaches the caller.
         """
         timeout_seconds = _model_endpoint_timeout_seconds(global_config_dict)
         unreachable = _wait_for_model_endpoints(_collect_model_endpoints(global_config_dict), timeout_seconds)
@@ -721,7 +733,6 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
             return
 
         listed = "\n".join(f"  - {url} (from `{key}`)" for key, url in unreachable)
-        self.shutdown()
         raise ConfigError(
             f"""{len(unreachable)} model endpoint(s) never answered within {timeout_seconds:.0f}s:
 {listed}
