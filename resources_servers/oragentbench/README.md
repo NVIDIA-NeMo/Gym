@@ -90,8 +90,23 @@ so the setting is zero-shot with a skill library, as upstream's harnesses had.
   system and are a comparison, not a reproduction.
 - **Image.** `docker/Dockerfile` is upstream's `docker/base/Dockerfile` verbatim plus one layer
   installing `tmux` and `procps`, which Terminus 2 needs and the no-network container cannot
-  fetch. Upstream pins no package versions; the versions resolved at build time are recorded in
-  the Surveyor implementation note, and a different SCIP build can move `quality`.
+  fetch. Upstream pins no package versions (`FROM python:3.11-slim` and unversioned `pip install`),
+  so the solver stack is whatever `pip` resolves on build day, and a different SCIP build can
+  move `quality`. The build that produced the recorded validation results (reference sweep,
+  negative controls, example rollouts) resolved the versions below (author-reported, resolved
+  2026-09-22); `prepare_oragentbench.py --build-images` prints the same probe for the image it
+  just built so a rebuild can be compared against this table.
+
+  | Component | Resolved version |
+  | --- | --- |
+  | Base image | `python:3.11-slim` (Debian 13) |
+  | PySCIPOpt | 6.2.1 |
+  | SCIP | 10.0 |
+  | numpy | 2.4.6 |
+  | pandas | 3.0.6 |
+  | scipy | 1.17.1 |
+  | networkx | 3.6.1 |
+  | pyomo | 6.10.1 |
 - **Network.** Containers run with `--network none`. `task.toml` says `allow_internet = true`
   but the instruction and the paper both forbid internet use.
 - **min_reward gating** as described above.

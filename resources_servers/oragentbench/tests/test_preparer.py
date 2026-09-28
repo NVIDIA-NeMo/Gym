@@ -4,6 +4,7 @@
 
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -99,6 +100,46 @@ class TestMain:
         monkeypatch.setattr(prep, "ensure_checkout", never)
         with pytest.raises(SystemExit):
             prep.main(["--limit", limit])
+
+
+class TestBuildImages:
+    def test_base_image_versions_are_probed_and_printed_after_the_base_build(self, tmp_path, monkeypatch, capsys):
+        calls = []
+
+        def fake_run(argv, cwd=None):
+            calls.append(argv)
+            if argv[:3] == ["docker", "run", "--rm"]:
+                assert (
+                    argv[3] == prep.BASE_IMAGE_TAG and argv[4:6] == ["python", "-c"] and argv[6] == prep.VERSION_PROBE
+                )
+                return "pyscipopt 6.2.1\nscip 10.0\n"
+            return ""
+
+        monkeypatch.setattr(prep, "_run", fake_run)
+        prep.build_images(tmp_path, ["easy_task_000", "easy_task_001"])
+        assert [c[:2] for c in calls] == [
+            ["docker", "build"],
+            ["docker", "run"],
+            ["docker", "build"],
+            ["docker", "build"],
+        ]
+        out = capsys.readouterr().out
+        assert prep.BASE_IMAGE_TAG in out and "pyscipopt 6.2.1" in out and "scip 10.0" in out
+
+    def test_failed_version_probe_warns_and_still_builds_task_images(self, tmp_path, monkeypatch, capsys):
+        calls = []
+
+        def fake_run(argv, cwd=None):
+            calls.append(argv)
+            if argv[:2] == ["docker", "run"]:
+                raise subprocess.CalledProcessError(1, argv, stderr="no python")
+            return ""
+
+        monkeypatch.setattr(prep, "_run", fake_run)
+        prep.build_images(tmp_path, ["easy_task_000"])
+        assert [c[:2] for c in calls] == [["docker", "build"], ["docker", "run"], ["docker", "build"]]
+        captured = capsys.readouterr()
+        assert "could not probe package versions" in captured.err and "Resolved versions" not in captured.out
 
 
 class TestEnsureCheckout:

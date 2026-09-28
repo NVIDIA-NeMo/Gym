@@ -40,6 +40,20 @@ BASE_DOCKERFILE = SERVER_DIR / "docker" / "Dockerfile"
 BASE_IMAGE_TAG = "oragentbench-base:py311-scip"  # the tag every upstream task Dockerfile builds FROM
 AGENT_NAME = "oragentbench_agent"
 
+# Upstream pins none of these and a different SCIP build can move ``quality``; the README records
+# the versions the validated build resolved so a rebuild can be compared against it.
+VERSION_PROBE = (
+    "import platform, sys, networkx, numpy, pandas, pyomo, pyscipopt, scipy;"
+    "print('python', sys.version.split()[0], platform.freedesktop_os_release().get('PRETTY_NAME', ''));"
+    "print('pyscipopt', pyscipopt.__version__);"
+    "print('scip', pyscipopt.Model().version());"
+    "print('numpy', numpy.__version__);"
+    "print('pandas', pandas.__version__);"
+    "print('scipy', scipy.__version__);"
+    "print('networkx', networkx.__version__);"
+    "print('pyomo', pyomo.__version__)"
+)
+
 
 def _run(argv: List[str], cwd: Optional[Path] = None) -> str:
     result = subprocess.run(argv, cwd=cwd, check=True, capture_output=True, text=True)
@@ -114,9 +128,21 @@ def load_rows(checkout_dir: Path, task_folder_root: Optional[Path] = None) -> Li
     return rows
 
 
+def report_base_image_versions(image: str = BASE_IMAGE_TAG) -> None:
+    """Print the solver stack the base image resolved; a failed probe is a warning, not a failed build."""
+    try:
+        output = _run(["docker", "run", "--rm", image, "python", "-c", VERSION_PROBE])
+    except (subprocess.CalledProcessError, OSError) as exc:
+        print(f"Warning: could not probe package versions in {image}: {exc}", file=sys.stderr)
+        return
+    print(f"Resolved versions in {image} (upstream pins none; compare with the server README):")
+    print(output.rstrip())
+
+
 def build_images(checkout_dir: Path, task_dir_names: List[str], commit: str = PINNED_COMMIT) -> None:
     print(f"Building {BASE_IMAGE_TAG} from {BASE_DOCKERFILE}", file=sys.stderr)
     _run(["docker", "build", "--quiet", "-t", BASE_IMAGE_TAG, "-f", str(BASE_DOCKERFILE), str(BASE_DOCKERFILE.parent)])
+    report_base_image_versions()
     for index, name in enumerate(task_dir_names, start=1):
         tag = image_tag(name, commit)
         print(f"[{index}/{len(task_dir_names)}] docker build {tag}", file=sys.stderr)
