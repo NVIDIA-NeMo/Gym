@@ -2917,3 +2917,24 @@ def test_partial_head_server_inherits_the_resolved_host(monkeypatch):
 
     assert parsed[HEAD_SERVER_KEY_NAME]["port"] == 63000, "explicit port must survive"
     assert parsed[HEAD_SERVER_KEY_NAME]["host"] == "10.1.2.3", "host must be filled in"
+
+
+class TestRolloutRunLabels:
+    def test_rows_group_by_environment_server_and_keep_agent_labels(self) -> None:
+        from nemo_gym.global_config import rollout_run_key, rollout_run_labels
+
+        rows = [
+            {"agent_ref": {"name": "hermes"}, "_ng_environment_server": "hermes_relay"},
+            {"agent_ref": {"name": "hermes"}, "_ng_environment_server": "hermes_turn"},
+            {"_ng_environment_server": "episode_server"},
+            {"agent_ref": {"name": "simple"}},
+        ]
+
+        assert [rollout_run_key(row) for row in rows] == ["hermes_relay", "hermes_turn", "episode_server", "simple"]
+        # Twin servers for one agent stay separate: the second takes its own name.
+        assert rollout_run_labels(rows) == {
+            "hermes_relay": "hermes",
+            "hermes_turn": "hermes_turn",
+            "episode_server": "episode_server",
+            "simple": "simple",
+        }

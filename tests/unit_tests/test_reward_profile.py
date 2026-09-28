@@ -327,6 +327,26 @@ class TestRewardProfile:
         assert [m["agent_ref"]["name"] for m in agent_level_metrics] == ["environment"]
         assert agent_level_metrics[0]["mean/reward"] == 0.5
 
+    def test_profile_keeps_two_servers_that_front_one_agent_apart(self) -> None:
+        rows = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": r,
+                "agent_ref": {"name": "hermes"},
+                "_ng_environment_server": server,
+            }
+            for r, server in enumerate(("hermes_relay", "hermes_turn"))
+        ]
+        results = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "reward": 0.0},
+        ]
+
+        _, agent_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
+
+        rewards = {m["agent_ref"]["name"]: m["mean/reward"] for m in agent_level_metrics}
+        assert rewards == {"hermes": 1.0, "hermes_turn": 0.0}
+
     def test_profile_from_data_series(self) -> None:
         rows = [
             {

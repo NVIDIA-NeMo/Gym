@@ -838,6 +838,15 @@ class TestBuildVerifyPayload:
 
         assert _rs_for_row({"_ng_environment_server": "environment"}, {}, config) == "swe"
 
+    def test_rollout_without_a_response_names_its_result_type(self) -> None:
+        pair = InputRolloutPair(
+            input={"task": "q1"},
+            rollout={"_ng_task_index": 3, "_ng_rollout_index": 1, "_ng_result_type": "user_simulation", "reward": 1.0},
+        )
+
+        with pytest.raises(ConfigError, match="result type 'user_simulation' has no `response`"):
+            _build_verify_payload(pair)
+
     def test_response_key_overwrites_any_existing_response_in_input(self) -> None:
         pair = InputRolloutPair(
             input={"response": {"output": "stale"}, "task": "q1"},
