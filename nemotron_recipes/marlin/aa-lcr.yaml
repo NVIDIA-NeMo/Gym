@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# AA-LCR v1.1 (long-context reasoning, no tools): 100 questions x 16 repeats, each asked over
+# a full set of documents. A judge model (gpt-5.6-luna, medium reasoning effort) marks each
+# answer CORRECT or INCORRECT against the official one, as a JSON verdict; the score is the
+# mean reward over the judged answers.
+#
+#   nemotron_recipes/marlin/run.sh aa-lcr
+#
+# Needs the judge endpoint in env.yaml (judge_base_url, judge_api_key) and JUDGE_API_KEY in
+# your shell; the endpoint must serve gpt-5.6-luna through the OpenAI Responses API
+# (<judge_base_url>/responses). The benchmark config pins the dataset
+# (ArtificialAnalysis/AA-LCR at revision 9a77ef5).
+#
+# An answer whose judge call fails, or whose verdict is not that JSON, is left out of the
+# score and written to evaluator_rollouts_failures.jsonl; RESUME=1 retries it (the model
+# answers again; 3 attempts in all by default).
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: 5a7dd6fe6c3d348005922f1a3d4f87215e3ca15a
+# Gym benchmark config this recipe builds on.
+benchmark_config: benchmarks/aalcr/config_v1_1.yaml
+
+# The published run sampled this benchmark with top_p 1.0, not the shared 0.95.
+responses_create_params:
+  top_p: 1.0
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      # As in the published run (Gym's default is true): a conversation that ends with
+      # reasoning but no answer is not sent back to the model to continue.
+      sequential_reasoning_allowed: false
+
+# Judge: gpt-5.6-luna at reasoning effort medium. Endpoint and key come from env.yaml; set
+# judge_model_name there only if your provider serves this model under a different id.
+judge_model_name: gpt-5.6-luna
+aalcr_v1_1_judge_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+      # Responses API form. The published run sent the benchmark config's Chat Completions
+      # spelling (reasoning_effort), which its endpoint applied as effort medium; OpenAI's
+      # Responses API rejects that spelling.
+      extra_body:
+        _delete_key: reasoning_effort
+        reasoning:
+          effort: medium

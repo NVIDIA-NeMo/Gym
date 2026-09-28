@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# CritPt (no tools): 70 research-level physics problems x 5 repeats. Each rollout has two
+# turns: a derivation, then the problem's Python template filled in with the answer. The
+# Artificial Analysis (AA) API grades the templates in batches of all 70 problems against
+# private test cases, and every rollout in a batch gets that batch's accuracy as its reward.
+#
+#   nemotron_recipes/marlin/run.sh critpt
+#
+# Needs ARTIFICIAL_ANALYSIS_API_KEY (https://artificialanalysis.ai/documentation#critpt-api):
+# one key, or '[key1,key2]' to switch keys when one hits its rate limit. A full run makes 5
+# grading calls, and AA limits each key per day (10 calls per 24 h on the free tier).
+#
+# Serve the model with a context length (--max-model-len) that fits the prompt plus 245,760
+# output tokens: each turn asks for that many. vLLM rejects a turn that does not fit the
+# context, and Gym records the rejected turn as an empty answer, scored 0 without an error.
+# With a shorter context every turn fails this way, so check that output_tokens is above 0.
+#
+# The dataset is not pinned to a revision: Gym loads the latest CritPt-Benchmark/CritPt,
+# which had 70 problems when the published number was produced. A different problem count
+# means a different problem set.
+#
+# Leave PARALLEL unset (or at 350 or more). A rollout holds its slot until its batch is
+# graded, so with fewer slots no batch ever fills, and the run fails once the 6 h verify
+# timeout expires.
+#
+# LIMIT does not work for a smoke here: the 5 repeats of each problem come one after another
+# and LIMIT keeps the first rows, so a limited run cannot fill a batch and fails the same way.
+# For a smoke, copy this file to critpt-smoke.yaml, add `fire_after: 1` next to
+# verify_timeout_seconds below and run `LIMIT=1 nemotron_recipes/marlin/run.sh
+# critpt-smoke`. That is one AA call with the other 69 problems sent empty: it shows the
+# setup works, but it is not a score.
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: 1e668906d2e69a9e8ee9aaafc60050a4025d9688
+# Gym benchmark config this recipe builds on.
+benchmark_config: benchmarks/critpt/config.yaml
+
+# 5 samples per problem (the benchmark default), each sent with its own seed.
+num_repeats_add_seed: true
+
+responses_create_params:
+  # The published run capped each turn at 245,760 output tokens.
+  max_output_tokens: 245760
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      # As in the published run (Gym's default is true): a conversation that ends with
+      # reasoning but no answer is not sent back to the model to continue.
+      sequential_reasoning_allowed: false
+
+critpt_resources_server:
+  resources_servers:
+    critpt:
+      # Wait up to 6 h for a rollout's batch to fill and be graded (default 2.5 h).
+      verify_timeout_seconds: 21600
+      # Keep every submission and grader response, so a run that runs out of grading quota
+      # can be re-scored later without new inference:
+      #   python -m resources_servers.critpt.replay --cache-dir <directory logged at startup>
+      # Relative to the Gym repo root, whatever OUT is.
+      cache_dir: results/critpt/critpt_cache
+      # Grading key: one key, or a '[key1,key2]' list, parsed here as the published run's
+      # command line did.
+      api_key: ${oc.decode:${oc.select:artificial_analysis_api_key,null}}
