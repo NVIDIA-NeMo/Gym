@@ -19,7 +19,7 @@ SCRIPT = Path(__file__).resolve().parents[3] / "scripts/check_harness_conformanc
 
 @pytest.fixture
 def record():
-    return json.loads((Path(__file__).parent / "fixtures/opencode.json").read_text())
+    return json.loads((Path(__file__).parent / "fixtures/miniswe.json").read_text())
 
 
 @pytest.mark.parametrize(
@@ -36,7 +36,7 @@ def test_script_discovers_bundle(record, tmp_path, monkeypatch, relative_path):
     with pytest.raises(SystemExit) as exit_info:
         runpy.run_path(str(SCRIPT), run_name="__main__")
     assert exit_info.value.code == 0
-    (summary_path,) = (tmp_path / "reports").glob("*/capability_summary.json")
+    (summary_path,) = (tmp_path / "reports").glob("*/evidence_summary.json")
     summary = json.loads(summary_path.read_text())
     assert summary["verdict"] == "fulfilled"
     assert summary["sources"].keys() == {str(path.resolve())}
@@ -44,7 +44,7 @@ def test_script_discovers_bundle(record, tmp_path, monkeypatch, relative_path):
 
 
 @pytest.mark.parametrize(
-    "profile,code", [("gym-artifacts-p1/v1", 1), ("gym-artifacts-all/v1", 1), ("onboarding-p0/v1", 2)]
+    "profile,code", [("gym-artifacts-p1/v1", 2), ("gym-artifacts-all/v1", 2), ("onboarding-p0/v1", 2)]
 )
 def test_script_gate_exit_codes(record, tmp_path, monkeypatch, profile, code):
     path = tmp_path / "rollouts.jsonl"
@@ -87,15 +87,13 @@ def test_ambiguous_directory_requires_explicit_file(record, tmp_path):
     for name in ("rollouts.jsonl", "evaluator_rollouts.jsonl"):
         (tmp_path / name).write_text(json.dumps(record) + "\n")
     with pytest.raises(ValueError, match="exactly one"):
-        cli.inspect_bundle(tmp_path, output=tmp_path / "reports", profile="gym-artifacts-p0/v1")
-    _, summary = cli.inspect_bundle(
-        tmp_path / "rollouts.jsonl", output=tmp_path / "reports", profile="gym-artifacts-p0/v1"
-    )
+        cli.inspect_bundle(tmp_path, output=tmp_path / "reports", profile="gym-p0/v1")
+    _, summary = cli.inspect_bundle(tmp_path / "rollouts.jsonl", output=tmp_path / "reports", profile="gym-p0/v1")
     assert summary["verdict"] == "fulfilled"
 
 
 @pytest.mark.parametrize("sidecar_state", ["complete", "missing", "incomplete", "extra_call"])
-def test_script_recovers_payloads_and_validates_sidecars(record, tmp_path, monkeypatch, sidecar_state):
+def test_sidecars_validate_but_do_not_repair_missing_jsonl_payloads(record, tmp_path, monkeypatch, sidecar_state):
     full = hydrate_record(record)
     capture_dir = tmp_path / "model-calls"
     capture_dir.mkdir()
@@ -126,8 +124,8 @@ def test_script_recovers_payloads_and_validates_sidecars(record, tmp_path, monke
     )
     with pytest.raises(SystemExit) as exit_info:
         runpy.run_path(str(SCRIPT), run_name="__main__")
-    assert exit_info.value.code == (0 if sidecar_state == "complete" else 1)
-    (summary_file,) = (tmp_path / "reports").glob("*/capability_summary.json")
+    assert exit_info.value.code == 1  # Sidecars cannot repair the delivered JSONL surface.
+    (summary_file,) = (tmp_path / "reports").glob("*/evidence_summary.json")
     summary = json.loads(summary_file.read_text())
     if sidecar_state != "missing":
         assert str(capture_file.resolve()) in summary["sources"]
@@ -144,7 +142,7 @@ def test_changing_input_publishes_no_report(record, tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "json_rows", mutate_after_read)
     with pytest.raises(ValueError, match="source changed"):
-        cli.inspect_bundle(path, output=tmp_path / "reports", profile="gym-artifacts-p0/v1")
+        cli.inspect_bundle(path, output=tmp_path / "reports", profile="gym-p0/v1")
     assert list((tmp_path / "reports").iterdir()) == []
 
 
@@ -161,3 +159,23 @@ def test_reports_do_not_include_payload_values(record, tmp_path, capsys):
     path.write_text('{"' + secret + '":')
     assert cli.run_inspection(bundle=path, output=tmp_path / "reports") == 2
     assert secret not in capsys.readouterr().out
+
+
+def test_script_matrix_routes_and_returns_failed_gate(tmp_path, monkeypatch):
+    fixtures = Path(__file__).parent / "fixtures"
+    args = [str(SCRIPT), "matrix", "--output", str(tmp_path)]
+    for name in ("opencode", "pi", "codex", "hermes"):
+        args.extend(["--harness", f"{name}={fixtures / (name + '.jsonl')}"])
+    monkeypatch.setattr(sys, "argv", args)
+    with pytest.raises(SystemExit) as error:
+        runpy.run_path(str(SCRIPT), run_name="__main__")
+    assert error.value.code == 1
+    (matrix,) = tmp_path.glob("*/harness_evidence.json")
+    assert set(json.loads(matrix.read_text())["harnesses"]) == {"opencode", "pi", "codex", "hermes"}
+
+
+def test_matrix_error_cannot_publish_partial_matrix(tmp_path):
+    fixtures = Path(__file__).parent / "fixtures"
+    with pytest.raises(OSError):
+        cli.inspect_matrix({"opencode": fixtures / "opencode.jsonl", "missing": tmp_path / "missing"}, output=tmp_path)
+    assert not list(tmp_path.glob("*/harness_evidence.json"))

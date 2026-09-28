@@ -252,10 +252,10 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
 
     # Inspect the emitted records, not a reconstructed copy of the expected evidence.
     _, conformance = inspect_bundle(
-        path, output=tmp_path / "capabilities", profile="gym-artifacts-p0/v1", capture_dir=capture_dir
+        path, output=tmp_path / "capabilities", profile="gym-p0/v1", capture_dir=capture_dir
     )
-    expected = "not_fulfilled" if scenario in {"missing_usage", "missing_details"} else "fulfilled"
+    expected = "fulfilled"  # Provider omission is faithful evidence; health still evaluates missing usage.
     assert conformance["verdict"] == expected
-    for capability in ("C1", "C3", "C4", "C5", "C9", "C10"):
-        assert conformance["capabilities"][capability]["verdict"] == "fulfilled", (scenario, capability)
+    for capability in ("TE-1", "TE-2", "TE-3", "TE-4", "TE-5", "TE-7", "TE-8"):
+        assert conformance["evidence"][capability]["verdict"] == "fulfilled", (scenario, capability)
     assert conformance["is_behavioral_qualification"] is False

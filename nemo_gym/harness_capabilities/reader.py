@@ -41,13 +41,40 @@ def hydrate_record(record: dict, *, capture_dir: Path | None = None) -> dict:
     """Restore payloads by exact model_call_id, never order or content hash.
 
     The native collector moves bodies from capture.calls into ng_trajectory.
-    An optional capture directory provides the retained transport exchanges.
+    An optional capture directory cross-checks the retained transport exchanges.
+    It never repairs payloads missing from the delivered JSONL.
     Conflicts are preserved as reader failures instead of being overwritten.
     """
     result = copy.deepcopy(record)
     capture = result.get("ng_model_call_capture") or {}
     calls = capture.get("calls") or []
     trajectory = result.get("ng_trajectory") or {}
+    if "ng_model_call_capture" not in result and trajectory.get("model_calls"):
+        # Canonical-only delivery is also a supported native surface. Copy known
+        # fields exactly; do not invent clocks, usage, or ownership.
+        calls = []
+        for item in trajectory["model_calls"]:
+            call = {
+                **item.get("response_metadata", {}),
+                "model_call_id": item.get("model_call_id"),
+                "started_at": item.get("started_at"),
+                "completed_at": item.get("completed_at"),
+            }
+            for key in ("request", "response"):
+                value = item.get(key)
+                call[key if isinstance(value, dict) else key + "_raw"] = value
+            stats = item.get("token_stats") or {}
+            for canonical, captured in (
+                ("prompt_tokens", "tokens_in"),
+                ("completion_tokens", "tokens_out"),
+                ("reasoning_tokens", "tokens_reasoning"),
+                ("total_tokens", "tokens_total"),
+                ("cached_tokens", "cached_tokens"),
+            ):
+                call[captured] = stats.get(canonical)
+            calls.append(call)
+        capture = {"rollout_id": trajectory.get("rollout_id"), "calls": calls}
+        result["ng_model_call_capture"] = capture
     issues = result.setdefault("_capability_reader_issues", [])
     by_id: dict[str, dict] = {}
     for call in calls:
@@ -71,7 +98,7 @@ def hydrate_record(record: dict, *, capture_dir: Path | None = None) -> dict:
                     if value is not None:
                         if call.get(key) is not None and call[key] != value:
                             issues.append("conflicting payload representations")
-                        else:
+                        elif not sidecar:
                             call[key] = value
                 metadata = item if sidecar else item.get("response_metadata", {})
                 for key in (
@@ -80,6 +107,8 @@ def hydrate_record(record: dict, *, capture_dir: Path | None = None) -> dict:
                     "status_code",
                     "dialect",
                     "error_category",
+                    "response_status",
+                    "finish_reason",
                 ):
                     if metadata.get(key) is not None and call.get(key) != metadata[key]:
                         issues.append("conflicting model-call metadata")

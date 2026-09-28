@@ -9,4 +9,5 @@ from nemo_gym.harness_capabilities.cli import main
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(["inspect", *sys.argv[1:]]))
+    args = sys.argv[1:]
+    raise SystemExit(main(args if args and args[0] == "matrix" else ["inspect", *args]))
