@@ -21,7 +21,7 @@ VLLM_COMMON_ARGS=(
     --data-parallel-backend mp
     --enable-auto-tool-choice
     --tool-call-parser glm47
-    --reasoning-parser glm45
+    --reasoning-parser glm47
     --enable-chunked-prefill
     --enable-prefix-caching
     --kv-cache-dtype fp8
