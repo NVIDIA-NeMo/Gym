@@ -62,13 +62,25 @@ def _iter_json_objects(text: str):
                     yield text[start : i + 1]
 
 
+def clean_text(raw: Optional[str]) -> str:
+    """Bounded text with reasoning blocks removed.
+
+    Upstream's ``_raw`` fallback holds post-extraction text, not the whole reply,
+    so anything falling back to it must use this rather than ``output_text`` --
+    otherwise a reasoning model's entire trace is scored by ``token_f1``.
+    """
+    if not raw:
+        return ""
+    text = raw[:MAX_RESPONSE_CHARS]
+    text = _THINK_BLOCK_RE.sub(" ", text)
+    return _OPEN_THINK_RE.sub(" ", text)
+
+
 def extract_json(raw: Optional[str]) -> Tuple[Optional[Dict[str, Any]], str]:
     """Return ``(object, status)``; ``object`` is None when nothing parsed."""
     if not raw or not raw.strip():
         return None, "empty_output"
-    text = raw[:MAX_RESPONSE_CHARS]
-    text = _THINK_BLOCK_RE.sub(" ", text)
-    text = _OPEN_THINK_RE.sub(" ", text)
+    text = clean_text(raw)
     if not text.strip():
         # The whole reply was reasoning: the budget ran out before any answer.
         return None, "no_json_found"
@@ -220,9 +232,9 @@ def to_prediction(
                 return {"gold_rationale": value[:MAX_RATIONALE_CHARS]}
         # Upstream's extractor yields {"_raw": text} on a parse failure and
         # post_rationalization falls through to it, so a prose-only reply is still
-        # scored by token_f1 rather than being zeroed. Mirror that: the raw reply
-        # is the last fallback.
-        return {"gold_rationale": (raw or "").strip()[:MAX_RATIONALE_CHARS]}
+        # scored rather than zeroed. Use the CLEANED text: upstream's _raw is
+        # post-extraction, and scoring a whole reasoning trace would be neither.
+        return {"gold_rationale": clean_text(raw).strip()[:MAX_RATIONALE_CHARS]}
 
     raise ValueError(f"unknown task_type: {task_type!r}")
 

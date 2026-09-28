@@ -83,11 +83,18 @@ def _first_output_logprobs(response: Any) -> Any:
     return None
 
 
-def _sanitize(text: Optional[str]) -> Optional[str]:
-    """Drop lone surrogates; one reaching the JSON encoder raises while building the response."""
-    if text is None:
+def _sanitize(value: Any) -> Optional[str]:
+    """Coerce to a wire-safe string, dropping lone surrogates.
+
+    Must accept any type: `task_id` is declared `Any` so a wrong-typed row reaches
+    verify() as a status rather than a 422, which means a non-string can arrive here.
+    A surrogate reaching the JSON encoder raises while the response is being built.
+    """
+    if value is None:
         return None
-    return text.encode("utf-8", "replace").decode("utf-8", "replace")
+    if not isinstance(value, str):
+        value = str(value)
+    return value.encode("utf-8", "replace").decode("utf-8", "replace")
 
 
 class ChemReasonBenchResourcesServer(SimpleResourcesServer):

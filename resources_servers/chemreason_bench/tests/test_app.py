@@ -106,7 +106,9 @@ def _verify(server, output_text, **fields):
     missing-vocabulary path.
     """
     task_type = fields.get("task_type")
-    for key, value in QUESTION_SIDE.get(task_type, {}).items():
+    # Guarded: wrong-type tests pass unhashable values here on purpose.
+    defaults = QUESTION_SIDE.get(task_type, {}) if isinstance(task_type, str) else {}
+    for key, value in defaults.items():
         fields.setdefault(key, value)
     return asyncio.run(server.verify(_make_request(output_text, **fields)))
 
@@ -166,10 +168,52 @@ class TestHarnessFailures:
         assert result.status == "bad_task_type"
         assert result.harness_failure is True
 
-    def test_ground_truth_wrong_type(self):
-        result = _verify(_make_server(), "{}", task_type="ordering", ground_truth=None)
+    @pytest.mark.parametrize("bad", [None, [], "a string", 7, True])
+    def test_ground_truth_wrong_type(self, bad):
+        result = _verify(_make_server(), "{}", task_type="ordering", ground_truth=bad)
         assert result.status == "bad_ground_truth"
         assert result.harness_failure is True
+
+    @pytest.mark.parametrize("bad", [7, [], {}, True])
+    def test_task_type_wrong_type(self, bad):
+        result = _verify(_make_server(), "{}", ground_truth={}, task_type=bad)
+        assert result.status == "bad_task_type"
+        assert result.harness_failure is True
+
+    @pytest.mark.parametrize("bad_id", [123, ["a"], {"k": "v"}, 1.5, True])
+    def test_non_string_task_id_does_not_crash(self, bad_id):
+        """Fields are declared Any so a wrong-typed row is a status, not a 422.
+
+        That widening is what lets a non-string reach _sanitize, so it must coerce
+        rather than assume str -- an int previously raised AttributeError inside
+        verify(), which is a 500 and aborts the run.
+        """
+        result = _verify(
+            _make_server(),
+            GOLD_REPLY["ordering"],
+            task_id=bad_id,
+            task_type="ordering",
+            ground_truth=GOLD["ordering"],
+        )
+        assert result.harness_failure is False
+        assert isinstance(result.task_id, str)
+        json.dumps(result.model_dump())
+
+    @pytest.mark.parametrize(
+        "field,bad",
+        [("expected_step_ids", "not a list"), ("options", 7), ("legend", ["a"]), ("benchmark_id", "x")],
+    )
+    def test_wrong_typed_question_side_vocabulary_degrades(self, field, bad):
+        """Costs the assist for that row; must not fail it."""
+        result = _verify(
+            _make_server(),
+            GOLD_REPLY["step_validation"],
+            task_type="step_validation",
+            ground_truth=GOLD["step_validation"],
+            **{field: bad},
+        )
+        assert result.harness_failure is False
+        assert result.reward == pytest.approx(1.0)
 
     def test_surrogate_in_task_id_does_not_break_the_response(self):
         result = _verify(
@@ -212,6 +256,29 @@ class TestModelOutputHandling:
         assert result.status == "no_json_found"
         assert result.reward == 0.0
         assert result.harness_failure is False
+
+    def test_prose_only_rationalization_is_scored_not_zeroed(self):
+        """Upstream falls through to _raw, so a non-JSON rationale still scores."""
+        result = _verify(
+            _make_server(),
+            "Calcium activates the carbonyl.",
+            task_type="rationalization",
+            ground_truth=GOLD["rationalization"],
+        )
+        assert result.status == "no_json_found"
+        assert result.reward == pytest.approx(1.0)
+
+    def test_reasoning_trace_is_not_scored_as_the_rationale(self):
+        """The fallback must use CLEANED text, not output_text.
+
+        Scoring a whole <think> block through token_f1 measures the trace, not
+        the answer, and matches neither upstream nor any published number.
+        """
+        answer = "Calcium activates the carbonyl."
+        traced = f"<think>{'borohydride reduces esters slowly ' * 20}</think>{answer}"
+        plain = _verify(_make_server(), answer, task_type="rationalization", ground_truth=GOLD["rationalization"])
+        with_trace = _verify(_make_server(), traced, task_type="rationalization", ground_truth=GOLD["rationalization"])
+        assert with_trace.reward == pytest.approx(plain.reward)
 
     def test_non_dict_reply_forces_negative_label(self):
         """Upstream's conservative fallback: a non-JSON reply must not count positive.

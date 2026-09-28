@@ -299,7 +299,82 @@ class TestSlotCanonicalization:
         assert SC.canonicalize_slots(None, None) == {}
         assert SC.canonicalize_slots({}, {}) == {}
 
-    def test_unit_map_carries_concentration_entries_eval_lacks(self):
-        """predict.py and eval.py ship DIFFERENT unit tables; they are not merged."""
-        assert SC._UCUM["M"] == "M" and SC._UCUM["n"] == "N"
+    def test_unit_map_matches_upstreams_exactly(self):
+        """Every entry, not a spot check.
+
+        Six were missing from a hand-copied version (liter, litre, ltrs, mole,
+        moles, ul.) and cost 59 rows of disagreement with upstream before anyone
+        noticed, so the whole table is pinned against predict.py's DEFAULT_UCUM.
+        """
+        expected = {
+            "μl": "uL",
+            "µl": "uL",
+            "ul": "uL",
+            "μL": "uL",
+            "µL": "uL",
+            "uL": "uL",
+            "ml": "mL",
+            "mL": "mL",
+            "l": "L",
+            "L": "L",
+            "ul.": "uL",
+            "liter": "L",
+            "litre": "L",
+            "ltrs": "L",
+            "mg": "mg",
+            "g": "g",
+            "kg": "kg",
+            "µg": "ug",
+            "μg": "ug",
+            "ug": "ug",
+            "ng": "ng",
+            "mol": "mol",
+            "mmol": "mmol",
+            "µmol": "umol",
+            "μmol": "umol",
+            "umol": "umol",
+            "mole": "mol",
+            "moles": "mol",
+            "s": "s",
+            "sec": "s",
+            "secs": "s",
+            "second": "s",
+            "seconds": "s",
+            "min": "min",
+            "mins": "min",
+            "minute": "min",
+            "minutes": "min",
+            "h": "h",
+            "hr": "h",
+            "hour": "h",
+            "hours": "h",
+            "°c": "C",
+            "c": "C",
+            "°f": "F",
+            "f": "F",
+            "k": "K",
+            "C": "C",
+            "F": "F",
+            "K": "K",
+            "m": "M",
+            "M": "M",
+            "n": "N",
+            "N": "N",
+        }
+        assert SC._UCUM == expected
+
+    def test_canonicalization_and_scoring_tables_stay_separate(self):
+        """predict.py and eval.py ship DIFFERENT tables; merging them would change scores."""
         assert "M" not in M.DEFAULT_UCUM and "n" not in M.DEFAULT_UCUM
+        assert SC._UCUM.keys() - M.DEFAULT_UCUM.keys() == {
+            "ul.",
+            "liter",
+            "litre",
+            "ltrs",
+            "mole",
+            "moles",
+            "m",
+            "M",
+            "n",
+            "N",
+        }
