@@ -42,7 +42,15 @@ from typing import Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from prompting import MAX_OUTPUT_TOKENS, NUM_CANDIDATES, TEMPERATURE, build_messages  # noqa: E402
-from scoring import canonical  # noqa: E402
+
+
+try:
+    from scoring import canonical  # noqa: E402
+except ModuleNotFoundError as e:  # rdkit is a server-only dependency, not a core gym one
+    raise ModuleNotFoundError(
+        f"NMRArena preparation needs the resources server's dependencies ({e.name}). Install them first: "
+        "cd resources_servers/nmrarena && uv venv --python 3.13 && uv pip install -r requirements.txt"
+    ) from e
 
 
 GITHUB_REPO = "odanchem/NMRArena"
