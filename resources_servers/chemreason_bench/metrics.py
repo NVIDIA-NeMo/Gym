@@ -5,9 +5,12 @@
 Derived from ``eval/eval.py`` in https://github.com/Khadaz/ChemReason-Bench at
 commit ``c0b9ac2933708fcca47b1795492952cbf280e194`` (2026-05-08), which the
 project licenses under Apache-2.0. Constants (``EN_STOP``, ``DEFAULT_UCUM``,
-punctuation regexes, tolerances) and the metric bodies reproduce that file so
-that scores are comparable to the published table by construction rather than
-by coincidence.
+punctuation regexes, tolerances) and the metric bodies reproduce that file, so
+the SCORER introduces no divergence of its own: gold replayed through it and
+through upstream's ``eval.py`` agrees to six decimal places. That is a property
+of this module only. Whether a whole run is comparable to the published table
+also depends on the prompt, the decoding recipe and the ``lm`` protocol; see the
+README's "Known gap" section for the one divergence that remains.
 
 Scope: only the six PRIMARY metrics named in ``eval/eval.py`` ``primary_map``
 (line 813) are implemented here, because those are the ones the published

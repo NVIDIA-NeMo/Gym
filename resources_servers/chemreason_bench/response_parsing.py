@@ -15,6 +15,8 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from slot_canonicalization import canonicalize_slots
+
 
 # Thinking models emit these; the JSON we want is always after them.
 _THINK_BLOCK_RE = re.compile(r"<(think|thinking)\b[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
@@ -185,6 +187,7 @@ def to_prediction(
     expected_step_ids: Optional[List[str]] = None,
     options: Optional[List[Any]] = None,
     raw: str = "",
+    legend: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Coerce a parsed object into the shape ``metrics.score_row`` expects.
 
@@ -222,16 +225,24 @@ def to_prediction(
         slots = obj.get("slots")
         if not isinstance(slots, dict):
             slots = {}
-        # Keys must be strings for the slot matcher's endswith/startswith checks.
-        slots = {str(k): v for k, v in slots.items()}
+        # Upstream canonicalizes against the row's legend before scoring; without
+        # it a matched reagent reads as an unrecognised key, or an unnormalised
+        # unit trips the fatal flag and zeroes the task.
+        slots = canonicalize_slots({str(k): v for k, v in slots.items()}, legend)
         return {"action": str(obj.get("action", "")), "slots": slots}
 
     if task_type == "rationalization":
         for key in ("gold_rationale", "rationale", "predicted_rationale", "answer"):
             value = obj.get(key)
+            if isinstance(value, list):
+                value = " ".join(str(item) for item in value)
             if isinstance(value, str) and value.strip():
                 return {"gold_rationale": value[:MAX_RATIONALE_CHARS]}
-        return {"gold_rationale": ""}
+        # Upstream's extractor yields {"_raw": text} on a parse failure and
+        # post_rationalization falls through to it, so a prose-only reply is still
+        # scored by token_f1 rather than being zeroed. Mirror that: the raw reply
+        # is the last fallback.
+        return {"gold_rationale": (raw or "").strip()[:MAX_RATIONALE_CHARS]}
 
     raise ValueError(f"unknown task_type: {task_type!r}")
 

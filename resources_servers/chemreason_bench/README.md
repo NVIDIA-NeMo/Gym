@@ -97,11 +97,22 @@ Two upstream inconsistencies were resolved deliberately:
 - A reply that is not a JSON dict forces `label=False` (upstream's conservative fallback),
   while a dict merely missing `score` falls through to `0.5 >= 0.5` and counts positive.
 
+One deliberate departure, recorded rather than hidden: when a reply contains several JSON
+objects this server scores the **rightmost**, on the grounds that a later object is the
+model's correction of an earlier draft. Upstream prefers a fenced block, else the span from
+the first `{` to the last `}`, which on a two-object reply fails to parse at all. The
+departure can only help a model that self-corrects; it is not silent, and the status field
+distinguishes a parse failure from a scored answer.
+
 ### Known gap: `lm` labels
 
-Upstream derives the `lm` label from an argmax over the decision tokens' logits, never
-generating. This server will use exactly that rule the moment the values arrive, reporting
-status `ok_logprobs`. They do not arrive today:
+Upstream derives the `lm` label from token probabilities, never generating. Two details
+matter and are not yet matched: it sums probability mass over **every vocabulary token**
+whose normalised form ends in `YES` or `NO` (not a top-k argmax), and it abstains when one
+side has no mass at all. This server currently takes the highest-probability decision token
+among whatever alternatives it is given, reporting status `ok_logprobs` when it can — a
+closer approximation than text parsing, but still not upstream's rule. Neither applies
+today, because the values do not arrive at all:
 `nemo_gym/responses_converter.py` constructs the output text without populating its `logprobs`
 field, so chat-level logprobs are dropped on the way back into the Responses shape. Until that
 changes, `lm` labels come from parsing the generated text, which agrees with upstream whenever
@@ -119,11 +130,17 @@ Model-free checks only; no model is involved in any number here.
   upstream's `eval/eval.py` agree on all six primary metrics and on Primary-Overall
   (0.988983) to six decimal places. Repeated with replies delivered bare, `<think>`-wrapped
   and fenced, and across both protocols: unchanged.
-- **Gold cannot reach 100 on `step_completion`**, which caps at **0.9339**. This is an upstream
-  data property that the port reproduces exactly, not a defect here: 460 of 1,483 rows have
-  empty gold slots and `slot_f1({}, {})` is 0 by construction, 2 rows use slot keys outside
-  the schema (`reagents`, `through`), and 6 carry `duration_unit: "day"`, which upstream's own
-  legality check rejects. Published SC-Scores sit against that ceiling.
+- **Gold cannot reach 100 on `step_completion`.** This is an upstream data property the port
+  reproduces exactly, not a defect here: 460 of 1,483 rows have empty gold slots and
+  `slot_f1({}, {})` is 0 by construction, 2 rows use slot keys outside the schema (`reagents`,
+  `through`), and 6 carry `duration_unit: "day"`, which upstream's own legality check rejects.
+
+  There are two ceilings, and which one applies depends on how much of upstream's pipeline is
+  in play. Scored by `eval.py` alone, gold caps at **0.9339** — that is the figure the
+  six-decimal agreement above is measured against. Through the real pipeline, where
+  `canonicalize_slots` runs first as it does for any model answer, gold caps at **0.9272**,
+  because canonicalization alters 297 of the 1,483 gold slot sets. A model run goes through
+  the second path, so 0.9272 is the ceiling that bounds a reported SC-Score.
 - **Negative controls over all 7,306 rows**, not a sample. An empty prediction scores 0.00
   Primary-Overall. **A fixed constant answer scores 27.54** -- `f1_positive` pays 0.627 and
   0.729 on the two validation tasks because always-positive earns good positive-class F1 when

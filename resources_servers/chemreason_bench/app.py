@@ -20,7 +20,7 @@ corpus-level format-error penalty -- so the headline numbers are computed in
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 import metrics as M
 from pydantic import model_validator
@@ -30,12 +30,16 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 
 
 class ChemReasonBenchResourcesServerConfig(BaseResourcesServerConfig):
-    pass
+    # Nothing is carried between verifications: scoring is a pure function of the
+    # reply and the row. This is not a claim that arbitrary model output reproduces
+    # -- only that this server keeps no state.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
 
 class ChemReasonBenchVerifyRequest(BaseVerifyRequest):
@@ -43,13 +47,19 @@ class ChemReasonBenchVerifyRequest(BaseVerifyRequest):
     # committed example.jsonl nests them under `verifier_metadata` instead.
     # Accept both rather than requiring one shape.
     verifier_metadata: Optional[Dict[str, Any]] = None
-    task_type: Optional[str] = None
-    ground_truth: Optional[Dict[str, Any]] = None
-    task_id: Optional[str] = None
-    benchmark_id: Optional[int] = None
+    # Typed as Any, deliberately. A narrower annotation turns a wrong-typed row into a
+    # 422 raised during request validation, before verify() runs -- and simple_agent
+    # calls raise_for_status, so one bad row would abort the whole run. Widening the
+    # field lets verify() report it as a harness_failure status instead, which is the
+    # behaviour the module docstring promises. Shapes are checked in verify().
+    task_type: Any = None
+    ground_truth: Any = None
+    task_id: Any = None
+    benchmark_id: Any = None
     # Question-side vocabulary upstream's post-processors need. Not gold.
-    expected_step_ids: Optional[List[str]] = None
-    options: Optional[List[Any]] = None
+    expected_step_ids: Any = None
+    options: Any = None
+    legend: Any = None
     # "gen" (JSON reply) or "lm" (bare decision token). Rows without it are gen,
     # so a dataset prepared before the lm protocol existed still scores.
     protocol: str = "gen"
@@ -125,6 +135,12 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
                 **payload, reward=0.0, status="bad_ground_truth", harness_failure=True
             )
 
+        # Question-side vocabulary is optional; a wrong-typed value costs the assist
+        # for that row but must not fail it, so it degrades to empty rather than raising.
+        expected_step_ids = body.expected_step_ids if isinstance(body.expected_step_ids, list) else []
+        options = body.options if isinstance(body.options, list) else []
+        legend = body.legend if isinstance(body.legend, dict) else {}
+
         if body.protocol == "lm":
             if task_type not in M.DUAL_PROTOCOL_TASKS:
                 return ChemReasonBenchVerifyResponse(
@@ -135,7 +151,7 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
         else:
             raw = body.response.output_text or ""
             parsed, status = extract_json(raw)
-            prediction = to_prediction(task_type, parsed, body.expected_step_ids, body.options, raw)
+            prediction = to_prediction(task_type, parsed, expected_step_ids, options, raw, legend)
         scored = M.score_row(task_type, prediction, ground_truth)
         reward = float(scored.pop("reward"))
 

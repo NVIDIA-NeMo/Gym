@@ -325,6 +325,10 @@ def _format_row(prompt_row: Dict[str, Any], answer_row: Dict[str, Any], protocol
         row["expected_step_ids"] = [str(s.get("step_id", "")) for s in (prompt_row.get("steps_to_order") or [])]
     elif task_type == "contrastive_choice":
         row["options"] = list(prompt_row.get("options") or [])
+    elif task_type == "step_completion":
+        # canonicalize_slots resolves reagent NAMES back to their $n$ placeholders
+        # through the legend, so the scorer needs it as data, not just as prompt text.
+        row["legend"] = dict(prompt_row.get("legend") or {})
     if protocol == "lm" and LM_RESPONSES_CREATE_PARAMS:
         row["responses_create_params"] = dict(LM_RESPONSES_CREATE_PARAMS)
     return row

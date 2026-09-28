@@ -9,7 +9,7 @@ identifies which of the 500 source reactions an instance came from, which is
 what upstream's ``range_1_400`` / ``range_401_500`` reporting slices on.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,6 +31,34 @@ class TaskData(BaseModel):
             "task_type (e.g. correct_order for ordering, label for the binary "
             "tasks, action+slots for step_completion)."
         ),
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+    protocol: str = Field(
+        default="gen",
+        description=(
+            "'gen' (JSON reply) or 'lm' (bare decision token). The three discriminative "
+            "tasks carry both; the published metric averages them."
+        ),
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+    question: Optional[str] = Field(
+        default=None,
+        description="Rendered user prompt; materialized into responses_create_params, never read by the server.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
+    expected_step_ids: Optional[List[str]] = Field(
+        default=None,
+        description="ORDERING only: the legal step ids in presentation order, for upstream's post_ordering.",
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+    options: Optional[List[Any]] = Field(
+        default=None,
+        description="CONTRASTIVE_CHOICE only: the option list, for upstream's post_contrastive.",
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+    legend: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="STEP_COMPLETION only: placeholder->name map, for upstream's canonicalize_slots.",
         json_schema_extra={"consumed_by": ["verify"]},
     )
     task_id: Optional[str] = Field(

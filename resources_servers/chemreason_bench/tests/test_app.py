@@ -225,13 +225,36 @@ class TestModelOutputHandling:
         )
         assert result.reward == pytest.approx(1.0)
 
-    def test_illegal_unit_zeroes_step_completion(self):
+    def test_unknown_amount_unit_is_scrubbed_not_fatal(self):
+        """Canonicalization drops an out-of-set amount_unit before scoring.
+
+        Upstream's _sanitize_units removes amount_* when the unit is neither a
+        mass/volume/mole unit nor migratable to time/temperature, so the fatal
+        format-error flag never sees it and the reagent still matches.
+        """
         result = _verify(
             _make_server(),
-            '{"action":"WASH","slots":{"reagent":"$7$","amount_unit":"furlongs"}}',
+            '{"action":"WASH","slots":{"reagent":"$7$","amount_value":1,"amount_unit":"furlongs"}}',
             task_type="step_completion",
             ground_truth=GOLD["step_completion"],
         )
+        assert result.contributions["format_error"] == 0.0
+        assert result.reward == pytest.approx(1.0)
+
+    def test_illegal_duration_unit_is_fatal_and_zeroes_the_task(self):
+        """duration_unit and temperature_unit are normalized but never dropped.
+
+        So they remain the only route to the fatal flag after canonicalization --
+        which is exactly how the six gold rows carrying duration_unit "day" trip
+        upstream's own legality check.
+        """
+        result = _verify(
+            _make_server(),
+            '{"action":"WASH","slots":{"reagent":"$7$","duration_value":2,"duration_unit":"day"}}',
+            task_type="step_completion",
+            ground_truth=GOLD["step_completion"],
+        )
+        assert result.contributions["format_error"] == 1.0
         assert result.reward == 0.0
 
     @pytest.mark.parametrize(

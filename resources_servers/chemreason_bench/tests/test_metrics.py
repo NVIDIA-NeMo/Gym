@@ -17,6 +17,7 @@
 import pytest
 
 from resources_servers.chemreason_bench import metrics as M
+from resources_servers.chemreason_bench import slot_canonicalization as SC
 from resources_servers.chemreason_bench.task_data import TaskData
 
 
@@ -206,3 +207,99 @@ class TestTaskDataSchema:
     def test_extra_fields_allowed(self):
         data = TaskData(task_type="ordering", ground_truth={}, question="text")
         assert data.question == "text"
+
+
+class TestSlotCanonicalization:
+    """Upstream runs canonicalize_slots(slots, legend) before scoring (predict.py:953).
+
+    Paired agreement against upstream's own implementation was 1483/1483 on real
+    model outputs for both evaluated models; these pin the individual behaviours.
+    """
+
+    LEGEND = {"$4$": "calcium chloride", "$5$": "sodium borohydride", "$7$": "water"}
+
+    def test_alias_keys_collapse_to_reagent(self):
+        for alias in ("solvent", "base", "wash_with", "drying_agent", "chemical"):
+            out = SC.canonicalize_slots({alias: "$7$"}, self.LEGEND)
+            assert out == {"reagent": "$7$"}, alias
+
+    def test_reagent_name_resolves_to_its_placeholder(self):
+        assert SC.canonicalize_slots({"reagent": "sodium borohydride"}, self.LEGEND) == {"reagent": "$5$"}
+
+    def test_reagent_name_matching_ignores_case_and_parentheses(self):
+        out = SC.canonicalize_slots({"reagent": "Calcium Chloride (anhydrous)"}, self.LEGEND)
+        assert out == {"reagent": "$4$"}
+
+    def test_unknown_reagent_name_is_left_alone(self):
+        assert SC.canonicalize_slots({"reagent": "unobtainium"}, self.LEGEND) == {"reagent": "unobtainium"}
+
+    def test_amount_blob_splits_into_value_and_unit(self):
+        out = SC.canonicalize_slots({"reagent": "$7$", "amount": "10 mL"}, self.LEGEND)
+        assert out == {"reagent": "$7$", "amount_value": 10.0, "amount_unit": "mL"}
+
+    def test_placeholder_used_as_a_key_becomes_the_reagent(self):
+        out = SC.canonicalize_slots({"$4$": "5 g"}, self.LEGEND)
+        assert out == {"reagent": "$4$", "amount_value": 5.0, "amount_unit": "g"}
+
+    def test_time_valued_amount_migrates_to_duration(self):
+        out = SC.canonicalize_slots({"amount_value": 2, "amount_unit": "hours"}, self.LEGEND)
+        assert out == {"duration_value": 2.0, "duration_unit": "h"}
+
+    def test_temperature_valued_amount_migrates_to_temperature(self):
+        out = SC.canonicalize_slots({"amount_value": 25, "amount_unit": "°C"}, self.LEGEND)
+        assert out == {"temperature_value": 25.0, "temperature_unit": "C"}
+
+    def test_unknown_amount_unit_drops_the_amount_pair(self):
+        assert SC.canonicalize_slots({"amount_value": 1, "amount_unit": "furlongs"}, self.LEGEND) == {}
+
+    def test_unit_spellings_normalize(self):
+        # These six were missing from a hand-copied map and cost 59 rows of disagreement.
+        for spelling, expected in (
+            ("liter", "L"),
+            ("litre", "L"),
+            ("ltrs", "L"),
+            ("mole", "mol"),
+            ("moles", "mol"),
+            ("ul.", "uL"),
+        ):
+            out = SC.canonicalize_slots({"amount_value": 1, "amount_unit": spelling}, self.LEGEND)
+            assert out.get("amount_unit") == expected, spelling
+
+    def test_tokens_are_lifted_from_a_surviving_slot_value(self):
+        """The scan runs after the blob/unit passes, over whatever keys survive."""
+        out = SC.canonicalize_slots({"duration_unit": "@9@"}, self.LEGEND)
+        assert out == {"duration_token": "@9@"}
+        # A token sitting in the reagent value is lifted too, and the reagent stays.
+        assert SC.canonicalize_slots({"reagent": "#8#"}, self.LEGEND) == {
+            "reagent": "#8#",
+            "temperature_token": "#8#",
+        }
+
+    def test_blob_keys_that_parse_to_nothing_are_dropped(self):
+        """`duration: "@9@"` has no number+unit, so the key is popped before the token scan."""
+        assert SC.canonicalize_slots({"duration": "@9@", "temperature": "#8#"}, self.LEGEND) == {}
+
+    def test_token_fields_pass_through_untouched(self):
+        pair = {"duration_token": "@9@", "temperature_token": "#8#"}
+        assert SC.canonicalize_slots(pair, self.LEGEND) == pair
+
+    def test_keys_outside_the_whitelist_are_dropped(self):
+        out = SC.canonicalize_slots({"reagent": "$7$", "vibe": "energetic", "notes": 3}, self.LEGEND)
+        assert out == {"reagent": "$7$"}
+
+    def test_unit_given_as_a_list_takes_the_first_element(self):
+        out = SC.canonicalize_slots({"amount_value": 1, "amount_unit": ["mL", "L"]}, self.LEGEND)
+        assert out.get("amount_unit") == "mL"
+
+    def test_non_numeric_value_is_dropped_rather_than_raising(self):
+        out = SC.canonicalize_slots({"amount_value": "lots", "amount_unit": "mL"}, self.LEGEND)
+        assert "amount_value" not in out
+
+    def test_empty_and_none_inputs_are_safe(self):
+        assert SC.canonicalize_slots(None, None) == {}
+        assert SC.canonicalize_slots({}, {}) == {}
+
+    def test_unit_map_carries_concentration_entries_eval_lacks(self):
+        """predict.py and eval.py ship DIFFERENT unit tables; they are not merged."""
+        assert SC._UCUM["M"] == "M" and SC._UCUM["n"] == "N"
+        assert "M" not in M.DEFAULT_UCUM and "n" not in M.DEFAULT_UCUM
