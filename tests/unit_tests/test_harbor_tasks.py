@@ -367,10 +367,17 @@ class TestCli:
         assert [t.task_id for t in prepared.tasks] == ["a"]
 
     def test_resolve_agent_accepts_short_name(self):
-        selection = resolve_agent("hermes")
-        assert selection.instance_name == "hermes_agent"
-        assert selection.impl_name == "hermes_agent"
-        assert selection.config_path.name == "hermes_agent.yaml"
+        selection = resolve_agent("simple")
+        assert selection.instance_name == "simple_agent"
+        assert selection.impl_name == "simple_agent"
+        assert selection.config_path.name == "simple_agent.yaml"
+        # `hermes` and `terminus_2` each match two harnesses; the caller has to pick.
+        for ambiguous in ("hermes", "terminus_2"):
+            with pytest.raises(ValueError, match="ambiguous"):
+                resolve_agent(ambiguous)
+        terminus = resolve_agent("terminus_2_sandboxed_agent")
+        assert terminus.instance_name == "terminus_2_sandboxed_agent"
+        assert terminus.impl_name == "terminus_2_sandboxed_agent"
         with pytest.raises(ValueError, match="No agent config"):
             resolve_agent("no_such_agent_xyz")
 
