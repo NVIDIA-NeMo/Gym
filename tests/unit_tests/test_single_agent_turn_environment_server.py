@@ -7,6 +7,7 @@ from typing import Literal
 
 import orjson
 import pytest
+from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ConfigDict
 
@@ -249,6 +250,21 @@ async def test_legacy_compatibility_is_a_separate_environment_deployment() -> No
     assert result["reward"] == 1.0
     assert result["benchmark_field"] == "preserved"
     assert result["agent_ref"] == {"name": "agent"}
+
+
+def test_legacy_adapter_forwards_aggregate_metrics_to_resources() -> None:
+    environment_server, client = _environment_server()
+    client.responses = [_Response({"agent_metrics": {"mean/reward": 0.5}})]
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    response = TestClient(adapter.setup_webserver()).post(
+        "/aggregate_metrics",
+        json={"verify_responses": [{"_ng_task_index": 0, "reward": 0.5}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["agent_metrics"] == {"mean/reward": 0.5}
+    assert [(server, path) for server, path, _ in client.calls] == [("resources", "/aggregate_metrics")]
 
 
 async def test_legacy_and_native_envelopes_project_the_same_result() -> None:
