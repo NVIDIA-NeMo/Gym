@@ -203,9 +203,11 @@ class TestApp:
         assert sorted(list(not_equal_verify_response.model_dump())) == [
             "expected_answer",
             "extracted_answer",
+            "failure_kind",
             "failure_reason",
             "judge_evaluations",
             "library_reward",
+            "mask_sample",
             "response",
             "responses_create_params",
             "reward",
@@ -242,9 +244,11 @@ class TestApp:
         assert sorted(list(equal_verify_response.model_dump())) == [
             "expected_answer",
             "extracted_answer",
+            "failure_kind",
             "failure_reason",
             "judge_evaluations",
             "library_reward",
+            "mask_sample",
             "response",
             "responses_create_params",
             "reward",

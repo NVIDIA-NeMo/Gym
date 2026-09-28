@@ -41,6 +41,7 @@ def execution(monkeypatch):
         debug=False,
         model_context_limit=32_000,
         model_output_limit=4_000,
+        interleaved_thinking=False,
         llm_request_timeout=60,
         sandbox_provider="opensandbox",
         sandbox_timeout=10,

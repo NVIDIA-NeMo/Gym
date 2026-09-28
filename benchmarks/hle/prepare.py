@@ -28,6 +28,8 @@ baked into ``responses_create_params.input`` and image questions carry an
 
 from pathlib import Path
 
+from nemo_gym.vision_input import build_image_input
+
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
@@ -37,42 +39,6 @@ OUTPUT_VISION_FPATH = DATA_DIR / "hle_benchmark_vision.jsonl"
 # Prompt template used to materialize inputs in vision mode. Kept in sync with the
 # text-only path, which applies this same template at rollout time via prompt_config.
 PROMPT_CONFIG_FPATH = BENCHMARK_DIR / "prompts" / "default.yaml"
-
-
-def _to_data_uri(image: str) -> str:
-    """Normalize an HLE image field into a data URI usable as an ``image_url``.
-
-    The ``cais/hle`` image column stores a base64 data URI string (e.g.
-    ``data:image/png;base64,...``) for image questions. If a raw base64 payload
-    is encountered instead, wrap it with a PNG data-URI prefix.
-    """
-    if image.startswith("data:"):
-        return image
-    return f"data:image/png;base64,{image}"
-
-
-def _build_input(prompt_config, question: str, image: str) -> list:
-    """Build a materialized ``responses_create_params.input`` for one row.
-
-    Applies the shared prompt template, then (for image questions) rewrites the
-    user turn into a multimodal content list with an ``input_image`` block.
-    """
-    from nemo_gym.prompt import fill_prompt
-
-    messages = fill_prompt(prompt_config, {"question": question})
-    if not image:
-        return messages
-
-    # Rewrite the (string) user turn into a multimodal content list so the image
-    # travels alongside the question text.
-    for msg in messages:
-        if msg["role"] == "user":
-            msg["content"] = [
-                {"type": "input_text", "text": msg["content"]},
-                {"type": "input_image", "image_url": _to_data_uri(image), "detail": "high"},
-            ]
-            break
-    return messages
 
 
 def prepare(include_vision: bool = False) -> Path:
@@ -131,7 +97,7 @@ def prepare(include_vision: bool = False) -> Path:
             if include_vision:
                 # Materialize the prompt so the row is self-contained (no prompt_config needed).
                 row["has_image"] = bool(image)
-                row["responses_create_params"] = {"input": _build_input(prompt_config, question, image)}
+                row["responses_create_params"] = {"input": build_image_input(prompt_config, question, image)}
             rows.append(json.dumps(row) + "\n")
 
     output_fpath = OUTPUT_VISION_FPATH if include_vision else OUTPUT_FPATH

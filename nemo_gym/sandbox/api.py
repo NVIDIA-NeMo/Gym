@@ -17,6 +17,7 @@
 import asyncio
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
@@ -36,11 +37,17 @@ from nemo_gym.sandbox.providers import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
+    SupportsSandboxPauseResume,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
     create_provider,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
+from nemo_gym.telemetry.gym_metrics import (
+    record_sandbox_active,
+    record_sandbox_exec_duration,
+    record_sandbox_startup,
+)
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -372,6 +379,11 @@ class SandboxPty:
         )
 
 
+def _sandbox_id(handle: Any) -> str | None:
+    """The provider-neutral id of a handle, or None for a handle-less test double."""
+    return getattr(handle, "sandbox_id", None)
+
+
 class AsyncSandbox:
     """Async sandbox object backed by a runtime provider.
 
@@ -392,6 +404,10 @@ class AsyncSandbox:
         self._handle: SandboxHandle | None = None
         self._stopped = True
         self._closed = False
+        self._connected = False
+        # Whether this instance added itself to `gym.sandbox.active`; a `connect()`ed sandbox
+        # was counted by the process that started it and must not be subtracted here.
+        self._counted_active = False
         self.pty = SandboxPty(self)
 
     def _telemetry_provider_name(self) -> str:
@@ -416,12 +432,19 @@ class AsyncSandbox:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
         if is_span_group_enabled(GymSpanGroup.SANDBOX):
+            provider_name = self._telemetry_provider_name()
+            started = time.perf_counter()
             with managed_span(
                 GymSpanGroup.SANDBOX,
                 "gym.sandbox.start",
-                **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
-            ):
+                **{"nemo.gym.sandbox.provider": provider_name},
+            ) as span:
                 handle = await self._provider.create(requested_spec)
+                if span is not None:
+                    safe_set_span_attributes(span, {"nemo.gym.sandbox.id": _sandbox_id(handle)})
+            record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
+            record_sandbox_active(1, provider=provider_name)
+            self._counted_active = True
         else:
             handle = await self._provider.create(requested_spec)
         self._handle = handle
@@ -441,6 +464,24 @@ class AsyncSandbox:
 
         return self
 
+    async def start_with_setup(
+        self,
+        spec: SandboxSpec | None,
+        setup: Callable[["AsyncSandbox"], Awaitable[None]],
+    ) -> "AsyncSandbox":
+        """Start the sandbox, then run ``setup`` against it.
+
+        If ``setup`` raises, the sandbox is stopped before the exception
+        propagates.
+        """
+        await self.start(spec)
+        try:
+            await setup(self)
+        except BaseException:
+            await self.stop()
+            raise
+        return self
+
     async def exec(
         self,
         command: str,
@@ -458,21 +499,25 @@ class AsyncSandbox:
         # (`safe_set_span_attributes` would redact a key named `command`, not a value that
         # happens to be one). Provider, exit code and duration are the useful,
         # content-free parts.
+        provider_name = self._telemetry_provider_name()
+        started = time.perf_counter()
         with managed_span(
             GymSpanGroup.SANDBOX,
             "gym.sandbox.exec",
-            **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
+            **{"nemo.gym.sandbox.provider": provider_name},
         ) as span:
             result = await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
             if span is not None:
                 safe_set_span_attributes(
                     span,
                     {
+                        "nemo.gym.sandbox.id": _sandbox_id(self._handle),
                         "nemo.gym.sandbox.return_code": result.return_code,
                         "nemo.gym.sandbox.error_type": result.error_type,
                     },
                 )
-            return result
+        record_sandbox_exec_duration((time.perf_counter() - started) * 1000.0, provider=provider_name)
+        return result
 
     async def _exec_uninstrumented(
         self,
@@ -523,17 +568,76 @@ class AsyncSandbox:
             raise TypeError(f"Sandbox provider endpoint() must return SandboxEndpoint, got {type(resolved).__name__}")
         return resolved
 
+    async def pause(self) -> None:
+        """Pause this sandbox while preserving its state.
+
+        Open PTY sessions are detached; whether processes survive and sessions
+        can be re-attached after ``resume()`` depends on the provider backend.
+        """
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxPauseResume):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
+        await provider.pause(handle)
+
+    async def resume(self) -> None:
+        """Resume this sandbox and wait until it is ready.
+
+        On timeout the server-side state is unknown: reconnect and check
+        ``status()`` before retrying.
+        """
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxPauseResume):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
+        await provider.resume(handle)
+
     async def stop(self) -> None:
         if self._closed:
             return
         try:
             if self._handle is not None and not self._stopped:
-                await self._provider.close(self._handle)
+                # A failed close leaves the sandbox started so a later stop() retries it (the
+                # compose group relies on this); the count follows the same rule and drops only
+                # once the provider has actually released the sandbox.
+                if is_span_group_enabled(GymSpanGroup.SANDBOX):
+                    with managed_span(
+                        GymSpanGroup.SANDBOX,
+                        "gym.sandbox.stop",
+                        **{
+                            "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
+                            "nemo.gym.sandbox.id": _sandbox_id(self._handle),
+                        },
+                    ):
+                        await self._provider.close(self._handle)
+                else:
+                    await self._provider.close(self._handle)
                 self._stopped = True
+                if self._counted_active:
+                    self._counted_active = False
+                    record_sandbox_active(-1, provider=self._telemetry_provider_name())
         finally:
             if self._owns_provider:
                 await self._provider.aclose()
                 self._closed = True
+        self._closed = True
+
+    async def disconnect(self) -> None:
+        """Release this client without stopping a borrowed sandbox.
+
+        Use this only for a sandbox rebuilt with :meth:`connect`.
+        The component that created the sandbox remains responsible for stopping it.
+        """
+        if self._closed:
+            return
+        if not self._connected:
+            raise RuntimeError("disconnect() is valid only for a sandbox rebuilt with connect()")
+        if self._owns_provider:
+            await self._provider.aclose()
+        self._handle = None
+        self._stopped = True
         self._closed = True
 
     async def serialize(self, *, scope: str | None = None) -> dict[str, Any]:
@@ -574,6 +678,7 @@ class AsyncSandbox:
         sandbox = cls(provider, SandboxSpec(workdir=workdir, ports=ports), owns_provider=owns_provider)
         sandbox._handle = handle
         sandbox._stopped = False
+        sandbox._connected = True
         return sandbox
 
     async def __aenter__(self) -> "AsyncSandbox":
@@ -729,6 +834,12 @@ class Sandbox:
 
     def endpoint(self, port: int) -> SandboxEndpoint:
         return self._runner.run("endpoint", lambda: self._async_sandbox.endpoint(port))
+
+    def pause(self) -> None:
+        self._runner.run("pause", self._async_sandbox.pause)
+
+    def resume(self) -> None:
+        self._runner.run("resume", self._async_sandbox.resume)
 
     def stop(self) -> None:
         if self._closed:

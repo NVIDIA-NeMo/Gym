@@ -1,123 +1,154 @@
 ---
-title: "Trajectory capability matrix"
-description: "Observed trajectory coverage by criterion and producer"
+title: "Trajectory Capability Matrix"
+description: "Rollout-evidence coverage by agent and execution path."
 position: 5
 ---
 
-# Trajectory capability matrix
+Use this reference to check which evidence an agent path provides. Start with
+[Rollout Evidence](/main/observability/rollout-evidence) for collection and artifact relationships.
 
-This matrix reports the trajectory evidence that current producers emit for the evaluated agent paths. It describes
-observed producer coverage, not everything that the schema can represent or an unconditional guarantee for every way of
-running an agent.
+✅ **Full** means complete for the documented path; 🟡 **Partial** means some fields or paths are missing;
+❌ **Unavailable** means the path does not supply that evidence. These are manually maintained coverage
+claims, not guarantees for every configuration.
 
-`ng_trajectory` schema version `1.0` combines available model-call capture and agent observations in a rollout record.
-Model-call capture records qualifying calls routed through the Gym Model Server, while agent observations provide
-harness-side turns and tool activity. The trajectory joins the available evidence from both sources. Direct-provider
-calls bypass Gym Model Server capture, so the trajectory cannot obtain Gym-captured model-call evidence for those calls
-even when agent observations are available.
+<Note>
+The statuses below retain the coverage reported in [main at 88d9d453](https://github.com/NVIDIA-NeMo/Gym/blob/88d9d45385f15b1351cdd055fff396186000f84f/fern/versions/latest/pages/reference/trajectory-capabilities.mdx).
+That source does not record a full runtime-validation date or per-row test configuration.
+Contributors changing an agent should update its row with the config, execution path, and validation
+evidence in the same pull request.
+</Note>
 
-The trajectory can contain task and rollout identity, model calls and token usage, semantic turns, invocation-scoped
-model-visible histories, tool attempts, resolution, step count, and explicit evidence gaps. Source attachments remain
-under `ng_model_call_capture` and `ng_agent_observations`.
+## Model Calls and History
 
-## Key caveats
+Capture requires `observability_enabled`, a shared `model_call_capture_dir`, and a rollout-prefixed
+Gym Model Server URL. Direct-provider routes bypass capture. Token counts depend on provider usage
+fields. History may come from captured payloads or harness conversations.
 
-- Coverage is path-dependent. A producer may use both captured Gym Model Server calls and uncaptured direct-provider
-  calls.
-- Model-call evidence requires `observability_enabled: true`, `model_call_capture_dir: /data/model-calls`, and calls
-  through a `/ng-rollout/<rollout_id>` Gym Model Server prefix. See
-  [Model-call capture](/model-server/model-call-capture).
-- `O` and `X` describe current producer output, not fields that the `ng_trajectory` schema is unable to represent.
-- Token fields are nullable, and provider-reported details are preserved only when available. LabBench rows with the
-  `multimodal_history_redacted` gap omit captured request and response payload copies from `ng_trajectory`.
-- Aggregate-metrics requests omit `ng_trajectory`, `ng_model_call_capture`, and `ng_agent_observations` attachments.
+| Agent | Per-call metadata | Token counts | Model-visible history |
+| --- | :---: | :---: | :---: |
+| `anyswe_agent` | ❌ | ❌ | ❌ |
+| `anyterminal_agent` | ✅ | ✅ | ✅ |
+| `aviary_agent` | ✅ | ✅ | ✅ |
+| `browsecomp_agent` | ✅ | ✅ | ✅ |
+| `claude_code_agent` | ✅ | ✅ | ✅ |
+| `cline_agent` | ✅ | ✅ | ✅ |
+| `codex_agent` | ✅ | ✅ | ✅ |
+| `critpt_agent` | ✅ | ✅ | ✅ |
+| `cvdp_agent` | 🟡 | 🟡 | 🟡 |
+| `finance_agent` | ❌ | 🟡 | ❌ |
+| `gymnasium_agent` | ✅ | ✅ | ✅ |
+| `harbor_agent` | ❌ | ❌ | ❌ |
+| `hermes_agent` | ✅ | ✅ | ✅ |
+| `kilocode_agent` | ✅ | ✅ | ✅ |
+| `labbench2_vlm_agent` | ✅ | ✅ | 🟡 |
+| `langgraph_agent` | ❌ | ❌ | ❌ |
+| `mini_swe_agent` | ❌ | ❌ | ❌ |
+| `mini_swe_agent_2` | ✅ | ✅ | ✅ |
+| `non_executing_simple_agent` | ✅ | ✅ | ✅ |
+| `openclaw_agent` | ✅ | ✅ | 🟡 |
+| `opencode_agent` | ✅ | ✅ | ✅ |
+| `opencode_sandboxed_agent` | ✅ | ✅ | ✅ |
+| `osworld_agent` | 🟡 | 🟡 | 🟡 |
+| `pi_agent` | ✅ | ✅ | ✅ |
+| `proof_refinement_agent` | ✅ | ✅ | ✅ |
+| `remote_agent` | ❌ | 🟡 | ❌ |
+| `scicode_agent` | ❌ | ❌ | ❌ |
+| `simple_agent` | ✅ | ✅ | ✅ |
+| `speed_bench_agent` | ✅ | ✅ | ✅ |
+| `stirrup_agent` | 🟡 | 🟡 | 🟡 |
+| `swe_agents` / OpenCode (legacy) | ✅ | ✅ | ✅ |
+| `swe_agents` / OpenHands (legacy) | ❌ | ❌ | 🟡 |
+| `tau2` | ✅ | ✅ | ✅ |
+| `tool_simulation_agent` | ✅ | ✅ | ✅ |
+| `toolsandbox_agent` | ✅ | ✅ | ✅ |
+| `verifiers_agent` | ✅ | ✅ | ✅ |
 
-See [Model-call capture](/model-server/model-call-capture) for payload retention and access-control requirements. Token
-fields are `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `total_tokens`, and `cached_tokens`.
+## Agent Activity
 
-## Acceptance criteria
+Turns require explicit semantic-turn records. Tool execution covers output, status, and timestamps;
+parallel timing requires independent tool intervals. Resource/sandbox coverage means that the
+benchmark path emits standardized agent evidence, not that every resource metric is available.
 
-| ID | Criterion |
-|---|---|
-| C1 | Standard schema for per-model-call token statistics and response metadata |
-| C2 | Prompt, completion, reasoning, total, and cached token counts when available |
-| C3 | Task and rollout identity, turn number, timestamp, question, answer, reasoning, resolution, and step count per turn |
-| C4 | Model-visible input and output history can be reconstructed from persisted rollout JSONL |
-| C5 | Tool output, status, start and completion timestamps, and duration |
-| C6 | Independent timing for parallel tool calls |
-| C7 | Resource-server-backed and custom or sandbox-backed benchmarks |
+| Agent | Semantic turns | Tool execution | Parallel timing | Resource/sandbox path |
+| --- | :---: | :---: | :---: | :---: |
+| `claude_code_agent` | ❌ | ✅ | ✅ | ✅ |
+| `hermes_agent` | ❌ | ✅ | ✅ | ✅ |
+| `labbench2_vlm_agent` | 🟡 | 🟡 | ❌ | ✅ |
+| `openclaw_agent` | ❌ | ✅ | ✅ | ✅ |
+| `opencode_agent` | ❌ | ✅ | ✅ | ✅ |
+| `opencode_sandboxed_agent` | ❌ | ✅ | ✅ | ✅ |
+| `pi_agent` | ❌ | ✅ | ✅ | ✅ |
+| `simple_agent` | 🟡 | 🟡 | ❌ | ✅ |
+| `swe_agents` / OpenCode (legacy) | ❌ | ❌ | ❌ | ✅ |
+| `swe_agents` / OpenHands (legacy) | ❌ | ❌ | ❌ | ✅ |
 
-## Agent coverage
+The other agents listed above report these four dimensions as unavailable. Model HTTP capture
+alone does not establish tool execution or sandbox activity.
 
-- `V`: complete for the evaluated path under the documented observability configuration.
-- `O`: currently partial or path-dependent.
-- `X`: currently unavailable.
+## Path Qualifications
 
-In practice, rely on `V` for the evaluated path when observability is configured as documented, inspect configuration
-and trajectory gaps before relying on `O`, and do not expect the producer to supply `X` on the evaluated path. These
-symbols are not absolute agent capabilities: alternate execution paths can produce different evidence. For C1, C2, and
-C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternatives are outside capture.
+| Path | Qualification |
+| --- | --- |
+| CVDP | Partial capture on the Simple path |
+| Finance and Remote | Aggregate usage only; no standardized per-call metadata |
+| Simple | Resolution can be missing; raised tool failures can be omitted |
+| LabBench | Resolution and tool evidence can be partial; `multimodal_history_redacted` omits trajectory payload copies |
+| OSWorld | M3 and Pointer routes call providers directly |
+| Stirrup | Calls outside the policy path are not fully captured |
+| OpenClaw | Includes standalone resources and PinchBench sandbox paths; history is partial |
+| OpenCode | Includes standalone and sandboxed agents; the sandboxed path combines harness and verifier-sandbox evidence |
+| Legacy OpenHands | One cumulative root conversation; pinned fork bypasses rollout-prefixed capture |
+| Verifiers | Gym Model Server path captures environment-initiated calls; no agent observations or tool status/timing; agent-turn and bound-call health checks remain unobserved |
 
-| Agent | C1 | C2 | C3 | C4 | C5 | C6 | C7 |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| `anyswe_agent` | X | X | X | X | X | X | X |
-| `anyterminal_agent` | V | V | X | V | X | X | X |
-| `aviary_agent` | V | V | X | V | X | X | X |
-| `browsecomp_agent` | V | V | X | V | X | X | X |
-| `claude_code_agent` | V | V | X | V | V | V | V |
-| `cline_agent` | V | V | X | V | X | X | X |
-| `codex_agent` | V | V | X | V | X | X | X |
-| `critpt_agent` | V | V | X | V | X | X | X |
-| `cvdp_agent` | O | O | X | O | X | X | X |
-| `finance_agent` | X | O | X | X | X | X | X |
-| `gymnasium_agent` | V | V | X | V | X | X | X |
-| `harbor_agent` | X | X | X | X | X | X | X |
-| `hermes_agent` | V | V | X | V | V | V | V |
-| `kilocode_agent` | V | V | X | V | X | X | X |
-| `labbench2_vlm_agent` | V | V | O | O | O | X | V |
-| `langgraph_agent` | X | X | X | X | X | X | X |
-| `mini_swe_agent` | X | X | X | X | X | X | X |
-| `mini_swe_agent_2` | V | V | X | V | X | X | X |
-| `non_executing_simple_agent` | V | V | X | V | X | X | X |
-| `openclaw_agent` | V | V | X | O | V | V | V |
-| `opencode_agent` | V | V | X | V | V | V | V |
-| `opencode_sandboxed_agent` | V | V | X | V | V | V | V |
-| `osworld_agent` | O | O | X | O | X | X | X |
-| `pi_agent` | V | V | X | V | V | V | V |
-| `proof_refinement_agent` | V | V | X | V | X | X | X |
-| `remote_agent` | X | O | X | X | X | X | X |
-| `scicode_agent` | X | X | X | X | X | X | X |
-| `simple_agent` | V | V | O | V | O | X | V |
-| `speed_bench_agent` | V | V | X | V | X | X | X |
-| `stirrup_agent` | O | O | X | O | X | X | X |
-| `swe_agents` / OpenCode (legacy) | V | V | X | V | X | X | V |
-| `swe_agents` / OpenHands (legacy) | X | X | X | O | X | X | V |
-| `tau2` | V | V | X | V | X | X | X |
-| `tool_simulation_agent` | V | V | X | V | X | X | X |
-| `toolsandbox_agent` | V | V | X | V | X | X | X |
-| `verifiers_agent` | V | V | X | V | X | X | X |
+Inspect `ng_trajectory.gaps` before relying on partial coverage. Aggregate-metrics requests omit
+the trajectory and source attachments.
 
-### Coverage notes
+## ATIF export
 
-- Simple and LabBench C3 support is partial because verifier responses may omit resolution status.
-- Other `O` values reflect the following paths or evidence gaps:
-  - The CVDP Simple path.
-  - Finance and Remote aggregate usage.
-  - LabBench image redaction.
-  - OSWorld M3 and Pointer direct-provider routes.
-  - Raised failures omitted by Simple-derived agents.
-  - Stirrup calls outside its policy path.
-- OpenClaw coverage includes its standalone resource-server path and the PinchBench sandbox benchmark path.
-- Verifiers C1, C2, and C4 cover the Gym Model Server path: the agent routes the client it
-  hands to `verifiers` through the rollout capture prefix, so calls the environment makes on its
-  own are captured and correlated. C5 and C6 are unavailable because the agent emits no
-  `ng_agent_observations`, so tool attempts carry no status or timing, and rollout-health checks
-  that read agent turns or bound calls stay unobserved.
-- OpenCode coverage includes both the standalone producer and the decoupled `opencode_sandboxed_agent` path. The
-  decoupled path composes agent observations with verifier-sandbox evidence returned by its resources server.
-- Legacy OpenHands retains one cumulative root conversation, so its model-visible history remains partial. Its pinned
-  fork does not route model calls through a rollout-prefixed Gym Model Server endpoint.
-- C7 requires standardized agent-side trajectory evidence; model HTTP capture alone does not satisfy it.
+`gym eval export --format atif` converts the supported `ng_trajectory` version `1.0` subset into ATIF v1.7 without loading
+NeMo Relay. The initial converter accepts a completed root invocation with one initial system/user input phase, exactly one
+captured model call per turn, text-only output (including ordered multipart tool results), and unambiguous function-call and
+function-result relationships. Model calls may be joined by `model_call_id` or by a unique `(model_ref, response_id)`
+pair. It rejects later user/system turns and source records when their status, evidence gaps, content type, invocation
+structure, tool correlation, or provider completion evidence would require dropping or guessing information. This strict
+boundary means an accepted conversion is complete for the supported source profile; it does not claim that the original
+agent harness observed every action outside Gym.
+
+Responses message `phase` values such as `commentary` and `final_answer` are rejected because ATIF v1.7 has no equivalent
+field. Namespaced Responses function calls are also rejected because the standard ATIF tool-call fields cannot retain the
+separate namespace identity. A missing or null phase or namespace is accepted because it carries no additional source meaning.
+Provider-native hosted tools, shell and patch calls, tool search, compaction records, approvals, and additional-tool records
+remain outside the initial generic function-call profile and are rejected rather than flattened.
+
+The semantic profile maps ordered messages, reasoning, function calls and results, turn identity and resolution, tool timing,
+normalized model identity, and normalized token counts. Training token IDs, log probabilities, and routed-expert metadata are
+outside the initial profile and fail conversion rather than being copied into an extension. Captured provider request and
+response values are retained opaquely under step-level `extra.nemo_gym.model_call` metadata because ATIF's standard step
+fields do not carry those provider-specific payloads. The converter does not parse those raw payloads or use them to
+reconstruct the canonical trajectory; the producer-owned `response_metadata` and `token_stats` fields supply completion,
+model, and usage evidence. Per-step token fields are preserved when available. Final prompt, completion, and cached-token
+totals are emitted only when every model call provides the corresponding field, so unavailable values are never counted as
+zero. Each agent step retains the normalized model identity. The root agent model is populated only when
+every model-backed step uses the same known model; routed or fallback trajectories keep their model identities on the
+individual steps instead.
+
+The strict ATIF reverify path additionally requires complete prompt and completion counts when any supported usage is
+present because one Gym response cannot represent partial standard usage. A partial-metric export remains valid ATIF for
+other consumers, but Gym reverify rejects it instead of dropping the known counts or reporting a false complete aggregate.
+
+The ATIF `agent.name` comes from each rollout row's `agent_ref.name`. The initial batch exporter accepts one agent identity
+per input file because the caller supplies one corresponding agent implementation version. Conversion provenance is kept
+under the ATIF root's `extra.nemo_gym` namespace rather than overloading the agent identity fields:
+
+| Metadata | Value | Purpose |
+| --- | --- | --- |
+| Exporter | NeMo Gym and its package version | Identifies the implementation that created the ATIF file. |
+| Source | Gym rollout and `ng_trajectory` schema version | Records the format that was converted. |
+| Conversion status | `complete` | Confirms that the supported normalized `ng_trajectory` profile was mapped without omission; it does not attest to the contents of opaque provider payloads. |
+| Conversion warnings | Not emitted by strict v1 | Reserved for a future best-effort mode that can describe information it could not represent. |
+
+The initial strict converter does not emit partial files or conversion warnings. Unsupported or lossy inputs fail validation.
+A future best-effort mode would need an explicit `partial` status and structured warnings rather than reusing `complete`.
 
 ### Terminus2 decisions and invocation ownership
 

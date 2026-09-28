@@ -22,13 +22,11 @@ resource server, which applies MathArena's 0–2 rubric via an LLM judge:
 | 2 | Explicitly says it is false / unprovable as written | 1.0 |
 
 The judge sees the false statement, the true `original_problem` it was derived
-from, and the model's full reply. The judge prompt, verdict regex and
-`points → reward` mapping are ported verbatim from
-[eth-sri/matharena](https://github.com/eth-sri/matharena); the one deliberate
-difference is the judge model — MathArena uses `gemini-31-pro-medium`, this
-benchmark defaults to Nemotron 3 Ultra (`judge_nemotron3ultra.yaml`), the same
-judge as the MathArena math benchmarks. Set `JUDGE_BASE_URL` / `JUDGE_MODEL` to
-use a different one.
+from, and the model's full final reply. The rubric, verdict parser and
+`points → reward` mapping are unchanged. The default judge is now **Luna medium**;
+MathArena uses Gemini 3.1 Pro medium. This is a different judge configuration,
+so record the judge alongside the score rather than treating the result as an
+exact reproduction of MathArena's grading.
 
 ## Prompt
 
@@ -71,7 +69,12 @@ gym eval run --no-serve \
     --agent brokenarxiv_0526_false_statement_judge_simple_agent \
     --input benchmarks/brokenarxiv_0526/data/brokenarxiv_0526_benchmark.jsonl \
     --output results/brokenarxiv_0526_rollouts.jsonl \
-    --num-repeats 4
+    --num-repeats 16
 ```
 
-The judge needs `NVIDIA_API_KEY` in the environment.
+The judge needs `OPENAI_API_KEY` (or `JUDGE_API_KEY`) in the environment.
+The shared [judge config](../judge_luna.yaml) uses the public OpenAI Responses
+API. For another compatible provider, set `JUDGE_BASE_URL`, `JUDGE_MODEL`, and
+`JUDGE_API_KEY` together. It must support medium reasoning through the Responses
+API. The example supplies all repeats at collection time; do not also repeat
+the prepared dataset.

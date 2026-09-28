@@ -65,6 +65,20 @@ class TestListBenchmarks:
         found = {str(p.relative_to(tmp_path)) for p in _benchmark_config_paths(tmp_path)}
         assert found == {"standard/config.yaml", "flavored/configs/myflavor.yaml"}
 
+    def test_prefilter_rejects_the_benchmarks_manifest(self, tmp_path) -> None:
+        # A benchmark's manifest.yaml mirrors the config's `type: benchmark` dataset, so by content it would
+        # read as a second config of the same benchmark; it is catalog metadata and is rejected by name.
+        from nemo_gym.benchmarks import _benchmark_config_paths, _is_benchmark_config
+
+        (tmp_path / "bench").mkdir()
+        (tmp_path / "bench" / "config.yaml").write_text("x:\n  datasets:\n  - name: bench\n    type: benchmark\n")
+        manifest = tmp_path / "bench" / "manifest.yaml"
+        manifest.write_text("name: bench\nkind: benchmark\ndatasets:\n- name: bench\n  type: benchmark\n")
+
+        assert _is_benchmark_config(manifest) is False
+        found = {str(p.relative_to(tmp_path)) for p in _benchmark_config_paths(tmp_path)}
+        assert found == {"bench/config.yaml"}
+
     @pytest.mark.parametrize(
         ("text", "is_benchmark"),
         [

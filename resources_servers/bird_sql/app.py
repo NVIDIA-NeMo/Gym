@@ -39,8 +39,11 @@ logger = logging.getLogger(__name__)
 class FailureCode(str, Enum):
     NONE = "none"
     NO_SQL_EXTRACTED = "no_sql_extracted"
+    RESULT_MISMATCH = "result_mismatch"
     EXECUTION_ERROR = "execution_error"
+    EXECUTION_TIMEOUT = "execution_timeout"
     GOLD_EXECUTION_ERROR = "gold_execution_error"
+    GOLD_EXECUTION_TIMEOUT = "gold_execution_timeout"
     UNKNOWN_ERROR = "unknown_error"
 
 
@@ -181,11 +184,15 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
 
         if err == "gold_sql_error":
             failure_reason = FailureCode.GOLD_EXECUTION_ERROR
+        elif err == "gold_sql_timeout":
+            failure_reason = FailureCode.GOLD_EXECUTION_TIMEOUT
         elif err == "pred_sql_error":
             failure_reason = FailureCode.EXECUTION_ERROR
+        elif err == "pred_sql_timeout":
+            failure_reason = FailureCode.EXECUTION_TIMEOUT
         else:
             execution_match = match
-            failure_reason = FailureCode.NONE if match else FailureCode.EXECUTION_ERROR
+            failure_reason = FailureCode.NONE if match else FailureCode.RESULT_MISMATCH
 
         reward = 1.0 if execution_match else 0.0
 

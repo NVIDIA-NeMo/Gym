@@ -1,0 +1,10 @@
+# The messages AssayBench's reference harness (arXiv:2605.10876) sent for every screen, three layers:
+#   1. `{question}`: the paper's Appendix A.4 template, rendered per screen at prepare time.
+#   2. The suffix its collection script appended to every question ("Your goal is to provide ...").
+#   3. DSPy ChatAdapter framing for `ChainOfThought(RankingSignature)`: the field-declaring system
+#      message and the `[[ ## field ## ]]` markers. Captured from dspy 3.3.1; the verifier parses
+#      replies the same way.
+# Double-quoted so DSPy's trailing spaces survive the whitespace hooks; `{{...}}` are literal braces.
+# Byte-exactness against DSPy's rendering is pinned in tests/test_app.py::TestPrompt.
+system: "Your input fields are:\n1. `question` (str): The gene ranking task description\nYour output fields are:\n1. `reasoning` (str): \n2. `answer` (str): Comma-separated list of genes in ranked order\nAll interactions will be structured in the following way, with the appropriate values filled in.\n\n[[ ## question ## ]]\n{{question}}\n\n[[ ## reasoning ## ]]\n{{reasoning}}\n\n[[ ## answer ## ]]\n{{answer}}\n\n[[ ## completed ## ]]\nIn adhering to this structure, your objective is: \n        Signature for gene ranking task."
+user: "[[ ## question ## ]]\n{question}\n\nYour goal is to provide a list of genes that meet the screen criteria, even if you do not have access to the actual experimental data. The genes must use HGNC symbols. Use your knowledge of biology, gene function, and relevant pathways to predict which genes are most likely to be hits. Do not refuse to answer or say you need more data—make your best predictions based on your understanding of the biological context.\n\nRespond with the corresponding output fields, starting with the field `[[ ## reasoning ## ]]`, then `[[ ## answer ## ]]`, and then ending with the marker for `[[ ## completed ## ]]`."

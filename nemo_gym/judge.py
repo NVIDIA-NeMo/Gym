@@ -100,10 +100,21 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
             )
             if body is None:  # verify always has a request body; guard against an opaque 500
                 raise RuntimeError("judge_failsafe: could not locate the verify request body") from e
-            data = body.model_dump() | {
+            error = str(e)[:2000]
+            data = body.model_dump()
+            instance_config = data.get("instance_config")
+            data |= {
                 "reward": 0.0,
+                "mask_sample": True,
+                "failure_kind": "judge_failed",
+                "failure_reason": error,
+                # Keep older NeMo RL consumers working during top-level field migration.
+                "instance_config": {
+                    **(instance_config if isinstance(instance_config, dict) else {}),
+                    "mask_sample": True,
+                },
                 "_ng_failure_class": "judge_failed",
-                "_ng_failure_judge_error": str(e),
+                "_ng_failure_judge_error": error,
             }
             return JSONResponse(content=jsonable_encoder(data))
 
