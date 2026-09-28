@@ -138,3 +138,61 @@ async def test_cleanup_transport_failure_keeps_captured_response(tmp_path, runne
     assert "lost cleanup response" in outcome.detail
     assert len(response.output) == 1
     assert extra["mini_swe_trajectory"]["info"]["exit_status"] == "Submitted"
+
+
+async def test_cancellation_during_native_cleanup_retains_trajectory(tmp_path, runner_factory, monkeypatch):
+    async def query(params):
+        return NeMoGymResponse(
+            id="submitted",
+            created_at=0,
+            object="response",
+            model="model",
+            parallel_tool_calls=False,
+            tools=[],
+            tool_choice="auto",
+            output=[
+                {
+                    "type": "function_call",
+                    "call_id": "submit",
+                    "name": "bash",
+                    "arguments": '{"command":"echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}',
+                }
+            ],
+        )
+
+    harness = await runner_factory(
+        context=HarnessContext(session_id="cancel-cleanup", instruction="submit"),
+        config=MiniSWEConfig(),
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        query=query,
+        model_name="model",
+        directory=tmp_path / "artifacts",
+    )
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original_exec = harness.sandbox.exec
+
+    async def exec_command(command, **kwargs):
+        if not command.startswith("setsid"):
+            entered.set()
+            await release.wait()
+            result = await original_exec(command, **kwargs)
+            finished.set()
+            return result
+        return await original_exec(command, **kwargs)
+
+    monkeypatch.setattr(harness.sandbox, "exec", exec_command)
+    run = asyncio.create_task(harness.execute(15))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        for _ in range(3):
+            run.cancel()
+            await asyncio.sleep(0)
+            assert not run.done()
+            assert not finished.is_set()
+    finally:
+        release.set()
+        response, outcome, extra = await asyncio.wait_for(run, 5)
+    assert finished.is_set()
+    assert outcome.reason == "cancelled"
+    assert len(response.output) == 1
+    assert extra["mini_swe_trajectory"]["info"]["exit_status"] == "Submitted"

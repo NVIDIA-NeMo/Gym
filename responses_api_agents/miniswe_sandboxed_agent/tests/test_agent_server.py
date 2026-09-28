@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from httpx import ASGITransport, AsyncClient
 from starlette.middleware.sessions import SessionMiddleware
 
+from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
@@ -170,7 +171,7 @@ async def test_responses_sets_up_borrowed_session_without_resource_calls(fixture
         rollout_id="activation",
         capture_model_calls=False,
     )
-    f.agent._sessions["owner"] = state
+    f.agent._sessions[("owner", state.rollout_id)] = state
     response = await f.agent.responses(f.request, f.body.responses_create_params)
     assert state.result.termination.reason == "completed" and state.result.agent_started
     assert response == state.result.response
@@ -224,7 +225,7 @@ async def test_run_invokes_responses_with_session_state_and_releases_it(fixture,
     original = module.MiniSWESandboxedAgent.responses
 
     async def responses(self, request, body):
-        key = request.session[SESSION_ID_KEY]
+        key = (request.session[SESSION_ID_KEY], module.current_rollout_id())
         state = self._sessions[key]
         assert request is f.request
         assert request.session == {SESSION_ID_KEY: "owner"}
@@ -239,7 +240,7 @@ async def test_run_invokes_responses_with_session_state_and_releases_it(fixture,
     monkeypatch.setattr(module.MiniSWESandboxedAgent, "responses", responses)
     first, replay = await asyncio.gather(f.agent.run(f.request, f.body), f.agent.run(f.request, f.body))
     assert first == replay
-    assert calls == ["owner"]
+    assert calls == [("owner", "rollout")]
     assert not f.agent._sessions
     assert f.body.responses_create_params.input == []
 
@@ -272,7 +273,7 @@ async def test_responses_requires_matching_session_and_replays_one_execution(fix
         rollout_id="rollout",
         capture_model_calls=False,
     )
-    f.agent._sessions["owner"] = state
+    f.agent._sessions[("owner", state.rollout_id)] = state
 
     def request(owner):
         return Request({"type": "http", "session": {SESSION_ID_KEY: owner}})
@@ -301,7 +302,8 @@ async def test_responses_requires_matching_session_and_replays_one_execution(fix
     f.agent._sessions.clear()
 
 
-async def test_http_responses_uses_middleware_session_cookie(fixture, monkeypatch):
+@pytest.mark.parametrize("prefixed", [False, True])
+async def test_http_responses_uses_middleware_session_cookie(fixture, monkeypatch, prefixed):
     f = fixture
     params = f.body.responses_create_params
     response = module.empty_response(params, "model")
@@ -309,15 +311,24 @@ async def test_http_responses_uses_middleware_session_cookie(fixture, monkeypatc
     harness = SimpleNamespace(setup=AsyncMock(), execute=execute, close=AsyncMock())
     constructor = MagicMock(return_value=harness)
     monkeypatch.setattr(module, "MiniSWEHarness", constructor)
-    f.agent._sessions["owner"] = module.MiniSWESession(
+    f.agent._sessions[("owner", "rollout")] = module.MiniSWESession(
         sandbox=f.sandbox,
         seed=SeedSessionResponse.model_validate(f.seed),
         original_params=params.model_copy(deep=True),
         rollout_id="rollout",
         capture_model_calls=False,
     )
+    if prefixed:
+        f.agent._sessions[("owner", "another")] = module.MiniSWESession(
+            sandbox=f.sandbox,
+            seed=SeedSessionResponse.model_validate(dict(f.seed, session_id="another-session")),
+            original_params=params.model_copy(deep=True),
+            rollout_id="another",
+            capture_model_calls=False,
+        )
     app = FastAPI()
     app.add_middleware(SessionMiddleware, secret_key="test-key")
+    app.add_middleware(RolloutContextMiddleware)
 
     @app.get("/session")
     async def start_session(request: Request):
@@ -330,10 +341,11 @@ async def test_http_responses_uses_middleware_session_cookie(fixture, monkeypatc
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await client.get("/session")
-        result = await client.post("/v1/responses", json=params.model_dump(mode="json"))
+        path = "/ng-rollout/rollout/v1/responses" if prefixed else "/v1/responses"
+        result = await client.post(path, json=params.model_dump(mode="json"))
         assert result.status_code == 200
         assert result.json()["id"] == response.id
-        replay = await client.post("/v1/responses", json=params.model_dump(mode="json"))
+        replay = await client.post(path, json=params.model_dump(mode="json"))
         assert replay.status_code == 200
         assert replay.json() == result.json()
     execute.assert_awaited_once()
@@ -341,6 +353,9 @@ async def test_http_responses_uses_middleware_session_cookie(fixture, monkeypatc
     constructor.assert_called_once()
     harness.setup.assert_awaited_once()
     module.AsyncSandbox.connect.assert_not_awaited()
+    assert constructor.call_args.kwargs["context"].session_id == "resource-session"
+    if prefixed:
+        assert f.agent._sessions[("owner", "another")].worker is None
 
 
 @pytest.mark.parametrize("shutdown", [False, True])
@@ -372,3 +387,109 @@ async def test_connection_timeout_or_shutdown_releases_transport_before_verifica
     assert f.verification["termination"]["reason"] == ("cancelled" if shutdown else "timeout")
     assert not f.verification["agent_started"]
     assert not f.harnesses
+
+
+@pytest.mark.parametrize("capture", [False, True])
+async def test_concurrent_rollouts_share_cookie_without_sharing_execution(fixture, monkeypatch, capture):
+    f = fixture
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_constructor = module.MiniSWEHarness
+    original_post = f.agent.server_client.post.side_effect
+
+    async def post(**kwargs):
+        response = await original_post(**kwargs)
+        if kwargs["url_path"] == "/seed_session":
+            response.value = dict(response.value, session_id=kwargs["json"]["rollout_id"])
+        return response
+
+    async def setup():
+        if len(f.harnesses) == 2:
+            entered.set()
+        await release.wait()
+
+    def harness(**kwargs):
+        instance = original_constructor(**kwargs)
+        instance.setup.side_effect = setup
+        return instance
+
+    f.agent.server_client.post.side_effect = post
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    bodies = [
+        f.body.model_copy(update={"rollout_id": rid, "capture_rollout_id": rid if capture else None})
+        for rid in ("first", "second")
+    ]
+    callers = [asyncio.create_task(f.agent.run(f.request, body)) for body in bodies]
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert set(f.agent._sessions) == {("owner", "first"), ("owner", "second")}
+        with pytest.raises(HTTPException, match="Multiple mini-SWE rollouts"):
+            await f.agent.responses(f.request, f.body.responses_create_params)
+        with module.rollout_context("missing"):
+            with pytest.raises(HTTPException, match="No seeded"):
+                await f.agent.responses(f.request, f.body.responses_create_params)
+        retry = asyncio.create_task(f.agent.run(f.request, bodies[0]))
+    finally:
+        release.set()
+        results = await asyncio.gather(*callers)
+    assert await retry == results[0]
+    assert results[0].response.id != results[1].response.id
+    assert {h.context.session_id for h in f.harnesses} == {"first", "second"}
+    for harness in f.harnesses:
+        harness.setup.assert_awaited_once()
+        harness.execute.assert_awaited_once()
+    verifications = [
+        c.kwargs["json"] for c in f.agent.server_client.post.await_args_list if c.kwargs["url_path"] == "/verify"
+    ]
+    assert {v["session_id"] for v in verifications} == {"first", "second"}
+    assert all(v["termination"]["reason"] == "completed" for v in verifications)
+    assert not f.agent._sessions
+
+
+@pytest.mark.parametrize("during_setup", [False, True])
+async def test_cancellation_during_cleanup_delays_transport_release_and_verification(
+    fixture, monkeypatch, during_setup
+):
+    from responses_api_agents.miniswe_sandboxed_agent.harness import MiniSWEHarness
+
+    f = fixture
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def cleanup_exec(*args, **kwargs):
+        if args[0] == "pwd":
+            return SimpleNamespace(return_code=0, stdout="/workspace\n")
+        entered.set()
+        await release.wait()
+        finished.set()
+        return SimpleNamespace(return_code=0)
+
+    class Harness(MiniSWEHarness):
+        async def setup(self):
+            if during_setup:
+                raise RuntimeError("setup failed")
+
+        async def execute(self, budget):
+            await self.close()
+            return module.empty_response(self.params, "model"), HarnessOutcome(reason="completed"), {}
+
+    f.sandbox.exec.side_effect = cleanup_exec
+    monkeypatch.setattr(module, "MiniSWEHarness", Harness)
+    caller = asyncio.create_task(f.agent.run(f.request, f.body))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        run = f.agent._runs[("owner", "rollout")][1]
+        worker = f.agent._sessions[("owner", "rollout")].worker
+        for _ in range(3):
+            run.cancel()
+            worker.cancel()
+            await asyncio.sleep(0)
+            assert not finished.is_set()
+            assert not caller.done()
+            assert not f.verification
+            f.provider.aclose.assert_not_awaited()
+    finally:
+        release.set()
+        await asyncio.wait_for(caller, 1)
+    assert finished.is_set()
+    f.provider.aclose.assert_awaited_once()
+    assert f.verification["termination"]["reason"] == "cancelled"
+    assert not f.agent._sessions

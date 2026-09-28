@@ -22,7 +22,7 @@ from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Simpl
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
 from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
@@ -115,7 +115,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
         self._runs = {}
-        self._sessions: dict[str, MiniSWESession] = {}
+        self._sessions: dict[tuple[str, str], MiniSWESession] = {}
         self._finalizers = set()
         self._closing = False
         self._shutdown_deadline: float | None = None
@@ -160,8 +160,17 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             LOGGER.error("mini-SWE background operation failed", exc_info=(type(error), error, error.__traceback__))
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
-        key = request.session[SESSION_ID_KEY]
-        state = self._sessions.get(key)
+        owner = request.session[SESSION_ID_KEY]
+        rollout_id = current_rollout_id()
+        if rollout_id is None:
+            matches = [key for key in self._sessions if key[0] == owner]
+            if len(matches) > 1:
+                raise HTTPException(
+                    409, "Multiple mini-SWE rollouts for this session; use /ng-rollout/<id>/v1/responses"
+                )
+            state = self._sessions.get(matches[0]) if matches else None
+        else:
+            state = self._sessions.get((owner, rollout_id))
         if state is None:
             raise HTTPException(409, "No seeded mini-SWE sandbox for this session")
         if body != state.original_params:
@@ -255,12 +264,15 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
 
         if state.worker is None:
             state.worker = asyncio.create_task(execute_message())
-        try:
-            state.result = await asyncio.shield(state.worker)
-        except asyncio.CancelledError:
-            state.worker.cancel()
-            # Join setup/execution cleanup before /run releases the transport and verifies.
-            state.result = await state.worker
+        # Repeated cancellation must not release the transport or verify while
+        # the message worker is still cleaning up sandbox processes.
+        while not state.worker.done():
+            try:
+                await asyncio.shield(state.worker)
+            except asyncio.CancelledError:
+                if not state.worker.cancelling():
+                    state.worker.cancel()
+        state.result = state.worker.result()
         return state.result.response
 
     async def run(self, request: Request, body: MiniSWERunRequest) -> MiniSWEVerifyResponse:
@@ -322,7 +334,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         )
         provider = None
         state = None
-        key = request.session[SESSION_ID_KEY]
+        key = (request.session[SESSION_ID_KEY], payload["rollout_id"])
         try:
             if not cancelled and seed.termination is None:
                 setup_started_at = now()
@@ -346,7 +358,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                     setup_started_at=setup_started_at,
                 )
                 self._sessions[key] = state
-                await self.responses(request, params)
+                with rollout_context(payload["rollout_id"]):
+                    await self.responses(request, params)
                 result = state.result
         except asyncio.CancelledError:
             result.termination = HarnessOutcome(reason="cancelled")

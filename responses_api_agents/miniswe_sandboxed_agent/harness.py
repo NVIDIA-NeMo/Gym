@@ -247,6 +247,18 @@ class MiniSWEHarness:
 
     async def close(self) -> None:
         """Stop the agent and its shell process groups before verification."""
+        cleanup = asyncio.create_task(self._close())
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _close(self) -> None:
         # Native LocalEnvironment gives each command its own process group.
         # An inherited per-run marker also finds those groups after their parent
         # exits, including children orphaned by a cancelled sandbox exec.
@@ -363,6 +375,8 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
         finally:
             try:
                 await self.close()
+            except asyncio.CancelledError:
+                termination = HarnessOutcome(reason="cancelled")
             except Exception as error:
                 LOGGER.exception("Failed to stop mini-SWE processes; resources must quiesce the sandbox")
                 termination = HarnessOutcome(reason="infrastructure_error", detail=f"Process cleanup failed: {error}")
