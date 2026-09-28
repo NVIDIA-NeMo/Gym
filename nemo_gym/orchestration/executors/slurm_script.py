@@ -18,7 +18,6 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from nemo_gym.base_responses_api_model import ModelCallCaptureConfig
 from nemo_gym.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.orchestration.api import (
     RUNTIME_ENV_PREFIX,
@@ -411,7 +410,9 @@ def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
 
 
 def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> dict[str, Any]:
-    """Auto-derive model_call_capture_dir from this benchmark's own real output
+    """Enable capture for submitted evaluations unless explicitly disabled.
+
+    Auto-derive model_call_capture_dir from this benchmark's own real output
     directory when observability is on and the caller didn't set one.
 
     Hydra interpolation resolves before remote_bench_dir exists (it's computed
@@ -420,8 +421,8 @@ def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> di
     Python, once the real path is known. An explicit model_call_capture_dir in
     run always wins over this default.
     """
-    default_enabled = ModelCallCaptureConfig.model_fields[OBSERVABILITY_ENABLED_KEY_NAME].default
-    if run.get(OBSERVABILITY_ENABLED_KEY_NAME, default_enabled) and MODEL_CALL_CAPTURE_DIR_KEY_NAME not in run:
+    run = {OBSERVABILITY_ENABLED_KEY_NAME: True, **run}
+    if run.get(OBSERVABILITY_ENABLED_KEY_NAME) and MODEL_CALL_CAPTURE_DIR_KEY_NAME not in run:
         return {**run, MODEL_CALL_CAPTURE_DIR_KEY_NAME: str(remote_bench_dir / "model-calls")}
     return run
 

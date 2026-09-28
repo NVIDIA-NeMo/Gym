@@ -710,9 +710,11 @@ def test_with_default_capture_dir_injects_when_observability_on():
     assert out["model_call_capture_dir"] == "/remote/jobs/gym-job-20260729/gsm8k/model-calls"
 
 
-def test_with_default_capture_dir_explicit_value_wins():
-    run = {"observability_enabled": True, "model_call_capture_dir": "/custom/path"}
+@pytest.mark.parametrize("enabled", [True, False])
+def test_with_default_capture_dir_explicit_value_wins(enabled):
+    run = {"observability_enabled": enabled, "model_call_capture_dir": "/custom/path"}
     out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert out["observability_enabled"] is enabled
     assert out["model_call_capture_dir"] == "/custom/path"
 
 
@@ -723,9 +725,9 @@ def test_with_default_capture_dir_no_injection_when_observability_off():
 
 
 def test_with_default_capture_dir_does_not_mutate_input():
-    run = {"observability_enabled": True}
+    run = {}
     _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
-    assert "model_call_capture_dir" not in run
+    assert run == {}
 
 
 # ---------------------------------------------------------------------------
@@ -748,6 +750,7 @@ def test_build_sbatch_script_auto_default_capture_dir(bench_dir):
     benchmark = config.driver.benchmarks["gsm8k"]
     compute = next(iter(config.compute.values()))
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "+observability_enabled=True" in script
     assert f"+model_call_capture_dir={bench_dir / 'model-calls'}" in script
 
 
@@ -777,6 +780,7 @@ def test_build_sbatch_script_no_capture_dir_when_observability_off(submit_config
     benchmark.run["observability_enabled"] = False
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "+observability_enabled=False" in script
     assert "model_call_capture_dir" not in script
 
 
