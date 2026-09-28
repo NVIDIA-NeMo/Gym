@@ -7,10 +7,14 @@ leancat_leancat_resources_server:
   _inherit_from: leancat
   resources_servers:
     leancat:
-      # On, matching EVALUATION.md's criteria and what the README reports. Upstream's own
-      # script omits this check, so set it false to score the way that script does --
-      # `statement_preserved` is reported either way, so the gap stays measurable.
-      require_statement_preserved: true
+      # Off, because this benchmark reproduces the paper's numbers and upstream's scorer
+      # (scripts/eval_common.py::verify_lean) is banned tokens plus the `lake env lean` exit
+      # code -- it never compares against the reference statement. Upstream's EVALUATION.md
+      # does require the statement to be unchanged, so its document and its code disagree;
+      # this follows the code that produced the published numbers. `statement_preserved` is
+      # reported on every response either way, so the documented criterion can be applied
+      # afterwards without rerunning.
+      require_statement_preserved: false
 
 leancat_leancat_simple_agent:
   _inherit_from: leancat_simple_agent

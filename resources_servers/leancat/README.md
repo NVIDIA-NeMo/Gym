@@ -55,8 +55,8 @@ the elaborated statement compared in the sandbox (`#check`/`#print axioms`) rath
 `statement_preserved` as evidence that the text is unchanged, not proof that the theorem is.
 
 Check 3 exists because the whole-file format lets a model weaken the theorem it was asked to prove, and the weakened
-version compiles. `require_statement_preserved: false` disables the rejection while still reporting
-`statement_preserved` on every response, which is the way to measure how often the guard fires.
+version compiles. The benchmark ships it **reporting but not rejecting** (`require_statement_preserved: false`), so
+scoring matches the upstream script the published numbers came from; see "What lines up, and what does not" below.
 
 ## Requirements
 
@@ -194,14 +194,16 @@ Three things that were caveats against v1 are **not** problems against v2:
 
 One real divergence remains:
 
-- **Upstream's shipped scorer does not implement upstream's own protocol.** `verify_lean` is
-  `has_invalid_tokens(code)` then compile; it never compares against the reference statement, even though
-  `EVALUATION.md` requires the statement, definitions and assumptions to be unchanged and
-  `configs/evaluation_protocol.json` sets `"statement_changes_allowed": false`. This server follows the documented
-  protocol, so its numbers sit at or below anything produced with the reference script. Set
-  `require_statement_preserved: false` to match the script rather than the protocol; `statement_preserved` is
-  reported either way, so the size of the gap is always visible. Measured over 16,800 rollouts, 7 submissions
-  compiled clean but altered the statement.
+- **Upstream's document and upstream's code disagree.** `EVALUATION.md` requires the statement, definitions and
+  assumptions to be unchanged, and `configs/evaluation_protocol.json` sets `"statement_changes_allowed": false` --
+  but `verify_lean` is `has_invalid_tokens(code)` then compile, and never compares against the reference statement.
+  No setting matches both.
+
+  **The benchmark ships `require_statement_preserved: false`, following the code that produced the published
+  numbers**, since reproducing them is what it is for. `statement_preserved` is reported on every response, so the
+  documented criterion can be applied afterwards without rerunning: measured over 16,800 rollouts, 7 submissions
+  compiled clean but altered the statement, and applying it costs at most one task per run. Set the flag true to
+  enforce it during the run instead.
 
 ## Prompt
 
