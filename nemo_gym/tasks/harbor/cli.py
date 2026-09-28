@@ -193,7 +193,15 @@ def _config_path(relative: str) -> Path:
 
 
 def _has_override(overrides: list[str], key: str) -> bool:
-    return any(token.lstrip("+").split("=", 1)[0] == key for token in overrides)
+    return _override_value(overrides, key) is not None
+
+
+def _override_value(overrides: list[str], key: str) -> str | None:
+    for token in overrides:
+        name, _, value = token.lstrip("+").partition("=")
+        if name == key:
+            return value
+    return None
 
 
 def build_run(
@@ -275,7 +283,7 @@ def validate_target(args: argparse.Namespace, overrides: list[str]) -> None:
         f"Run config written to {config_path}; validating {len(prepared.tasks) - len(unvalidated)} task(s) with the oracle"
     )
     dispatch("nemo_gym.cli.eval:e2e_rollout_collection", _merge_config_paths(tokens))
-    rollouts = prepared.output_dir / "rollouts.jsonl"
+    rollouts = Path(_override_value(tokens, "output_jsonl_fpath") or prepared.output_dir / "rollouts.jsonl")
     report = summarize_validation(rollouts, unvalidated)
     print(report.text)
     if not report.ok:
