@@ -411,6 +411,7 @@ class TestVerify:
         assert payload["failure_kind"] is None
         assert payload["verifier_rewards"] == {"reward": 1.0}
         assert payload["verifier_return_code"] == 0
+        assert payload["verifier_seconds"] >= 0
         assert payload["responses_create_params"]["input"][0]["content"] == "Create hello.txt"
 
         run = next(call for call in sandbox.execs if "test.sh" in call["command"])

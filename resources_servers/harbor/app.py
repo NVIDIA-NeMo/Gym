@@ -92,6 +92,7 @@ class HarborVerifyResponse(BaseVerifyResponse):
     verifier_rewards: dict[str, float] | None = None
     verifier_return_code: int | None = None
     verifier_logs_dir: str | None = None
+    verifier_seconds: float | None = None
 
 
 class HarborTasksetConfig(BaseModel):
@@ -477,6 +478,7 @@ class HarborResourcesServer(SimpleResourcesServer):
         sandbox = session.sandbox
         settings = task.config.verifier
         logs_dir = self.config.artifacts_dir / session_id
+        started = asyncio.get_running_loop().time()
         try:
             # /logs/verifier is root-owned from seed; a non-root image user cannot reset it.
             prepare = await _exec_as_root_user(
@@ -503,13 +505,19 @@ class HarborResourcesServer(SimpleResourcesServer):
                 timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
                 user=settings.user,
             )
+            if result.error_type is not None and result.error_type != "timeout":
+                return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
+            # Keep whatever the verifier wrote, including on a timeout, so a slow test.sh can be diagnosed.
+            await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir)
             if result.error_type == "timeout" or result.return_code == 137:
                 return self._measured(
-                    0.0, VERIFIER_TIMEOUT_KIND, f"test.sh exceeded [verifier].timeout_sec={settings.timeout_sec}"
-                )
-            if result.error_type is not None:
-                return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
-            await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir)
+                    0.0,
+                    VERIFIER_TIMEOUT_KIND,
+                    f"test.sh exceeded [verifier].timeout_sec={settings.timeout_sec}; tail: {_stdout_tail(logs_dir)}",
+                ) | {
+                    "verifier_logs_dir": str(logs_dir),
+                    "verifier_seconds": round(asyncio.get_running_loop().time() - started, 1),
+                }
         except HTTPException:
             raise
         except Exception as exc:
@@ -518,7 +526,11 @@ class HarborResourcesServer(SimpleResourcesServer):
 
         # Absolute, so the row names a folder that exists from wherever the run was launched; the server
         # process runs from its own folder, where a relative artifacts_dir would otherwise resolve.
-        extras = {"verifier_return_code": result.return_code, "verifier_logs_dir": str(Path(logs_dir).resolve())}
+        extras = {
+            "verifier_return_code": result.return_code,
+            "verifier_logs_dir": str(Path(logs_dir).resolve()),
+            "verifier_seconds": round(asyncio.get_running_loop().time() - started, 1),
+        }
         rewards, problem = parse_reward_file(logs_dir)
         if rewards is None:
             kind = MISSING_REWARD_KIND if "written" in (problem or "") else INVALID_REWARD_KIND
