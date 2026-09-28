@@ -77,6 +77,7 @@ class Status(str, Enum):
     SANDBOX_FAILED = "sandbox_failed"
     STEP_SETUP_FAILED = "step_setup_failed"
     TESTS_UPLOAD_FAILED = "tests_upload_failed"
+    VERIFIER_EXEC_FAILED = "verifier_exec_failed"
     NO_SESSION = "no_session"
 
 
@@ -85,6 +86,10 @@ HARNESS_FAULTS = {
     Status.SANDBOX_FAILED: "the task container could not be started (model-free validation mode)",
     Status.STEP_SETUP_FAILED: "upstream's step workdir/setup.sh exited non-zero before the agent ran",
     Status.TESTS_UPLOAD_FAILED: "the task's tests/ could not be uploaded into the container",
+    Status.VERIFIER_EXEC_FAILED: (
+        "the container runtime failed to run tests/test.sh (docker exec error or server exception), "
+        "so no validator verdict exists"
+    ),
     Status.NO_SESSION: "verify() was called without a seeded session for this rollout",
 }
 
@@ -552,6 +557,12 @@ class ORAgentBenchResourcesServer(SimpleResourcesServer):
         result.test_output = _clean(exec_result.stderr) + _clean(exec_result.stdout)
         if exec_result.error_type == "timeout":
             result.status = Status.VERIFIER_TIMEOUT.value
+        elif exec_result.error_type == "sandbox":
+            # The provider could not run the command at all (daemon down, container gone): the same
+            # class of fault the reset exec above records, so it is attributed the same way.
+            result.status = Status.VERIFIER_EXEC_FAILED.value
+            session.harness_status = Status.VERIFIER_EXEC_FAILED
+            session.aborted = True
         else:
             reward, details, evaluation = await self._download_rewards(sandbox)
             if isinstance(evaluation, dict):
@@ -614,7 +625,11 @@ class ORAgentBenchResourcesServer(SimpleResourcesServer):
                     try:
                         await self._verify_step(session, pending)
                     except BaseException:
+                        # Nothing the model did raises here; without this the row would score as
+                        # step_incomplete with harness_failure 0.
                         print(f"Exception verifying {body.task_name}: {format_exc()}", file=stderr)
+                        session.harness_status = Status.VERIFIER_EXEC_FAILED
+                        session.aborted = True
         try:
             return self._aggregate(body, session, verification_time_taken=time() - start)
         finally:

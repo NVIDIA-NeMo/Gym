@@ -48,6 +48,7 @@ also carries a `failure_reason` and `harness_failure: 1.0`:
 | `sandbox_failed` | Task container could not start (model-free modes only) | yes |
 | `step_setup_failed` | A step's `workdir/setup.sh` exited non-zero before the agent ran | yes |
 | `tests_upload_failed` | The step's `tests/` could not be copied into the container | yes |
+| `verifier_exec_failed` | The container runtime could not run `tests/test.sh` (`docker exec` runtime error, or the server raised while running it); no validator verdict exists | yes |
 | `no_session` | `verify()` called without a seeded session | yes |
 
 Verifier timeouts and missing verifier output are charged to the policy because an agent's

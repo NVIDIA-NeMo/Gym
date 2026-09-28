@@ -57,12 +57,20 @@ class FakeExecResult:
 class FakeSandbox:
     """Scripted container: ``verifier`` decides what running test.sh leaves in /logs/verifier."""
 
-    def __init__(self, verifier=None, exec_timeout_on_tests: bool = False, setup_fails: bool = False):
+    def __init__(
+        self,
+        verifier=None,
+        exec_timeout_on_tests: bool = False,
+        exec_runtime_failure_on_tests: bool = False,
+        setup_fails: bool = False,
+    ):
         self.commands: List[str] = []
         self.uploads: List[str] = []
+        self.downloads: List[str] = []
         self.files: Dict[str, str] = {}
         self.verifier = verifier
         self.exec_timeout_on_tests = exec_timeout_on_tests
+        self.exec_runtime_failure_on_tests = exec_runtime_failure_on_tests
         self.setup_fails = setup_fails
         self.stopped = False
         self._handle = MagicMock(sandbox_id="fake-sandbox")
@@ -88,6 +96,9 @@ class FakeSandbox:
         if command == "bash /tests/test.sh":
             if self.exec_timeout_on_tests:
                 return FakeExecResult(return_code=-1, stderr="timed out", error_type="timeout")
+            if self.exec_runtime_failure_on_tests:
+                # Gym's docker provider: rc 125 + error_type "sandbox" for "no such container" etc.
+                return FakeExecResult(return_code=125, stderr="Error: No such container: x", error_type="sandbox")
             if self.verifier is not None:
                 for name, payload in self.verifier(self).items():
                     self.files[f"/logs/verifier/{name}"] = json.dumps(payload)
@@ -98,6 +109,7 @@ class FakeSandbox:
         self.uploads.append(remote_path)
 
     async def download(self, remote_path: str, local_path) -> None:
+        self.downloads.append(remote_path)
         if remote_path not in self.files:
             raise RuntimeError(f"no such file {remote_path}")
         Path(local_path).write_text(self.files[remote_path])
@@ -348,6 +360,15 @@ class TestModelFreeVerify:
         assert result["status"] == Status.VERIFIER_TIMEOUT.value
         assert result["reward"] == 0.0 and result["harness_failure"] == 0.0 and result["failure_reason"] is None
 
+    def test_docker_exec_runtime_failure_on_test_sh_is_a_harness_fault(self, monkeypatch):
+        sandbox = FakeSandbox(exec_runtime_failure_on_tests=True)
+        server = make_server(sandbox, monkeypatch, validation_mode="no_action")
+        result = self.post(server, verify_body())
+        assert result["status"] == Status.VERIFIER_EXEC_FAILED.value and result["harness_failure"] == 1.0
+        assert result["failure_reason"] == HARNESS_FAULTS[Status.VERIFIER_EXEC_FAILED] and result["reward"] == 0.0
+        assert result["step_results"][0]["verifier_return_code"] == 125
+        assert not sandbox.downloads and sandbox.stopped
+
     def test_missing_reward_file_is_the_policys_problem(self, monkeypatch):
         sandbox = FakeSandbox(verifier=lambda sb: {})
         server = make_server(sandbox, monkeypatch, validation_mode="no_action")
@@ -458,6 +479,25 @@ class TestSessionVerify:
         assert result.status_code == 200, result.text
         assert result.json()["reward"] == 1.0 and result.json()["steps_completed"] == 2 and sandbox.stopped
 
+    def test_exception_while_verifying_the_pending_step_is_a_harness_fault_not_a_500(self, monkeypatch):
+        class ExplodingSandbox(FakeSandbox):
+            async def exec(self, command, **kwargs):
+                if command == "bash /tests/test.sh":
+                    raise RuntimeError("provider lost the container")
+                return await super().exec(command, **kwargs)
+
+        sandbox = ExplodingSandbox()
+        server = make_server(sandbox, monkeypatch)
+        client = TestClient(server.setup_webserver())
+        body = verify_body()
+        assert client.post("/seed_session", json=body).status_code == 200
+        response = client.post("/verify", json=body)
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["status"] == Status.VERIFIER_EXEC_FAILED.value and result["harness_failure"] == 1.0
+        assert result["failure_reason"] == HARNESS_FAULTS[Status.VERIFIER_EXEC_FAILED] and result["reward"] == 0.0
+        assert sandbox.stopped
+
     def test_stock_single_step_agent_gets_its_pending_step_verified(self, monkeypatch):
         sandbox = FakeSandbox(verifier=scored(True, 2.0))
         server = make_server(sandbox, monkeypatch)
@@ -529,6 +569,7 @@ class TestAggregation:
             Status.SANDBOX_FAILED,
             Status.STEP_SETUP_FAILED,
             Status.TESTS_UPLOAD_FAILED,
+            Status.VERIFIER_EXEC_FAILED,
             Status.NO_SESSION,
         }
 
