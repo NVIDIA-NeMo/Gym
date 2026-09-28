@@ -1105,6 +1105,7 @@ Full body: {json.dumps(exc.body, indent=4)}
             )
 
         uvicorn_kwargs = dict(
+            loop=global_config_dict.get("uvicorn_loop", "auto"),
             host=server.config.host,
             port=server.config.port,
             # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
