@@ -71,6 +71,7 @@ from nemo_gym.global_config import (
     allowed_agents_for,
     dataset_agent_pins,
     get_global_config_dict,
+    label_runs,
     pairing_override_enabled,
     resolve_dataset_agent,
 )
@@ -2116,12 +2117,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 server_agents[server_name] = agent_name
 
         # One entry per environment server, labelled by the agent it binds so metric names and
-        # `agent_ref` keep today's shape. Two servers bound to one agent (a native server and its
-        # legacy_agent twin) would otherwise collide, so the second is labelled by its own name.
-        labels: Dict[str, str] = {}
-        for server_name, agent_name in server_agents.items():
-            label = agent_name if agent_name is not None and agent_name not in labels.values() else server_name
-            labels[server_name] = label
+        # `agent_ref` keep today's shape. Servers that front the same agent (a native server and its
+        # legacy_agent twin) are each labelled by their own name, whatever order their rows arrive in.
+        labels = label_runs(server_agents)
 
         async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
             # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.

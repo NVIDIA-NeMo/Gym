@@ -5121,7 +5121,8 @@ class TestEnvironmentServerRouting:
         )
 
         written = {entry[NG_ENVIRONMENT_SERVER_KEY]: entry for entry in json.loads(metrics_fpath.read_text())}
-        assert written["environment"][AGENT_REF_KEY_NAME] == {"name": "hermes"}
+        # Both servers front hermes, so each is labelled by its own name, whatever order rows arrive in.
+        assert written["environment"][AGENT_REF_KEY_NAME] == {"name": "environment"}
         assert written["hermes_environment_server"][AGENT_REF_KEY_NAME] == {"name": "hermes_environment_server"}
 
     async def test_call_aggregate_metrics_names_a_stamped_server_missing_from_the_config(

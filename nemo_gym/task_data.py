@@ -231,7 +231,15 @@ class TaskDataValidator:
         task_input = row.get("task_input")
         materialized = isinstance(row.get("task_id"), Mapping) and isinstance(task_input, Mapping)
         if materialized:
-            row = dict(task_input.get("task_data") or {})
+            task_data = task_input.get("task_data") or {}
+            if not isinstance(task_data, Mapping):
+                self.report.error_rows += 1
+                if len(self.report.errors) < TaskDataValidationReport.MAX_RECORDED_ERRORS:
+                    self.report.errors.append(
+                        f"{row_index}: task_input.task_data must be an object, got {type(task_data).__name__}"
+                    )
+                return
+            row = dict(task_data)
         # Misplacement: the schema says today's wire reads this field from inside
         # verifier_metadata, but the row carries it only top-level. Validation would accept it
         # (schemas are flat) while the server at runtime would never see it, so it is flagged.
