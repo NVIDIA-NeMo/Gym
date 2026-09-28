@@ -122,16 +122,23 @@ def strip_thinking(text: str) -> str:
 
 
 # Upstream takes the *last* fenced block; an unfenced response falls back to the whole text.
-# The newline after the tag is optional: a single-line ```lean4 theorem ...``` is still a
-# fenced block, and requiring it silently dropped those responses.
-_CODE_BLOCK_RE = re.compile(r"```(?:lean4?|Lean4?)?[ \t]*\n?(.*?)```", re.DOTALL)
+# Upstream's regex, verbatim (`scripts/eval_common.py`): the newline after the tag is
+# required. Loosening it makes every fenced block in any language a candidate for "the last
+# fenced block" and captures the language tag as code -- a reply that appends a ```bash hint
+# after its Lean file would be scored on the bash. Single-line fences are upstream's loss too.
+_CODE_BLOCK_RE = re.compile(r"```(?:lean4?|Lean4?)?\s*\n(.*?)```", re.DOTALL)
 
 # An unfenced answer counts as a Lean file if some line opens with a file-level keyword.
-# `open` and `def` start English sentences as often as Lean files, so they only count when
-# the line looks like Lean: a declaration keyword followed by an identifier, not prose.
+# `open` and `def` start English sentences as often as Lean files, so they only count when the
+# line looks like Lean: a declaration keyword followed by an identifier, or `open` followed by
+# one or more capitalised namespaces.
 _LEAN_FILE_START_RE = re.compile(
-    r"^\s*(?:import\s+[A-Z]|universe\s+\w|variable\s*[\(\{\[]|open\s+[A-Z][\w.]*\s*$"
-    r"|(?:theorem|lemma|example|def|abbrev|instance)\s+\w)",
+    r"^\s*(?:import\s+[A-Z]|universe\s+\w|variable\s*[\(\{\[]"
+    r"|open\s+[A-Z][\w.]*(?:\s+[A-Z][\w.]*)*\s*$"
+    # A declaration is a keyword, an optional name, then binders or a type ascription --
+    # `def foo :`, `theorem t (x : T)`, `instance : Category C`. Requiring that is what keeps
+    # prose like "def the target theorem is about limits" from reading as Lean.
+    r"|(?:theorem|lemma|example|def|abbrev|instance)\s+(?:\w[\w.'’]*\s*)?[({\[:])",
     re.M,
 )
 

@@ -93,6 +93,56 @@ def test_find_banned_declarations(code, expected):
 
 
 @pytest.mark.parametrize(
+    "text,expected,why",
+    [
+        (
+            "Here is the proof:\n```lean4\n" + TRIVIAL + "\n```\nThen run:\n```bash\nlake build\n```",
+            TRIVIAL,
+            "a trailing shell-command fence must not become the answer",
+        ),
+        (
+            "```\n" + TRIVIAL + "\n```",
+            TRIVIAL,
+            "an untagged fence is still upstream's last-fence candidate",
+        ),
+        (
+            "```lean4 " + TRIVIAL + "```",
+            "```lean4 " + TRIVIAL + "```",
+            "upstream requires a newline after the tag, so a single-line fence is not a block",
+        ),
+    ],
+)
+def test_extraction_follows_upstreams_fence_rule(text, expected, why):
+    """Parity with `scripts/eval_common.py`: loosening the rule changes which block wins."""
+    assert extract_lean_code(text) == expected, why
+
+
+@pytest.mark.parametrize(
+    "answer,wins",
+    [
+        ("open CategoryTheory\n" + TRIVIAL, True),
+        # Two namespaces on one `open` is ordinary Lean (problem 0003 does it).
+        ("open CategoryTheory Limits\n" + TRIVIAL, True),
+        (FILE, True),
+        ("variable {C : Type*} [Category C]\n" + TRIVIAL, True),
+        ("open the file and read the statement carefully.", False),
+        ("def the target theorem is about limits, roughly.", False),
+    ],
+)
+def test_unfenced_answer_only_beats_a_thinking_fence_when_it_looks_like_lean(answer, wins):
+    """Prose after `</think>` must not displace the fenced code inside it.
+
+    StepFun emits its final file bare, so a bare answer has to be able to win -- but only when
+    it reads as a Lean file, or a sentence starting "open the file..." would be scored as one.
+    """
+    text = "<think>```lean4\nsorry\n```</think>\n" + answer
+    extracted = extract_lean_code(text)
+    assert (extracted == answer.strip()) == wins
+    if not wins:
+        assert extracted == "sorry", "the fence inside the reasoning is all there is"
+
+
+@pytest.mark.parametrize(
     "submission",
     [
         SOLVED,

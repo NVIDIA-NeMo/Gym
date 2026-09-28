@@ -32,8 +32,8 @@ import re
 import sys
 from pathlib import Path
 
-from resources_servers.lean_proof.lean_sandbox import DEFAULT_LEAN_PROJECT_DIR, TOOLCHAIN_PROBE, LeanSandbox
-from resources_servers.lean_proof.toolchain import parse_lean_version
+from resources_servers.lean_proof.lean_sandbox import DEFAULT_LEAN_PROJECT_DIR, LeanSandbox
+from resources_servers.lean_proof.toolchain import TOOLCHAIN_PROBE, parse_lean_version
 
 
 EXPECTED_LEAN_VERSION = "4.19.0"

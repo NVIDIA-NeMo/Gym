@@ -104,7 +104,8 @@ class LeanSandbox:
                     "loaded. Pass an inline {provider: {...}} mapping when running outside a Gym run."
                 )
             provider = resolve_provider_config(self._provider, global_config)
-            default_metadata = resolve_provider_metadata(self._provider, global_config) if global_config else {}
+            # Accepts a mapping too, so an inline block's default_metadata is not dropped.
+            default_metadata = resolve_provider_metadata(self._provider, global_config)
 
             resources = SandboxResources.from_mapping(self._config.get("resources", {}))
             env = dict(self._config.get("env", {}))
@@ -142,9 +143,14 @@ class LeanSandbox:
         sandbox = await self.start()
         path = f"attempt_{uuid.uuid4().hex}.lean"
         delimiter = f"LEAN_EOF_{uuid.uuid4().hex}"
+        # `timeout` bounds Lean itself at the documented budget, as upstream does
+        # (subprocess.run(..., timeout=300)); the exec budget below is headroom on top, so the
+        # sandbox is what reports a timeout rather than the client dropping the output that
+        # explains it. Without the inner bound a proof taking 300-330s would pass here and
+        # fail upstream.
         command = (
             f"cat > {path} <<'{delimiter}'\n{code}\n{delimiter}\n"
-            f"lake env lean {path}; status=$?; rm -f {path}; exit $status"
+            f"timeout -s KILL {int(timeout_s)} lake env lean {path}; status=$?; rm -f {path}; exit $status"
         )
         return await sandbox.exec(
             command,

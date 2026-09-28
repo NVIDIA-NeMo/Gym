@@ -222,9 +222,11 @@ class LeanCatResourcesServer(SimpleResourcesServer):
                 failure_reason=reason,
             )
 
-        await self._check_toolchain_once(body.lean_toolchain)
-
         try:
+            # Inside the handler: this is the first thing to touch the sandbox, so a sandbox
+            # that will not start surfaced here as a 500 while the identical failure during
+            # the compile came back as a status.
+            await self._check_toolchain_once(body.lean_toolchain)
             result = await self._run_lean(code)
         except Exception as exc:  # noqa: BLE001 - any start/exec failure is a sandbox outcome
             # Without this a sandbox that will not start raises out of verify() as a 500,
@@ -238,6 +240,10 @@ class LeanCatResourcesServer(SimpleResourcesServer):
                 predicted_proof=code,
                 statement_preserved=preserved,
                 failure_reason=f"Sandbox unavailable: {type(exc).__name__}: {exc}",
+                # The model did not fail here, the infrastructure did; masking keeps an
+                # outage from lowering pass@k. A `timeout` stays unmasked: upstream counts
+                # it as a failed attempt.
+                mask_sample=True,
             )
         proof_status, failure_reason = determine_proof_status(
             {
@@ -262,6 +268,9 @@ class LeanCatResourcesServer(SimpleResourcesServer):
             statement_preserved=preserved,
             compiler_output=compiler_output,
             failure_reason=failure_reason,
+            # Same reasoning as the start-failure path above: an infrastructure error is not
+            # the model failing. `timeout` is left unmasked -- upstream counts it as a fail.
+            mask_sample=proof_status == STATUS_SANDBOX_ERROR,
         )
 
     # ──────────────────────────────────────────────────────────
