@@ -42,3 +42,11 @@ generative_reward_model_simple_agent:
           type: example
           jsonl_fpath: resources_servers/generative_reward_model/data/example.jsonl
 
+
+generative_reward_model_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: generative_reward_model_simple_agent
