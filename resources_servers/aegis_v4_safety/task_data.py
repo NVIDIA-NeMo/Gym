@@ -10,6 +10,14 @@ from pydantic import BaseModel, ConfigDict, Field
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    prompt: Optional[str] = Field(
+        default=None,
+        description=(
+            "Raw benchmark prompt materialized into responses_create_params.input by the prompt configuration. "
+            "Optional because pre-materialized datasets can already contain model responses."
+        ),
+        json_schema_extra={"consumed_by": ["prompt"]},
+    )
     sample_id: Optional[Union[str, int]] = Field(
         default=None,
         description="Stable source identifier echoed into rollout results.",
