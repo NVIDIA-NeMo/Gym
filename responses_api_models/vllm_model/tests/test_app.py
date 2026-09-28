@@ -770,6 +770,7 @@ class TestApp:
         *,
         propagate_context_overflow_errors: bool = False,
         external_staging_backend: str | None = None,
+        forward_session_id_as_conversation_id: bool = False,
     ):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -782,6 +783,7 @@ class TestApp:
             return_token_id_information=False,
             uses_reasoning_parser=False,
             propagate_context_overflow_errors=propagate_context_overflow_errors,
+            forward_session_id_as_conversation_id=forward_session_id_as_conversation_id,
         )
 
         get_global_config_dict_mock = MagicMock()
@@ -1008,8 +1010,11 @@ class TestApp:
 
         assert client_indices[0] == client_indices[1]
 
-    async def test_chat_completions_forwards_session_id_as_conversation_id(self, monkeypatch: MonkeyPatch) -> None:
-        server = self._setup_server(monkeypatch)
+    @mark.parametrize("forward", [False, True])
+    async def test_chat_completions_forwards_session_id_as_conversation_id(
+        self, monkeypatch: MonkeyPatch, forward: bool
+    ) -> None:
+        server = self._setup_server(monkeypatch, forward_session_id_as_conversation_id=forward)
         mock_chat_completion = NeMoGymChatCompletion(
             id="chtcmpl-conv",
             object="chat.completion",
@@ -1042,7 +1047,10 @@ class TestApp:
             NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "go"}]),
         )
 
-        assert captured_kwargs["conversation_params"] == {"conversation_id": "session-1"}
+        if forward:
+            assert captured_kwargs["conversation_params"] == {"conversation_id": "session-1"}
+        else:
+            assert "conversation_params" not in captured_kwargs
 
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
