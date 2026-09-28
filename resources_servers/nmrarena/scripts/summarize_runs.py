@@ -47,9 +47,11 @@ from scipy import stats
 METRICS = ("top1", "top10", "tanimoto")
 
 
-def per_run_metrics(rows: list[dict]) -> dict:
+def per_run_metrics(rows: list[dict], source: str = "<rows>") -> dict:
     """Upstream's three numbers for one sweep, plus the counts behind them."""
     n = len(rows)
+    if n == 0:
+        raise ValueError(f"{source}: no rollout rows to summarise; the sweep file is empty or truncated")
     tani = [r["tanimoto_top1"] for r in rows if isinstance(r.get("tanimoto_top1"), (int, float))]
     return {
         "n": n,
@@ -118,7 +120,7 @@ def main(argv: Optional[list[str]] = None) -> dict:
     for path in args.run:
         raw = Path(path).read_bytes()
         rows = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
-        per_run.append(dict(per_run_metrics(rows), file=path, sha256=hashlib.sha256(raw).hexdigest()))
+        per_run.append(dict(per_run_metrics(rows, path), file=path, sha256=hashlib.sha256(raw).hexdigest()))
     report = {"per_run": per_run, "summary": summarise(per_run, dict(args.published), args.published_n)}
     text = json.dumps(report, indent=2)
     if args.output:

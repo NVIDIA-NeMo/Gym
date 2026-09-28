@@ -40,6 +40,11 @@ def test_per_run_metrics_match_upstream_definitions() -> None:
     assert m["statuses"] == {"format_fail": 1, "scored": 2}
 
 
+def test_empty_sweep_names_the_file() -> None:
+    with pytest.raises(ValueError, match=r"/tmp/run_a\.jsonl: .*empty or truncated"):
+        sr.per_run_metrics([], "/tmp/run_a.jsonl")
+
+
 def test_welch_matches_scipy_from_summaries() -> None:
     a = [27.6, 25.7, 29.5]
     b = [22.0, 24.0, 20.5]
