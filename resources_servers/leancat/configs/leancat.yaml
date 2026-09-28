@@ -54,4 +54,4 @@ leancat_simple_agent:
         type: example
         jsonl_fpath: resources_servers/leancat/data/example.jsonl
         prompt_config: benchmarks/prompts/eval/leancat/paper.yaml
-        license: CC-BY-4.0
+        license: Creative Commons Attribution 4.0 International

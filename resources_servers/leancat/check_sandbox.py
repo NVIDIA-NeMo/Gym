@@ -32,9 +32,8 @@ import re
 import sys
 from pathlib import Path
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config
-from resources_servers.lean_proof.toolchain import TOOLCHAIN_PROBE, parse_lean_version
+from resources_servers.lean_proof.lean_sandbox import DEFAULT_LEAN_PROJECT_DIR, TOOLCHAIN_PROBE, LeanSandbox
+from resources_servers.lean_proof.toolchain import parse_lean_version
 
 
 EXPECTED_LEAN_VERSION = "4.19.0"
@@ -71,16 +70,10 @@ def load_statements(limit: int | None) -> list[tuple[str, str, str]]:
 
 
 def provider_config(args: argparse.Namespace) -> dict:
-    """Inline provider config, so this script needs no Gym global config to run.
-
-    Defaults to OpenSandbox against `OPENSANDBOX_DOMAIN`/`OPENSANDBOX_API_KEY`. The cells use
-    self-signed certificates, hence `tls_verify: false` -- the same default the shipped
-    provider config carries.
-    """
+    """Inline provider config, so this script needs no Gym global config to run."""
     if args.provider == "enroot":
         # bypass_entrypoint passes `--rc /dev/null`, which enroot resolves inside the
-        # container namespace before /dev is mounted -- it fails with "No such file or
-        # directory". The Lean image sets CMD, not ENTRYPOINT, so there is nothing to bypass.
+        # container namespace before /dev is mounted. The image sets CMD, not ENTRYPOINT.
         return {"enroot": {"create": {"bypass_entrypoint": False}}}
     if args.provider != "opensandbox":
         return {args.provider: {}}
@@ -89,46 +82,39 @@ def provider_config(args: argparse.Namespace) -> dict:
             "connection": {
                 "domain": args.domain,
                 "api_key": os.environ.get("OPENSANDBOX_API_KEY"),
+                # The cells use self-signed certificates, as the shipped provider config does.
                 "tls_verify": False,
             }
         }
     }
 
 
-async def start_sandbox(args: argparse.Namespace) -> AsyncSandbox:
-    """Start one sandbox from a snapshot or image, exactly as the server does."""
-    sandbox = AsyncSandbox(resolve_provider_config(provider_config(args)))
-    await sandbox.start(
-        SandboxSpec(
-            image=args.image,
-            ttl_s=args.ttl,
-            ready_timeout_s=args.ready_timeout,
-            workdir=args.project_dir,
-            resources=SandboxResources.from_mapping({"cpu": args.cpu, "memory_mib": args.memory_mib}),
-            provider_options={"snapshot_id": args.snapshot_id} if args.snapshot_id else {},
-            metadata={"benchmark": "leancat", "purpose": "check-sandbox"},
-        )
-    )
-    return sandbox
-
-
-async def run_lean(sandbox: AsyncSandbox, code: str, project_dir: str, timeout: float) -> dict:
-    """Compile one file, the same way app.py does: heredoc in, `lake env lean`, temp file out."""
-    import uuid
-
-    path = f"check_{uuid.uuid4().hex}.lean"
-    delimiter = f"LEANCAT_EOF_{uuid.uuid4().hex}"
-    command = (
-        f"cat > {path} <<'{delimiter}'\n{code}\n{delimiter}\n"
-        f"lake env lean {path}; status=$?; rm -f {path}; exit $status"
-    )
-    result = await sandbox.exec(command, cwd=project_dir, timeout_s=timeout + 30)
+async def compile_in(lean: LeanSandbox, code: str, timeout: float) -> dict:
+    """Compile one file through the server's own path and flatten the result."""
+    result = await lean.compile(code, timeout_s=timeout)
     return {
         "stdout": result.stdout or "",
         "stderr": result.stderr or "",
         "return_code": result.return_code,
         "error_type": result.error_type,
     }
+
+
+def build_sandbox(args: argparse.Namespace) -> LeanSandbox:
+    """The same LeanSandbox the server uses, so the gate exercises the real compile path."""
+    return LeanSandbox(
+        sandbox_provider=provider_config(args),
+        sandbox_config={
+            "image": args.image,
+            "ttl_s": args.ttl,
+            "ready_timeout_s": args.ready_timeout,
+            "resources": {"cpu": args.cpu, "memory_mib": args.memory_mib},
+            "provider_options": {"snapshot_id": args.snapshot_id} if args.snapshot_id else {},
+            "metadata": {"benchmark": "leancat", "purpose": "check-sandbox"},
+        },
+        project_dir=args.project_dir,
+        server_name="leancat-check-sandbox",
+    )
 
 
 async def main() -> int:
@@ -141,7 +127,11 @@ async def main() -> int:
     )
     parser.add_argument("--snapshot-id", default=os.environ.get("LEANCAT_SANDBOX_SNAPSHOT_ID"))
     parser.add_argument("--image", default=None, help="Image URI, when there is no snapshot.")
-    parser.add_argument("--project-dir", default="/lean4/my_project", help="Lake project to compile in.")
+    parser.add_argument(
+        "--project-dir",
+        default=DEFAULT_LEAN_PROJECT_DIR,
+        help="Lake project to compile in; the shipped image builds Mathlib there.",
+    )
     parser.add_argument("--ttl", type=float, default=7200)
     parser.add_argument("--ready-timeout", type=float, default=1200)
     parser.add_argument("--cpu", type=float, default=4)
@@ -155,14 +145,15 @@ async def main() -> int:
         print("FAIL: pass --snapshot-id or --image; there is no default Lean environment.", file=sys.stderr)
         return 2
 
+    lean = build_sandbox(args)
     try:
-        sandbox = await start_sandbox(args)
+        await lean.start()
     except Exception as exc:  # noqa: BLE001 - the reason matters more than the type here
         print(f"FAIL: could not start a sandbox: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
     # Report the toolchain first so per-problem failures below can be read in context.
-    probe = await run_lean(sandbox, TOOLCHAIN_PROBE, args.project_dir, args.timeout)
+    probe = await compile_in(lean, TOOLCHAIN_PROBE, args.timeout)
     found = parse_lean_version(probe)
     if found is None:
         print("FAIL: `import Mathlib` did not compile -- this sandbox cannot state any LeanCat problem.")
@@ -182,7 +173,7 @@ async def main() -> int:
 
     async def check(problem_id: str, level: str, statement: str) -> None:
         async with semaphore:
-            result = await run_lean(sandbox, statement, args.project_dir, args.timeout)
+            result = await compile_in(lean, statement, args.timeout)
         combined = f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
         error_type = result.get("error_type")
         return_code = result.get("return_code")
@@ -211,9 +202,7 @@ async def main() -> int:
     print(f"\n{len(problems) - len(failures)}/{len(problems)} reference statements compiled as expected.")
     if failures:
         print(f"\n{len(failures)} FAILED — this sandbox is not usable for LeanCat.")
-        print(
-            "Almost always this means its Mathlib is not v4.19.0. See README.md, 'Get a sandbox on Mathlib v4.19.0'.\n"
-        )
+        print("Almost always this means its Mathlib is not v4.19.0. See the 'Requirements' section of README.md.\n")
         for problem_id, level, reason in failures[:10]:
             print(f"  {problem_id} [{level}]: {reason[:140]}")
         return 1

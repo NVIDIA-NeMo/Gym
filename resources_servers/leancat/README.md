@@ -41,12 +41,18 @@ Everything not specific to LeanCat is **imported** from `resources_servers/lean_
 `CompilerOutput` model, the Mathlib version probe, and the text checks.
 
 The fifth upstream criterion, "maintained mathematical intent", is a human judgement and is not automated. Check 3 is
-the closest mechanical proxy: the reference file is split on `sorry`, and every remaining fragment must appear in the
-submission, in order, modulo whitespace and comments. That is exactly the condition "you filled the holes and changed
-nothing else", and it generalises to the nine problems that carry more than one `sorry`. Preamble lines are matched
-individually rather than as a block, so the model stays free to add imports and to insert auxiliary declarations.
-The paper's prompt neither permits nor forbids those explicitly, and upstream's own scorer allows them, so the guard
-must not treat them as tampering.
+a mechanical proxy, not a decision procedure: the reference file is split on `sorry`, and every remaining fragment
+must appear in the submission, in order, modulo whitespace and comments. It generalises to the nine problems that
+carry more than one `sorry`. Preamble lines are matched individually rather than as a block, so the model stays free
+to add imports and auxiliary declarations — the paper's prompt permits them and upstream's scorer allows them.
+
+**What it catches and what it does not.** It is a *textual* check, so it catches edits to the statement, the
+assumptions or the preamble — the case measured here, where a submission weakened a theorem and compiled. It does
+**not** catch a submission that leaves every fragment byte-identical while changing what the statement means through
+additions the check permits: a `variable (h : False)` plus `include h`, or a local `notation` rebinding a symbol the
+statement uses, both keep the text intact, carry no banned tokens, compile, and would score 1.0. Closing that needs
+the elaborated statement compared in the sandbox (`#check`/`#print axioms`) rather than its text; until then, treat
+`statement_preserved` as evidence that the text is unchanged, not proof that the theorem is.
 
 Check 3 exists because the whole-file format lets a model weaken the theorem it was asked to prove, and the weakened
 version compiles. `require_statement_preserved: false` disables the rejection while still reporting

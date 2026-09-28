@@ -7,9 +7,10 @@ leancat_leancat_resources_server:
   _inherit_from: leancat
   resources_servers:
     leancat:
-      # Off for reproduction: upstream's verifier has no statement check, so leaving it on
-      # yields a number below the paper's. `statement_preserved` is still reported as a score.
-      require_statement_preserved: false
+      # On, matching EVALUATION.md's criteria and what the README reports. Upstream's own
+      # script omits this check, so set it false to score the way that script does --
+      # `statement_preserved` is reported either way, so the gap stays measurable.
+      require_statement_preserved: true
 
 leancat_leancat_simple_agent:
   _inherit_from: leancat_simple_agent
@@ -22,7 +23,7 @@ leancat_leancat_simple_agent:
         type: benchmark
         jsonl_fpath: benchmarks/leancat/data/leancat_benchmark.jsonl
         prepare_script: benchmarks/leancat/prepare.py
-        license: CC-BY-4.0
+        license: Creative Commons Attribution 4.0 International
         # The paper's Appendix D.1 prompt.
         prompt_config: benchmarks/prompts/eval/leancat/paper.yaml
         # Paper v2: k=4, the generalist-model budget of Table 1 and one of upstream's

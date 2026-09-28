@@ -15,16 +15,15 @@
 
 """Confirm the sandbox runs the Mathlib a benchmark's statements were written against.
 
-Each Lean benchmark pins its own Mathlib, and a NeMo-Skills sandbox serves exactly one:
+Each Lean benchmark pins its own Mathlib, and a sandbox image carries exactly one:
 ``/execute`` takes no project parameter, so the version is fixed when the container starts.
 A mismatch does not error at startup; tasks fail with ordinary compile errors and the run
 reports a plausible but meaningless score.
 
-A server constructs a :class:`ToolchainCheck` with the version its rows expect and awaits
-:meth:`ToolchainCheck.run` before its first compile. The probe runs once per process.
+``LeanSandbox.check_toolchain`` runs the probe once per process and compares what it finds
+against the version a benchmark's rows expect.
 """
 
-import asyncio
 import logging
 import re
 from typing import Any, Dict, Optional
@@ -53,47 +52,3 @@ def parse_lean_version(compiler_output: Dict[str, Any]) -> Optional[str]:
 def normalize_version(value: Optional[str]) -> str:
     """``leanprover/lean4:v4.19.0``, ``v4.19.0`` and ``4.19.0`` all mean the same thing."""
     return (value or "").removeprefix("leanprover/lean4:").lstrip("v")
-
-
-class ToolchainCheck:
-    """One-shot sandbox version probe, safe to await from every concurrent verify.
-
-    Logs an error rather than raising so a run in flight is not killed.
-    """
-
-    def __init__(self, expected: Optional[str]):
-        self.expected = normalize_version(expected)
-        self._checked = False
-        self._lock: Optional[asyncio.Lock] = None
-
-    async def run(self, sandbox_client: Any, expected_override: Optional[str] = None) -> None:
-        """Probe once. ``expected_override`` is a row's own pin and beats the server default."""
-        if self._checked:
-            return
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        async with self._lock:
-            # Re-check under the lock so concurrent verifies share one probe.
-            if self._checked:
-                return
-            self._checked = True
-
-            result = await sandbox_client.execute_lean4(code=TOOLCHAIN_PROBE, timeout=PROBE_TIMEOUT)
-            found = parse_lean_version(result)
-            want = normalize_version(expected_override) or self.expected
-
-            if found is None:
-                LOG.error(
-                    "Could not determine the sandbox's Lean version: `import Mathlib` did not compile. "
-                    "Every task will fail for reasons unrelated to the model."
-                )
-            elif want and found != want:
-                LOG.error(
-                    "SANDBOX MATHLIB MISMATCH: sandbox is Lean/Mathlib %s, but these tasks are written "
-                    "against %s. Statements may fail to compile regardless of the model, so scores from "
-                    "this run are not comparable to published ones.",
-                    found,
-                    want,
-                )
-            else:
-                LOG.info("Lean sandbox toolchain verified: %s", found)

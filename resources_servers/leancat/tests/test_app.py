@@ -296,7 +296,7 @@ class TestPrompt:
             assert row["formal_statement"] in messages[0]["content"]
 
 
-class TestToolchainCheck:
+class TestToolchainProbe:
     """The probe itself is tested in lean_proof; this is only the wiring."""
 
     @pytest.mark.asyncio
