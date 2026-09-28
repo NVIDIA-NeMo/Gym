@@ -43,6 +43,9 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled
+from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 LOGGER = logging.getLogger(__name__)
@@ -299,6 +302,8 @@ def _log_create_retry(retry_state: Any) -> None:
         sleep_s,
         exception,
     )
+    if is_span_group_enabled(GymSpanGroup.SANDBOX):
+        record_sandbox_create_retry(provider="opensandbox")
 
 
 def _log_operation_retry(retry_state: Any, *, operation: str = "?", sandbox_id: str = "?") -> None:
@@ -1908,6 +1913,27 @@ class OpenSandboxProvider:
             return aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
         return aiohttp.ClientSession()
 
+    async def _pty_session_missing(
+        self, base_url: str, headers: dict[str, str], session_id: str, request_timeout_s: float | None
+    ) -> bool:
+        """True only when execd itself reports the PTY session does not exist.
+
+        A proxy 404 (route not registered yet) lacks execd's error code, and a
+        failed check is treated as unknown so the attach proceeds as before.
+        """
+        import aiohttp
+
+        try:
+            async with self._pty_http_client() as client:
+                async with client.get(
+                    f"{base_url}/pty/{session_id}",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=request_timeout_s),
+                ) as response:
+                    return response.status == 404 and "CONTEXT_NOT_FOUND" in await response.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return False  # unknown: keep the takeover retries
+
     async def _pty_target(self, handle: SandboxHandle) -> tuple[str, dict[str, str], float | None]:
         """Resolve the sandbox's execd base URL, headers and request timeout."""
         from opensandbox.constants import DEFAULT_EXECD_PORT
@@ -1958,6 +1984,11 @@ class OpenSandboxProvider:
         from nemo_gym.sandbox.providers.opensandbox.pty import _PTY_TAKEOVER_RETRY_DELAYS, attach_pty_session
 
         base_url, headers, request_timeout_s = await self._pty_target(handle)
+        # execd refuses a missing session with the same close as a held one (for
+        # example after a pause replaced the runtime), which the takeover retries
+        # below would ride out for tens of seconds. Ask first.
+        if await self._pty_session_missing(base_url, headers, session_id, request_timeout_s):
+            raise SandboxPtyError(f"PTY session {session_id} not found")
         if takeover:
             # Release our own live attachment first, so the takeover below has
             # nothing to evict and cannot be refused as "already attached".
