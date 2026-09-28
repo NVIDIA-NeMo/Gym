@@ -740,6 +740,10 @@ class ModelCallRecord(BaseModel):
         default=None,
         description="Client-declared correlation identifier; evidence only, not a security boundary.",
     )
+    client_assistant_message_id: Optional[str] = Field(
+        default=None,
+        description="Persisted client assistant-message ID; retries may share it, model_call_id remains per attempt.",
+    )
 
     # Durable append order, not a causal or semantic order for concurrent calls.
     call_index: int
@@ -824,6 +828,11 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
         client_session_id=(
             exchange.get("client_session_id") if isinstance(exchange.get("client_session_id"), str) else None
         ),
+        client_assistant_message_id=(
+            exchange.get("client_assistant_message_id")
+            if isinstance(exchange.get("client_assistant_message_id"), str)
+            else None
+        ),
         call_index=call_index,
         model_ref=exchange.get("model_ref"),
         model=model if isinstance(model, str) else None,
@@ -906,6 +915,7 @@ _OBSERVED_PATHS = {
 # A client may declare its persisted session ID for exact correlation with an AgentInvocation.
 # It is correlation evidence, not authentication; absence is fail-safe.
 _CLIENT_SESSION_HEADER = b"x-session-id"
+_CLIENT_ASSISTANT_MESSAGE_HEADER = b"x-opencode-assistant-message-id"
 
 _TERMINAL_SSE_LINES: dict[str, dict[bytes, str]] = {
     "responses": {
@@ -1235,6 +1245,7 @@ def _record(
     request_bytes: bytes,
     *,
     client_session_id: Optional[str] = None,
+    client_assistant_message_id: Optional[str] = None,
     rollout_id: str,
     model_call_id: str,
     started_at: float,
@@ -1280,6 +1291,8 @@ def _record(
             exchange.update(execution)
             if execution["local_response_reason"] == "context_length_exceeded":
                 exchange["error_category"] = "context_length_exceeded"
+        if client_assistant_message_id is not None:
+            exchange["client_assistant_message_id"] = client_assistant_message_id
         if request_raw is not None:
             exchange["request_raw"] = request_raw
         if response_raw is not None:
@@ -1469,6 +1482,9 @@ class _CaptureMiddleware:
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
+        client_assistant_message_id = _unique_request_header(
+            scope.get("headers") or [], _CLIENT_ASSISTANT_MESSAGE_HEADER
+        )
 
         # Give the model server a token sink keyed to this call.
         # The sink records token ids from the complete response.
@@ -1584,6 +1600,7 @@ class _CaptureMiddleware:
                     self._model_server_name,
                     bytes(request_body),
                     client_session_id=client_session_id,
+                    client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
                     model_call_id=model_call_id,
                     started_at=started_at,
@@ -1654,6 +1671,7 @@ class _CaptureMiddleware:
                 model_server_name,
                 request_bytes,
                 client_session_id=client_session_id,
+                client_assistant_message_id=client_assistant_message_id,
                 rollout_id=rollout_id,
                 model_call_id=model_call_id,
                 started_at=started_at,
@@ -1877,6 +1895,26 @@ def merge_model_call_capture_into_record(
                     )
                     bundle.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
             bundle = join_model_call_observations(bundle, calls)
+            if bundle.source == "opencode":
+                try:
+                    from nemo_gym.rollout_observability import TrajectoryRecord
+                    from responses_api_agents.opencode_agent.observability import associate_opencode_message_calls
+
+                    raw_trajectory = record.get("ng_trajectory")
+                    trajectory = (
+                        TrajectoryRecord.model_validate(raw_trajectory) if raw_trajectory is not None else None
+                    )
+                    if trajectory is not None and trajectory.rollout_id != rollout_id:
+                        bundle.gaps.append(ObservationGap(code="opencode_message_call_rollout_mismatch"))
+                    else:
+                        bundle, trajectory = associate_opencode_message_calls(bundle, trajectory, calls)
+                        if trajectory is not None:
+                            record["ng_trajectory"] = trajectory.model_dump(mode="json")
+                except Exception:
+                    logger.warning(
+                        "Could not associate OpenCode message calls for rollout %s.", rollout_id, exc_info=True
+                    )
+                    bundle.gaps.append(ObservationGap(code="opencode_message_call_join_failed"))
             record["ng_agent_observations"] = bundle.model_dump(mode="json")
         except Exception:
             logger.warning("Could not join agent observations for rollout %s.", rollout_id, exc_info=True)

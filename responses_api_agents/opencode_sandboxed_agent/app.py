@@ -89,7 +89,11 @@ def _milliseconds(value: Any) -> Optional[float]:
 
 
 def parse_opencode_observations(
-    db_path: Path, fallback_invocation_id: str, trajectory: Optional[TrajectoryRecord] = None
+    db_path: Path,
+    fallback_invocation_id: str,
+    trajectory: Optional[TrajectoryRecord] = None,
+    *,
+    model_ref: ModelServerRef | None = None,
 ) -> AgentObservationBundle:
     """Read OpenCode's persisted session tree before its workspace is removed."""
     if not db_path.is_file():
@@ -128,7 +132,7 @@ def parse_opencode_observations(
     compaction_parts: list[tuple[str, str, float | None, dict[str, Any]]] = []
     gaps: list[ObservationGap] = []
     summary_text: dict[str, list[str]] = {}
-    summaries_by_parent: dict[str, list[str]] = {}
+    summaries_by_parent: dict[tuple[str, str], list[str]] = {}
     first_item_id_by_message: dict[tuple[str, str], str] = {}
 
     for row in message_rows:
@@ -142,11 +146,11 @@ def parse_opencode_observations(
             message_time = message.get("time") if isinstance(message.get("time"), dict) else {}
             if invocation_status[session_id] != "failed" and _milliseconds(message_time.get("completed")) is not None:
                 invocation_status[session_id] = "completed"
-        if message.get("summary") is True:
+        if message.get("role") == "assistant" and message.get("summary") is True:
             summary_text[row["id"]] = []
             parent_id = message.get("parentID")
             if isinstance(parent_id, str):
-                summaries_by_parent.setdefault(parent_id, []).append(row["id"])
+                summaries_by_parent.setdefault((session_id, parent_id), []).append(row["id"])
 
     for row in part_rows:
         part = _load_json(row["data"])
@@ -290,13 +294,14 @@ def parse_opencode_observations(
 
     compactions: list[ContextCompactionObservation] = []
     for session_id, message_id, observed_at, part in compaction_parts:
-        summary_ids = summaries_by_parent.get(message_id, [])
+        summary_ids = summaries_by_parent.get((session_id, message_id), [])
         summary = "\n".join(summary_text.get(summary_ids[0], [])) if len(summary_ids) == 1 else None
         if len(summary_ids) > 1:
             gaps.append(
                 ObservationGap(
                     code="compaction_summary_ambiguous",
                     invocation_id=session_id,
+                    detail=",".join(summary_ids),
                 )
             )
         trigger = "overflow" if part.get("overflow") is True else "automatic" if part.get("auto") is True else "manual"
@@ -307,6 +312,8 @@ def parse_opencode_observations(
         compactions.append(
             ContextCompactionObservation(
                 invocation_id=session_id,
+                source_message_ids=summary_ids,
+                source_model_ref=model_ref,
                 observed_at=observed_at,
                 trigger=trigger,
                 outcome="completed" if summary else "unknown",
@@ -378,7 +385,7 @@ def parse_opencode_observations(
         gaps.append(ObservationGap(code="agent_transcript_unavailable"))
 
     if trajectory is not None:
-        append_opencode_turns(trajectory, session_ids, message_rows, part_rows)
+        append_opencode_turns(trajectory, session_ids, message_rows, part_rows, model_ref=model_ref)
 
     return AgentObservationBundle(
         source="opencode",
@@ -816,7 +823,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError("OpenCode database snapshot failed")
                 await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
                 observations = parse_opencode_observations(
-                    observations_local_fpath, observation_invocation_id, trajectory
+                    observations_local_fpath, observation_invocation_id, trajectory, model_ref=self.config.model_server
                 )
             except Exception:
                 print("Failed to capture OpenCode observations", format_exc(), file=sys.stderr)
