@@ -23,12 +23,16 @@ ARG DEBIAN_SNAPSHOT=20260916T000000Z
 # APT::Sandbox::User=root: apt drops privileges to `_apt` to fetch, which needs a user
 # namespace. Builders without one (buildah under chroot isolation) fail with "Could not
 # switch group".
+#
+# libatomic1 is not incidental: `prisma generate` downloads a prebuilt node, which links
+# against it. Upstream Kimina gets it transitively from build-essential; this image pulls
+# the one library rather than a compiler toolchain it does not otherwise need.
 RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/00-no-sandbox && \
     rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources && \
     printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/%s/ bookworm main\ndeb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/%s/ bookworm-security main\n' "$DEBIAN_SNAPSHOT" "$DEBIAN_SNAPSHOT" > /etc/apt/sources.list && \
     apt-get update && apt-get install -y --no-install-recommends \
       bash git curl ca-certificates zstd libgmp-dev jq \
-      python3 python3-venv procps && \
+      python3 python3-venv procps libatomic1 && \
     rm -rf /var/lib/apt/lists/*
 
 FROM base AS lean
@@ -141,7 +145,7 @@ ENV LEAN_SERVER_HOST=0.0.0.0 \
 # the symlinks are what keep `lake` findable for the REPL subprocess regardless.
 RUN ln -sf /opt/lean/bin/lake /usr/local/bin/lake && \
     ln -sf /opt/lean/bin/lean /usr/local/bin/lean && \
-    ln -sf /opt/venv/bin/python /usr/local/bin/kimina-python
+    ln -sf /opt/venv/bin/python /usr/local/bin/python
 
 # Start a REPL the way the server does -- `lake env <repl>` with cwd at the project -- and
 # require it to load Mathlib and report the Lean version. This is the check that turns a

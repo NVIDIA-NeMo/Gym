@@ -15,12 +15,16 @@
     ],
     "gold_answer_rows": 45,
     "gold_answer_status": {
-      "has_sorry": 41,
-      "compile_error": 4
+      "has_sorry": 37,
+      "compile_error": 8
     },
     "gold_answer_failures": [
+      "brualdi_ch8_6",
       "hackmath_6",
       "imo_2008_p5",
+      "imo_2014_p2",
+      "imo_2019_p5",
+      "imo_2022_p1",
       "imo_2022_p6",
       "imo_2023_p5"
     ],
@@ -62,126 +66,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.018643
+        "time": 0.017933
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.047178
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "brualdi_ch1_10": {
-      "tag": "brualdi",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.043732
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "hackmath_2": {
-      "tag": "hackmath",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.025132
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.030319
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "brualdi_ch1_16": {
-      "tag": "brualdi",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.0672
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "hackmath_1": {
-      "tag": "hackmath",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.018908
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.029495
+        "time": 0.027586
       },
       "controls": {
         "empty": {
@@ -207,74 +97,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.030289
+        "time": 0.036892
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.044812
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "hackmath_5": {
-      "tag": "hackmath",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.020007
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.076244
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "hackmath_3": {
-      "tag": "hackmath",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.040707
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.073321
+        "time": 0.028987
       },
       "controls": {
         "empty": {
@@ -300,12 +128,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.027499
+        "time": 0.022617
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.075758
+        "time": 0.022907
       },
       "controls": {
         "empty": {
@@ -331,12 +159,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.031431
+        "time": 0.047129
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.062979
+        "time": 0.022401
       },
       "controls": {
         "empty": {
@@ -357,17 +185,131 @@
         }
       }
     },
-    "brualdi_ch2_6": {
+    "brualdi_ch1_10": {
       "tag": "brualdi",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.029483
+        "time": 0.050129
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "brualdi_ch1_16": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.060166
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "hackmath_5": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.02509
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.019954
+        "time": 0.034944
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "hackmath_2": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.030329
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.026547
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "hackmath_1": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.024393
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.020949
       },
       "controls": {
         "empty": {
@@ -393,12 +335,74 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.021619
+        "time": 0.047902
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.054856
+        "time": 0.024175
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "brualdi_ch2_6": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.05439
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.019176
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "hackmath_3": {
+      "tag": "hackmath",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.037025
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.041911
       },
       "controls": {
         "empty": {
@@ -424,12 +428,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.062249
+        "time": 0.063782
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.036143
+        "time": 0.033052
       },
       "controls": {
         "empty": {
@@ -455,12 +459,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.02042
+        "time": 0.048515
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.051838
+        "time": 0.03143
       },
       "controls": {
         "empty": {
@@ -486,12 +490,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.139577
+        "time": 0.137016
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.08847
+        "time": 0.088685
       },
       "controls": {
         "empty": {
@@ -512,38 +516,12 @@
         }
       }
     },
-    "brualdi_ch3_4": {
-      "tag": "brualdi",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.016714
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
     "brualdi_ch3_18": {
       "tag": "brualdi",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.023756
+        "time": 0.024452
       },
       "controls": {
         "empty": {
@@ -564,38 +542,12 @@
         }
       }
     },
-    "brualdi_ch3_27": {
+    "brualdi_ch3_4": {
       "tag": "brualdi",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.030838
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "brualdi_ch4_9": {
-      "tag": "brualdi",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.045697
+        "time": 0.017023
       },
       "controls": {
         "empty": {
@@ -621,7 +573,85 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.028479
+        "time": 0.02347
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "brualdi_ch4_59": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.028192
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "brualdi_ch3_27": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.029435
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "brualdi_ch4_9": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.02749
       },
       "controls": {
         "empty": {
@@ -647,12 +677,12 @@
       "statement": {
         "status": "compile_error",
         "error": null,
-        "time": 0.237424
+        "time": 0.257963
       },
       "gold_answer": {
         "status": "compile_error",
         "error": null,
-        "time": 0.309777
+        "time": 0.261646
       },
       "controls": {
         "empty": {
@@ -673,38 +703,12 @@
         }
       }
     },
-    "brualdi_ch4_59": {
-      "tag": "brualdi",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.032618
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
     "brualdi_ch4_35": {
       "tag": "brualdi",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.057893
+        "time": 0.043164
       },
       "controls": {
         "empty": {
@@ -730,7 +734,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.051253
+        "time": 0.049385
       },
       "controls": {
         "empty": {
@@ -756,33 +760,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.103249
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "brualdi_ch8_30": {
-      "tag": "brualdi",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.015053
+        "time": 0.059193
       },
       "controls": {
         "empty": {
@@ -808,7 +786,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.080806
+        "time": 0.08894
       },
       "controls": {
         "empty": {
@@ -834,12 +812,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.068617
+        "time": 0.058885
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.071293
+        "time": 0.085858
       },
       "controls": {
         "empty": {
@@ -860,17 +838,12 @@
         }
       }
     },
-    "brualdi_ch6_9": {
+    "brualdi_ch8_30": {
       "tag": "brualdi",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.079278
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.088526
+        "time": 0.017748
       },
       "controls": {
         "empty": {
@@ -879,7 +852,7 @@
         },
         "echo_with_sorry": {
           "reward": 0.0,
-          "status": "compile_error"
+          "status": "has_sorry"
         },
         "axiom": {
           "reward": 0.0,
@@ -896,7 +869,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.021418
+        "time": 0.021519
       },
       "controls": {
         "empty": {
@@ -917,12 +890,17 @@
         }
       }
     },
-    "brualdi_ch9_13": {
+    "brualdi_ch6_9": {
       "tag": "brualdi",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.041753
+        "time": 0.118686
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.043177
       },
       "controls": {
         "empty": {
@@ -931,7 +909,7 @@
         },
         "echo_with_sorry": {
           "reward": 0.0,
-          "status": "has_sorry"
+          "status": "compile_error"
         },
         "axiom": {
           "reward": 0.0,
@@ -948,12 +926,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.029588
+        "time": 0.058452
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.032242
+        "time": 0.053088
       },
       "controls": {
         "empty": {
@@ -974,12 +952,12 @@
         }
       }
     },
-    "brualdi_ch10_31": {
+    "brualdi_ch9_13": {
       "tag": "brualdi",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.039996
+        "time": 0.037403
       },
       "controls": {
         "empty": {
@@ -1000,17 +978,12 @@
         }
       }
     },
-    "brualdi_ch7_15": {
+    "brualdi_ch10_31": {
       "tag": "brualdi",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.044941
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.164456
+        "time": 0.050918
       },
       "controls": {
         "empty": {
@@ -1019,7 +992,7 @@
         },
         "echo_with_sorry": {
           "reward": 0.0,
-          "status": "compile_error"
+          "status": "has_sorry"
         },
         "axiom": {
           "reward": 0.0,
@@ -1036,7 +1009,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.014779
+        "time": 0.012697
       },
       "controls": {
         "empty": {
@@ -1062,7 +1035,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.066626
+        "time": 0.083676
       },
       "controls": {
         "empty": {
@@ -1088,7 +1061,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.06602
+        "time": 0.07104
       },
       "controls": {
         "empty": {
@@ -1109,12 +1082,43 @@
         }
       }
     },
+    "brualdi_ch7_15": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.098198
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.195448
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
     "brualdi_ch11_59": {
       "tag": "brualdi",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.023839
+        "time": 0.023148
       },
       "controls": {
         "empty": {
@@ -1140,7 +1144,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.017247
+        "time": 0.025423
       },
       "controls": {
         "empty": {
@@ -1166,12 +1170,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.058789
+        "time": 0.039955
       },
       "gold_answer": {
-        "status": "has_sorry",
+        "status": "compile_error",
         "error": null,
-        "time": 0.079955
+        "time": 0.121304
       },
       "controls": {
         "empty": {
@@ -1197,12 +1201,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.08368
+        "time": 0.086679
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.06175
+        "time": 0.169201
       },
       "controls": {
         "empty": {
@@ -1223,38 +1227,12 @@
         }
       }
     },
-    "brualdi_ch12_34": {
-      "tag": "brualdi",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.0074
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
     "brualdi_ch12_62": {
       "tag": "brualdi",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.031071
+        "time": 0.019366
       },
       "controls": {
         "empty": {
@@ -1275,12 +1253,12 @@
         }
       }
     },
-    "brualdi_ch14_33": {
+    "brualdi_ch12_34": {
       "tag": "brualdi",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.007544
+        "time": 0.011784
       },
       "controls": {
         "empty": {
@@ -1306,7 +1284,33 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.014801
+        "time": 0.034655
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "brualdi_ch14_33": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.025522
       },
       "controls": {
         "empty": {
@@ -1332,59 +1336,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.129104
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "apmo_1991_p2": {
-      "tag": "math_competitions",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.109977
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "apmo_2023_p1": {
-      "tag": "math_competitions",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.119105
+        "time": 0.131413
       },
       "controls": {
         "empty": {
@@ -1410,7 +1362,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.168017
+        "time": 0.163627
       },
       "controls": {
         "empty": {
@@ -1436,33 +1388,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.171455
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imosl_2015_c6": {
-      "tag": "math_competitions",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.028553
+        "time": 0.155029
       },
       "controls": {
         "empty": {
@@ -1488,7 +1414,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.075688
+        "time": 0.043664
       },
       "controls": {
         "empty": {
@@ -1509,12 +1435,12 @@
         }
       }
     },
-    "imosl_2019_c2": {
+    "apmo_2023_p1": {
       "tag": "math_competitions",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.096354
+        "time": 0.116685
       },
       "controls": {
         "empty": {
@@ -1535,12 +1461,12 @@
         }
       }
     },
-    "imosl_2011_c6": {
+    "apmo_1991_p2": {
       "tag": "math_competitions",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.12822
+        "time": 0.08785
       },
       "controls": {
         "empty": {
@@ -1566,12 +1492,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.0906
+        "time": 0.08713
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.144029
+        "time": 0.158031
       },
       "controls": {
         "empty": {
@@ -1592,12 +1518,64 @@
         }
       }
     },
-    "brualdi_ch9_11": {
-      "tag": "brualdi",
+    "imosl_2019_c2": {
+      "tag": "math_competitions",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.489572
+        "time": 0.028598
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imosl_2015_c6": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.039767
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imosl_2011_c6": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.099482
       },
       "controls": {
         "empty": {
@@ -1623,7 +1601,59 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.025258
+        "time": 0.035736
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imosl_2021_c5": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.089721
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "brualdi_ch9_11": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.591142
       },
       "controls": {
         "empty": {
@@ -1649,12 +1679,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.183301
+        "time": 0.139954
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.143716
+        "time": 0.166841
       },
       "controls": {
         "empty": {
@@ -1675,64 +1705,12 @@
         }
       }
     },
-    "imosl_2021_c5": {
-      "tag": "math_competitions",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.083315
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
     "imo_2009_p6": {
       "tag": "imo",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.026724
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2024_p3": {
-      "tag": "imo",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.028283
+        "time": 0.028356
       },
       "controls": {
         "empty": {
@@ -1758,33 +1736,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.063222
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2001_p3": {
-      "tag": "imo",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.033598
+        "time": 0.068618
       },
       "controls": {
         "empty": {
@@ -1810,12 +1762,95 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.069996
+        "time": 0.080175
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.078043
+        "time": 0.117209
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2024_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.062527
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2001_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.054578
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "usamo_2000_p4": {
+      "tag": "math_competitions",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.028536
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.062782
       },
       "controls": {
         "empty": {
@@ -1841,100 +1876,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.141591
+        "time": 0.146356
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.116408
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "usamo_2000_p4": {
-      "tag": "math_competitions",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.022369
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.030878
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2001_p4": {
-      "tag": "imo",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.075435
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2000_p4": {
-      "tag": "imo",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.040921
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.044082
+        "time": 0.116253
       },
       "controls": {
         "empty": {
@@ -1960,7 +1907,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.046452
+        "time": 0.056683
       },
       "controls": {
         "empty": {
@@ -1981,12 +1928,12 @@
         }
       }
     },
-    "imo_2005_p6": {
+    "imo_2001_p4": {
       "tag": "imo",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.087114
+        "time": 0.099299
       },
       "controls": {
         "empty": {
@@ -2012,7 +1959,33 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.148397
+        "time": 0.173294
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2005_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.106371
       },
       "controls": {
         "empty": {
@@ -2038,7 +2011,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.039606
+        "time": 0.012864
       },
       "controls": {
         "empty": {
@@ -2059,17 +2032,48 @@
         }
       }
     },
+    "imo_2000_p4": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.062205
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.102205
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
     "brualdi_ch9_8": {
       "tag": "brualdi",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.543565
+        "time": 0.616927
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.562961
+        "time": 0.565211
       },
       "controls": {
         "empty": {
@@ -2095,7 +2099,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.118903
+        "time": 0.113153
       },
       "controls": {
         "empty": {
@@ -2121,38 +2125,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.304544
+        "time": 0.369839
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.332423
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2011_p2": {
-      "tag": "imo",
-      "statement": {
-        "status": "compile_error",
-        "error": null,
-        "time": 0.333762
+        "time": 0.320506
       },
       "controls": {
         "empty": {
@@ -2178,7 +2156,90 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.074735
+        "time": 0.140945
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2011_p2": {
+      "tag": "imo",
+      "statement": {
+        "status": "compile_error",
+        "error": null,
+        "time": 0.297632
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2013_p2": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.098328
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.102532
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2013_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.269839
       },
       "controls": {
         "empty": {
@@ -2204,7 +2265,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.109527
+        "time": 0.207
       },
       "controls": {
         "empty": {
@@ -2214,187 +2275,6 @@
         "echo_with_sorry": {
           "reward": 0.0,
           "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2013_p6": {
-      "tag": "imo",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.251978
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2013_p2": {
-      "tag": "imo",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.094668
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.124551
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2015_p1": {
-      "tag": "imo",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.050238
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.081866
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2006_p2": {
-      "tag": "imo",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.314708
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.316843
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2008_p5": {
-      "tag": "imo",
-      "statement": {
-        "status": "compile_error",
-        "error": null,
-        "time": 0.376348
-      },
-      "gold_answer": {
-        "status": "compile_error",
-        "error": null,
-        "time": 0.360661
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2014_p2": {
-      "tag": "imo",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.094719
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.127286
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
         },
         "axiom": {
           "reward": 0.0,
@@ -2411,12 +2291,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.307171
+        "time": 0.209307
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.290465
+        "time": 0.231178
       },
       "controls": {
         "empty": {
@@ -2442,12 +2322,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.333909
+        "time": 0.266936
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.318682
+        "time": 0.279718
       },
       "controls": {
         "empty": {
@@ -2464,12 +2344,136 @@
         }
       }
     },
-    "imo_2016_p6": {
+    "imo_2006_p2": {
       "tag": "imo",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.264711
+        "time": 0.317695
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.338428
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2015_p1": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.064189
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.062663
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2008_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "compile_error",
+        "error": null,
+        "time": 0.308344
+      },
+      "gold_answer": {
+        "status": "compile_error",
+        "error": null,
+        "time": 0.3708
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2014_p2": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.11277
+      },
+      "gold_answer": {
+        "status": "compile_error",
+        "error": null,
+        "time": 0.199631
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2017_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.082782
       },
       "controls": {
         "empty": {
@@ -2490,12 +2494,12 @@
         }
       }
     },
-    "imo_2017_p5": {
+    "imo_2016_p6": {
       "tag": "imo",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.121852
+        "time": 0.225169
       },
       "controls": {
         "empty": {
@@ -2521,38 +2525,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.156488
+        "time": 0.169913
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.190274
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2021_p5": {
-      "tag": "imo",
-      "statement": {
-        "status": "compile_error",
-        "error": null,
-        "time": 0.162112
+        "time": 0.165579
       },
       "controls": {
         "empty": {
@@ -2578,105 +2556,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.187811
+        "time": 0.128972
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.194834
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2018_p4": {
-      "tag": "imo",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.110084
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.111848
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2022_p6": {
-      "tag": "imo",
-      "statement": {
-        "status": "compile_error",
-        "error": null,
-        "time": 0.789195
-      },
-      "gold_answer": {
-        "status": "compile_error",
-        "error": null,
-        "time": 0.796266
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2020_p4": {
-      "tag": "imo",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.04719
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.060137
+        "time": 0.147484
       },
       "controls": {
         "empty": {
@@ -2702,43 +2587,12 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.09595
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.125087
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "imo_2023_p5": {
-      "tag": "imo",
-      "statement": {
-        "status": "compile_error",
-        "error": null,
-        "time": 0.169021
+        "time": 0.097585
       },
       "gold_answer": {
         "status": "compile_error",
         "error": null,
-        "time": 0.184671
+        "time": 0.122517
       },
       "controls": {
         "empty": {
@@ -2759,17 +2613,12 @@
         }
       }
     },
-    "imo_2018_p3": {
+    "imo_2021_p5": {
       "tag": "imo",
       "statement": {
-        "status": "has_sorry",
+        "status": "compile_error",
         "error": null,
-        "time": 0.257468
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.244396
+        "time": 0.161077
       },
       "controls": {
         "empty": {
@@ -2790,17 +2639,79 @@
         }
       }
     },
-    "imo_2022_p1": {
+    "imo_2018_p4": {
       "tag": "imo",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.208898
+        "time": 0.138273
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.225026
+        "time": 0.139767
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2022_p6": {
+      "tag": "imo",
+      "statement": {
+        "status": "compile_error",
+        "error": null,
+        "time": 0.798206
+      },
+      "gold_answer": {
+        "status": "compile_error",
+        "error": null,
+        "time": 0.859833
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2020_p4": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.068347
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.053485
       },
       "controls": {
         "empty": {
@@ -2826,12 +2737,105 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.231057
+        "time": 0.181638
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.220805
+        "time": 0.158245
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2018_p3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.317447
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.222068
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2022_p1": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.183661
+      },
+      "gold_answer": {
+        "status": "compile_error",
+        "error": null,
+        "time": 0.289095
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
+    "imo_2023_p5": {
+      "tag": "imo",
+      "statement": {
+        "status": "compile_error",
+        "error": null,
+        "time": 0.166916
+      },
+      "gold_answer": {
+        "status": "compile_error",
+        "error": null,
+        "time": 0.285678
       },
       "controls": {
         "empty": {
@@ -2857,7 +2861,7 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 5.538993
+        "time": 5.209836
       },
       "controls": {
         "empty": {
@@ -2889,6 +2893,6 @@
   "split": [
     "test"
   ],
-  "answer_check_ascription": true,
+  "answer_check_ascription": false,
   "lean_server_url": "http://localhost:16211"
 }

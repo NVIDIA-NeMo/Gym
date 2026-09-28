@@ -15,62 +15,88 @@
         "denominator": 5,
         "nonzero_reward": 0,
         "status": {
-          "empty_output": 5
+          "empty_generation": 5
         }
       },
       "echo_with_sorry": {
         "denominator": 5,
         "nonzero_reward": 0,
         "status": {
-          "proof_failed": 4,
-          "has_sorry": 1
+          "has_sorry": 1,
+          "compile_error": 4
         }
       },
       "axiom": {
         "denominator": 5,
         "nonzero_reward": 0,
         "status": {
-          "forbidden_keyword": 5
+          "banned_tokens": 5
         }
       },
       "weakened": {
         "denominator": 5,
         "nonzero_reward": 0,
         "status": {
-          "statement_mismatch": 5
+          "statement_modified": 5
         }
       }
     }
   },
   "rows": {
+    "synthetic_pigeonhole_3": {
+      "tag": "imo",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.029621
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "has_sorry"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
+        }
+      }
+    },
     "synthetic_choose_1": {
       "tag": "hackmath",
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.03166
+        "time": 0.026762
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.031783
+        "time": 0.013962
       },
       "controls": {
         "empty": {
           "reward": 0.0,
-          "status": "empty_output"
+          "status": "empty_generation"
         },
         "echo_with_sorry": {
           "reward": 0.0,
-          "status": "proof_failed"
+          "status": "compile_error"
         },
         "axiom": {
           "reward": 0.0,
-          "status": "forbidden_keyword"
+          "status": "banned_tokens"
         },
         "weakened": {
           "reward": 0.0,
-          "status": "statement_mismatch"
+          "status": "statement_modified"
         }
       }
     },
@@ -79,86 +105,29 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.041787
+        "time": 0.031338
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.020154
+        "time": 0.020278
       },
       "controls": {
         "empty": {
           "reward": 0.0,
-          "status": "empty_output"
+          "status": "empty_generation"
         },
         "echo_with_sorry": {
           "reward": 0.0,
-          "status": "proof_failed"
+          "status": "compile_error"
         },
         "axiom": {
           "reward": 0.0,
-          "status": "forbidden_keyword"
+          "status": "banned_tokens"
         },
         "weakened": {
           "reward": 0.0,
-          "status": "statement_mismatch"
-        }
-      }
-    },
-    "synthetic_pigeonhole_3": {
-      "tag": "imo",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.036297
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_output"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "forbidden_keyword"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_mismatch"
-        }
-      }
-    },
-    "synthetic_gauss_4": {
-      "tag": "brualdi",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.017738
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.05539
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_output"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "proof_failed"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "forbidden_keyword"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_mismatch"
+          "status": "statement_modified"
         }
       }
     },
@@ -167,29 +136,60 @@
       "statement": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.017622
+        "time": 0.032586
       },
       "gold_answer": {
         "status": "has_sorry",
         "error": null,
-        "time": 0.045324
+        "time": 0.022767
       },
       "controls": {
         "empty": {
           "reward": 0.0,
-          "status": "empty_output"
+          "status": "empty_generation"
         },
         "echo_with_sorry": {
           "reward": 0.0,
-          "status": "proof_failed"
+          "status": "compile_error"
         },
         "axiom": {
           "reward": 0.0,
-          "status": "forbidden_keyword"
+          "status": "banned_tokens"
         },
         "weakened": {
           "reward": 0.0,
-          "status": "statement_mismatch"
+          "status": "statement_modified"
+        }
+      }
+    },
+    "synthetic_gauss_4": {
+      "tag": "brualdi",
+      "statement": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.028141
+      },
+      "gold_answer": {
+        "status": "has_sorry",
+        "error": null,
+        "time": 0.023875
+      },
+      "controls": {
+        "empty": {
+          "reward": 0.0,
+          "status": "empty_generation"
+        },
+        "echo_with_sorry": {
+          "reward": 0.0,
+          "status": "compile_error"
+        },
+        "axiom": {
+          "reward": 0.0,
+          "status": "banned_tokens"
+        },
+        "weakened": {
+          "reward": 0.0,
+          "status": "statement_modified"
         }
       }
     }
@@ -200,37 +200,44 @@
     "results": {
       "synthetic_choose_1": {
         "reward": 1.0,
-        "status": "success",
+        "status": "completed",
         "lean_error": null,
         "errors": []
       },
       "synthetic_perm_2": {
         "reward": 1.0,
-        "status": "success",
+        "status": "completed",
         "lean_error": null,
         "errors": []
       },
       "synthetic_pigeonhole_3": {
         "reward": 1.0,
-        "status": "success",
+        "status": "completed",
         "lean_error": null,
         "errors": []
       },
       "synthetic_gauss_4": {
         "reward": 1.0,
-        "status": "success",
+        "status": "completed",
         "lean_error": null,
         "errors": []
       },
       "synthetic_ratio_5": {
         "reward": 1.0,
-        "status": "success",
+        "status": "completed",
         "lean_error": null,
         "errors": []
       }
     }
   },
-  "input": "resources_servers/combibench/data/example_prepare.jsonl",
+  "input": "/out/example_prepare.jsonl",
+  "dataset_source": [
+    "synthetic"
+  ],
+  "dataset_revision": null,
+  "split": [
+    "test"
+  ],
   "answer_check_ascription": true,
-  "lean_server_url": "http://127.0.0.1:12332"
+  "lean_server_url": "http://localhost:16211"
 }
