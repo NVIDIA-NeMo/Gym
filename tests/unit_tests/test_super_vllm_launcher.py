@@ -259,7 +259,7 @@ VLLM_COMMON_ARGS=(--common-test 'value with spaces')
 VLLM_PREFILL_ARGS=(--prefill-test producer)
 VLLM_DECODE_ARGS=(--decode-test consumer)
 vllm() {
-    printf '%s\0' "$VLLM_NIXL_SIDE_CHANNEL_HOST" "$VLLM_NIXL_SIDE_CHANNEL_PORT" "$@"
+    printf '%s\0' "${VLLM_NIXL_SIDE_CHANNEL_HOST:-}" "${VLLM_NIXL_SIDE_CHANNEL_PORT:-}" "$@"
     touch "$TEST_STATE_DIR/service-ready"
     if [[ "$TEST_COUPLED_HEAD" == 1 ]]; then
         while true; do "$TEST_SLEEP" 0.01; done
@@ -425,6 +425,162 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
         status, stdout, stderr = self.run_shell(setup + inspect, *expected)
         self.assertEqual(status, 0, stderr)
         self.assertEqual(dict(zip(expected, stdout.removesuffix("\0").split("\0"), strict=True)), expected)
+
+    def test_prefill_profile_wraps_only_prefill_workers(self) -> None:
+        recipe = str(SCRIPT.parent / "vllm_configs/nemotron_3.5_super_mtp.sh")
+        # Record the actual Nsight invocation, then pass through to the serving stub.
+        profiler_stub = r"""
+nsys() {
+    printf '%s\0' "$VLLM_WORKER_MULTIPROC_METHOD" "$@" > "$TEST_NSYS_ARGS"
+    while [[ "$1" != vllm ]]; do shift; done
+    "$@"
+}
+"""
+        capture = Path(self.workdir) / "nsys_args"
+        profile_dir = Path(self.workdir) / "profile with spaces"
+        for mode in ("independent", "coupled", "aggregated"):
+            for enabled in ("0", "1"):
+                env = {
+                    "VLLM_CONFIG": recipe,
+                    "VLLM_MODE": "aggregated" if mode == "aggregated" else "pd",
+                    "VLLM_PD_DEPLOYMENT_MODE": "coupled" if mode == "coupled" else "independent",
+                    "PROFILE_PREFILL": enabled,
+                    "PREFILL_PROFILE_STEPS": "7",
+                    "PREFILL_PROFILE_DELAY_SECONDS": "manual",
+                    "PREFILL_PROFILE_DIR": str(profile_dir),
+                    "TEST_NSYS_ARGS": str(capture),
+                }
+                _, command = self.generate_commands(env=env)
+                for rank in (0, 1, 4, 5):
+                    with self.subTest(mode=mode, enabled=enabled, rank=rank):
+                        capture.unlink(missing_ok=True)
+                        _, _, args, _ = self.serving_arguments(
+                            profiler_stub + command,
+                            rank=rank,
+                            coupled_head=mode == "coupled" and rank == 0,
+                            env=env,
+                        )
+                        should_profile = enabled == "1" and rank < 4 and mode != "aggregated"
+                        self.assertEqual(capture.exists(), should_profile)
+                        self.assertEqual("--profiler-config" in args, should_profile)
+                        if should_profile:
+                            profiler_args = capture.read_text().removesuffix("\0").split("\0")
+                            self.assertEqual(profiler_args[:2], ["spawn", "profile"])
+                            self.assertIn("--capture-range=cudaProfilerApi", profiler_args)
+                            self.assertIn("--capture-range-end=stop", profiler_args)
+                            self.assertIn("--cuda-graph-trace=node", profiler_args)
+                            output = profiler_args[profiler_args.index("--output") + 1]
+                            self.assertEqual(output, str(profile_dir / f"prefill-12345-node{rank}-%p"))
+                            self.assertTrue(profile_dir.is_dir())
+                            config = json.loads(args[args.index("--profiler-config") + 1])
+                            self.assertEqual(config, {"profiler": "cuda", "max_iterations": 7})
+
+    def test_prefill_profile_automatically_waits_for_health_and_warmup(self) -> None:
+        _, command = self.generate_commands()
+        setup = command.split('\nmooncake_pid=""', 1)[0]
+        stubs = r"""
+hostname() { echo node1; }
+curl() {
+    if [[ "${*: -1}" == http://node1:8001/health ]]; then
+        echo health
+        if [[ ! -f ready ]]; then touch ready; return 22; fi
+    else
+        [[ "${*: -3}" == '-X POST http://node1:8001/start_profile' ]] || return 99
+        echo post
+        return "${TEST_POST_STATUS:-0}"
+    fi >> events
+}
+sleep() { echo sleep >> events; SECONDS=$((SECONDS + 1)); }
+"""
+        for post_status in ("0", "22"):
+            with self.subTest(post_status=post_status):
+                for name in ("ready", "events"):
+                    (Path(self.workdir) / name).unlink(missing_ok=True)
+                status, _, stderr = self.run_shell(
+                    stubs + setup + "\nprofile_delay=2\nsteps=20\ntrigger_prefill_profile\n",
+                    env={"TEST_POST_STATUS": post_status},
+                )
+                self.assertEqual(status, 0 if post_status == "0" else 1, stderr)
+                self.assertEqual(
+                    (Path(self.workdir) / "events").read_text().splitlines(),
+                    ["health", "sleep", "health", "sleep", "sleep", "post"],
+                )
+                self.assertIn("capture started" if post_status == "0" else "Could not start", stderr)
+
+    def test_prefill_profile_autotrigger_only_runs_on_api_workers(self) -> None:
+        _, command = self.generate_commands()
+        setup = command.split('\nmooncake_pid=""', 1)[0]
+        stubs = r"""
+nsys() {
+    if [[ " $* " == *' --headless '* || "$PREFILL_PROFILE_DELAY_SECONDS" == manual ]]; then return; fi
+    while [[ ! -f posted ]]; do "$TEST_SLEEP" 0.01; done
+}
+curl() {
+    echo "${*: -1}" >> urls
+    if [[ "${*: -1}" == */start_profile ]]; then touch posted; fi
+}
+"""
+        for delay, headless in (("0", False), ("0", True), ("manual", False)):
+            with self.subTest(delay=delay, headless=headless):
+                for name in ("posted", "urls"):
+                    (Path(self.workdir) / name).unlink(missing_ok=True)
+                status, _, stderr = self.run_shell(
+                    stubs + setup + '\nserve_prefill /test/model "$@"\n',
+                    *(["--headless"] if headless else []),
+                    env={"PROFILE_PREFILL": "1", "PREFILL_PROFILE_DELAY_SECONDS": delay},
+                )
+                self.assertEqual(status, 0, stderr)
+                urls = Path(self.workdir) / "urls"
+                self.assertEqual(urls.exists(), delay == "0" and not headless)
+                if urls.exists():
+                    self.assertEqual(
+                        [url.rsplit("/", 1)[1] for url in urls.read_text().splitlines()], ["health", "start_profile"]
+                    )
+
+    def test_prefill_profile_rejects_invalid_steps_or_missing_nsys(self) -> None:
+        _, command = self.generate_commands()
+        setup = command.split('\nmooncake_pid=""', 1)[0]
+        # Hide nsys regardless of what is installed on the test host.
+        stubs = r"""
+command() { if [[ "$*" == '-v nsys' ]]; then return 1; else builtin command "$@"; fi; }
+vllm() { echo 'unexpected server launch'; }
+"""
+        for steps, expected in (
+            ("0", "must be a positive integer"),
+            ("-1", "must be a positive integer"),
+            ("1.5", "must be a positive integer"),
+            ("abc", "must be a positive integer"),
+            ("20", "requires Nsight Systems"),
+        ):
+            with self.subTest(steps=steps):
+                status, stdout, stderr = self.run_shell(
+                    stubs + setup + "\nserve_prefill /test/model\n",
+                    env={"PROFILE_PREFILL": "1", "PREFILL_PROFILE_STEPS": steps},
+                )
+                self.assertNotEqual(status, 0)
+                self.assertNotIn("unexpected server launch", stdout)
+                self.assertIn(expected, stderr)
+
+    def test_prefill_profile_cancels_pending_trigger_when_server_exits(self) -> None:
+        _, command = self.generate_commands()
+        setup = command.split('\nmooncake_pid=""', 1)[0]
+        stubs = r"""
+nsys() {
+    while [[ ! -f trigger_started ]]; do "$TEST_SLEEP" 0.01; done
+    return 17
+}
+trigger_prefill_profile() {
+    trap 'touch trigger_stopped; exit 0' TERM
+    touch trigger_started
+    while true; do "$TEST_SLEEP" 0.01; done
+}
+"""
+        status, _, stderr = self.run_shell(
+            setup + stubs + "\nserve_prefill /test/model\n",
+            env={"PROFILE_PREFILL": "1"},
+        )
+        self.assertEqual(status, 17, stderr)
+        self.assertTrue((Path(self.workdir) / "trigger_stopped").exists())
 
     def test_api_server_count_is_removed_only_from_headless_ranks(self):
         with TemporaryDirectory(prefix="gym-headless-args-") as directory:

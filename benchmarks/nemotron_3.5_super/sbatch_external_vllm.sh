@@ -212,19 +212,120 @@ fi
 this_node_hostname=\$(hostname)
 read -r -a nodes <<< "\$ALL_NODES"
 
+# The model config can opt prefill into a short, API-triggered GPU trace.
+# Keep profiler setup here so decode, evaluation, and aggregated workers are unaffected.
+profiler_pid=""
+trigger_pid=""
+cleanup_prefill_profile() {
+    if [[ -n "\$trigger_pid" ]]; then
+        kill "\$trigger_pid" 2>/dev/null || true
+        wait "\$trigger_pid" 2>/dev/null || true
+        trigger_pid=""
+    fi
+    if [[ -n "\$profiler_pid" ]]; then
+        kill "\$profiler_pid" 2>/dev/null || true
+        wait "\$profiler_pid" 2>/dev/null || true
+        profiler_pid=""
+    fi
+}
+
+trigger_prefill_profile() {
+    local url="http://\$this_node_hostname:$WORKER_SERVER_PORT"
+    local deadline=\$(( SECONDS + 1200 ))
+    until curl --noproxy '*' --silent --fail --max-time 5 "\$url/health" >/dev/null; do
+        if (( SECONDS >= deadline )); then
+            echo "WARNING: Timed out waiting for \$url/health; no prefill profile captured." >&2
+            return 1
+        fi
+        sleep 1
+    done
+    echo "Prefill profiling: \$url ready; capturing in \$profile_delay seconds." >&2
+    # Short sleeps let teardown cancel the trigger without leaving a long-lived sleep process.
+    deadline=\$(( SECONDS + 10#\$profile_delay ))
+    while (( SECONDS < deadline )); do sleep 1; done
+    if curl --noproxy '*' --silent --show-error --fail --max-time 120 \
+        -X POST "\$url/start_profile" >/dev/null; then
+        echo "Prefill profiling: capture started on \$url (worker-step limit: \$steps)." >&2
+    else
+        echo "WARNING: Could not start prefill profile on \$url; serving continues." >&2
+        return 1
+    fi
+}
+
+serve_prefill() {
+    if [[ "\${PROFILE_PREFILL:-0}" != 1 ]]; then
+        vllm serve "\$@"
+        return
+    fi
+    local steps="\${PREFILL_PROFILE_STEPS:-20}"
+    if [[ ! "\$steps" =~ ^[1-9][0-9]*\$ ]]; then
+        echo "ERROR: PREFILL_PROFILE_STEPS must be a positive integer." >&2
+        return 1
+    fi
+    if ! command -v nsys >/dev/null 2>&1; then
+        echo "ERROR: PROFILE_PREFILL=1 requires Nsight Systems (nsys) in the vLLM container." >&2
+        return 1
+    fi
+    local profile_delay="\${PREFILL_PROFILE_DELAY_SECONDS:-300}"
+    if [[ "\$profile_delay" != manual && ! "\$profile_delay" =~ ^[0-9]+\$ ]]; then
+        echo "ERROR: PREFILL_PROFILE_DELAY_SECONDS must be a nonnegative integer or manual." >&2
+        return 1
+    fi
+    local api_worker=1 arg
+    for arg in "\$@"; do
+        if [[ "\$arg" == --headless ]]; then api_worker=0; fi
+    done
+    if [[ "\$profile_delay" != manual ]] && (( api_worker )) && ! command -v curl >/dev/null 2>&1; then
+        echo "ERROR: Automatic prefill profiling requires curl in the vLLM container." >&2
+        return 1
+    fi
+    local profile_dir="\${PREFILL_PROFILE_DIR:-\${SLURM_SUBMIT_DIR:-\$PWD}/results/nsys}"
+    mkdir -p "\$profile_dir"
+    # The coupled API head runs this function in a background shell. Forward
+    # its shutdown to Nsight; the parent owns router and Mooncake cleanup.
+    if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]] && (( SLURM_PROCID == 0 )); then
+        trap cleanup_prefill_profile EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+    fi
+    # Trace graph nodes and child TP workers. 'stop' ends collection without
+    # shutting down the serving process; this captures one window per launch.
+    VLLM_WORKER_MULTIPROC_METHOD=spawn nsys profile \
+        --trace=cuda,nvtx,osrt \
+        --sample=none --cpuctxsw=none \
+        --trace-fork-before-exec=true --cuda-graph-trace=node \
+        --capture-range=cudaProfilerApi --capture-range-end=stop \
+        --output "\$profile_dir/prefill-\$SLURM_JOB_ID-\$this_node_hostname-%p" \
+        vllm serve "\$@" \
+        --profiler-config "{\"profiler\":\"cuda\",\"max_iterations\":\$steps}" &
+    profiler_pid=\$!
+    # Coupled headless ranks are profiled through their tier's API head.
+    if [[ "\$profile_delay" != manual ]] && (( api_worker )); then
+        trigger_prefill_profile &
+        trigger_pid=\$!
+    fi
+    local status=0
+    wait "\$profiler_pid" || status=\$?
+    profiler_pid=""
+    cleanup_prefill_profile
+    return "\$status"
+}
+
 mooncake_pid=""
-cleanup_mooncake() {
+cleanup_worker_services() {
+    cleanup_prefill_profile
     if [[ -n "\$mooncake_pid" ]]; then
         kill "\$mooncake_pid" 2>/dev/null || true
         wait "\$mooncake_pid" 2>/dev/null || true
     fi
 }
 
+# Cover setup failures and headless workers before serving-mode traps take over.
+trap cleanup_worker_services EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if (( ENABLE_MOONCAKE )); then
-    # Cover setup failures before the serving-mode cleanup traps take over.
-    trap cleanup_mooncake EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
     export MOONCAKE_CONFIG_PATH="\${MOONCAKE_CONFIG_PATH:-/tmp/mooncake-\$SLURM_JOB_ID/config.json}"
     mkdir -p "\$(dirname "\$MOONCAKE_CONFIG_PATH")"
     cat > "\$MOONCAKE_CONFIG_PATH" <<MOONCAKE_CONFIG
@@ -313,7 +414,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         # prefill ranks run headless so expert parallelism spans the tier.
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+        serve_prefill "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
             --host \$this_node_hostname \
             --port $WORKER_SERVER_PORT \
             --data-parallel-size $NUM_PREFILL_NODES \
@@ -329,7 +430,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             # Signal both local services without delaying failure propagation;
             # the enclosing srun tears down the remaining distributed workers.
             kill "\${coupled_pids[@]}" 2>/dev/null || true
-            cleanup_mooncake
+            cleanup_worker_services
             exit "\$status"
         }
         trap cleanup_coupled_head EXIT
@@ -372,7 +473,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         set_headless_args "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}"
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${headless_args[@]}" \
+        serve_prefill "$MODEL" --served-model-name "$MODEL_NAME" "\${headless_args[@]}" \
             --headless \
             --data-parallel-size $NUM_PREFILL_NODES \
             --data-parallel-start-rank \$SLURM_PROCID \
@@ -409,7 +510,7 @@ else
             kill "\$router_pid" 2>/dev/null || true
             wait "\$router_pid" 2>/dev/null || true
         fi
-        cleanup_mooncake
+        cleanup_worker_services
     }
     trap cleanup_vllm EXIT
     trap 'exit 130' INT
@@ -490,7 +591,7 @@ else
         # Prefill
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+        serve_prefill "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
             --host \$this_node_hostname \
             --port $WORKER_SERVER_PORT
     else
