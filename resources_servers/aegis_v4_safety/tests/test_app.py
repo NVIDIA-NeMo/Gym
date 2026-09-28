@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 from app import (
+    VERIFIER_FIXTURE,
     AegisV4SafetyConfig,
     AegisV4SafetyResourcesServer,
     AegisV4SafetyVerifyRequest,
@@ -21,6 +22,21 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.verifier_fixture import exercise_verifier_fixture
+
+
+async def test_verifier_fixture() -> None:
+    results = await exercise_verifier_fixture(
+        VERIFIER_FIXTURE,
+        reward_range=(0.0, 1.0),
+        higher_is_better=True,
+        determinism="stochastic",
+    )
+    assert [(result.kind, result.observed_rewards) for result in results] == [
+        ("full_reward", (1.0,)),
+        ("zero_reward", (0.0,)),
+        ("malformed", ()),
+    ]
 
 
 def _response(text: str, reasoning: str | None = None) -> NeMoGymResponse:

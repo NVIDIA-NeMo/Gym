@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import re
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, ClassVar, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,6 +33,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.verifier_fixture import VerifierFixture
+from resources_servers.aegis_v4_safety.verifier_fixture import (
+    create_aegis_v4_safety_server,
+    invoke_aegis_v4_safety,
+)
 
 
 SafetyLabel = Literal["safe", "unsafe"]
@@ -415,6 +421,14 @@ class AegisV4SafetyResourcesServer(SimpleResourcesServer):
         for score_name in ("response_safe", "response_unsafe", "unresolved", "user_unsafe"):
             key_metrics.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=[score_name]))
         return key_metrics
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_aegis_v4_safety_server,
+    request_model=AegisV4SafetyVerifyRequest,
+    cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
+    invoke=invoke_aegis_v4_safety,
+)
 
 
 if __name__ == "__main__":
