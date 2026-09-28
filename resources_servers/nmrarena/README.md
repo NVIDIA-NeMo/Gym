@@ -133,6 +133,26 @@ to `count/tanimoto_defined`, so it is read with its denominator.
   any invalid, oversize or duplicate entry, or more than ten entries. Off by
   default; it exists to measure upstream's tolerance, not to replace it.
 
+### Known limitation: the applied temperature is not confirmed by the response
+
+Every row of `data/example_rollouts.jsonl` requests upstream's decoding,
+`temperature: 1.0` and `max_output_tokens: 24576`, but the recorded provider
+response on the `gcp/google/gemini-3.1-pro-preview` route reports
+`"temperature": 0.0` and `"max_output_tokens": null`. That field reports the
+provider's own call rather than echoing the request — the OpenAI-route siblings
+(`moldetox`, `fukuyamabench`) send no temperature at all and come back reporting
+`1.0` with `top_p 0.98` — and this route under-reports applied parameters
+generally: it also reports `max_output_tokens: null` while the gateway
+separately returned responses over that budget.
+
+What it does not prove is that decoding was greedy. The three sweeps recorded
+here score 31.4 / 29.5 / 28.6 (SD 1.5) on a fixed 105-task set, which greedy
+decoding would not produce. So sampling was evidently on, but the temperature
+actually applied on this route is **not confirmed** by the recorded response,
+in either direction. Treat the reported value as unreliable on this route and
+do not read the recorded sweeps as an exact reproduction of upstream's
+decoding settings.
+
 ## Harness validation
 
 No model is involved. `scripts/validate_harness.py` drives `verify()` over the
