@@ -156,8 +156,11 @@ class HermesAgentSessionState:
     workdir: str | None
     session_dir: str
     owns_sandbox: bool = False
+    runner_launch: asyncio.Future[SandboxPtySession] | None = None
     runner_session: SandboxPtySession | None = None
     runner_exit_task: asyncio.Task[int] | None = None
+    activation: asyncio.Task[AgentEpisode] | None = None
+    closing: bool = False
     observations: AgentObservationBundle | None = None
 
 
@@ -180,6 +183,8 @@ if not LOG.handlers:
 
 
 def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Optional[str]]:
+    if isinstance(input_items, str):
+        return input_items, [], None
     items = list(input_items)
     system_message: Optional[str] = None
     if items:
@@ -300,6 +305,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 return AgentCloseSessionResponse(agent_session_id=agent_session_id)
             if body.episode_id != state.request.episode_id:
                 raise ValueError("episode_id does not match the seeded agent session")
+            # Stop any activation still running, and wait for it to stop its runner before tearing down.
+            state.closing = True
+            if state.activation is not None and not state.activation.done():
+                state.activation.cancel()
+                await asyncio.wait({state.activation})
             observations = await self._close_agent_session_state(state)
             del self._agent_sessions[agent_session_id]
             self._closed_agent_session_ids.add(agent_session_id)
@@ -475,6 +485,21 @@ class HermesAgent(SimpleResponsesAPIAgent):
         )
 
     async def _terminate_sandbox_runner(self, state: HermesAgentSessionState) -> None:
+        launch, state.runner_launch = state.runner_launch, None
+        if launch is not None and state.runner_session is None:
+            # A cancelled activation can leave the runner starting; wait for its handle so it can be stopped.
+            try:
+                state.runner_session = await asyncio.wait_for(
+                    asyncio.shield(launch),
+                    timeout=self.config.session_close_timeout_seconds,
+                )
+                state.runner_exit_task = asyncio.create_task(state.runner_session.wait_exit())
+            except TimeoutError:
+                LOG.warning("Hermes sandbox runner launch did not finish; the sandbox teardown must stop it")
+                return
+            except Exception:
+                # A failed launch started no runner, and the activation already reports its error.
+                return
         runner_session = state.runner_session
         runner_exit_task = state.runner_exit_task
         if runner_session is None:
@@ -658,8 +683,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "user_message": user_message,
         }
         await self._upload_json(state.sandbox, input_path, payload)
-        try:
-            state.runner_session = await state.sandbox.pty.create(
+        # Keep the launch so termination can still stop a runner whose activation was cancelled mid-launch.
+        state.runner_launch = asyncio.ensure_future(
+            state.sandbox.pty.create(
                 command=(
                     f"{quote(_SANDBOX_PYTHON)} {quote(_SANDBOX_RUNNER)} "
                     f"{quote(input_path)} {quote(output_path)} "
@@ -668,14 +694,18 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 cwd=state.workdir,
                 pty=False,
             )
-        except NotImplementedError as error:
-            raise ValueError("Hermes requires a sandbox provider with PTY process sessions") from error
-        state.runner_exit_task = asyncio.create_task(state.runner_session.wait_exit())
+        )
 
         model_cookies: Any = None
         model_calls: list[ModelCallRef] = []
         request_index = 0
         try:
+            try:
+                state.runner_session = await asyncio.shield(state.runner_launch)
+            except NotImplementedError as error:
+                raise ValueError("Hermes requires a sandbox provider with PTY process sessions") from error
+            state.runner_launch = None
+            state.runner_exit_task = asyncio.create_task(state.runner_session.wait_exit())
             while True:
                 request_path = f"{state.session_dir}/model-request-{request_index}.json"
                 status = await state.sandbox.exec(
@@ -691,12 +721,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 if state_name == "running" and state.runner_exit_task is not None and state.runner_exit_task.done():
                     state_name = "exited"
                 if state_name == "request":
+                    # The runner relays the request body the OpenAI SDK built, so it is sent as is.
                     model_request = await self._download_json(state.sandbox, request_path)
-                    for client_option in ("extra_headers", "extra_query", "timeout"):
-                        model_request.pop(client_option, None)
-                    extra_body = model_request.pop("extra_body", None)
-                    if isinstance(extra_body, dict):
-                        model_request = extra_body | model_request
                     try:
                         model_response = await self.server_client.post(
                             server_name=self.config.model_server.name,
@@ -714,7 +740,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
                             )
                         relay_payload = {"response": response_payload}
                     except Exception as error:
-                        relay_payload = {"error": str(error)}
+                        # Keep the Model Server's status and body so Hermes handles the error as it would over HTTP.
+                        content = getattr(error, "response_content", None)
+                        relay_payload = {
+                            "error": content.decode(errors="replace") if isinstance(content, bytes) else str(error)
+                        }
+                        if isinstance(getattr(error, "status", None), int):
+                            relay_payload["status"] = error.status
                     await self._upload_json(
                         state.sandbox,
                         f"{state.session_dir}/model-response-{request_index}.json",
@@ -983,12 +1015,20 @@ class HermesAgent(SimpleResponsesAPIAgent):
             state = self._require_agent_session(agent_session_id)
             if state.request.episode_id.capture_key != rollout_id:
                 raise ValueError("Agent-session episode_id does not match the rollout route")
-            episode = await self._run_sandbox_episode(
-                request=request,
-                body=body,
-                agent_session_id=agent_session_id,
-                state=state,
+            if state.closing:
+                raise ValueError(f"Agent session is closing: {agent_session_id}")
+            if state.activation is not None and not state.activation.done():
+                raise ValueError(f"Agent session already has an activation in flight: {agent_session_id}")
+            # Close cancels this task and waits for it, so it must not start a runner after close begins.
+            state.activation = asyncio.create_task(
+                self._run_sandbox_episode(
+                    request=request,
+                    body=body,
+                    agent_session_id=agent_session_id,
+                    state=state,
+                )
             )
+            episode = await state.activation
             state.observations = episode.observations
             return episode.response
         if not isinstance(rollout_id, str):

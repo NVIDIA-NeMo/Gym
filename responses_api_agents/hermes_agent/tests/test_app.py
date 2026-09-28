@@ -42,6 +42,7 @@ from responses_api_agents.hermes_agent.app import (
     HermesAgent,
     HermesAgentConfig,
     HermesAgentRunRequest,
+    HermesAgentSessionState,
     ModelServerRef,
     ResourcesServerRef,
     _split_input_to_user_and_history,
@@ -239,6 +240,79 @@ class TestSanity:
 
         hermes._initialize_agent_session_state.assert_not_awaited()
 
+    async def test_close_during_runner_launch_stops_the_late_runner(self) -> None:
+        class _Runner:
+            def __init__(self) -> None:
+                self.exited = asyncio.Event()
+                self.signals: list[str] = []
+                self.closed = False
+
+            async def wait_exit(self) -> int:
+                await self.exited.wait()
+                return 0
+
+            async def send_signal(self, signal: str) -> None:
+                self.signals.append(signal)
+                self.exited.set()
+
+            async def close(self) -> None:
+                self.closed = True
+
+        class _Sandbox:
+            def __init__(self) -> None:
+                self.runner = _Runner()
+                self.launch_started = asyncio.Event()
+                self.release_launch = asyncio.Event()
+                self.pty = self
+
+            async def upload(self, *_args) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                pass
+
+            async def exec(self, *_args, **_kwargs) -> SimpleNamespace:
+                return SimpleNamespace(stdout="running")
+
+            async def create(self, **_kwargs) -> _Runner:
+                self.launch_started.set()
+                await self.release_launch.wait()
+                return self.runner
+
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        seed = AgentSeedSessionRequest(
+            agent_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="test", task_id="task"),
+        )
+        sandbox = _Sandbox()
+        hermes._agent_sessions["session"] = HermesAgentSessionState(
+            request=seed, sandbox=sandbox, workdir=None, session_dir="/session"
+        )
+        request = SimpleNamespace(
+            session={"agent_session_id": "session"},
+            path_params={"rollout_id": seed.episode_id.capture_key},
+        )
+
+        activation = asyncio.create_task(
+            hermes.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
+        )
+        await sandbox.launch_started.wait()
+        close = asyncio.create_task(
+            hermes.close_agent_session(
+                request, AgentCloseSessionRequest(agent_session_id="session", episode_id=seed.episode_id)
+            )
+        )
+        await asyncio.sleep(0.01)
+        sandbox.release_launch.set()
+        await asyncio.wait_for(close, timeout=5)
+
+        assert sandbox.runner.signals == ["SIGTERM"]
+        assert sandbox.runner.closed
+        assert "session" not in hermes._agent_sessions
+        with pytest.raises(asyncio.CancelledError):
+            await activation
+
     async def test_close_before_seed_prevents_late_creation(self) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         body = AgentSeedSessionRequest(
@@ -378,6 +452,9 @@ class TestSigtermHandler:
 
 
 class TestSplitInputToUserAndHistory:
+    def test_string_input_is_the_user_message(self) -> None:
+        assert _split_input_to_user_and_history("fix bug") == ("fix bug", [], None)
+
     def test_user_only(self) -> None:
         items = [NeMoGymEasyInputMessage(role="user", content="hi")]
         user, history, system = _split_input_to_user_and_history(items)
