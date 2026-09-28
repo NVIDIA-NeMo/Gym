@@ -20,7 +20,9 @@ The dataset is one JSON file in the upstream GitHub repository
 has no tags, releases or DOI, and both the results table and the spectra strings
 have been edited in place since the repository appeared, so the file is fetched at a
 pinned commit and its SHA-256 is checked before anything is written. The benchmark
-data is MIT-licensed but is not redistributed here; it is downloaded at run time.
+data is not redistributed here; it is downloaded at run time. Upstream declares the
+repository MIT, but the rights in the underlying published spectra are undetermined,
+so both splits carrying these rows are declared TBD; see README "Licensing".
 
 Each output row is upstream's request: the vendored system prompt, the notebook's
 user prompt built from the normalised 1H and 13C peak strings, and the notebook's
