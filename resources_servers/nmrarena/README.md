@@ -223,11 +223,21 @@ gym env test +entrypoint=resources_servers/nmrarena
 
 Code: Apache 2.0.
 
-NMRArena data: MIT ("Copyright (c) 2026 OdanChem"), declared for the whole
-repository including `dataset/dataset_selected_clean_105.json`. The spectra are
-curated from OdanChem's open spectral database; rights in the underlying published
-spectra are not determined here. The data is downloaded at run time and not
-committed.
+NMRArena data: upstream ships a single repository-wide `LICENSE`, MIT
+("Copyright (c) 2026 OdanChem"), with no separate data licence and no statement
+scoping it, so it reads as covering `dataset/dataset_selected_clean_105.json`
+too. That grant covers the curated peak lists. It does not settle the rights in
+the underlying published spectra, which are curated from OdanChem's open
+spectral database and are not determined here.
+
+Both splits carrying those 105 rows — the `nmrarena_105` validation split in
+`configs/nmrarena.yaml` and the benchmark split in `benchmarks/nmrarena/config.yaml`
+— are therefore declared `TBD` rather than asserting a grant we cannot verify.
+Resolve with Legal before publishing results. The data is downloaded at run time
+and not committed.
+
+The five-row `example` split stays MIT: those molecules and peak lists are
+hand-authored for this repository and contain no upstream data.
 
 `prompts/system_prompt.txt` is upstream's, unmodified, under MIT with the upstream
 licence and a provenance notice alongside. The Apache-2.0 header covers the
