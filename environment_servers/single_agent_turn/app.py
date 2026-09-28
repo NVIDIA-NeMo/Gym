@@ -20,7 +20,6 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
-    ResourcesVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
@@ -257,7 +256,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 cookies=resources_cookies,
             )
             await raise_for_status(verify_http_response)
-            verification = ResourcesVerifyResponse.model_validate(await get_response_json(verify_http_response))
+            verification = SingleAgentTurnResult.model_validate(await get_response_json(verify_http_response))
         except Exception as error:
             raise self._failure(
                 stage="verification",
@@ -276,11 +275,12 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return SingleAgentTurnResponse(
             episode_id=request.episode_id,
             task_id=request.task.task_id,
-            result=SingleAgentTurnResult(
-                verification=verification,
-                agent_observations=agent_close_response.agent_observations
-                if agent_close_response is not None
-                else None,
+            result=verification.model_copy(
+                update={
+                    "ng_agent_observations": agent_close_response.agent_observations
+                    if agent_close_response is not None
+                    else None
+                }
             ),
         )
 

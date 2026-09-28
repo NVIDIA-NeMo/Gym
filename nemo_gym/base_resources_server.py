@@ -215,12 +215,6 @@ class ResourcesVerifyRequest(BaseModel, Generic[VerificationInputT]):
     verification_input: VerificationInputT
 
 
-class ResourcesVerifyResponse(BaseVerifyResponse):
-    """Preserve environment-specific verification fields across the server boundary."""
-
-    model_config = ConfigDict(extra="allow")
-
-
 class ResourcesCloseSessionRequest(BaseModel):
     """Close resources-server state."""
 

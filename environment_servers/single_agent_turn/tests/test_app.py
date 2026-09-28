@@ -181,8 +181,11 @@ async def test_single_agent_turn_with_direct_resources_tools() -> None:
     result = await environment_server.run_request(_request())
 
     assert result.result is not None
-    assert result.result.verification.reward == 1.0
-    assert result.result.verification.model_dump()["benchmark_field"] == "preserved"
+    assert result.result.reward == 1.0
+    assert result.result.model_dump()["benchmark_field"] == "preserved"
+    # The verify response is the result itself, so stored rollout records keep the flat verify-response shape.
+    assert "verification" not in result.result.model_dump()
+    assert result.result.model_dump()["response"]["id"] == "response"
     assert [path for _, path, _ in client.calls] == [
         "/seed_session",
         "/v1/agent_sessions",
@@ -285,7 +288,7 @@ async def test_resources_close_failure_after_verification_keeps_result() -> None
     result = await environment_server.run_request(_request())
 
     assert result.result is not None
-    assert result.result.verification.reward == 1.0
+    assert result.result.reward == 1.0
     assert [path for _, path, _ in client.calls].count("/close_session") == 2
 
 
