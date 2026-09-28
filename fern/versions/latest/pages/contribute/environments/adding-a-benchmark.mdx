@@ -6,19 +6,17 @@ position: 3
 
 # Add a benchmark
 
-A benchmark contribution should let another person prepare the same tasks, run them under a stated configuration, and understand what the score measures. Preserve the benchmark's data, prompting, verification, and scoring semantics when integrating it into Gym.
+A benchmark contribution should let any user prepare the same tasks, run them under a stated configuration, and understand what the score measures.
 
-Keep the task contract independent of the harness wherever possible. The task defines the inputs, tools, state, required artifacts, and scoring rules; the harness chooses how to solve it. If the harness itself is part of the subject being measured, say so explicitly. See [Component Ownership](/main/contribute/environments/new-environment#component-ownership) for the agent/environment separation design and the current implementation boundaries.
+When onboarding a benchmark, it is important to keep the task contract independent of the harness wherever possible. The task defines the inputs, tools, state, required artifacts, and scoring rules; the harness chooses how to solve it. If the harness itself is part of the subject being measured, this must be stated explicitly. See [Component Ownership](/main/contribute/environments/new-environment#component-ownership) for the agent/environment separation design and the current implementation boundaries.
 
 ## Before implementation
 
-Record the measurement contract in the benchmark's README:
+The measurement contract should be recorded in the benchmark's README:
 
 - **Provenance:** upstream repository or dataset, pinned revision, data and software licenses, split, filtering, task count, and any synthetic data generation.
 - **Task contract:** model-visible inputs, prompt construction, tools, sandbox requirements, and how the harness produces every artifact the verifier reads. Keep reference answers out of model-visible prompts.
 - **Scoring and run conditions:** reward range and direction, aggregate metric, judge settings, harness and model, sampling settings, token or step budgets, timeouts, repeats, and seeds where supported.
-
-For an existing benchmark, first reproduce a published result using its original implementation. Then reproduce it in Gym under matched conditions. Record unresolved upstream reproduction issues and intentional deviations; a successful smoke run alone does not establish benchmark fidelity.
 
 ## Onboarding workflow
 
@@ -64,7 +62,7 @@ Complete the manifest's authored metadata and keep its composition mirror consis
 - Set `kind: benchmark`, the source `canonical_split`, and at least one dataset with `type: benchmark` and `prepare_script`. The source split name and Gym's dataset type may differ.
 - Use `prompt_source: template` (the default) with `standard_prompt_config` for templated rows; use `prepared` when rows already contain `responses_create_params.input`; use `agent` when prompts are constructed during harness or external-engine execution. Follow the [prompt field rules](/main/contribute/environments/new-environment#prompt-sources).
 - Keep task data with the resources-server instance for new Gym-native tasks, as the standard scaffold does. Existing agent-owned declarations remain supported. Update the runtime config first when wiring changes.
-- Keep `experimental: true` initially. A manifest is a discovery and validation contract, not a certification of the benchmark's scores.
+- Keep `experimental: true` initially. A manifest is a discovery and validation contract, not a certification of the benchmark's scores. This value moves to *false* with specific approval from the Gym developer team.
 
 See [Environment Manifest](/main/contribute/environments/new-environment#environment-manifest) for the example and field reference, including `config_path` for named configurations and `dataset_owner` for ambiguous compositions.
 
@@ -86,7 +84,7 @@ The fixture-based `gym env test NAME` and `gym env publish NAME` commands curren
 
 ### 4. Run a representative evaluation
 
-Configure your endpoint as described in [Configure Model](/main/model-server). This example uses the OpenAI-compatible adapter; choose the adapter for your endpoint:
+For an existing benchmark, try to reproduce a published result using your model of choice. Configure your endpoint as described in [Configure Model](/main/model-server). This example uses the OpenAI-compatible adapter; choose the adapter for your endpoint:
 
 ```bash
 gym eval run --benchmark my_benchmark --model-type openai_model \
@@ -94,31 +92,4 @@ gym eval run --benchmark my_benchmark --model-type openai_model \
     --output results/my_benchmark_smoke.jsonl
 ```
 
-Inspect the materialized inputs, agent trajectories, verifier decisions, and aggregate score. Include successful and unsuccessful cases and exercise any changed tools or state. Confirm that task artifacts reach the verifier and that setup or transport failures are distinguishable from valid low-scoring attempts. For example, a deliverable-scoring task must expose how to create the deliverables, rather than relying on an undocumented handoff in one harness.
-
 For workloads with a verifier fixture, finish the local onboarding checks with `gym env publish my_benchmark`. This reruns validation and the fixture, rejects unfinished metadata, and confirms catalog discovery. It does not upload data, register a hosted workload, or push changes.
-
-## Reward profiling
-
-Profile a benchmark to check difficulty, scoring behavior, and variability. Choose models that can meaningfully attempt the task, and exercise instruct and thinking behavior where applicable. Compare Gym and upstream results with the same model, harness, prompts, dataset, verifier, and budgets before attributing a score difference to the model.
-
-Collect multiple repeats on a fixed configuration and use the matching materialized inputs and rollouts:
-
-```bash
-gym eval run --benchmark my_benchmark --model-type openai_model \
-    --split benchmark --num-repeats 4 \
-    --output results/my_benchmark.jsonl
-
-gym eval profile \
-    --inputs results/my_benchmark_materialized_inputs.jsonl \
-    --rollouts results/my_benchmark.jsonl
-```
-
-Four repeats illustrate the workflow, not a universal statistical threshold. Inspect high- and low-reward trajectories, report variability, and choose enough repeats to resolve the score differences you intend to measure. A single aggregate number can hide prompt, tool, or verifier bugs.
-
-## Best practices
-
-- Keep model-specific adaptation in the model adapter and reusable loop behavior in the harness. Keep task state, tools, artifacts, and scoring with the task implementation.
-- When comparing harnesses, use the supported `--agent-type` selector for compatible pairings and hold the task, model, prompts, verifier, and budgets fixed. Record the selected harness and any limitations. If the harness is part of the benchmark definition, a swap is a separate measured variant.
-- Preserve exact reproduction commands, source revisions, model and harness identities, overrides, and representative rollout evidence in the README or PR. Explain differences from the published baseline and checks that could not be completed.
-- Follow [Contributing](/main/contribute) for repository checks and signed-off commits. Behavior-changing task or agent work requires a representative real model rollout. Full evaluations and training runs provide stronger evidence but are not blanket merge requirements; documentation and metadata-only changes do not require model compute.
