@@ -62,11 +62,19 @@ artefact or container changes can cause both. Harness-fault rows are not masked:
 the `pass_rate/<band>` denominator at reward 0 (as the Surveyor how-to and `terminal_bench_2_1`
 do) and are distinguishable through `mean/harness_failure` and the row's `failure_kind`
 (`provider_unavailable`, `verifier_error`, `session_lost`, or `oragentbench:<status>`), so a
-run with infrastructure incidents reads as a lower bound rather than a clean score. Headline selection: `mean/reward`,
-`mean/feasibility`, `mean/quality`, `mean/harness_failure`, token counts, and the per-stratum
-`pass_rate/<band>`, `feasibility_rate/<band>`, `mean_quality/<band>`, `count/<band>` are promoted
-to `key_metrics`; published baselines differ by more than 2x across strata, so the pooled
-figure alone describes no published quantity.
+run with infrastructure incidents reads as a lower bound rather than a clean score. This is a
+deliberate departure from the `mask_sample` guidance in `nemo_gym/base_resources_server.py`,
+which names infrastructure failures (a lost session, an unavailable judge, an OOM-killed
+container) as the cases to mask: the published pass rates are over all 107 tasks, so every task
+stays in the denominator and a harness incident costs the run its point rather than shrinking
+the sample; the incident is surfaced through `mean/harness_failure` and `failure_kind` instead.
+A consumer who wants harness rows excluded can filter on `harness_failure == 1.0` or on
+`failure_kind`.
+
+Headline selection: `mean/reward`, `mean/feasibility`, `mean/quality`, `mean/harness_failure`,
+token counts, and the per-stratum `pass_rate/<band>`, `feasibility_rate/<band>`,
+`mean_quality/<band>`, `count/<band>` are promoted to `key_metrics`; published baselines differ
+by more than 2x across strata, so the pooled figure alone describes no published quantity.
 
 ## Agent path and multi-step tasks
 
