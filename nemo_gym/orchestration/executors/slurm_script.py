@@ -581,9 +581,14 @@ def _render_collector_service(
     )
 
 
-def _render_collector_health_check(config: SubmitConfig) -> str:
+def _render_collector_health_check(config: SubmitConfig, driver_node: int | None = None) -> str:
+    # The collector runs beside the driver (see _render_collector_service).
     return render_health_check(
-        COLLECTOR_SERVICE_NAME, COLLECTOR_HEALTH_PORT, "/", config.otel.health_check_timeout_seconds
+        COLLECTOR_SERVICE_NAME,
+        COLLECTOR_HEALTH_PORT,
+        "/",
+        config.otel.health_check_timeout_seconds,
+        _probe_host(driver_node or 0),
     )
 
 
@@ -713,6 +718,28 @@ def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> di
     return run
 
 
+def _probe_host(node: int) -> str:
+    """How the batch script, which runs on the allocation's first node, reaches `node`."""
+    return "localhost" if node == 0 else f"${{gym_nodes[{node}]}}"
+
+
+def _health_check_host(
+    service: VllmServiceConfig | RayServiceConfig,
+    config: SubmitConfig,
+    compute: SlurmComputeConfig,
+    driver_node: int | None,
+    total_nodes: int,
+) -> str:
+    """Where this service answers its health probe: the node it runs on, as _service_nodelist places it."""
+    if isinstance(service, RayServiceConfig):
+        return _probe_host(_driver_node(config, compute))
+    if service.node_pool is not None:
+        return _probe_host(_pool_offsets(compute)[service.node_pool][0])
+    if driver_node is not None and not _vllm_spans_multiple_nodes(service, total_nodes):
+        return _probe_host(driver_node)
+    return "localhost"
+
+
 def build_sbatch_script(
     config: SubmitConfig,
     benchmark_name: str,
@@ -776,10 +803,14 @@ def build_sbatch_script(
     )
 
     health_checks = "\n\n".join(
-        ([_render_collector_health_check(config)] if observed else [])
+        ([_render_collector_health_check(config, driver_node)] if observed else [])
         + [
             render_health_check(
-                name, service.health_check.port, service.health_check.path, service.health_check.timeout_seconds
+                name,
+                service.health_check.port,
+                service.health_check.path,
+                service.health_check.timeout_seconds,
+                _health_check_host(service, config, compute, driver_node, total_nodes),
             )
             for name, service in config.services.items()
             if service.health_check

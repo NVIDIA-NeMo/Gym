@@ -1862,3 +1862,57 @@ def test_the_driver_goes_to_the_policys_node_when_services_are_pinned(tmp_path):
     script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
     driver = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
     assert '--nodelist="${gym_nodes[1]}" --nodes=1 --ntasks=1' in driver
+
+
+# ---------------------------------------------------------------------------
+# health probes
+# ---------------------------------------------------------------------------
+
+
+def _driver_on_aux(tmp_path, services):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"policy": _vllm(8000, "aux", tensor_parallel_size=4), **services},
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
+            "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    return build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
+
+
+_RAY_WITH_PROBE = {
+    "type": "ray",
+    "container": "img",
+    "node_pools": ["gpu", "aux"],
+    "health_check": {"port": 8011, "path": "/"},
+}
+
+
+def test_a_pinned_service_on_a_later_pool_is_probed_where_it_runs(tmp_path):
+    # The probe runs on node 0; the aux pool's service answers on node 1.
+    script = _render(tmp_path, {"policy": _vllm(8000, "gpu"), "scorer": _vllm(8001, "aux")})
+    assert "Waiting for scorer at http://${gym_nodes[1]}:8001" in script
+    assert "Waiting for policy at http://localhost:8000" in script
+
+
+def test_a_ray_head_is_probed_beside_a_non_zero_driver_node(tmp_path):
+    script = _driver_on_aux(tmp_path, {"ray": _RAY_WITH_PROBE})
+    assert "Waiting for ray at http://${gym_nodes[1]}:8011" in script
+
+
+def test_the_collector_is_probed_beside_a_non_zero_driver_node(tmp_path):
+    script = _driver_on_aux(tmp_path, {})
+    assert "Waiting for otel_collector at http://${gym_nodes[1]}:13133" in script
+
+
+def test_services_on_node_0_are_probed_locally(tmp_path):
+    script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": _RAY_WITH_PROBE})
+    assert "Waiting for ray at http://localhost:8011" in script
+    assert "Waiting for policy at http://localhost:8000" in script
+
+
+def test_an_unpinned_multi_node_service_is_probed_on_node_0(tmp_path):
+    # It spans the allocation and serves its API from node 0, where the probe runs.
+    script = _driver_on_aux(tmp_path, {"judge": {"type": "vllm", "container": "img", "model": "/j", "port": 9000}})
+    assert "Waiting for judge at http://localhost:9000" in script
