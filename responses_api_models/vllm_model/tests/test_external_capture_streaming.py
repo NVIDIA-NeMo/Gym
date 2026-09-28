@@ -47,7 +47,8 @@ class _Worker:
         self.refusal = False
         self.capture = RolloutTokenCapture(sink=self, weight_version_fn=lambda: 7, adapter=VLLMCaptureAdapter())
 
-    def stage(self, record):
+    def stage(self, record, *, attachments=None):
+        assert attachments is None
         self.records[record.staging_key] = record
         return StageResult(ok=True, staging_key=record.staging_key)
 
