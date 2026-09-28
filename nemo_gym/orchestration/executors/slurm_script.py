@@ -165,7 +165,7 @@ def _render_service_command(
     # --nodelist names the exact hosts. --relative is only a starting point Slurm may
     # move off when that node's resources are taken, landing a service on the wrong node.
     if nodelist is not None:
-        node_flags = f' --nodelist="${nodelist}" --nodes={nodes} --ntasks={ntasks}'
+        node_flags = f' --nodelist="${{{nodelist}}}" --nodes={nodes} --ntasks={ntasks}'
     mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in mounts)}" if mounts else ""
     if pre_command:
         # Wrapped in one shell so export/unset statements in pre_command are
@@ -369,9 +369,9 @@ def pool_nodes_var(pool: str) -> str:
     return f"GYM_POOL_{bash_var(pool)}_NODES"
 
 
-def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig) -> str:
-    """Export each node pool's hosts, so a pinned service can name them in --nodelist."""
-    if not any(s.node_pool for s in config.services.values()):
+def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig, is_multi_node: bool) -> str:
+    """Declare the allocation's hosts, and export each node pool's, for --nodelist."""
+    if not is_multi_node and not any(s.node_pool for s in config.services.values()):
         return ""
     lines = [_NODE_ARRAY]
     for name, (start, count) in _pool_offsets(compute).items():
@@ -395,8 +395,9 @@ def _render_ray_head_addresses(config: SubmitConfig, compute: SlurmComputeConfig
     if not heads:
         return ""
     offsets = _pool_offsets(compute)
-    # _render_pool_nodes already declared the host array when any service is pinned.
-    lines = [] if any(s.node_pool for s in config.services.values()) else [_NODE_ARRAY]
+    # _render_pool_nodes already declared the host array in a multi-node or pinned job.
+    declared = _node_totals(compute)[0] > 1 or any(s.node_pool for s in config.services.values())
+    lines = [] if declared else [_NODE_ARRAY]
     for name, service in heads.items():
         index = offsets[service.node_pool][0] if service.node_pool else 0
         ip = f"$(getent hosts ${{gym_nodes[{index}]}} | awk '{{print $1}}')"
@@ -458,13 +459,43 @@ def _service_nodes(
     return compute.node_pools[service.node_pool].nodes
 
 
+def _driver_node(config: SubmitConfig, compute: SlurmComputeConfig) -> int:
+    """The node the driver runs on in a multi-node job: the policy's first node.
+
+    The driver reaches the policy on localhost. A multi-node policy serves its API
+    from node 0, and a pinned one from its pool's first node.
+    """
+    policy = config.services.get(config.driver.policy_model or "")
+    if policy is not None and policy.node_pool is not None:
+        return _pool_offsets(compute)[policy.node_pool][0]
+    return 0
+
+
+def _service_nodelist(
+    service: VllmServiceConfig | RayServiceConfig, driver_node: int | None, total_nodes: int
+) -> str | None:
+    """What a service's --nodelist names, as the shell variable it expands.
+
+    A pinned service names its pool. In a multi-node job an unpinned service that
+    fits on one node joins the driver, which reaches it on localhost; otherwise
+    Slurm could start it on any node.
+    """
+    if service.node_pool is not None:
+        return pool_nodes_var(service.node_pool)
+    if driver_node is not None and not _vllm_spans_multiple_nodes(service, total_nodes):
+        return f"gym_nodes[{driver_node}]"
+    return None
+
+
 def _srun_nodes(
     service: VllmServiceConfig | RayServiceConfig, compute: SlurmComputeConfig, total_nodes: int
 ) -> int | None:
     nodes = _service_nodes(service, compute, total_nodes)
     if service.node_pool is not None:
         return nodes
-    return total_nodes if _vllm_spans_multiple_nodes(service, total_nodes) else None
+    if _vllm_spans_multiple_nodes(service, total_nodes):
+        return total_nodes
+    return 1 if total_nodes > 1 else None
 
 
 def _srun_ntasks(
@@ -476,7 +507,9 @@ def _srun_ntasks(
     if service.node_pool is not None:
         pool = compute.node_pools[service.node_pool]
         return pool.nodes * pool.ntasks_per_node
-    return total_ntasks if _vllm_spans_multiple_nodes(service, total_nodes) else None
+    if _vllm_spans_multiple_nodes(service, total_nodes):
+        return total_ntasks
+    return 1 if total_nodes > 1 else None
 
 
 def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
@@ -521,12 +554,13 @@ def build_sbatch_script(
             render_ray_prelude()
             if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.services.values())
             else "",
-            _render_pool_nodes(config, compute),
+            _render_pool_nodes(config, compute, is_multi_node),
             _render_ray_head_addresses(config, compute),
         )
         if block
     )
 
+    driver_node = _driver_node(config, compute) if is_multi_node else None
     service_commands = "\n\n".join(
         _render_service_command(
             name,
@@ -541,7 +575,7 @@ def build_sbatch_script(
             nodes=_srun_nodes(service, compute, total_nodes),
             ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
             pre_command=service.pre_command,
-            nodelist=pool_nodes_var(service.node_pool) if service.node_pool else None,
+            nodelist=_service_nodelist(service, driver_node, total_nodes),
         )
         for name, service in config.services.items()
     )
@@ -578,13 +612,9 @@ def build_sbatch_script(
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
-    driver_node_flags = " --nodes=1 --ntasks=1" if is_multi_node else ""
-    if any(s.node_pool for s in config.services.values()):
-        # With pinned services Slurm may place the driver on any node. It reaches the
-        # policy on localhost, so it goes to the first node of the policy's pool.
-        policy = config.services.get(config.driver.policy_model or "")
-        index = _pool_offsets(compute)[policy.node_pool][0] if policy and policy.node_pool else 0
-        driver_node_flags = f' --nodelist="${{gym_nodes[{index}]}}" --nodes=1 --ntasks=1'
+    driver_node_flags = (
+        f' --nodelist="${{gym_nodes[{driver_node}]}}" --nodes=1 --ntasks=1' if driver_node is not None else ""
+    )
     # The driver writes everything relative to the job directory -- `output_path`
     # above is `artifacts/rollouts.jsonl`. `#SBATCH --chdir` sets the cwd of the
     # BATCH script on the host, but inside a Pyxis container the cwd is whatever
