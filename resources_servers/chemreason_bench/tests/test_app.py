@@ -27,12 +27,16 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from resources_servers.chemreason_bench import metrics as M
+from resources_servers.chemreason_bench import response_parsing
 from resources_servers.chemreason_bench.app import (
     ChemReasonBenchResourcesServer,
     ChemReasonBenchResourcesServerConfig,
     ChemReasonBenchVerifyRequest,
 )
-from resources_servers.chemreason_bench.response_parsing import extract_json, to_prediction
+from resources_servers.chemreason_bench.response_parsing import (
+    MAX_RESPONSE_CHARS,
+    to_prediction,
+)
 
 
 _SERVER_DIR = Path(__file__).absolute().parents[1]
@@ -262,9 +266,17 @@ class TestModelOutputHandling:
         ["{", '{"a":', "é" * 50, '{"slots": [1,2]}', '{"predicted_order": {"a":1}}', "<think>unterminated"],
     )
     @pytest.mark.parametrize("task_type", sorted(GOLD))
-    def test_malformed_output_never_raises(self, junk, task_type):
+    def test_malformed_output_is_charged_to_the_model_not_the_harness(self, junk, task_type):
+        """A raise here would be a 500, and a 500 aborts the whole run.
+
+        Beyond not raising, the row must land as a scored answer: harness_failure
+        False so it stays in the denominator, and a status that names what
+        happened rather than a silent zero.
+        """
         result = _verify(_make_server(), junk, task_type=task_type, ground_truth=GOLD[task_type])
-        assert 0.0 <= result.reward <= 1.0
+        assert result.harness_failure is False
+        assert result.status in ("ok", "no_json_found", "empty_output")
+        assert result.contributions is not None
 
 
 class TestMetrics:
@@ -383,11 +395,22 @@ class TestParsingContract:
         with pytest.raises(ValueError, match="unknown task_type"):
             M.score_row("nope", {}, {})
 
-    def test_oversized_reply_is_bounded_before_parsing(self):
-        obj, status = extract_json("x" * 500_000 + '{"predicted_order":["1"]}')
-        # The tail is past the cap, so nothing parses -- but it must not hang or raise.
-        assert status in ("no_json_found", "ok")
-        assert obj is None or isinstance(obj, dict)
+    def test_reply_is_truncated_at_the_length_cap(self, monkeypatch):
+        """The cap must bound the input, not merely avoid raising.
+
+        The cap is monkeypatched rather than read from the module: building the
+        filler from the real constant would make the test self-referential and
+        unable to detect the cap being raised or removed.
+        """
+        monkeypatch.setattr(response_parsing, "MAX_RESPONSE_CHARS", 50)
+        payload = '{"predicted_order":["1"]}'
+        filler = "x" * 100
+        assert response_parsing.extract_json(payload + filler)[1] == "ok"
+        assert response_parsing.extract_json(filler + payload) == (None, "no_json_found")
+
+    def test_shipped_cap_is_bounded(self):
+        """Separate from the mechanism: the value actually shipped must be finite."""
+        assert 0 < MAX_RESPONSE_CHARS <= 1_000_000
 
 
 class TestLmProtocol:

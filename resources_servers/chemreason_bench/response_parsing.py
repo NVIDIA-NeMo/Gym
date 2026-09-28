@@ -1,12 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Extract the model's JSON object and coerce it into the scorer's contract.
+"""Recover the model's JSON object and apply upstream's field coercions.
 
-Every ChemReason prompt ends with "Return JSON ONLY with EXACT keys", so a
-well-behaved reply is a bare JSON object. Reasoning models are not well-behaved:
-they emit think blocks, prose, and fenced code. This module recovers the object
-and then applies the same field coercions upstream's ``predict.py`` applies, so
-a reply that upstream would have scored is scored identically here.
+Prompts ask for a bare JSON object; replies arrive with think blocks, prose and
+fences. Coercions mirror ``predict.py`` so a reply upstream would have scored is
+scored identically here.
 """
 
 from __future__ import annotations
@@ -35,12 +33,8 @@ MAX_RATIONALE_CHARS = 20_000
 
 
 def _iter_json_objects(text: str):
-    """Yield candidate JSON objects, LEFTMOST-first, by brace matching.
-
-    Callers take the LAST successful parse: when a reply contains several
-    objects, the rightmost is the model's conclusion, not a draft it corrected
-    further down. Ordering candidates by position rather than by kind (fenced
-    before bare) is what makes that true.
+    """Candidate JSON objects, leftmost-first. Callers take the LAST that parses:
+    a later object is the model's correction of an earlier draft.
     """
     depth = 0
     start = -1
@@ -123,15 +117,9 @@ def canonicalize_step_token(token: Any) -> str:
 
 
 def post_ordering(obj: Optional[Dict[str, Any]], expected: List[str], raw: str = "") -> List[str]:
-    """Port of upstream ``post_ordering``.
-
-    Three behaviours our first implementation lacked, in increasing order of how
-    much they move a score: step ids are canonicalized, repeats are dropped, and
-    -- once at least one legal id has matched -- the ids the model never
-    mentioned are appended in presentation order. That last one is upstream's
-    own comment's "critical behavior": a partial answer is completed rather than
-    scored short, but a wholly unmatched answer is NOT fabricated from the
-    expected order.
+    """Port of upstream ``post_ordering``: canonicalize ids, drop repeats, and --
+    once one legal id has matched -- append the unmentioned ids in presentation
+    order. An answer matching nothing yields [], never a fabricated order.
     """
     obj = obj if isinstance(obj, dict) else {}
     got = obj.get("predicted_order")
@@ -160,11 +148,8 @@ def post_ordering(obj: Optional[Dict[str, Any]], expected: List[str], raw: str =
 
 
 def post_contrastive(obj: Optional[Dict[str, Any]], options: List[Any], raw: str = "") -> int:
-    """Port of upstream ``post_contrastive``, index only.
-
-    Recovers the choice from the raw text when ``predicted_choice`` is absent or
-    unknown, and range-checks the index. Upstream is explicit that an invalid
-    index must NOT fall back to option 0, so it becomes -1 and scores wrong.
+    """Port of upstream ``post_contrastive``, index only. Recovers the choice from
+    raw text and range-checks; an invalid index becomes -1, never option 0.
     """
     obj = obj if isinstance(obj, dict) else {}
     choice = obj.get("predicted_choice") or obj.get("choice")
@@ -191,18 +176,13 @@ def to_prediction(
 ) -> Dict[str, Any]:
     """Coerce a parsed object into the shape ``metrics.score_row`` expects.
 
-    A missing or malformed object is NOT excused -- it yields the conservative
-    fallback upstream uses (score 0.5 -> label False for the binary tasks, empty
-    order, index -1), so the row scores as a wrong answer rather than being
-    dropped from the denominator.
+    A malformed object is not excused: it takes upstream's conservative fallback
+    and scores as a wrong answer rather than leaving the denominator.
 
-    The "no object at all" and "object without the requested key" cases are
-    deliberately NOT collapsed. Upstream forces ``label=False`` only when the
-    reply was not a JSON dict; a dict whose ``score`` is missing falls through
-    to ``0.5 >= 0.5`` and so counts as positive. Collapsing them would label
-    every unparseable reply positive, and with 46-57% of gold labels positive
-    that alone buys ~0.63-0.73 f1_positive -- the do-nothing floor, credited as
-    if it were capability.
+    "No object" and "object without the key" are deliberately NOT collapsed:
+    upstream forces ``label=False`` only for a non-dict, while a dict missing
+    ``score`` falls through to ``0.5 >= 0.5`` and counts positive. Collapsing
+    them would credit every unparseable reply with the do-nothing floor.
     """
     no_object = not isinstance(obj, dict)
     obj = obj if isinstance(obj, dict) else {}
@@ -262,11 +242,9 @@ def _norm_token(token: str) -> str:
 
 
 def _first_token_alternatives(logprobs: Any) -> List[Tuple[str, float]]:
-    """Flatten the first generated position into ``(token, logprob)`` candidates.
-
-    Upstream scores lm by comparing the decision tokens' logits at exactly this
-    position, so only position 0 is read. The chosen token is included because a
-    provider may report it outside its own ``top_logprobs`` list.
+    """``(token, logprob)`` candidates at the first generated position only, which
+    is where upstream compares the decision tokens. The chosen token is included
+    because a provider may omit it from its own ``top_logprobs``.
     """
     if not isinstance(logprobs, list) or not logprobs:
         return []
@@ -287,12 +265,8 @@ def _first_token_alternatives(logprobs: Any) -> List[Tuple[str, float]]:
 
 
 def _restricted_argmax(alternatives: List[Tuple[str, float]], match) -> Optional[Any]:
-    """Highest-logprob candidate whose token ``match``es, or None.
-
-    This is upstream's decision rule: an argmax restricted to the decision
-    tokens, so whatever scaffolding the model would have gone on to emit is
-    irrelevant. Tokenizers differ on leading spaces and case, hence the
-    normalization inside each matcher.
+    """Highest-logprob candidate whose token ``match``es, or None. Restricting to
+    the decision tokens makes any surrounding scaffolding irrelevant.
     """
     best_value, best_logprob = None, float("-inf")
     for token, logprob in alternatives:
@@ -318,14 +292,9 @@ def _match_index(token: str) -> Optional[int]:
 def to_prediction_lm(task_type: str, raw: Optional[str], logprobs: Any = None) -> Dict[str, Any]:
     """Parse an lm-protocol reply, whose contract is one bare decision token.
 
-    Upstream picks the label by argmax over the decision tokens' logits. With
-    greedy decoding the first generated token IS that argmax over the whole
-    vocabulary, which agrees whenever the top token is one of the decision
-    tokens -- overwhelmingly the case given the prompt asks for exactly that.
-    Where it can differ is a reply that opens with neither, and there upstream's
-    restricted argmax still commits while generation does not. Those fall back
-    to the conservative default rather than being dropped, so the denominator is
-    unchanged either way.
+    Upstream decides from token probabilities; this agrees whenever the reply
+    opens with a decision token. Replies opening with neither take the
+    conservative default rather than leaving the denominator. See README.
     """
     alternatives = _first_token_alternatives(logprobs)
     if task_type in ("step_validation", "condition_validation"):

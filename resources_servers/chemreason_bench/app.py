@@ -2,19 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """ChemReason-Bench resources server.
 
-Single-turn, deterministic, no tools and no code execution: the model returns one
-JSON object and a pure-Python scorer compares it to gold. Six task types are
-dispatched on ``task_type``; see ``metrics.py`` for the formulas and their
-provenance.
+Single-turn and deterministic: one JSON object in, a pure-Python scorer against
+gold. ``task_type`` selects one of six scorers; ``metrics.py`` holds the formulas.
 
-Reward vs. reported metric
---------------------------
-``reward`` is a per-row signal in [0, 1]. It is NOT the benchmark's metric. Four
-of the six published metrics are only defined over a corpus -- ``f1_positive``
-needs the full confusion matrix, ``step_completion_score`` applies a
-corpus-level format-error penalty -- so the headline numbers are computed in
-``compute_metrics`` by reducing per-row contributions, not by averaging rewards.
-``mean/reward`` is therefore deliberately kept out of ``get_key_metrics``.
+``reward`` is a per-row signal, NOT the benchmark's metric -- four of the six
+published metrics are only defined over a corpus, so ``compute_metrics`` reduces
+contributions rather than averaging rewards. See the README.
 """
 
 from __future__ import annotations
@@ -43,15 +36,11 @@ class ChemReasonBenchResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class ChemReasonBenchVerifyRequest(BaseVerifyRequest):
-    # Prepared benchmark rows are flat, so these arrive at the top level; the
-    # committed example.jsonl nests them under `verifier_metadata` instead.
-    # Accept both rather than requiring one shape.
+    # Prepared rows are flat; example.jsonl nests under `verifier_metadata`. Accept both.
     verifier_metadata: Optional[Dict[str, Any]] = None
-    # Typed as Any, deliberately. A narrower annotation turns a wrong-typed row into a
-    # 422 raised during request validation, before verify() runs -- and simple_agent
-    # calls raise_for_status, so one bad row would abort the whole run. Widening the
-    # field lets verify() report it as a harness_failure status instead, which is the
-    # behaviour the module docstring promises. Shapes are checked in verify().
+    # Any, deliberately: a narrower type makes a wrong-typed row a 422 during request
+    # validation, which simple_agent's raise_for_status turns into an aborted run.
+    # verify() shape-checks instead and reports a harness_failure status.
     task_type: Any = None
     ground_truth: Any = None
     task_id: Any = None
@@ -67,12 +56,10 @@ class ChemReasonBenchVerifyRequest(BaseVerifyRequest):
     @model_validator(mode="before")
     @classmethod
     def _lift_verifier_metadata(cls, data: Any) -> Any:
-        """Accept the row's fields nested under `verifier_metadata` or at the top level.
+        """Lift nested `verifier_metadata` to the top level; top level wins.
 
-        Top level wins, matching the sibling servers. Without this a flat row
-        reaches verify() with task_type unset and every instance is charged to
-        the harness -- which is exactly how the first smoke run scored 0.00 on
-        all six tasks with bad_task_type=50.
+        Without this a flat row reaches verify() with task_type unset and every
+        instance is charged to the harness.
         """
         if isinstance(data, dict) and isinstance(data.get("verifier_metadata"), dict):
             return {**data["verifier_metadata"], **data}
@@ -87,11 +74,7 @@ class ChemReasonBenchVerifyResponse(ChemReasonBenchVerifyRequest, BaseVerifyResp
 
 
 def _first_output_logprobs(response: Any) -> Any:
-    """Per-token logprobs of the first output text part, or None.
-
-    Only lm rows request them (prepare.py sets logprobs/top_logprobs on those
-    rows), so this is None for every gen row and the text path is used.
-    """
+    """Per-token logprobs of the first output text part, or None (currently always None)."""
     for item in getattr(response, "output", None) or []:
         for part in getattr(item, "content", None) or []:
             logprobs = getattr(part, "logprobs", None)
@@ -101,11 +84,7 @@ def _first_output_logprobs(response: Any) -> Any:
 
 
 def _sanitize(text: Optional[str]) -> Optional[str]:
-    """Drop lone surrogates so the response can be encoded for the wire.
-
-    A surrogate reaching the JSON encoder raises while the response is being
-    built, which no guard inside the scorer can catch.
-    """
+    """Drop lone surrogates; one reaching the JSON encoder raises while building the response."""
     if text is None:
         return None
     return text.encode("utf-8", "replace").decode("utf-8", "replace")
@@ -119,15 +98,11 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
     async def verify(self, body: ChemReasonBenchVerifyRequest) -> ChemReasonBenchVerifyResponse:
         task_type = body.task_type
         ground_truth = body.ground_truth
-        # `task_id` and `task_type` are declared on the request, so they are already
-        # in model_dump(); passing them again as keywords is a TypeError. Build the
-        # payload once and override.
+        # Declared on the request, so already in model_dump(); re-passing them is a TypeError.
         payload = body.model_dump()
         payload["task_id"] = _sanitize(payload.get("task_id"))
 
-        # A malformed row is the harness's fault, not the model's: report it as a
-        # status so the run continues and the rate stays visible, rather than
-        # raising a 500 that would end the whole job.
+        # A malformed row is a status, not a 500: a 500 ends the whole run.
         if not isinstance(task_type, str) or task_type not in M.TASK_TYPES:
             return ChemReasonBenchVerifyResponse(**payload, reward=0.0, status="bad_task_type", harness_failure=True)
         if not isinstance(ground_truth, dict):
@@ -135,8 +110,7 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
                 **payload, reward=0.0, status="bad_ground_truth", harness_failure=True
             )
 
-        # Question-side vocabulary is optional; a wrong-typed value costs the assist
-        # for that row but must not fail it, so it degrades to empty rather than raising.
+        # Optional: a wrong-typed value degrades to empty rather than failing the row.
         expected_step_ids = body.expected_step_ids if isinstance(body.expected_step_ids, list) else []
         options = body.options if isinstance(body.options, list) else []
         legend = body.legend if isinstance(body.legend, dict) else {}
@@ -168,12 +142,9 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Reduce per-row contributions into the six published primary metrics.
 
-        For the three discriminative tasks the published primary metric is the
-        mean of the two protocols (paper appendix F.3.4, m_t = (m_gen+m_lm)/2),
-        so gen and lm rows are reduced separately and then averaged. Scoring gen
-        alone and calling the result Primary-Overall is NOT the paper's number.
-        A task with only one protocol present falls back to that protocol, which
-        is what makes a gen-only dataset still score.
+        The three discriminative tasks average their gen and lm protocols
+        (appendix F.3.4); a task with only one present falls back to it, so a
+        gen-only dataset still scores rather than being halved.
         """
         by_key: Dict[tuple, List[Dict[str, float]]] = defaultdict(list)
         harness_failures = 0
@@ -205,19 +176,15 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
             out[f"{task_type}/protocols"] = float(len(present))
 
         out["primary_overall"] = M.primary_overall(per_task) * 100.0
-        # Published as a score, not filtered out silently. These rollouts also
-        # score reward 0, so nothing is dropped from any denominator.
+        # Published as a score, not filtered silently; these rollouts also score 0.
         out["harness_failure"] = M.safe_div(harness_failures, total)
         return out
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Headline set: Primary-Overall plus the six per-task primaries.
 
-        The inherited implementation promotes every ``mean/*`` entry, which would
-        make ``mean/reward`` -- an average of per-row rewards that matches no
-        published quantity -- read as the benchmark score on a dashboard.
-        Overriding both this and ``compute_metrics`` is what prevents that;
-        overriding only ``compute_metrics`` leaves the wrong headline in place.
+        The inherited version promotes every ``mean/*`` entry, which would make
+        ``mean/reward`` -- matching no published quantity -- read as the score.
         """
         key: Dict[str, Any] = {}
         for name in ("mean/input_tokens", "mean/output_tokens"):

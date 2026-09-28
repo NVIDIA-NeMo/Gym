@@ -14,29 +14,13 @@
 # limitations under the License.
 """Prepare ChemReason-Bench for the ``chemreason_bench`` resources server.
 
-ChemReason-Bench (ACL 2026 Long Papers pp. 33211-33248) turns 500 curated
-experimental procedures into 7,306 task instances across six task families.
-Every instance is text in, one JSON object out -- no tools, no agent loop, no
-code execution.
-
-Upstream ships the evaluation set as two plain JSONL files joined on
-``task_id``: ``benchmark_data/prompts.jsonl`` carries the question material and
-``benchmark_data/answers.jsonl`` the gold. Both are fetched at a pinned commit
-rather than from the default branch, because upstream publishes no tagged
-release and an edit that preserves row count would move every score silently.
-
-The six user prompts are the ones ``predict/predict.py`` builds upstream,
-rendered here at prepare time so a row's ``question`` is byte-identical to what
-the reference harness sent. The three-line system prompt lives in the prompt
-config, not here.
+Joins upstream's ``prompts.jsonl`` and ``answers.jsonl`` on ``task_id`` at a
+pinned commit, and renders the prompts ``predict/predict.py`` builds so a row's
+``question`` is byte-identical to what the reference harness sent. See the
+server README for the task families, the two protocols and the licensing.
 
     gym eval prepare --benchmark chemreason_bench
     gym eval prepare --benchmark chemreason_bench +prepare_script_args.limit=50
-
-Only the ``train_data/`` SFT/RL splits are Git-LFS-backed; the evaluation files
-are plain text, so no LFS client is needed.
-
-Data: CC BY 4.0 (upstream ``DATA_LICENSE``). Code: Apache 2.0.
 """
 
 from __future__ import annotations
@@ -58,9 +42,8 @@ _RAW = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_REVISION}"
 PROMPTS_URL = f"{_RAW}/benchmark_data/prompts.jsonl"
 ANSWERS_URL = f"{_RAW}/benchmark_data/answers.jsonl"
 
-# Per-task counts at the pinned revision. prepare() refuses to write anything else:
-# a short corpus from a truncated download still exits 0 and silently changes the
-# denominator of every metric derived from it.
+# prepare() refuses any other counts: a truncated download exits 0 and silently
+# changes the denominator of every metric derived from it.
 EXPECTED_TOTAL = 7306
 EXPECTED_BY_TASK = {
     "step_completion": 1483,
@@ -108,28 +91,15 @@ ALLOWED_ACTIONS = sorted(
 # prompt must ask for exactly one key or the request and the parser disagree.
 ORDERING_KEY = "predicted_order"
 
-# Tasks whose published primary metric averages two protocols (paper appendix F.3.4:
-# m_t = (m_gen + m_lm) / 2). `lm` asks for a bare decision token instead of JSON, so it
-# is a different prompt, not the same request with logprobs. Both are emitted here and
-# the server averages them, so one run yields the paper-comparable Primary-Overall.
+# Paper appendix F.3.4: these three average two protocols, m_t = (m_gen + m_lm)/2.
+# `lm` is a different PROMPT, not the same request with logprobs.
 DUAL_PROTOCOL_TASKS = ("step_validation", "condition_validation", "contrastive_choice")
 EXPECTED_LM_ROWS = sum(EXPECTED_BY_TASK[t] for t in DUAL_PROTOCOL_TASKS)
 
-# lm rows request NOTHING special, and that is deliberate.
-#
-# Upstream derives the lm label from an argmax over the decision tokens' logits. Two attempts to
-# obtain those failed, both verified against live runs:
-#   1. `logprobs: true` is not a Responses API field and the agent forbids extra keys, so every
-#      lm row failed validation into the sidecar.
-#   2. `top_logprobs: 20` alone is accepted, but vLLM only emits logprobs when the chat-level
-#      `logprobs` flag is set; with top_logprobs set and logprobs unset the completion comes back
-#      EMPTY, truncated at max_output_tokens. A full run scored 0.00 on all three lm tasks with
-#      empty_output on all 3,342 rows.
-# Neither would have helped regardless: `nemo_gym/responses_converter.py` builds the output text
-# without populating its logprobs field, so chat-level logprobs are discarded before any verifier
-# sees them. `response_parsing.to_prediction_lm` still prefers logprobs when present and reports
-# status `ok_logprobs`, so this turns on by itself once that shared converter is fixed; until then
-# lm labels come from parsing the generated text.
+# Empty, deliberately. `logprobs: true` is not a Responses API field and sends every lm row to
+# the failure sidecar; `top_logprobs` alone returns an EMPTY completion truncated at
+# max_output_tokens. Neither helps anyway -- responses_converter discards logprobs before any
+# verifier sees them. See the README's "Known gap".
 LM_RESPONSES_CREATE_PARAMS: Dict[str, Any] = {}
 
 
@@ -137,10 +107,7 @@ def _dumps(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
 
-# ---------------------------------------------------------------------------
-# Prompt builders -- transcribed from predict/predict.py lines 710-805 so that a
-# prepared row reproduces the reference harness's user message exactly.
-# ---------------------------------------------------------------------------
+# Prompt builders, transcribed from predict/predict.py lines 710-805.
 
 
 def _prompt_ordering(r: Dict[str, Any]) -> str:
@@ -180,12 +147,7 @@ Return JSON ONLY with EXACT keys:
 
 
 def _prompt_binary(r: Dict[str, Any]) -> str:
-    """Binary tasks ask for a SCORE, not a label.
-
-    The discrete label is derived downstream as ``score >= 0.5``; the model is
-    never asked for a boolean. Asking for one would change what is measured,
-    because ``f1_positive`` is computed on the thresholded score.
-    """
+    """Asks for a SCORE, not a label; the label is derived as ``score >= 0.5``."""
     return f"""Context:
 {r.get("context", "")}
 
@@ -318,16 +280,13 @@ def _format_row(prompt_row: Dict[str, Any], answer_row: Dict[str, Any], protocol
         # It is never rendered into `question`.
         "ground_truth": answer_row["ground_truth"],
     }
-    # Upstream's post-processors need the question-side vocabulary to canonicalize and
-    # range-check a prediction: the legal step ids for ORDERING, the option list for
-    # CONTRASTIVE CHOICE. Neither is gold, and neither is rendered into `question`.
+    # Question-side vocabulary upstream's post-processors need. Not gold.
     if task_type == "ordering":
         row["expected_step_ids"] = [str(s.get("step_id", "")) for s in (prompt_row.get("steps_to_order") or [])]
     elif task_type == "contrastive_choice":
         row["options"] = list(prompt_row.get("options") or [])
     elif task_type == "step_completion":
-        # canonicalize_slots resolves reagent NAMES back to their $n$ placeholders
-        # through the legend, so the scorer needs it as data, not just as prompt text.
+        # canonicalize_slots resolves reagent names to $n$ through this.
         row["legend"] = dict(prompt_row.get("legend") or {})
     if protocol == "lm" and LM_RESPONSES_CREATE_PARAMS:
         row["responses_create_params"] = dict(LM_RESPONSES_CREATE_PARAMS)

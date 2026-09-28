@@ -12,33 +12,17 @@ of this module only. Whether a whole run is comparable to the published table
 also depends on the prompt, the decoding recipe and the ``lm`` protocol; see the
 README's "Known gap" section for the one divergence that remains.
 
-Scope: only the six PRIMARY metrics named in ``eval/eval.py`` ``primary_map``
-(line 813) are implemented here, because those are the ones the published
-Primary-Overall macro-average is built from. Upstream's secondary metrics
-(Kendall tau, BLEU, ROUGE-L, BERTScore, AUROC/AUPRC/ECE/Brier, log-loss, MRR)
-are deliberately omitted: they do not enter the headline, and BERTScore in
-particular would pull a neural model into an otherwise dependency-free scorer.
+Only the six PRIMARY metrics from ``eval.py``'s ``primary_map`` (line 813) are
+implemented -- those are what Primary-Overall averages. Secondary metrics are
+omitted; BERTScore alone would pull a neural model into a dependency-free scorer.
 
-    task type             primary metric
-    ------------------    ----------------------
-    ordering              pairwise_accuracy
-    contrastive_choice    top1_accuracy
-    step_validation       f1_positive
-    condition_validation  f1_positive
-    step_completion       step_completion_score
-    rationalization       coverage_f1
+Two upstream inconsistencies resolved deliberately:
 
-Two upstream inconsistencies were resolved deliberately:
-
-1. ``eval/eval_config.yaml`` states the step-completion formula as
-   ``0.5 * action_em + 0.5 * slot_f1``. Both ``eval/eval.py`` (line 631) and the
-   paper (appendix, "Raw = 0.8*ActionEM + 0.2*SlotF1, SCS = Raw*(1-FER)") use
-   0.8/0.2 with a format-error penalty. The config string is stale; the code and
-   paper agree and are what produced the published numbers, so 0.8/0.2 is used.
-2. ``f1_positive`` is a per-corpus quantity, not a per-row one -- it needs the
-   full confusion matrix. Same for ``step_completion_score``, whose format-error
-   penalty is a corpus-level rate. Rows are therefore scored into contributions
-   here and reduced across the corpus by the caller.
+1. ``eval_config.yaml`` states step completion as ``0.5*action_em + 0.5*slot_f1``;
+   ``eval.py`` (line 631) and the paper both use 0.8/0.2 with a format-error
+   penalty. The config is stale and the code produced the published numbers.
+2. ``f1_positive`` and ``step_completion_score`` are corpus-level, not per-row,
+   so rows are scored into contributions and reduced by the caller.
 """
 
 from __future__ import annotations
@@ -243,11 +227,7 @@ def tokenize_en(s: Optional[str], stopwords: Optional[set] = None) -> List[str]:
 def token_f1(pred: Optional[str], truth: Optional[str], stopwords: set) -> float:
     """Bag-of-tokens F1 after normalization and stopword removal.
 
-    NOTE for interpretation: this metric pays for lexical overlap alone. A
-    response that echoes the prompt's chemistry vocabulary scores above zero
-    without explaining anything, so `coverage_f1` must never be read as a
-    correctness rate. Upstream nonetheless makes it the primary metric for
-    RATIONALIZATION, so it is reproduced as-is.
+    Pays for lexical overlap alone, so `coverage_f1` is not a correctness rate.
     """
     pt = tokenize_en(pred, stopwords)
     gt = tokenize_en(truth, stopwords)
@@ -270,10 +250,9 @@ def token_f1(pred: Optional[str], truth: Optional[str], stopwords: set) -> float
 
 
 def pairwise_accuracy(pred: List[Any], truth: List[Any]) -> float:
-    """Fraction of correctly ordered pairs among the model's *legal* step ids.
+    """Correctly ordered pairs among the model's legal step ids.
 
-    Upstream is deliberately conservative: ids absent from the gold order are
-    dropped rather than filled in, and fewer than two surviving ids scores 0.
+    Ids absent from gold are dropped, not imputed; fewer than two survivors scores 0.
     """
     truth_pos = {str(k): i for i, k in enumerate(truth)}
     pred_seq = [str(p) for p in pred if str(p) in truth_pos]
@@ -351,12 +330,9 @@ def slot_f1(
     ucum: Optional[Dict[str, str]] = None,
     policy: UnitPolicy = DEFAULT_UNIT_POLICY,
 ) -> Tuple[float, bool]:
-    """Returns ``(slot_f1, fatal_error_flag)``.
-
-    Reagents match as an unordered multiset; amount/time/temperature match as
-    grouped value+unit pairs under tolerance; ``*_token`` fields match exactly.
-    ``fatal`` fires when the prediction carries a unit outside the legal set,
-    and feeds the corpus-level format-error rate.
+    """``(slot_f1, fatal)``. Reagents match as a multiset, numeric groups under
+    tolerance, ``*_token`` exactly. ``fatal`` fires on an illegal unit and feeds
+    the corpus format-error rate.
     """
     ucum = DEFAULT_UCUM if ucum is None else ucum
     pred = dict(pred_slots or {})
@@ -435,14 +411,9 @@ def step_completion_score(action_em: float, slot_f1_mean: float, format_error_ra
 
 
 def score_row(task_type: str, prediction: Dict[str, Any], ground_truth: Dict[str, Any]) -> Dict[str, Any]:
-    """Score one prediction against one gold record.
-
-    Returns a dict carrying both a per-row ``reward`` in [0, 1] and whatever
-    corpus-level contributions that task needs (confusion-matrix cells for the
-    binary tasks, action/slot/fatal terms for step completion). The per-row
-    reward is a usable signal on its own, but the *published* metric for the
-    binary and step-completion tasks is only defined over a corpus, so the
-    caller must reduce the contributions rather than average the rewards.
+    """Score one prediction, returning a per-row ``reward`` plus the corpus-level
+    contributions that task needs. Callers reduce the contributions; averaging
+    the rewards does not give the published metric.
     """
     if task_type == "ordering":
         pred_order = prediction.get("predicted_order") or prediction.get("order") or []
@@ -528,11 +499,8 @@ def reduce_task(task_type: str, rows: List[Dict[str, Any]]) -> float:
 
 
 def primary_overall(per_task: Dict[str, float]) -> float:
-    """Macro-average over the six task families (eval/eval.py line 838).
-
-    Upstream records 0.0 for a task that is present in the gold but produced no
-    usable metric, so a task missing from ``per_task`` is scored 0 rather than
-    silently dropped from the denominator.
+    """Macro-average over the six families (eval.py:838); a missing task scores 0
+    rather than shrinking the denominator.
     """
     values = [float(per_task.get(t, 0.0)) for t in TASK_TYPES]
     return sum(values) / len(values) if values else 0.0

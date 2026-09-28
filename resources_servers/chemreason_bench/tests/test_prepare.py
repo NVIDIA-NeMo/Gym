@@ -182,10 +182,15 @@ class TestProtocolsAndLimit:
 class TestRowContract:
     def test_question_side_vocabulary_is_carried_per_task(self, stub_fetch, tmp_path):
         by_type = {r["task_type"]: r for r in _prepare(tmp_path) if r["protocol"] == "gen"}
-        assert isinstance(by_type["ordering"]["expected_step_ids"], list)
-        assert isinstance(by_type["contrastive_choice"]["options"], list)
+        source = {r["task_type"]: r for r in _load("prompts.jsonl")}
+        # The carried values must equal the source row's, not merely be the right type.
+        assert by_type["ordering"]["expected_step_ids"] == [
+            str(s["step_id"]) for s in source["ordering"]["steps_to_order"]
+        ]
+        assert by_type["contrastive_choice"]["options"] == source["contrastive_choice"]["options"]
         # canonicalize_slots resolves reagent names through this.
-        assert isinstance(by_type["step_completion"]["legend"], dict)
+        assert by_type["step_completion"]["legend"] == source["step_completion"]["legend"]
+        assert by_type["step_completion"]["legend"], "legend must be non-empty for this fixture"
         # and it is not attached where it has no meaning
         assert "legend" not in by_type["ordering"]
         assert "options" not in by_type["rationalization"]
