@@ -5173,6 +5173,51 @@ class TestEnvironmentServerRouting:
         assert record[nemo_gym.rollout_collection.NG_RESULT_TYPE_KEY] == "legacy_agent"
         assert record[AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
 
+    async def test_progress_reward_averages_only_results_that_report_a_reward(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unscored result, one without a reward, does not dilute the reward progress metrics."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_bytes(
+            b"".join(
+                orjson.dumps(
+                    {
+                        "responses_create_params": {"input": [{"role": "user", "content": str(i)}]},
+                        AGENT_REF_KEY_NAME: {"name": "hermes_legacy"},
+                    }
+                )
+                + b"\n"
+                for i in range(2)
+            )
+        )
+        replies = iter([{"reward": 1.0}, {"response_note": "unscored"}])
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/run":
+                return FakeResponse(200, next(replies))
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client.global_config_dict = self._mixed_batch_config()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: client.global_config_dict)
+        exported: list[dict] = []
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "export_metrics", lambda metrics, **_: exported.append(metrics)
+        )
+
+        await RolloutCollectionHelper().run_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_jsonl_fpath),
+                output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+                disable_health_check=True,
+            )
+        )
+
+        final = [m for m in exported if "progress/hermes_legacy/reward" in m][-1]
+        assert final["progress/hermes_legacy/reward"] == 100.0
+        assert final["progress/hermes_legacy/reward_lower_bound"] == 100.0
+
     async def test_run_from_config_sidecars_a_native_failure_and_retries_it_on_resume(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

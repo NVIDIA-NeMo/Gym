@@ -1743,6 +1743,9 @@ class RolloutCollectionHelper(BaseModel):
         pcts_to_print = list(range(1, 100)) + [99.5, 100]
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
+        # How many results reported each metric, so a result without a metric (such as an unscored
+        # result without a reward) does not dilute that metric's average.
+        agent_name_to_metric_counts = defaultdict(Counter)
         # Quality accounting restricted to persisted rollouts: `count`/`reward` over the
         # unmasked ones, `masked` over the rest. Token capture already reports its own
         # masking; this is the same accounting for what an environment declares on its
@@ -1913,9 +1916,9 @@ class RolloutCollectionHelper(BaseModel):
             if not no_result:
                 # An infrastructure failure is not a score of zero, and not a sample either.
                 metrics = agent_name_to_metrics[agent_name]
-                metrics.update(
-                    {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
-                )
+                numeric = {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
+                metrics.update(numeric)
+                agent_name_to_metric_counts[agent_name].update(numeric.keys())
                 agent_name_to_counts[agent_name] += 1
 
             # Quality accounting covers only what reaches the main rollout output, which is
@@ -1949,7 +1952,8 @@ class RolloutCollectionHelper(BaseModel):
                     metrics = agent_name_to_metrics[agent_name]
                     agent_total_samples = dispatched_per_agent[agent_name]
                     agent_sample_pct = 100 * agent_name_to_counts[agent_name] / agent_total_samples
-                    avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
+                    metric_counts = agent_name_to_metric_counts[agent_name]
+                    avg_metrics = {k: v / metric_counts[k] for k, v in metrics.items()}
                     print_str += f"""Found {agent_name_to_counts[agent_name]} / {agent_total_samples} ({agent_sample_pct:.2f}%) rollouts for `{agent_name}`.
 {json.dumps(avg_metrics, indent=4)}
 """
@@ -1959,11 +1963,12 @@ class RolloutCollectionHelper(BaseModel):
                 if get_exporters():
                     step_metrics = {"progress/total/rollouts_per_min": rollouts_per_min}
                     for agent_name, metrics in agent_name_to_metrics.items():
-                        step_metrics[f"progress/{agent_name}/reward"] = round(
-                            100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
-                        )
+                        scored = agent_name_to_metric_counts[agent_name]["reward"]
+                        if not scored:
+                            continue
+                        step_metrics[f"progress/{agent_name}/reward"] = round(100 * metrics["reward"] / scored, 2)
                         step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
-                            100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]), 2
+                            100 * metrics["reward"] / (counts_left[agent_name] + scored), 2
                         )
                     # The union, not just the scored agents: an agent whose every request
                     # fails never lands in `agent_name_to_counts`, and reporting only the
