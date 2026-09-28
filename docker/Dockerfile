@@ -31,6 +31,7 @@ ENV NEMO_GYM_CONTAINER=1
 USER root
 
 ARG ENROOT_VERSION=3.5.0
+ARG NSYS_VERSION=2026.5.1.161-265138896106v0
 RUN <<"EOF" bash -exu -o pipefail
 export DEBIAN_FRONTEND=noninteractive
 export TZ=America/Los_Angeles
@@ -87,6 +88,28 @@ curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-contai
 apt-get update
 apt-get install -y nvidia-container-toolkit
 rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+# Replace the CUDA base image's bundled Nsight Systems, which is built
+# against an outdated Go toolchain (CVE-2025-61731, CVE-2025-4674,
+# GO-2025-3849, GO-2025-3563, GO-2026-5026, GO-2026-6089, GO-2026-6090),
+# with a current release from NVIDIA's devtools apt repo.
+rm -rf /usr/local/cuda*/NsightSystems-cli-* /opt/nvidia/nsight-systems*
+apt-get remove --purge -y --allow-change-held-packages 'nsight-systems*' || true
+
+nsys_release=$(echo "${NSYS_VERSION}" | cut -d. -f1-3)
+nsys_repo="https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${arch}"
+curl -fsSL "${nsys_repo}/nvidia.pub" -o /usr/share/keyrings/nvidia-devtools.asc
+echo "deb [signed-by=/usr/share/keyrings/nvidia-devtools.asc] ${nsys_repo}/ /" \
+    > /etc/apt/sources.list.d/nvidia-devtools.list
+apt-get update
+apt-get install -y --no-install-recommends "nsight-systems-cli-${nsys_release}=${NSYS_VERSION}"
+rm -f /etc/apt/sources.list.d/nvidia-devtools.list /usr/share/keyrings/nvidia-devtools.asc
+
+# The base image's cuda/bin dir can precede /usr/local/bin on PATH; if it
+# already symlinks nsys (pointing at the old bundled copy), repoint it.
+if [ -L /usr/local/cuda/bin/nsys ]; then
+    ln -sf /usr/local/bin/nsys /usr/local/cuda/bin/nsys
+fi
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
