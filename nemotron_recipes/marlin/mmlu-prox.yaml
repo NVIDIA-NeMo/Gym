@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# MMLU-ProX (no tools): MMLU-Pro's 10-option multiple-choice questions in other languages.
+# Like the published run, this recipe prepares 10 languages (en, de, es, fr, it, ja, zh, hi,
+# pt, ko), one sample per question: 117,590 questions. Scored by accuracy on the answer
+# letter; there is no judge model.
+#
+#   nemotron_recipes/marlin/run.sh mmlu-prox
+#
+# The dataset is not pinned to a revision: Gym loads the latest li-lab/MMLU-ProX, which had
+# 117,590 questions for these languages when the published number was produced.
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
+# Gym benchmark config this recipe builds on.
+benchmark_config: benchmarks/mmlu_prox/config.yaml
+
+# The published run's 10 languages; the benchmark default prepares more.
+prepare_script_args:
+  languages: [en, de, es, fr, it, ja, zh, hi, pt, ko]
