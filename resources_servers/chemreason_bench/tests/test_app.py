@@ -726,13 +726,13 @@ class TestRationalizationFallbackScope:
     def test_parsed_dict_without_a_rationale_key_scores_empty(self):
         """It must not be scored on its own JSON text; upstream gives it "".
 
-        A dict that parsed has no _raw upstream, so post_rationalization yields
-        "" and coverage_f1 is 0. Falling back to the reply here would credit
-        token overlap between the JSON and the gold rationale.
+        The wrong key deliberately carries text OVERLAPPING the gold rationale.
+        A non-overlapping payload scores 0 whether or not the fallback is scoped,
+        so it cannot tell the branches apart.
         """
         result = _verify(
             _make_server(),
-            '{"note":"unsure"}',
+            '{"note":"Calcium activates the carbonyl."}',
             task_type="rationalization",
             ground_truth=GOLD["rationalization"],
         )
@@ -754,8 +754,14 @@ class TestOneCleaningRule:
     """Every raw-text fallback receives the think-stripped reply, not output_text."""
 
     def test_ordering_recovery_ignores_a_reasoning_trace(self):
-        """Digits inside a trace must not be recovered as step ids."""
-        traced = "<think>step 2 then 0 then 1 seems right</think>no answer here"
+        """Digits inside a trace must not be recovered as step ids.
+
+        `predicted_order` must be PRESENT but not a list: that is the only input
+        that reaches post_ordering's raw-text scan. With no JSON at all, `got`
+        defaults to [] -- already a list -- so the scan never runs and the test
+        would pass whether or not the text was cleaned.
+        """
+        traced = '<think>2 then 0 then 1</think>{"predicted_order": "see above"}'
         result = _verify(_make_server(), traced, task_type="ordering", ground_truth=GOLD["ordering"])
         assert result.reward == 0.0
 
