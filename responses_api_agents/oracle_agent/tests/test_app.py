@@ -54,8 +54,10 @@ class FakeSandbox:
 
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
         self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
-        if "solve.sh" in command:
-            return SandboxExecResult(stdout="", stderr=self.result.stderr, return_code=self.result.return_code)
+        if command.startswith("nohup setsid") and "solve.sh" in command:
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
+        if command.startswith("cat /tmp/.nemo-gym-rc-"):
+            return SandboxExecResult(stdout=f"{self.result.return_code}\n", stderr="", return_code=0)
         if command.startswith("tail -c"):
             return SandboxExecResult(stdout=self.result.stdout, stderr="", return_code=0)
         return SandboxExecResult(stdout="", stderr="", return_code=0)
@@ -134,13 +136,9 @@ def test_oracle_runs_solution_in_borrowed_sandbox(tmp_path, monkeypatch):
     assert payload["output"][0]["content"][0]["text"] == "Done!\n"
     assert any(remote.endswith(".tar.gz") for remote in sandbox.uploads)
     run = next(call for call in sandbox.execs if "solve.sh" in call["command"])
-    assert run == {
-        "command": "bash /solution/solve.sh > /logs/agent/solve-stdout.txt 2>&1",
-        "cwd": "/app",
-        "env": {"GREETING": "hi"},
-        "timeout_s": 120.0,
-        "user": "runner",
-    }
+    assert run["command"].startswith("nohup setsid bash -c ")
+    assert "bash /solution/solve.sh > /logs/agent/solve-stdout.txt 2>&1" in run["command"]
+    assert (run["cwd"], run["env"], run["user"]) == ("/app", {"GREETING": "hi"}, "runner")
 
     close = client.post(
         "/v1/agent_sessions/close",
@@ -170,7 +168,7 @@ def test_failing_solution_is_reported(tmp_path, monkeypatch):
 
     assert payload["metadata"]["oracle"] == "failed"
     assert payload["metadata"]["oracle_return_code"] == "2"
-    assert "boom" in payload["output"][0]["content"][0]["text"]
+    assert "solve.sh exited with 2" in payload["output"][0]["content"][0]["text"]
 
 
 def test_changed_folder_is_rejected(tmp_path, monkeypatch):
