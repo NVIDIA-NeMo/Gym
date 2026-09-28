@@ -848,9 +848,22 @@ class TestFailureRouting:
                     dispatched_keys.append((r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
             return await full_run(rows_in)
 
-        await run_multistage_stages(cfg, REF_ELOS, _distribution(task_ids), rows, capturing_run, resume=resume)
+        expected = []
+        await run_multistage_stages(
+            cfg,
+            REF_ELOS,
+            _distribution(task_ids),
+            rows,
+            capturing_run,
+            resume=resume,
+            on_expected_rows=expected.extend,
+        )
         assert dispatched_keys == [failing_key]
         assert terminal_key not in dispatched_keys
+        stage0_expected = {
+            (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in expected if r["stage_index"] == 0
+        }
+        assert stage0_expected == good_keys | {terminal_key, failing_key}
 
     async def test_only_successes_reach_all_results(self) -> None:
         # A run whose fake runner emits one failure + one kill-shaped row per stage:
@@ -916,6 +929,90 @@ class TestFailureRouting:
         assert summaries[0]["eval_elo"] == ref_summaries[0]["eval_elo"]
         assert summaries[1]["reference_ids"] == ref_summaries[1]["reference_ids"]
         assert summaries[1]["eval_elo"] == ref_summaries[1]["eval_elo"]
+
+
+class TestCompletionCoverage:
+    @pytest.mark.parametrize("incomplete", [False, True])
+    async def test_e2e_records_all_stage_inputs_and_rebuilds_them_on_resume(
+        self, tmp_path, monkeypatch, incomplete
+    ) -> None:
+        from nemo_gym.orchestration.completion import validate_completion
+        from nemo_gym.rollout_collection import RolloutCollectionConfig, _CompletedRollout
+        from resources_servers.gdpval import multistage_orchestrator as driver
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "nested" / "rollouts.jsonl"),
+            resume_from_cache=True,
+        )
+        task_ids = ["t0", "t1"]
+        dispatched = []
+        fake_run = _fake_run_rollouts_factory()
+
+        class Helper:
+            def _preprocess_rows_from_config(self, _config):
+                return _materialized_rows(task_ids, repeats=2)
+
+            def _run_examples_with_metadata(self, rows, **kwargs):
+                # All stages are recorded before any requests are dispatched.
+                recorded = [json.loads(line) for line in config.materialized_jsonl_fpath.read_text().splitlines()]
+                assert len(recorded) == 8
+                dispatched.extend(rows)
+
+                async def result(row):
+                    if (
+                        incomplete
+                        and row["stage_index"] == 0
+                        and row["task_id"] == "t0"
+                        and row[ROLLOUT_INDEX_KEY_NAME] == 0
+                    ):
+                        result = {NG_FAILURE_CLASS_KEY: "timeout_exceeded", NG_TERMINAL_KEY: True}
+                    else:
+                        _, result = (await fake_run([row]))[0]
+                    return _CompletedRollout(row=row, result=result, rollout_latency_ms=None)
+
+                return [result(row) for row in rows]
+
+            async def _call_aggregate_metrics(self, results, rows, output):
+                metrics = output.with_suffix(".metrics.json")
+                metrics.write_text(json.dumps({"completed": len(results)}))
+                return metrics
+
+        monkeypatch.setattr("nemo_gym.rollout_collection.RolloutCollectionHelper", Helper)
+        monkeypatch.setattr(driver, "find_gdpval_reference_elos", lambda _: REF_ELOS)
+        monkeypatch.setattr(driver, "ensure_distribution", lambda *a, **k: (_distribution(task_ids), None))
+        global_config = {"multistage": {"enabled": True, "stages": ["2", "2:2"], "seed": 7}}
+
+        for invocation in range(2):
+            metrics = await driver.run_e2e_multistage(config, global_config)
+            expected = [json.loads(line) for line in config.materialized_jsonl_fpath.read_text().splitlines()]
+            assert len(expected) == 8  # 2 tasks x 2 repeats x 2 stages, including reused deliverables.
+            assert {r["stage_index"] for r in expected} == {0, 1}
+            assert json.loads(metrics.read_text())["completed"] == (7 if incomplete else 8)
+            if incomplete:
+                with pytest.raises(ValueError, match="7/8 samples completed; 1 missing"):
+                    validate_completion(Path(config.output_jsonl_fpath))
+            else:
+                assert validate_completion(Path(config.output_jsonl_fpath)) == 8
+            assert len(dispatched) == 8  # Second invocation reuses completed stages without dispatch.
+            if invocation == 0:
+                assert all(r["reuse_cached_deliverable"] for r in dispatched if r["stage_index"] == 1)
+                # Rebuilding the manifest must discard stale rows from an earlier invocation.
+                with config.materialized_jsonl_fpath.open("a") as handle:
+                    handle.write(json.dumps({TASK_INDEX_KEY_NAME: 99, ROLLOUT_INDEX_KEY_NAME: 0}) + "\n")
+
+    async def test_cached_stage_without_plan_cannot_establish_expected_coverage(self) -> None:
+        resume = RecordingResume(outcomes={0: {"status": "complete"}})
+        with pytest.raises(ValueError, match="missing stage plan"):
+            await run_multistage_stages(
+                _two_stage_cfg(),
+                REF_ELOS,
+                _distribution([f"t{i}" for i in range(10)]),
+                _materialized_rows([f"t{i}" for i in range(10)]),
+                _fake_run_rollouts_factory(),
+                on_expected_rows=lambda rows: None,
+                resume=resume,
+            )
 
 
 class TestPrepareResume:

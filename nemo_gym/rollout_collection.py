@@ -69,7 +69,7 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
+from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, materialized_inputs_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -848,8 +848,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     @property
     def materialized_jsonl_fpath(self) -> Path:
-        output_fpath = Path(self.output_jsonl_fpath)
-        return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+        return materialized_inputs_path_for(Path(self.output_jsonl_fpath))
 
 
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:

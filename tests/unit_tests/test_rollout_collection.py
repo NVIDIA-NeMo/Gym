@@ -42,6 +42,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
 )
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.orchestration.completion import validate_completion
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
@@ -958,6 +959,9 @@ class TestRolloutCollection:
         agent_metrics = orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]
         assert agent_metrics["mean/reward"] == 1.0
 
+        with pytest.raises(ValueError, match="1/2 samples completed; 1 missing"):
+            validate_completion(output_jsonl_fpath)
+
         # The run says the setting is on, names each dropped rollout once, and closes with the count.
         printed = capsys.readouterr().out
         assert "route_failures_to_sidecar is on" in printed
@@ -1018,6 +1022,8 @@ class TestRolloutCollection:
         assert dispatched[0][ATTEMPT_INDEX_KEY_NAME] == 1
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
         assert [r["reward"] for r in persisted] == [1.0]
+
+        assert validate_completion(output_jsonl_fpath) == 1
 
     def test_failure_rows_counted_as_zero_selects_the_last_attempt_of_each_rollout(self, tmp_path: Path) -> None:
         """The last attempt stands, so it is chosen before the wanted classes are picked out."""
@@ -1528,6 +1534,9 @@ class TestRolloutCollection:
         printed = capsys.readouterr().out
         assert "Rollouts missing from the score: 1 of 3 materialized" in printed
         assert "Metrics cover: 2 of 3 rollouts" in printed
+
+        with pytest.raises(ValueError, match="2/3 samples completed; 1 missing"):
+            validate_completion(output_jsonl_fpath)
 
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""

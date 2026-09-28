@@ -19,6 +19,11 @@ def failures_path_for(output_fpath: Path) -> Path:
     return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
 
 
+def materialized_inputs_path_for(output_fpath: Path) -> Path:
+    """Return the expected-input artifact paired with a rollout file."""
+    return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+
+
 def aggregate_metrics_path_for(output_fpath: Path) -> Path:
     """`results/rollouts.jsonl` -> `results/rollouts_aggregate_metrics.json`.
 
