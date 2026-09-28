@@ -40,10 +40,12 @@ from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, UploadRollo
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
+    rollout_run_label,
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.rollout_collection import (
@@ -270,6 +272,13 @@ def _rs_for_row(
         block = global_config_dict.get(ts)
         if isinstance(block, (dict, DictConfig)) and "resources_servers" in block:
             return str(ts)
+    server = row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+    server_block = global_config_dict.get(server) if isinstance(server, str) else None
+    if isinstance(server_block, (dict, DictConfig)):
+        for environment_server in (server_block.get("environment_servers") or {}).values():
+            resources_ref = environment_server.get("resources_server") if environment_server else None
+            if resources_ref and resources_ref.get("name"):
+                return str(resources_ref["name"])
     agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
     try:
         return agent_to_rs[agent_name]
@@ -337,11 +346,10 @@ def _response_has_function_calls(row: Dict[str, Any]) -> bool:
 # Function used to summarize the debug information for a failed verification
 # ---------------------------------------------------------------------------
 def _rollout_verify_debug_summary(row: Dict[str, Any], resources_server_name: str) -> Dict[str, Any]:
-    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
-        "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+        "agent_name": rollout_run_label(row),
         "resources_server_name": resources_server_name,
     }
     return {k: v for k, v in summary.items() if v is not None}
@@ -532,7 +540,16 @@ def _yield_inputs_and_rollouts_paired(
 
 
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
-    return pair.input | {"response": pair.rollout["response"]}
+    task_input = pair.input.get("task_input")
+    if not isinstance(task_input, dict):
+        return pair.input | {"response": pair.rollout["response"]}
+    # A materialized task: rebuild the verify body its Resources Server accepts from the task input.
+    row_keys = {k: v for k, v in pair.input.items() if k not in ("task_id", "task_input")}
+    return (
+        row_keys
+        | (task_input.get("task_data") or {})
+        | {"responses_create_params": task_input.get("responses_create_params"), "response": pair.rollout["response"]}
+    )
 
 
 def _prepare_payloads(
@@ -763,7 +780,7 @@ async def _call_aggregate_metrics(
     # remapped row to be verified by one server and aggregated by another.
     agent_results: Dict[Tuple[str, str], List[Dict]] = {}
     for row, result in zip(rows, results):
-        agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+        agent_name = rollout_run_label(row)
         if not agent_name:
             continue
         rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
@@ -879,7 +896,10 @@ def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]
     with output_fpath.open("rb") as f:
         results = [orjson.loads(line) for line in f if line.strip()]
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
-    rows = [{k: r[k] for k in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME) if k in r} for r in results]
+    rows = [
+        {k: r[k] for k in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, ENVIRONMENT_SERVER_STAMP_KEY_NAME) if k in r}
+        for r in results
+    ]
     return results, rows
 
 
@@ -945,7 +965,7 @@ class RolloutReverificationHelper(BaseModel):
             semaphore = Semaphore(config.num_samples_in_parallel)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
-        counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in payloads_to_reverify)
+        counts_left = Counter(rollout_run_label(r) for r in payloads_to_reverify)
         results_file = output_fpaths.output.open("ab")
         failures_file = output_fpaths.failures.open("ab")
         failure_counts: Counter = Counter()
@@ -956,7 +976,9 @@ class RolloutReverificationHelper(BaseModel):
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
-                result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+                for key in (AGENT_REF_KEY_NAME, ENVIRONMENT_SERVER_STAMP_KEY_NAME):
+                    if key in row:
+                        result[key] = row[key]
                 # Keep task_source alongside agent_ref: aggregation routes with the same resolver
                 # as /verify (task_source authoritative), so it must survive into the output file.
                 if TASK_SOURCE_KEY_NAME in row:
@@ -998,9 +1020,10 @@ class RolloutReverificationHelper(BaseModel):
                     results_file.write(serialized + b"\n")
                     results_file.flush()
 
-                counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
-                if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
-                    counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
+                label = rollout_run_label(row)
+                counts_left[label] -= 1
+                if counts_left[label] <= 0:
+                    counts_left.pop(label)
 
                 completed += 1
                 current_pct = 100 * completed / len(payloads_to_reverify)

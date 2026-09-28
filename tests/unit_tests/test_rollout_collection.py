@@ -4879,7 +4879,7 @@ class TestEnvironmentServerRouting:
             "task_id": {"taskset": "swe_pro", "task_id": task},
         }
 
-    def test_native_failure_reply_is_projected_to_a_sidecar_row(self) -> None:
+    def test_episode_failure_reply_becomes_a_sidecar_row(self) -> None:
         reply = self._native_identity("a") | {
             "result": None,
             "failure": {
@@ -4889,67 +4889,57 @@ class TestEnvironmentServerRouting:
                 "partial_response": {"id": "partial"},
             },
         }
-        assert nemo_gym.rollout_collection._is_native_episode_response(reply)
+        assert nemo_gym.rollout_collection._is_episode_response(reply)
 
-        projected = nemo_gym.rollout_collection._project_native_episode_response(reply)
+        record = nemo_gym.rollout_collection._episode_record(reply)
 
-        assert projected[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
-        assert projected[NG_TERMINAL_KEY] is False
-        assert projected["_ng_failure_message"] == "agent unavailable"
-        assert projected["_ng_failure_stage"] == "agent"
-        assert projected["_ng_failure_partial_response"] == {"id": "partial"}
-        assert projected["task_id"]["task_id"] == "a"
-        assert "reward" not in projected
+        assert record[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+        assert record[NG_TERMINAL_KEY] is False
+        assert record["_ng_failure_message"] == "agent unavailable"
+        assert record["_ng_failure_stage"] == "agent"
+        assert record["_ng_failure_partial_response"] == {"id": "partial"}
+        assert record[nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] == "a"
+        assert "reward" not in record
 
-        terminal = nemo_gym.rollout_collection._project_native_episode_response(
+        terminal = nemo_gym.rollout_collection._episode_record(
             self._native_identity("a") | {"failure": {"message": "bad task", "terminal": True}}
         )
         assert terminal[NG_TERMINAL_KEY] is True
 
-    def test_native_result_reply_gains_top_level_reward_and_unwraps_for_aggregation(self) -> None:
+    def test_episode_result_is_stored_as_returned_with_only_collector_keys_added(self) -> None:
+        """The collector stores any Environment Server result without knowing its fields."""
         observations = {"source": "hermes", "records": [], "gaps": []}
-        reply = self._native_identity("a") | {
-            "failure": None,
-            "result": {
-                "verification": {"reward": 1.0, "response": {"usage": {"tokens": 3}}, "mask_sample": False},
-                "agent_observations": observations,
-            },
-        }
-
-        projected = nemo_gym.rollout_collection._project_native_episode_response(reply)
-
-        assert projected is reply
-        assert projected["reward"] == 1.0
-        assert projected["mask_sample"] is False
-        assert projected["result"]["verification"]["reward"] == 1.0
-        # Lifted to the key trajectory capture and the health check read, as the legacy adapter does.
-        assert projected["ng_agent_observations"] is observations
-
-        projected[TASK_INDEX_KEY_NAME] = 0
-        projected[NG_ENVIRONMENT_SERVER_KEY] = "environment"
-        projected[nemo_gym.rollout_collection.NG_PERF_KEY] = {"total_latency_ms": 12.0}
-        entry = nemo_gym.rollout_collection._verify_response_for_aggregation(projected)
-        assert entry == {
+        result = {
             "reward": 1.0,
             "response": {"usage": {"tokens": 3}},
             "mask_sample": False,
-            TASK_INDEX_KEY_NAME: 0,
-            NG_ENVIRONMENT_SERVER_KEY: "environment",
-            nemo_gym.rollout_collection.NG_PERF_KEY: {"total_latency_ms": 12.0},
+            # A verify response may echo dataset columns, including a string task_id.
+            "task_id": "dataset-task-7",
+            "ng_agent_observations": observations,
         }
+        reply = self._native_identity("a") | {"failure": None, "result": result}
 
-        legacy = {TASK_INDEX_KEY_NAME: 0, "reward": 0.5}
-        assert nemo_gym.rollout_collection._verify_response_for_aggregation(legacy) is legacy
+        record = nemo_gym.rollout_collection._episode_record(reply)
 
-    def test_native_detection_needs_object_identities_and_an_object_failure(self) -> None:
-        """A legacy reply echoing identity fields as strings is not a native reply; a bad failure is an error."""
-        is_native = nemo_gym.rollout_collection._is_native_episode_response
-        assert is_native(self._native_identity("a") | {"failure": {"message": "x", "terminal": True}})
-        assert not is_native({"episode_id": "0-a", "task_id": "a", "reward": 1.0, "failure": {"reason": "echoed"}})
-        assert not is_native(self._native_identity("a") | {"reward": 1.0})
+        assert record == result | {nemo_gym.rollout_collection.NG_TASK_ID_KEY: {"taskset": "swe_pro", "task_id": "a"}}
+        # The envelope is not stored twice: no nested result, no episode_id, no second reward.
+        assert "result" not in record and "episode_id" not in record and "failure" not in record
+
+    def test_episode_result_may_not_use_collector_keys(self) -> None:
+        reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": {}}}
+
+        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
+            nemo_gym.rollout_collection._episode_record(reply)
+
+    def test_episode_detection_needs_object_identities_and_an_object_failure(self) -> None:
+        """An agent reply echoing identity fields as strings is not an episode reply; a bad failure is an error."""
+        is_episode = nemo_gym.rollout_collection._is_episode_response
+        assert is_episode(self._native_identity("a") | {"failure": {"message": "x", "terminal": True}})
+        assert not is_episode({"episode_id": "0-a", "task_id": "a", "reward": 1.0, "failure": {"reason": "echoed"}})
+        assert not is_episode(self._native_identity("a") | {"reward": 1.0})
 
         with pytest.raises(ValueError, match="non-object failure: 'timeout'"):
-            nemo_gym.rollout_collection._project_native_episode_response(
+            nemo_gym.rollout_collection._episode_record(
                 self._native_identity("a") | {"result": None, "failure": "timeout"}
             )
 
@@ -4987,12 +4977,13 @@ class TestEnvironmentServerRouting:
         client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
         client.global_config_dict = self._mixed_batch_config()
 
-        native_result = self._native_identity("a") | {
+        episode_result = {
             TASK_INDEX_KEY_NAME: 0,
             ROLLOUT_INDEX_KEY_NAME: 0,
             NG_ENVIRONMENT_SERVER_KEY: "environment",
+            nemo_gym.rollout_collection.NG_TASK_ID_KEY: {"taskset": "swe_pro", "task_id": "a"},
             "reward": 1.0,
-            "result": {"verification": {"reward": 1.0, "response": {"usage": {"tokens": 3}}}},
+            "response": {"usage": {"tokens": 3}},
         }
         legacy_result = {
             TASK_INDEX_KEY_NAME: 1,
@@ -5006,20 +4997,12 @@ class TestEnvironmentServerRouting:
         ]
 
         metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics(
-            [native_result, legacy_result], rows, tmp_path / "output.jsonl"
+            [episode_result, legacy_result], rows, tmp_path / "output.jsonl"
         )
 
         assert set(posts) == {"environment", "legacy_environment"}
-        # The native group is scored on the unwrapped verify response, keyed by the row's indices.
-        assert posts["environment"] == [
-            {
-                "reward": 1.0,
-                "response": {"usage": {"tokens": 3}},
-                TASK_INDEX_KEY_NAME: 0,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-                NG_ENVIRONMENT_SERVER_KEY: "environment",
-            }
-        ]
+        # An episode record is sent as stored; it already has the verify-response shape.
+        assert posts["environment"] == [episode_result]
         assert posts["legacy_environment"][0][TASK_INDEX_KEY_NAME] == 1
         written = {entry[NG_ENVIRONMENT_SERVER_KEY]: entry for entry in json.loads(metrics_fpath.read_text())}
         assert set(written) == {"environment", "legacy_environment"}
@@ -5073,6 +5056,40 @@ class TestEnvironmentServerRouting:
                 [dict(rows[0], reward=1.0)], rows, tmp_path / "output.jsonl"
             )
 
+    async def test_run_from_config_stamps_server_and_result_type_on_agent_routed_rows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A flat row routed by its agent is stamped with the relay that ran it, so readers need not use agent_ref."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_bytes(
+            orjson.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "hermes_legacy"}})
+            + b"\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/run":
+                assert server_name == "legacy_environment"
+                return FakeResponse(200, {"reward": 1.0, "response": {"usage": {"total_tokens": 3}}})
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client.global_config_dict = self._mixed_batch_config()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: client.global_config_dict)
+
+        await RolloutCollectionHelper().run_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_jsonl_fpath),
+                output_jsonl_fpath=str(output_jsonl_fpath),
+                disable_health_check=True,
+            )
+        )
+
+        [record] = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert record[NG_ENVIRONMENT_SERVER_KEY] == "legacy_environment"
+        assert record[nemo_gym.rollout_collection.NG_RESULT_TYPE_KEY] == "legacy_agent"
+        assert record[AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
+
     async def test_run_from_config_sidecars_a_native_failure_and_retries_it_on_resume(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -5109,7 +5126,7 @@ class TestEnvironmentServerRouting:
                     identity
                     | {
                         "failure": None,
-                        "result": {"verification": {"reward": 1.0, "response": {"usage": {"total_tokens": 3}}}},
+                        "result": {"reward": 1.0, "response": {"usage": {"total_tokens": 3}}},
                     },
                 )
             assert url_path == "/aggregate_metrics"
@@ -5131,16 +5148,17 @@ class TestEnvironmentServerRouting:
 
         assert [server for server, _ in dispatched] == ["environment", "environment"]
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
-        assert [r["task_id"]["task_id"] for r in persisted] == ["b"]
+        assert [r[nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] for r in persisted] == ["b"]
         assert persisted[0]["reward"] == 1.0
         assert persisted[0][NG_ENVIRONMENT_SERVER_KEY] == "environment"
-        assert persisted[0][nemo_gym.rollout_collection.NG_TASKSET_KEY] == "swe_pro"
+        assert persisted[0][nemo_gym.rollout_collection.NG_RESULT_TYPE_KEY] == "single_agent"
+        assert "result" not in persisted[0] and "episode_id" not in persisted[0]
         failures = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
         assert len(failures) == 1
         assert failures[0][NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
         assert failures[0][NG_TERMINAL_KEY] is False
         assert failures[0][NG_ENVIRONMENT_SERVER_KEY] == "environment"
-        assert failures[0]["task_id"]["task_id"] == "a"
+        assert failures[0][nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] == "a"
         metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
             ".json"
         )
@@ -5158,5 +5176,5 @@ class TestEnvironmentServerRouting:
         assert body["task"]["task_id"]["task_id"] == "a"
         assert body["episode_id"]["attempt"] == 1
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
-        assert sorted(r["task_id"]["task_id"] for r in persisted) == ["a", "b"]
+        assert sorted(r[nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] for r in persisted) == ["a", "b"]
         assert all(r[NG_ENVIRONMENT_SERVER_KEY] == "environment" for r in persisted)

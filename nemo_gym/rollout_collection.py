@@ -60,6 +60,7 @@ from nemo_gym.global_config import (
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -186,8 +187,10 @@ NG_TERMINAL_KEY = "_ng_failure_terminal"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
 ENVIRONMENT_SERVER_FAILURE_CLASS = "environment_server_failed"
-NG_ENVIRONMENT_SERVER_KEY = "_ng_environment_server"
-NG_TASKSET_KEY = "_ng_taskset"
+NG_ENVIRONMENT_SERVER_KEY = ENVIRONMENT_SERVER_STAMP_KEY_NAME
+# Implementation name under `environment_servers:`, so readers know which result type a record holds.
+NG_RESULT_TYPE_KEY = "_ng_result_type"
+NG_TASK_ID_KEY = "_ng_task_id"
 _NO_RESULT_FAILURE_CLASSES = frozenset(
     {
         AGENT_REQUEST_FAILED_FAILURE_CLASS,
@@ -296,11 +299,11 @@ def _native_episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _is_native_episode_response(result: Any) -> bool:
+def _is_episode_response(result: Any) -> bool:
     """True for a ``BaseEpisodeResponse``-shaped reply: object identities plus a ``result`` or ``failure`` key.
 
-    The collector only projects such a reply for a row it dispatched as a native episode request
-    (``_materialized_taskset(row)``), so a legacy verify response that echoes identity fields is left alone.
+    The collector only applies this to a row it dispatched as an episode request
+    (``_materialized_taskset(row)``), so an agent's verify response that echoes identity fields is left alone.
     """
     return (
         isinstance(result, Mapping)
@@ -310,77 +313,48 @@ def _is_native_episode_response(result: Any) -> bool:
     )
 
 
-def _project_native_episode_response(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Give a native environment-server reply the keys the collector's readers expect.
+def _is_collector_key(key: str) -> bool:
+    """Keys rollout collection writes itself; an Environment Server result must not use them."""
+    return key.startswith("_ng_") or key in (NG_TRAJECTORY_KEY, "ng_model_call_capture", NG_PERF_KEY)
 
-    A handled ``failure`` becomes a failures-sidecar row in the same shape the legacy single-agent
-    adapter emits, so resume retries a non-terminal one and never a terminal one. A ``result`` keeps
-    the native record and gains the top-level ``reward`` (and mask flag) that progress accounting and
-    the aggregate request read off every line, plus ``ng_agent_observations`` so trajectory capture and
-    the health check see the agent's evidence as they do for legacy replies. The verifier's own fields
-    stay under ``result.verification``.
+
+def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Turn a ``BaseEpisodeResponse`` into the rollout record the collector stores.
+
+    A handled ``failure`` becomes a failures-sidecar row, so resume retries a non-terminal one and
+    never a terminal one. A ``result`` is stored as the Environment Server returned it; the collector
+    adds only its own ``_ng_*`` keys, so any Environment Server type can be collected without the
+    collector knowing its result fields.
     """
-    failure = result.get("failure")
+    task_id = response.get("task_id")
+    failure = response.get("failure")
     if failure is not None:
         if not isinstance(failure, Mapping):
             raise ValueError(
-                f"environment server reply for episode {result.get('episode_id')!r} carries a non-object "
-                f"failure: {failure!r}"
+                f"environment server reply for task {task_id!r} carries a non-object failure: {failure!r}"
             )
-        projected: Dict[str, Any] = {
-            "episode_id": result.get("episode_id"),
-            "task_id": result.get("task_id"),
+        record: Dict[str, Any] = {
+            NG_TASK_ID_KEY: task_id,
             NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
             NG_TERMINAL_KEY: bool(failure.get("terminal", False)),
             "_ng_failure_message": failure.get("message"),
         }
         if failure.get("stage") is not None:
-            projected["_ng_failure_stage"] = failure["stage"]
+            record["_ng_failure_stage"] = failure["stage"]
         if failure.get("partial_response") is not None:
-            projected["_ng_failure_partial_response"] = failure["partial_response"]
-        return projected
-    native_result = result.get("result")
-    if not isinstance(native_result, Mapping):
-        return result
-    verification = native_result.get("verification")
-    if isinstance(verification, Mapping):
-        if "reward" not in result and "reward" in verification:
-            result["reward"] = verification["reward"]
-        if MASK_SAMPLE_KEY not in result and MASK_SAMPLE_KEY in verification:
-            result[MASK_SAMPLE_KEY] = verification[MASK_SAMPLE_KEY]
-    observations = native_result.get("agent_observations")
-    if isinstance(observations, Mapping) and "ng_agent_observations" not in result:
-        result["ng_agent_observations"] = observations
-    return result
-
-
-# Collector-stamped per-rollout keys that travel with an unwrapped native record into `/aggregate_metrics`.
-_AGGREGATION_ROW_KEYS = (
-    TASK_INDEX_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    ATTEMPT_INDEX_KEY_NAME,
-    ROLLOUT_ID_KEY_NAME,
-    AGENT_REF_KEY_NAME,
-    TASK_SOURCE_KEY_NAME,
-    NG_ENVIRONMENT_SERVER_KEY,
-    NG_TASKSET_KEY,
-    NG_PERF_KEY,
-    MASK_SAMPLE_KEY,
-)
-
-
-def _verify_response_for_aggregation(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the verify response ``/aggregate_metrics`` scores: the record itself for a legacy
-    reply, the unwrapped ``result.verification`` plus the row keys for a native one."""
-    native_result = result.get("result") if _is_native_episode_response(result) else None
-    verification = native_result.get("verification") if isinstance(native_result, Mapping) else None
-    if not isinstance(verification, Mapping):
-        return result
-    entry = dict(verification)
-    for key in _AGGREGATION_ROW_KEYS:
-        if key in result:
-            entry[key] = result[key]
-    return entry
+            record["_ng_failure_partial_response"] = failure["partial_response"]
+        return record
+    result = response.get("result")
+    if not isinstance(result, Mapping):
+        raise ValueError(f"environment server reply for task {task_id!r} carries a non-object result: {result!r}")
+    reserved = sorted(key for key in result if _is_collector_key(key))
+    if reserved:
+        raise ValueError(
+            f"environment server result for task {task_id!r} uses keys reserved for rollout collection: {reserved}"
+        )
+    record = dict(result)
+    record[NG_TASK_ID_KEY] = task_id
+    return record
 
 
 @dataclass(frozen=True)
@@ -390,6 +364,8 @@ class _CompletedRollout:
     row: Dict[str, Any]
     result: Dict[str, Any]
     rollout_latency_ms: Optional[float]
+    environment_server: Optional[str] = None
+    environment_server_type: Optional[str] = None
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -1702,11 +1678,9 @@ class RolloutCollectionHelper(BaseModel):
         ):
             completed = await future
             row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
-            if _materialized_taskset(row) is not None and _is_native_episode_response(result):
-                # The row went out as a native episode request, so the reply is a BaseEpisodeResponse:
-                # a handled failure becomes a sidecar row (and a retry candidate), a result gains the
-                # top-level reward every reader below expects.
-                result = _project_native_episode_response(result)
+            if _materialized_taskset(row) is not None and _is_episode_response(result):
+                # The row went out as an episode request, so the reply is a BaseEpisodeResponse.
+                result = _episode_record(result)
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -1722,11 +1696,12 @@ class RolloutCollectionHelper(BaseModel):
                 # Capture readback recomputes the id from the finished record.
                 # Preserve an explicit id on the result just like the indices.
                 result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
-            if NG_ENVIRONMENT_SERVER_KEY in row:
-                result[NG_ENVIRONMENT_SERVER_KEY] = row[NG_ENVIRONMENT_SERVER_KEY]
-            taskset = _materialized_taskset(row)
-            if taskset is not None:
-                result[NG_TASKSET_KEY] = taskset
+            # Every record names the Environment Server that ran it and that server's type,
+            # so readers group by server instead of agent_ref and know which result type they hold.
+            if completed.environment_server is not None:
+                result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
+            if completed.environment_server_type is not None:
+                result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -1852,8 +1827,9 @@ class RolloutCollectionHelper(BaseModel):
                 agent_name_to_dropped[agent_name].update({"omitted" if no_persist else "failed": 1})
             elif result.get(MASK_SAMPLE_KEY):
                 agent_name_to_scored[agent_name].update({"masked": 1})
-            else:
-                agent_name_to_scored[agent_name].update({"reward": float(result.get("reward") or 0.0), "count": 1})
+            elif "reward" in result:
+                # A result without a reward is unscored, not a zero.
+                agent_name_to_scored[agent_name].update({"reward": float(result["reward"] or 0.0), "count": 1})
 
             current_pct = 100 * completed_dispatches / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
@@ -2034,7 +2010,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     f"Result rows are stamped with environment server {server_name!r}, which is not in the "
                     f"running config (available: {available_servers}); aggregate with the config that produced them"
                 )
-            server_results.setdefault(server_name, []).append(_verify_response_for_aggregation(result))
+            server_results.setdefault(server_name, []).append(result)
             if server_name not in server_agents:
                 if agent_name is None:
                     # A native row names no agent; the environment server's own binding does.
@@ -2413,18 +2389,24 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             agent_name: _environment_server_for_agent(agent_name, servers_by_agent)
             for agent_name in {row[AGENT_REF_KEY_NAME]["name"] for row in direct_agent_examples}
         }
+        server_types = {
+            str(name): str(next(iter(block[ENVIRONMENT_SERVER_TYPE_KEY_NAME])))
+            for name, block in server_client.global_config_dict.items()
+            if isinstance(block, DictConfig) and isinstance(block.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME), DictConfig)
+        }
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
+            server_name = (
+                self._dispatch_name(row)
+                if NG_ENVIRONMENT_SERVER_KEY in row
+                else server_for_agent[row[AGENT_REF_KEY_NAME]["name"]]
+            )
+            server_type = server_types.get(server_name)
             async with semaphore:
                 started_at = time()
                 res = None
                 try:
-                    server_name = (
-                        self._dispatch_name(row)
-                        if NG_ENVIRONMENT_SERVER_KEY in row
-                        else server_for_agent[row[AGENT_REF_KEY_NAME]["name"]]
-                    )
                     request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
@@ -2432,7 +2414,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time() - started_at) * 1000
-                    return _CompletedRollout(row=row, result=result, rollout_latency_ms=rollout_latency_ms)
+                    return _CompletedRollout(
+                        row=row,
+                        result=result,
+                        rollout_latency_ms=rollout_latency_ms,
+                        environment_server=server_name,
+                        environment_server_type=server_type,
+                    )
                 except Exception as e:
                     print(
                         "[rollout_collection] /run failed "
@@ -2448,7 +2436,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # when the body was the part that failed.
                     status = getattr(e, "status", None) or getattr(res, "status", None)
                     return _CompletedRollout(
-                        row=row, result=_agent_request_failure_row(e, status), rollout_latency_ms=None
+                        row=row,
+                        result=_agent_request_failure_row(e, status),
+                        rollout_latency_ms=None,
+                        environment_server=server_name,
+                        environment_server_type=server_type,
                     )
 
         return tqdm.as_completed(

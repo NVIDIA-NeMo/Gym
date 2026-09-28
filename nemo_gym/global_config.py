@@ -27,7 +27,7 @@ from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import ClassVar, Dict, List, Optional, Set, Tuple, Type
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Set, Tuple, Type
 
 import hydra
 import rich
@@ -201,6 +201,8 @@ ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
+# Stamped by rollout collection on every record: the Environment Server that ran the rollout.
+ENVIRONMENT_SERVER_STAMP_KEY_NAME = "_ng_environment_server"
 # The config instance that declares the row's dataset (a resources server normally; the agent
 # itself for self-contained environments). Stamped into derived artifacts at collate/load time;
 # resolved to an agent at dispatch time. See the dataset-decoupling RFC.
@@ -274,6 +276,18 @@ def get_hf_token() -> Optional[str]:  # pragma: no cover
 # OmegaConf new resolvers
 OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
 OmegaConf.register_new_resolver("copy", lambda a: f"${{copy:{a}}}")
+
+
+def rollout_run_label(row: Mapping[str, Any]) -> Optional[str]:
+    """Name what ran a rollout: its agent when the row names one, otherwise its Environment Server.
+
+    Rows routed by agent keep the agent's name, so existing metric labels do not change.
+    Rows without an ``agent_ref``, such as episode rows, use the Environment Server stamp.
+    """
+    agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+    if agent_name is not None:
+        return agent_name
+    return row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
 
 
 class GlobalConfigDictParserConfig(BaseModel):
