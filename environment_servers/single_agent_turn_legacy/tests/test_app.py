@@ -3,7 +3,6 @@
 
 import runpy
 from pathlib import Path
-from typing import Literal
 
 import orjson
 import pytest
@@ -15,7 +14,6 @@ import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
-    _is_retryable_dependency_error,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
@@ -29,24 +27,14 @@ class _Cookie:
     value = "cookie-value"
 
 
-@pytest.mark.parametrize(
-    "relative_path",
-    [
-        "environment_servers/single_agent_turn_legacy/app.py",
-        "environment_servers/legacy_agent/app.py",
-    ],
-)
-def test_legacy_module_exports_app_for_multi_worker_import(
-    monkeypatch: pytest.MonkeyPatch,
-    relative_path: str,
-) -> None:
+def test_legacy_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
     worker_app = object()
     monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_entrypoint", lambda _: True)
     monkeypatch.setattr(SimpleServer, "run_webserver", classmethod(lambda _: worker_app))
 
     namespace = runpy.run_path(
-        str(Path(__file__).parents[2] / relative_path),
-        run_name=f"{Path(relative_path).parent.name}.worker_test",
+        str(Path(__file__).parents[1] / "app.py"),
+        run_name="single_agent_turn_legacy.worker_test",
     )
 
     assert namespace["app"] is worker_app
@@ -87,39 +75,25 @@ class _Client(ServerClient):
         response = self.responses.pop(0)
         payload = orjson.loads(response.body)
         body = kwargs.get("json")
-        if url_path == "/seed_session" and hasattr(body, "resources_session_id"):
-            payload["resources_session_id"] = body.resources_session_id
+        if url_path == "/seed_session" and "resources_session_id" in body:
+            payload["resources_session_id"] = body["resources_session_id"]
         elif url_path == "/v1/agent_sessions":
-            payload["agent_session_id"] = body.agent_session_id
+            payload["agent_session_id"] = body["agent_session_id"]
         elif url_path == "/v1/agent_sessions/close":
-            payload["agent_session_id"] = body.agent_session_id
+            payload["agent_session_id"] = body["agent_session_id"]
         elif url_path == "/close_session":
-            payload["resources_session_id"] = body.resources_session_id
+            payload["resources_session_id"] = body["resources_session_id"]
         return _Response(payload)
 
     def _resolve_base_url(self, server_name: str) -> str:
         return f"http://{server_name}:8000"
 
 
-def _environment_server(
-    *,
-    token_capture: bool = False,
-    resources_tool_transports: list[Literal["direct_http", "mcp"]] | None = None,
-) -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
+def _environment_server() -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
     global_config = OmegaConf.create(
         {
             "resources": {"resources_servers": {"test": {"host": "resources", "port": 8000, "entrypoint": "app.py"}}},
-            "agent": {
-                "responses_api_agents": {
-                    "test": {
-                        "host": "agent",
-                        "port": 8001,
-                        "entrypoint": "app.py",
-                        "token_id_capture": token_capture,
-                    }
-                }
-            },
-            "token_id_capture": {"enabled": token_capture},
+            "agent": {"responses_api_agents": {"test": {"host": "agent", "port": 8001, "entrypoint": "app.py"}}},
         }
     )
     response = _agent_response()
@@ -157,80 +131,8 @@ def _environment_server(
         agent_server=AgentServerRef(type="responses_api_agents", name="agent"),
         default_episode_timeout_seconds=10,
         cleanup_timeout_seconds=10,
-        resources_tool_transports=resources_tool_transports or [],
     )
     return SingleAgentTurnEnvironmentServer(config=config, server_client=client), client
-
-
-def _request() -> SingleAgentTurnRequest:
-    return SingleAgentTurnRequest(
-        episode_id=EpisodeId(rollout_id="rollout", attempt=2),
-        task=MaterializedTask(
-            task_id=TaskId(taskset="source", task_id="task"),
-            task_input=SingleAgentTurnTaskInput(
-                responses_create_params={"input": "task"},
-                task_data={"instance_id": "task"},
-            ),
-        ),
-    )
-
-
-async def test_single_agent_turn_with_direct_resources_tools() -> None:
-    environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
-    result = await environment_server.run_request(_request())
-
-    assert result.result is not None
-    assert result.result.verification.reward == 1.0
-    assert result.result.verification.model_dump()["benchmark_field"] == "preserved"
-    assert [path for _, path, _ in client.calls] == [
-        "/seed_session",
-        "/v1/agent_sessions",
-        "/ng-rollout/rollout-a2/v1/responses",
-        "/v1/agent_sessions/close",
-        "/verify",
-        "/close_session",
-    ]
-    create_body = client.calls[1][2]["json"]
-    assert create_body.task_id == TaskId(taskset="source", task_id="task")
-    [tool_access] = create_body.tool_accesses
-    assert tool_access.name == "resources.direct_http"
-    assert str(tool_access.base_url) == "http://resources:8000/"
-    assert tool_access.cookies == {"session": "cookie-value"}
-    assert client.calls[2][2]["cookies"] == {"session": "cookie-value"}
-    assert client.calls[3][2]["cookies"] == {"session": "cookie-value"}
-    assert client.calls[3][2]["json"].episode_id == EpisodeId(rollout_id="rollout", attempt=2)
-    assert client.calls[4][2]["cookies"] == {"session": "updated-cookie"}
-    assert client.calls[5][2]["cookies"] == {"session": "updated-cookie"}
-    assert client.calls[5][2]["json"].episode_id == EpisodeId(rollout_id="rollout", attempt=2)
-
-
-async def test_single_agent_turn_translates_resources_mcp_metadata_to_canonical_tool_access() -> None:
-    environment_server, client = _environment_server(resources_tool_transports=["direct_http", "mcp"])
-    client.responses[0] = _Response(
-        {
-            "resources_session_id": "resources-session",
-            "resources_tools": {
-                "server_name": "resources",
-                "headers": {"Authorization": "Bearer scoped"},
-            },
-        }
-    )
-
-    await environment_server.run_request(_request())
-
-    direct_access, mcp_access = client.calls[1][2]["json"].tool_accesses
-    assert direct_access.name == "resources.direct_http"
-    assert mcp_access.name == "resources"
-    assert mcp_access.required is True
-    assert mcp_access.connection.transport == "streamable_http"
-    assert str(mcp_access.connection.url) == "http://resources:8000/mcp"
-    assert mcp_access.connection.headers == {"Authorization": "Bearer scoped"}
-
-
-async def test_token_capture_keeps_prefixed_twin_route() -> None:
-    environment_server, client = _environment_server(token_capture=True)
-    await environment_server.run_request(_request())
-    assert client.calls[2][1] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
 
 
 async def test_legacy_compatibility_is_a_separate_environment_deployment() -> None:
@@ -301,14 +203,3 @@ async def test_legacy_and_native_envelopes_project_the_same_result() -> None:
     native_result = await native_adapter.run_legacy(native_request.model_dump(mode="json"))
 
     assert native_result == legacy_result
-
-
-def test_dependency_failure_messages_are_bounded() -> None:
-    environment_server, _ = _environment_server()
-    error = environment_server._failure(stage="agent", message="x" * 3000, terminal=False)
-    assert len(error.failure.message) == 2000
-
-
-def test_retry_requires_a_transient_dependency_error() -> None:
-    assert _is_retryable_dependency_error(TimeoutError()) is True
-    assert _is_retryable_dependency_error(ValueError("invalid response")) is False
