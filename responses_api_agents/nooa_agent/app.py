@@ -156,6 +156,8 @@ def _merge_downstream_cookies(model_cookies: dict[str, str], resource_cookies: d
 class NOOAAgent(SimpleResponsesAPIAgent):
     """Embedded NOOA adapter that keeps Gym authoritative for every external interaction."""
 
+    ray_enabled = False
+
     config: NOOAAgentConfig
     runner: Any = None
     model_config = ConfigDict(arbitrary_types_allowed=True)

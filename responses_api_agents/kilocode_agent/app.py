@@ -280,6 +280,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
     that field. Eval-only either way: token IDs and logprobs are not wired up.
     """
 
+    ray_enabled = False
+
     config: KiloCodeAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)

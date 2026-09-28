@@ -18,6 +18,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 class LegalAgentBenchHarborBridge(HarborAgent):
     """Keep LAB-specific route and path compatibility out of the shared bridge."""
 
+    ray_enabled = False
+
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.post("/aggregate_metrics")(self.aggregate_metrics)
