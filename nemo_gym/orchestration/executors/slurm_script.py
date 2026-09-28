@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import re
 import shlex
 from pathlib import Path
@@ -78,21 +79,54 @@ def _render_directives(compute: SlurmComputeConfig, remote_bench_dir: Path, benc
     lines.append(f"#SBATCH --chdir={remote_bench_dir}")
     for key, val in compute.extra_args.items():
         lines.append(f"#SBATCH --{key}={val}")
-    for pool_name, pool in compute.node_pools.items():
-        lines.extend(_render_pool_directives(pool_name, pool))
+    lines.extend(_render_pool_directives(compute.node_pools))
     return "\n".join(lines)
 
 
-def _render_pool_directives(pool_name: str, pool: NodePool) -> list[str]:
+def _pool_directive(pools: dict[str, NodePool], attribute: str) -> Any:
+    """The one value every pool agrees on for `attribute`.
+
+    A plain sbatch job takes a single --partition/--ntasks-per-node/--gpus-per-node
+    for the whole allocation, so pools that disagree cannot both be honoured. Slurm
+    would silently apply whichever directive came last; say so instead.
+    """
+    values = {getattr(pool, attribute) for pool in pools.values()}
+    if len(values) > 1:
+        named = ", ".join(f"{name}={getattr(pool, attribute)!r}" for name, pool in pools.items())
+        raise ValueError(
+            f"Node pools disagree on {attribute} ({named}). One Slurm job takes a single value for the whole "
+            "allocation; split the run or make the pools agree."
+        )
+    return next(iter(values))
+
+
+def _render_pool_directives(pools: dict[str, NodePool]) -> list[str]:
+    """One set of directives for the whole allocation, not one per pool.
+
+    Pools divide an allocation between services (see _pool_offsets); they are not
+    separate Slurm requests. Emitting --nodes per pool made every pool but the last
+    a no-op, so a two-pool job asked for one pool's nodes while the rest of the
+    executor sized itself on the sum.
+    """
+    if not pools:
+        return []
     lines = [
-        f"#SBATCH --partition={pool.partition}  # pool: {pool_name}",
-        f"#SBATCH --nodes={pool.nodes}",
-        f"#SBATCH --ntasks-per-node={pool.ntasks_per_node}",
+        f"#SBATCH --partition={_pool_directive(pools, 'partition')}",
+        f"#SBATCH --nodes={sum(pool.nodes for pool in pools.values())}",
+        f"#SBATCH --ntasks-per-node={_pool_directive(pools, 'ntasks_per_node')}",
     ]
-    if pool.gpus_per_node is not None:
-        lines.append(f"#SBATCH --gpus-per-node={pool.gpus_per_node}")
-    for key, val in pool.extra_args.items():
-        lines.append(f"#SBATCH --{key}={val}")
+    gpus_per_node = _pool_directive(pools, "gpus_per_node")
+    if gpus_per_node is not None:
+        lines.append(f"#SBATCH --gpus-per-node={gpus_per_node}")
+    extra_args: dict[str, str] = {}
+    for name, pool in pools.items():
+        for key, val in pool.extra_args.items():
+            if extra_args.setdefault(key, val) != val:
+                raise ValueError(
+                    f"Node pool {name!r} sets extra_args[{key!r}]={val!r}, which conflicts with another pool's "
+                    f"{extra_args[key]!r}. #SBATCH directives apply to the whole allocation."
+                )
+    lines.extend(f"#SBATCH --{key}={val}" for key, val in extra_args.items())
     return lines
 
 
@@ -133,6 +167,7 @@ def _render_service_command(
     pre_command: str = "",
     workdir: str | None = None,
     single_node: bool = False,
+    nodelist: str | None = None,
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
@@ -141,6 +176,10 @@ def _render_service_command(
         node_flags = " --nodes=1 --ntasks=1"
     else:
         node_flags = f" --nodes={nodes} --ntasks={ntasks}" if (nodes is not None and nodes > 1) else ""
+    # --nodelist names the exact hosts. --relative is only a starting point Slurm may
+    # move off when that node's resources are taken, landing a service on the wrong node.
+    if nodelist is not None:
+        node_flags = f' --nodelist="${{{nodelist}}}" --nodes={nodes} --ntasks={ntasks}'
     mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in mounts)}" if mounts else ""
     workdir_flag = f" --container-workdir={shlex.quote(workdir)}" if workdir else ""
     if pre_command:
@@ -315,8 +354,76 @@ def _build_vllm_ray_serve_command(
     )
 
 
-def _build_ray_command(_service: RayServiceConfig) -> str:
-    return "ray start --head"
+def _build_ray_command(service: RayServiceConfig) -> str:
+    # --block keeps the srun step alive. `ray start` daemonises and returns, so
+    # without it the step exits the moment the node is up and Slurm tears the
+    # service down again.
+    cmd = "ray start --block"
+    if service.mode == "head":
+        cmd += f" --head --port {service.port}"
+    elif service.head is not None:
+        # Double-quoted, not shlex-quoted: the head's address is only known once
+        # Slurm places the job, and build_sbatch_script exports it under this name.
+        cmd += f' --address "${ray_head_address_var(service.head)}"'
+    else:
+        cmd += f" --address {shlex.quote(str(service.address))}"
+    if service.num_cpus is not None:
+        cmd += f" --num-cpus {service.num_cpus}"
+    if service.num_gpus is not None:
+        cmd += f" --num-gpus {service.num_gpus}"
+    if service.resources:
+        # Ray takes fractional custom resources, so the field is float-typed, but a
+        # whole number is written as one: {"extra_gpu": 4}, not 4.0, so the rendered
+        # command reads the way the config does.
+        resources = {k: int(v) if v.is_integer() else v for k, v in service.resources.items()}
+        cmd += " --resources=" + shlex.quote(json.dumps(resources, sort_keys=True))
+    if service.extra_args:
+        cmd += " " + service.extra_args
+    return cmd
+
+
+_NODE_ARRAY = 'gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))'
+
+
+def pool_nodes_var(pool: str) -> str:
+    """The env var build_sbatch_script exports with a node pool's comma-separated hosts."""
+    return f"GYM_POOL_{bash_var(pool)}_NODES"
+
+
+def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig, is_multi_node: bool) -> str:
+    """Declare the allocation's hosts, and export each node pool's, for --nodelist."""
+    if not is_multi_node and not any(s.node_pool for s in config.services.values()):
+        return ""
+    lines = [_NODE_ARRAY]
+    for name, (start, count) in _pool_offsets(compute).items():
+        if count:
+            lines.append(f'export {pool_nodes_var(name)}="$(IFS=,; echo "${{gym_nodes[*]:{start}:{count}}}")"')
+    return "\n".join(lines)
+
+
+def ray_head_address_var(head_service: str) -> str:
+    """The env var build_sbatch_script exports with a ray head service's host:port."""
+    return f"GYM_RAY_ADDRESS_{bash_var(head_service)}"
+
+
+def _render_ray_head_addresses(config: SubmitConfig, compute: SlurmComputeConfig) -> str:
+    """Export every ray head service's address, resolved from the node Slurm gave it.
+
+    A worker or the driver in another step can then join it without knowing,
+    when the config is written, which host the job will land on.
+    """
+    heads = {n: s for n, s in config.services.items() if isinstance(s, RayServiceConfig) and s.mode == "head"}
+    if not heads:
+        return ""
+    offsets = _pool_offsets(compute)
+    # _render_pool_nodes already declared the host array in a multi-node or pinned job.
+    declared = _node_totals(compute)[0] > 1 or any(s.node_pool for s in config.services.values())
+    lines = [] if declared else [_NODE_ARRAY]
+    for name, service in heads.items():
+        index = offsets[service.node_pool][0] if service.node_pool else 0
+        ip = f"$(getent hosts ${{gym_nodes[{index}]}} | awk '{{print $1}}')"
+        lines.append(f'export {ray_head_address_var(name)}="{ip}:{service.port}"')
+    return "\n".join(lines)
 
 
 _BUILDERS = {
@@ -344,7 +451,9 @@ def _build_service_command(
     return _BUILDERS[type(service)](service)
 
 
-def _render_collector_service(config: SubmitConfig, remote_bench_dir: Path, *, is_multi_node: bool) -> str:
+def _render_collector_service(
+    config: SubmitConfig, remote_bench_dir: Path, *, is_multi_node: bool, driver_node: int | None = None
+) -> str:
     """The collector's srun step. Started before the model services so the scrape covers their
     startup.
 
@@ -370,6 +479,10 @@ def _render_collector_service(config: SubmitConfig, remote_bench_dir: Path, *, i
             "SLURM_JOB_ID": f"{RUNTIME_ENV_PREFIX}SLURM_JOB_ID",
         },
         single_node=is_multi_node,
+        # Beside the driver: it scrapes the policy API on localhost, as the driver calls it.
+        nodelist=f"gym_nodes[{driver_node}]" if driver_node is not None else None,
+        nodes=1 if driver_node is not None else None,
+        ntasks=1 if driver_node is not None else None,
         **container_kwargs,
     )
 
@@ -401,6 +514,88 @@ def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path) -> 
         f"kill -TERM {pid} 2>/dev/null || true\n"
         "exit $DRIVER_RC"
     )
+
+
+def _pool_offsets(compute: SlurmComputeConfig) -> dict[str, tuple[int, int]]:
+    """Each pool's (first node index, node count) within the allocation.
+
+    Pools are laid out contiguously in declaration order, which is the order the
+    single #SBATCH --nodes total is built from, so pool i owns the nodes after
+    every pool before it.
+    """
+    offsets: dict[str, tuple[int, int]] = {}
+    start = 0
+    for name, pool in compute.node_pools.items():
+        offsets[name] = (start, pool.nodes)
+        start += pool.nodes
+    return offsets
+
+
+def _service_nodes(
+    service: VllmServiceConfig | RayServiceConfig, compute: SlurmComputeConfig, total_nodes: int
+) -> int:
+    """How many nodes this service actually runs on.
+
+    A service pinned to a pool sees only that pool, so a single-node pool inside a
+    ten-node job is a single-node deployment and must not be built as a multi-node
+    Ray one.
+    """
+    if service.node_pool is None:
+        return total_nodes
+    return compute.node_pools[service.node_pool].nodes
+
+
+def _driver_node(config: SubmitConfig, compute: SlurmComputeConfig) -> int:
+    """The node the driver runs on in a multi-node job: the policy's first node.
+
+    The driver reaches the policy on localhost. A multi-node policy serves its API
+    from node 0, and a pinned one from its pool's first node.
+    """
+    policy = config.services.get(config.driver.policy_model or "")
+    if policy is not None and policy.node_pool is not None:
+        return _pool_offsets(compute)[policy.node_pool][0]
+    return 0
+
+
+def _service_nodelist(
+    service: VllmServiceConfig | RayServiceConfig, driver_node: int | None, total_nodes: int
+) -> str | None:
+    """What a service's --nodelist names, as the shell variable it expands.
+
+    A pinned service names its pool. In a multi-node job an unpinned service that
+    fits on one node joins the driver, which reaches it on localhost; otherwise
+    Slurm could start it on any node.
+    """
+    if service.node_pool is not None:
+        return pool_nodes_var(service.node_pool)
+    if driver_node is not None and not _vllm_spans_multiple_nodes(service, total_nodes):
+        return f"gym_nodes[{driver_node}]"
+    return None
+
+
+def _srun_nodes(
+    service: VllmServiceConfig | RayServiceConfig, compute: SlurmComputeConfig, total_nodes: int
+) -> int | None:
+    nodes = _service_nodes(service, compute, total_nodes)
+    if service.node_pool is not None:
+        return nodes
+    if _vllm_spans_multiple_nodes(service, total_nodes):
+        return total_nodes
+    return 1 if total_nodes > 1 else None
+
+
+def _srun_ntasks(
+    service: VllmServiceConfig | RayServiceConfig,
+    compute: SlurmComputeConfig,
+    total_nodes: int,
+    total_ntasks: int,
+) -> int | None:
+    if service.node_pool is not None:
+        pool = compute.node_pools[service.node_pool]
+        return pool.nodes * pool.ntasks_per_node
+    if _vllm_spans_multiple_nodes(service, total_nodes):
+        return total_ntasks
+    return 1 if total_nodes > 1 else None
 
 
 def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
@@ -439,29 +634,42 @@ def build_sbatch_script(
         pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
     ]
 
-    ray_prelude = (
-        render_ray_prelude()
-        if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.services.values())
-        else ""
+    ray_prelude = "\n".join(
+        block
+        for block in (
+            render_ray_prelude()
+            if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.services.values())
+            else "",
+            _render_pool_nodes(config, compute, is_multi_node),
+            _render_ray_head_addresses(config, compute),
+        )
+        if block
     )
 
     observed = otel_active(config)
 
+    driver_node = _driver_node(config, compute) if is_multi_node else None
     service_commands = "\n\n".join(
-        ([_render_collector_service(config, remote_bench_dir, is_multi_node=is_multi_node)] if observed else [])
+        (
+            [_render_collector_service(config, remote_bench_dir, is_multi_node=is_multi_node, driver_node=driver_node)]
+            if observed
+            else []
+        )
         + [
             _render_service_command(
                 name,
                 service.container,
-                _build_service_command(service, total_nodes, gpus_per_node_values),
+                _build_service_command(service, _service_nodes(service, compute, total_nodes), gpus_per_node_values),
                 service.env or None,
                 service.mounts or None,
-                # Only services that actually span multiple nodes need the whole allocation's --nodes/
-                # --ntasks - not every service in a multi-node job (e.g. a plain Ray head service runs
-                # on a single node regardless of how many nodes the overall job spans).
-                nodes=total_nodes if _vllm_spans_multiple_nodes(service, total_nodes) else None,
-                ntasks=total_ntasks if _vllm_spans_multiple_nodes(service, total_nodes) else None,
+                # Only services that actually span multiple nodes need --nodes/--ntasks - not every
+                # service in a multi-node job (e.g. a plain Ray head service runs on a single node
+                # regardless of how many nodes the overall job spans). A pinned service always gets
+                # them, so the node list and the step size agree.
+                nodes=_srun_nodes(service, compute, total_nodes),
+                ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
                 pre_command=service.pre_command,
+                nodelist=_service_nodelist(service, driver_node, total_nodes),
             )
             for name, service in config.services.items()
         ]
@@ -502,7 +710,9 @@ def build_sbatch_script(
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
-    driver_node_flags = " --nodes=1 --ntasks=1" if is_multi_node else ""
+    driver_node_flags = (
+        f' --nodelist="${{gym_nodes[{driver_node}]}}" --nodes=1 --ntasks=1' if driver_node is not None else ""
+    )
     # The driver writes everything relative to the job directory -- `output_path`
     # above is `artifacts/rollouts.jsonl`. `#SBATCH --chdir` sets the cwd of the
     # BATCH script on the host, but inside a Pyxis container the cwd is whatever

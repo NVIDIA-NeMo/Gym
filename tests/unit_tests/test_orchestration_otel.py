@@ -309,6 +309,8 @@ def test_script_pins_the_collector_to_one_node_of_a_multi_node_job():
     )
     line = _collector_line(_script(multi))
     assert " --nodes=1 --ntasks=1" in line
+    # Named, not left to Slurm: the same node the driver is placed on.
+    assert '--nodelist="${gym_nodes[0]}"' in line
     assert " --nodes=1 --ntasks=1" not in _collector_line(_script(_config()))
 
 
