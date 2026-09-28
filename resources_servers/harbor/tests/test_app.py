@@ -73,13 +73,6 @@ class FakeSandbox:
 
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
         self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
-        if command.startswith("nohup setsid") and "test.sh" in command:
-            # The background launch itself; the outcome is reported through the exit-code file.
-            return SandboxExecResult(stdout="", stderr="", return_code=0)
-        if command.startswith("cat /tmp/.nemo-gym-rc-"):
-            if self.test_result.error_type == "timeout":
-                return SandboxExecResult(stdout="", stderr="", return_code=1)  # never finishes
-            return SandboxExecResult(stdout=f"{self.test_result.return_code}\n", stderr="", return_code=0)
         if "test.sh" in command:
             return self.test_result
         return SandboxExecResult(stdout="", stderr="", return_code=0)
@@ -364,10 +357,10 @@ class TestVerify:
         assert payload["responses_create_params"]["input"][0]["content"] == "Create hello.txt"
 
         run = next(call for call in sandbox.execs if "test.sh" in call["command"])
-        assert run["command"].startswith("nohup setsid bash -c ")
-        assert "timeout --signal=KILL 120 bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1" in run["command"]
+        assert run["command"] == "timeout --signal=KILL 120 bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1"
         assert run["cwd"] == "/app"
-        assert any(call["command"].startswith("cat /tmp/.nemo-gym-rc-") for call in sandbox.execs)
+        # The exec itself is bounded by the budget plus the grace period; the provider keeps it alive that long.
+        assert run["timeout_s"] == 120 + server.config.verifier_grace_s
         # tests/ was uploaded as an archive and unpacked into /tests.
         assert any(remote.endswith(".tar.gz") for _, remote in sandbox.uploads)
         assert any("tar -xzf" in call["command"] and "/tests" in call["command"] for call in sandbox.execs)
@@ -425,7 +418,7 @@ class TestVerify:
     def test_sandbox_runtime_failure_masks(self, tmp_path, monkeypatch):
         class BrokenLaunch(FakeSandbox):
             async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
-                if command.startswith("nohup setsid"):
+                if "test.sh" in command:
                     return SandboxExecResult(stdout=None, stderr="gone", return_code=125, error_type="sandbox")
                 return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
 

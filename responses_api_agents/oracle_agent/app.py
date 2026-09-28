@@ -50,13 +50,14 @@ from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.tasks.harbor import HarborTask, load_task
 from nemo_gym.tasks.harbor.task import HarborTaskError
-from resources_servers.harbor.app import run_detached
 from resources_servers.harbor.sandbox_io import upload_dir
 
 
 SOLUTION_DIR = "/solution"
 SOLVE_LOG_DIR = "/logs/agent"
 SOLVE_LOG = f"{SOLVE_LOG_DIR}/solve-stdout.txt"
+# Extra time the exec may wait after the in-container `timeout` should have fired.
+SOLVE_GRACE_S = 60.0
 ORACLE_METADATA_KEY = "oracle"
 ORACLE_STATUS_SOLVED = "solved"
 ORACLE_STATUS_UNVALIDATED = "unvalidated"
@@ -184,13 +185,13 @@ class OracleAgent(SimpleResponsesAPIAgent):
         timeout = min(settings.agent.timeout_sec, self.config.max_solve_timeout_s)
         await upload_dir(session.sandbox, task.path / "solution", SOLUTION_DIR)
         await session.sandbox.exec(f"mkdir -p {SOLVE_LOG_DIR} && chmod 777 {SOLVE_LOG_DIR}", cwd="/", timeout_s=60)
-        # Detached so a long solution does not hold a provider connection; output goes to a file we tail.
-        result = await run_detached(
-            session.sandbox,
-            f"bash {SOLUTION_DIR}/solve.sh > {SOLVE_LOG} 2>&1",
+        # One bounded exec: the provider keeps the command alive for `timeout_s`, and `timeout`
+        # inside the container stops the solution itself. Output goes to a file we tail.
+        result = await session.sandbox.exec(
+            f"timeout --signal=KILL {int(timeout)} bash {SOLUTION_DIR}/solve.sh > {SOLVE_LOG} 2>&1",
             cwd=session.workdir,
             env=dict(settings.solution.env),
-            timeout_s=timeout,
+            timeout_s=timeout + SOLVE_GRACE_S,
             user=task.user,
         )
         tail = self.config.output_tail_chars

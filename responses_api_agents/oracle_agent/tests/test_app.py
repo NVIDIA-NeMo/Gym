@@ -54,10 +54,9 @@ class FakeSandbox:
 
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
         self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
-        if command.startswith("nohup setsid") and "solve.sh" in command:
-            return SandboxExecResult(stdout="", stderr="", return_code=0)
-        if command.startswith("cat /tmp/.nemo-gym-rc-"):
-            return SandboxExecResult(stdout=f"{self.result.return_code}\n", stderr="", return_code=0)
+        if "solve.sh" in command:
+            # solve.sh output is redirected to a file in the sandbox, so the exec itself carries only the exit code.
+            return SandboxExecResult(stdout="", stderr="", return_code=self.result.return_code)
         if command.startswith("tail -c"):
             return SandboxExecResult(stdout=self.result.stdout, stderr="", return_code=0)
         return SandboxExecResult(stdout="", stderr="", return_code=0)
@@ -136,8 +135,8 @@ def test_oracle_runs_solution_in_borrowed_sandbox(tmp_path, monkeypatch):
     assert payload["output"][0]["content"][0]["text"] == "Done!\n"
     assert any(remote.endswith(".tar.gz") for remote in sandbox.uploads)
     run = next(call for call in sandbox.execs if "solve.sh" in call["command"])
-    assert run["command"].startswith("nohup setsid bash -c ")
-    assert "bash /solution/solve.sh > /logs/agent/solve-stdout.txt 2>&1" in run["command"]
+    assert run["command"] == "timeout --signal=KILL 120 bash /solution/solve.sh > /logs/agent/solve-stdout.txt 2>&1"
+    assert run["timeout_s"] == 120 + 60
     assert (run["cwd"], run["env"], run["user"]) == ("/app", {"GREETING": "hi"}, "runner")
 
     close = client.post(
