@@ -59,6 +59,8 @@ class TrajectoryResponseMetadata(ObservationModel):
 
 class TrajectoryModelCall(ObservationModel):
     model_call_id: Optional[str] = None
+    client_session_id: Optional[str] = None
+    client_assistant_message_id: Optional[str] = None
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     duration_ms: Optional[float] = Field(default=None, ge=0)
@@ -70,6 +72,12 @@ class TrajectoryModelCall(ObservationModel):
 
 class TrajectoryTurn(ObservationModel):
     invocation_id: str
+    source_message_id: Optional[str] = Field(
+        default=None, description="Persisted assistant-message ID in the harness."
+    )
+    source_model_ref: Optional[ModelServerRef] = Field(
+        default=None, description="Configured model server for matching the source message to captured calls."
+    )
     task_id: str
     rollout_id: str
     turn_no: int = Field(ge=1, description="Turn number within this invocation.")
@@ -161,6 +169,10 @@ class ContextCompactionObservation(ObservationModel):
 
     kind: Literal["context_compaction"] = "context_compaction"
     invocation_id: str
+    source_message_ids: list[str] = Field(
+        default_factory=list, description="Persisted assistant-message IDs explicitly associated with this compaction."
+    )
+    source_model_ref: Optional[ModelServerRef] = None
     observed_at: Optional[float] = None
     trigger: Optional[str] = None
     tokens_before: Optional[int] = Field(
