@@ -229,13 +229,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
+        # Verification needs this close response: it carries the Agent's observations and final Resources cookies.
+        # A repeated close cannot return them, so a transient failure retries the whole episode instead.
         try:
             await agent_cleanup.close()
         except Exception as error:
             raise self._failure(
                 stage="cleanup",
                 message=str(error),
-                terminal=True,
+                terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
             ) from error
         try:

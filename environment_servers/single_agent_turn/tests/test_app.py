@@ -289,6 +289,18 @@ async def test_lost_agent_seed_response_closes_both_caller_assigned_sessions() -
     assert agent_seed_body.agent_session_id == agent_close_body.agent_session_id
 
 
+async def test_lost_agent_close_response_is_a_retryable_failure_before_verification() -> None:
+    environment_server, client = _environment_server()
+    client.fail_path = "/v1/agent_sessions/close"
+
+    result = await environment_server.run_request(_request())
+
+    assert result.failure is not None
+    assert result.failure.stage == "cleanup"
+    assert result.failure.terminal is False
+    assert "/verify" not in [path for _, path, _ in client.calls]
+
+
 async def test_resources_close_failure_after_verification_keeps_result() -> None:
     environment_server, client = _environment_server()
     client.fail_path = "/close_session"
