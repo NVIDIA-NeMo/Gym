@@ -55,7 +55,7 @@ def _agent(
         image_build={
             "enabled": auto_build,
             "source_repo": "https://github.com/Mercor-Intelligence/archipelago.git",
-            "source_revision": "0cb5c476c219a9df637e0bd37fb86b2361f4ab89",
+            "source_revision": "0cb5c476c219a9df637e0bd37fb86b2361f4ab89",  # pragma: allowlist secret
             "source_root": None,
             "source_github_token": None,
             "dockerfile": "environment/Dockerfile",

@@ -21,7 +21,7 @@ def test_stirrup_repackages_image_tool_responses_for_chat_completions() -> None:
 
 
 def test_context_window_client_reports_the_window_and_keeps_the_output_cap() -> None:
-    from stirrup.clients.chat_completions_client import ChatCompletionsClient
+    ChatCompletionsClient = pytest.importorskip("stirrup.clients.chat_completions_client").ChatCompletionsClient
 
     client_class = stirrup_runtime.context_window_client(ChatCompletionsClient, 262_144)
     client = client_class(

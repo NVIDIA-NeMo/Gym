@@ -901,7 +901,7 @@ async def run_stirrup_rollout(
     client = client_class(
         model=config["policy_model"],
         base_url=config["model_base_url"],
-        api_key="unused",
+        api_key="unused",  # pragma: allowlist secret
         max_tokens=int(config["max_output_tokens"]),
         kwargs=model_kwargs,
     )
