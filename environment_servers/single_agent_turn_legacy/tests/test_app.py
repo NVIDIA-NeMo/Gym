@@ -152,6 +152,8 @@ async def test_legacy_compatibility_is_a_separate_environment_deployment() -> No
     assert result["reward"] == 1.0
     assert result["benchmark_field"] == "preserved"
     assert result["agent_ref"] == {"name": "agent"}
+    assert "verification" not in result
+    assert "ng_agent_observations" not in result
 
 
 def test_legacy_adapter_forwards_aggregate_metrics_to_resources() -> None:
