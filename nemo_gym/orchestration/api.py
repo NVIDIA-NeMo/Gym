@@ -375,6 +375,11 @@ class BenchmarkRunConfig(_StrictModel):
 class GymInstallConfig(_StrictModel):
     repo: str = "https://github.com/NVIDIA-NeMo/gym"
     ref: str  # Git tag or commit hash.
+    # Extra `uv pip install` arguments run in the driver venv after Gym itself,
+    # for a benchmark whose own package is not a Gym dependency (e.g.
+    # "-e benchmarks/automationbench", whose prepare() imports it). Paths are
+    # relative to the checkout.
+    extra_installs: list[str] = []
 
 
 class DriverConfig(_StrictModel):

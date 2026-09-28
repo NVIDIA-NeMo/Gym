@@ -1002,6 +1002,7 @@ def build_sbatch_script(
         prepare_cmd=prepare_cmd,
         command=benchmark.command,
         extras=(GYM_TELEMETRY_EXTRA,) if instrumented else (),
+        extra_installs=gi.extra_installs if gi else None,
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""

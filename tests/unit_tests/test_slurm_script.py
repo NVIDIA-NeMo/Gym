@@ -708,6 +708,31 @@ def test_render_driver_entrypoint_no_install_no_prepare_has_no_set_e():
     assert "set -euo pipefail" not in out
 
 
+def test_render_driver_entrypoint_installs_extra_packages_before_prepare():
+    """A benchmark whose own package is not a Gym dependency.
+
+    automationbench's prepare() imports automationbench_env, which lives in
+    benchmarks/automationbench. The driver installs Gym alone, so prepare died
+    with "automationbench_env is not installed" and the leaf could not run.
+    Order matters twice: after Gym so the package resolves against it, before
+    prepare so the import succeeds.
+    """
+    out = render_driver_entrypoint(
+        "https://github.com/NVIDIA-NeMo/gym",
+        "main",
+        "gym eval prepare +config_paths=[benchmarks/automationbench/config.yaml]",
+        extra_installs=["-e benchmarks/automationbench"],
+    )
+    assert "uv pip install -e benchmarks/automationbench" in out
+    assert out.index("uv pip install -e .") < out.index("uv pip install -e benchmarks/automationbench")
+    assert out.index("uv pip install -e benchmarks/automationbench") < out.index("gym eval prepare")
+
+
+def test_render_driver_entrypoint_without_extra_installs_adds_no_install():
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert out.count("uv pip install") == 1
+
+
 def test_render_driver_entrypoint_with_gym_install_sets_e():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
     assert "set -euo pipefail" in out

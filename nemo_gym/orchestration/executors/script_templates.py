@@ -180,6 +180,7 @@ def render_driver_entrypoint(
     command: str | None = None,
     *,
     extras: tuple[str, ...] = (),
+    extra_installs: list[str] | None = None,
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
@@ -193,6 +194,9 @@ def render_driver_entrypoint(
     `extras` are optional-dependency groups installed with the checkout; the server
     venvs Gym builds copy their telemetry packages from this process, so the driver
     is where `telemetry` has to be installed for any server to have it.
+
+    `extra_installs` are separate packages installed after the checkout, for a
+    benchmark whose own package is not a Gym dependency and so cannot be an extra.
     """
     preamble: list[str] = []
     # Double quotes: the whole preamble ends up inside a single-quoted `bash -c` block.
@@ -218,6 +222,8 @@ def render_driver_entrypoint(
             "source .venv/bin/activate",
             f"uv pip install -e {install_target}",
         ]
+        # After Gym, so a benchmark package that depends on it resolves.
+        preamble += [f"uv pip install {install}" for install in extra_installs or []]
 
     if prepare_cmd:
         preamble.append(prepare_cmd)
