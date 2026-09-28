@@ -1756,6 +1756,189 @@ def test_an_unknown_ray_node_pool_is_named(tmp_path):
         _placement_config(tmp_path, {"ray": {"type": "ray", "container": "img", "node_pools": ["nope"]}}, _TWO_POOLS)
 
 
+# ---------------------------------------------------------------------------
+# prefill/decode disaggregation
+# ---------------------------------------------------------------------------
+
+
+_PD_POOLS = {
+    "prefill": {"partition": "batch", "nodes": 4, "ntasks_per_node": 1, "gpus_per_node": 4},
+    "decode": {"partition": "batch", "nodes": 6, "ntasks_per_node": 1, "gpus_per_node": 4},
+}
+
+
+def _tier(port, pool, role, nixl, rpc, instances):
+    return {
+        "type": "vllm",
+        "container": "img",
+        "model": "/ckpt",
+        "served_model_name": "super35",
+        "port": port,
+        "node_pool": pool,
+        "kv_role": role,
+        "nixl_side_channel_port": nixl,
+        "data_parallel_rpc_port": rpc,
+        "tensor_parallel_size": 4,
+        "number_of_instances": instances,
+    }
+
+
+def _pd_services(**router_overrides):
+    return {
+        "prefill": _tier(8001, "prefill", "producer", 5600, 13345, 4),
+        "decode": _tier(8002, "decode", "consumer", 5700, 13346, 6),
+        "router": {
+            "type": "router",
+            "container": "img",
+            "model": "super35",
+            "port": 8000,
+            "prefill": "prefill",
+            "decode": "decode",
+            **router_overrides,
+        },
+    }
+
+
+def _pd_config(tmp_path, services=None, pools=None):
+    return SubmitConfig.model_validate(
+        {
+            "services": services if services is not None else _pd_services(),
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools or _PD_POOLS}},
+            "driver": {"container": "img", "policy_model": "router", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+def _pd_script(tmp_path, **kwargs):
+    config = _pd_config(tmp_path, **kwargs)
+    return build_sbatch_script(
+        config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+    )
+
+
+def test_each_tier_carries_its_own_kv_role(tmp_path):
+    script = _pd_script(tmp_path)
+    assert '"kv_role":"kv_producer"' in script.split("# service: decode")[0]
+    assert '"kv_role":"kv_consumer"' in script.split("# service: decode")[1]
+
+
+def test_each_tier_coordinates_on_its_own_head(tmp_path):
+    # Pointing both tiers at the allocation's head node would make prefill rank 0 and
+    # decode rank 0 try to coordinate through the same address and port.
+    script = _pd_script(tmp_path)
+    prefill, decode = script.split("# service: decode")[0], script.split("# service: decode")[1]
+    assert "--data-parallel-address ${gym_nodes[0]} --data-parallel-rpc-port 13345" in prefill
+    assert "--data-parallel-address ${gym_nodes[4]} --data-parallel-rpc-port 13346" in decode
+
+
+def test_the_tiers_take_separate_node_ranges(tmp_path):
+    script = _pd_script(tmp_path)
+    assert 'GYM_POOL_PREFILL_NODES="$(IFS=,; echo "${gym_nodes[*]:0:4}")"' in script
+    assert 'GYM_POOL_DECODE_NODES="$(IFS=,; echo "${gym_nodes[*]:4:6}")"' in script
+    assert '--nodelist="${GYM_POOL_PREFILL_NODES}" --nodes=4 --ntasks=4' in script
+    assert '--nodelist="${GYM_POOL_DECODE_NODES}" --nodes=6 --ntasks=6' in script
+    assert "#SBATCH --nodes=10" in script
+
+
+def test_the_router_runs_beside_the_driver(tmp_path):
+    # The driver reaches the router on localhost, so both go to node 0.
+    script = _pd_script(tmp_path)
+    router = script.split("# service: router")[1].splitlines()[1]
+    driver = next(line for line in script.splitlines() if "logs/driver.log" in line)
+    assert '--nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1' in router
+    assert '--nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1' in driver
+
+
+def test_the_router_addresses_both_tier_heads(tmp_path):
+    script = _pd_script(tmp_path)
+    router = script.split("# service: router")[1]
+    assert "--vllm-pd-disaggregation" in router
+    assert '--prefill "http://${gym_nodes[0]}:8001"' in router
+    assert '--decode "http://${gym_nodes[4]}:8002"' in router
+
+
+def test_a_tier_off_the_first_node_is_probed_where_it_runs(tmp_path):
+    # The probe runs on the allocation's first node; decode answers on node 4.
+    script = _pd_script(tmp_path)
+    assert "Waiting for decode at http://${gym_nodes[4]}:8002" in script
+    assert "Waiting for prefill at http://localhost:8001" in script
+
+
+def test_each_tier_exports_its_own_nixl_side_channel(tmp_path):
+    script = _pd_script(tmp_path)
+    assert "export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname)" in script
+    assert "export VLLM_NIXL_SIDE_CHANNEL_PORT=5600" in script
+    assert "export VLLM_NIXL_SIDE_CHANNEL_PORT=5700" in script
+
+
+def test_the_node_list_is_resolved_for_the_router(tmp_path):
+    assert 'gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))' in _pd_script(tmp_path)
+
+
+def test_a_router_naming_a_missing_service_is_refused(tmp_path):
+    services = _pd_services(prefill="nope")
+    with pytest.raises(ValueError, match="names prefill service 'nope', which is not in services"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_a_router_naming_a_mis_roled_tier_is_refused(tmp_path):
+    services = _pd_services()
+    services["decode"]["kv_role"] = "producer"
+    with pytest.raises(ValueError, match="kv_role is 'producer'; it has to be 'consumer'"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_tiers_sharing_a_side_channel_port_are_refused(tmp_path):
+    services = _pd_services()
+    services["decode"]["nixl_side_channel_port"] = 5600
+    with pytest.raises(ValueError, match="share nixl_side_channel_port 5600"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_tiers_sharing_a_data_parallel_rpc_port_are_refused(tmp_path):
+    services = _pd_services()
+    services["decode"]["data_parallel_rpc_port"] = 13345
+    with pytest.raises(ValueError, match="share data_parallel_rpc_port 13345"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_a_tier_without_a_node_pool_is_refused(tmp_path):
+    services = _pd_services()
+    del services["prefill"]["node_pool"]
+    with pytest.raises(ValueError, match="sets kv_role='producer' but no node_pool"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_a_router_away_from_the_driver_is_refused(tmp_path):
+    # driver.policy_model reaches the router over localhost, and the driver runs on
+    # the allocation's first node.
+    services = _pd_services(node_pool="decode")
+    with pytest.raises(ValueError, match="reaches it over localhost"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_a_plain_vllm_service_gets_no_kv_transfer_config(tmp_path):
+    services = {
+        "policy": {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "tensor_parallel_size": 4}
+    }
+    pools = {"gpu": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4}}
+    config = SubmitConfig.model_validate(
+        {
+            "services": services,
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools}},
+            "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    script = build_sbatch_script(
+        config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+    )
+    assert "--kv-transfer-config" not in script
+    assert "VLLM_NIXL_SIDE_CHANNEL" not in script
+    assert "gym_nodes=" not in script
+
+
 def _comet_like(tmp_path, pools=None, **ray):
     return _render(
         tmp_path,
@@ -1862,6 +2045,79 @@ def test_the_driver_goes_to_the_policys_node_when_services_are_pinned(tmp_path):
     script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
     driver = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
     assert '--nodelist="${gym_nodes[1]}" --nodes=1 --ntasks=1' in driver
+
+
+def _per_node_services():
+    services = _pd_services()
+    for tier in ("prefill", "decode"):
+        services[tier]["number_of_instances"] = 1
+        services[tier]["server_per_node"] = True
+    return services
+
+
+def test_a_per_node_tier_runs_one_plain_server_on_every_node(tmp_path):
+    # One srun over the pool, each task a standalone server: no data-parallel ranks.
+    script = _pd_script(tmp_path, services=_per_node_services())
+    prefill = script.split("# service: prefill")[1].split("# service: decode")[0]
+    assert '--nodelist="${GYM_POOL_PREFILL_NODES}" --nodes=4 --ntasks=4' in prefill
+    assert "vllm serve /ckpt --port 8001 --tensor-parallel-size 4" in prefill
+    assert "--data-parallel" not in prefill and "--headless" not in prefill
+
+
+def test_the_router_lists_every_node_of_a_per_node_tier(tmp_path):
+    router = _pd_script(tmp_path, services=_per_node_services()).split("# service: router")[1]
+    assert [f'--prefill "http://${{gym_nodes[{i}]}}:8001"' in router for i in range(4)] == [True] * 4
+    assert [f'--decode "http://${{gym_nodes[{i}]}}:8002"' in router for i in range(4, 10)] == [True] * 6
+    assert "gym_nodes[10]" not in router
+
+
+def test_a_per_node_tier_is_sized_as_one_node(tmp_path):
+    # TP4 on a 4-GPU node fills it; judged against the pool total it would warn of idle GPUs.
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _pd_config(tmp_path, services=_per_node_services())
+
+
+def test_server_per_node_needs_a_pool_and_one_instance(tmp_path):
+    services = _per_node_services()
+    services["prefill"]["number_of_instances"] = 4
+    with pytest.raises(ValueError, match="number_of_instances must be 1"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_an_unpinned_service_in_a_multi_node_job_runs_on_one_node(tmp_path):
+    # Without a node count srun starts the router on every node, and each copy
+    # tries to bind the hostname the batch script resolved on the first one.
+    router = _pd_script(tmp_path, services=_per_node_services()).split("# service: router")[1]
+    assert router.split("\n", 2)[1].count("--nodes=1 --ntasks=1") == 1
+
+
+def test_the_router_answers_on_localhost(tmp_path):
+    # driver.policy_model and the health probe both call http://localhost:<port>;
+    # binding $(hostname) would leave nothing listening there.
+    router = _pd_script(tmp_path).split("# service: router")[1]
+    assert "--host 0.0.0.0" in router and "$(hostname)" not in router.split("\n", 2)[1]
+
+
+def test_the_policy_host_can_be_routable(tmp_path):
+    # An agent in a remote sandbox cannot reach the driver's localhost.
+    config = SubmitConfig.model_validate(
+        {
+            "services": _per_node_services(),
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _PD_POOLS}},
+            "driver": {
+                "container": "img",
+                "policy_model": "router",
+                "policy_host": "${oc.env:HEAD_NODE_IP}",
+                "benchmarks": {"b": {"run": {}}},
+            },
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    assert config.driver.benchmarks["b"].run["policy_base_url"] == "http://${oc.env:HEAD_NODE_IP}:8000/v1"
+    assert _pd_config(tmp_path).driver.benchmarks["b"].run["policy_base_url"] == "http://localhost:8000/v1"
 
 
 # ---------------------------------------------------------------------------
