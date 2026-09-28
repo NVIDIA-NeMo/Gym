@@ -18,28 +18,17 @@ import sqlite3
 import sys
 from pathlib import Path
 from shlex import quote
-from time import time
 from traceback import format_exc
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import ConfigDict, Field
+from pydantic import Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    Body,
-    SimpleResponsesAPIAgent,
-)
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
@@ -56,18 +45,21 @@ from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ContextCompactionObservation,
     ObservationGap,
-    SandboxObservation,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.utils import cpu_cap_env
+from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
-    get_response_json,
     get_server_url,
     is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
+)
+from responses_api_agents.sandboxed_harness_agent.app import (
+    HarnessTranscript,
+    SandboxedHarnessAgent,
+    SandboxedHarnessAgentConfig,
+    SandboxedHarnessAgentRunRequest,
+    SandboxedHarnessAgentVerifyRequest,
+    SandboxedHarnessAgentVerifyResponse,
 )
 
 
@@ -380,10 +372,7 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
     )
 
 
-class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
-    model_server: ModelServerRef
-
+class OpenCodeSandboxedAgentConfig(SandboxedHarnessAgentConfig):
     opencode_version: str
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
@@ -391,17 +380,10 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
 
-    # Sandbox config
-    sandbox_provider: str
-    sandbox_config: Dict[str, Any]
-    sandbox_timeout: float
 
-    debug: bool = False
-
-
-class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
-    # Allow for benchmark params to propagate properly
-    model_config = ConfigDict(extra="allow")
+# The request classes now live in the generic agent; these names stay for code that imports them.
+OpenCodeSandboxedAgentRunRequest = SandboxedHarnessAgentRunRequest
+OpenCodeSandboxedAgentVerifyRequest = SandboxedHarnessAgentVerifyRequest
 
 
 def _build_remote_opencode_install_command(
@@ -429,107 +411,21 @@ def _extract_opencode_session_id(session_list_stdout: str) -> str:
     return session_id
 
 
-class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
-    # Allow for benchmark params to propagate properly
-    model_config = ConfigDict(extra="allow")
-
-
-class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
-    # Allow for benchmark params to propagate properly
-    model_config = ConfigDict(extra="allow")
-
+class OpenCodeSandboxedAgentVerifyResponse(SandboxedHarnessAgentVerifyResponse):
     opencode_results_fpath: str
     opencode_run_stdout: str
     opencode_run_stderr: str
     opencode_finished: bool
     opencode_export_found: bool
-    ng_agent_observations: Optional[AgentObservationBundle] = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-    )
 
 
-class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
+class OpenCodeSandboxedAgent(SandboxedHarnessAgent):
     config: OpenCodeSandboxedAgentConfig
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-
-        self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
-        self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
-
-    async def _start_sandbox(self, sandbox_id: Optional[str] = None) -> AsyncSandbox:
-        global_config_dict = get_global_config_dict()
-        resolved_sandbox_provider = create_provider(
-            resolve_provider_config(self.config.sandbox_provider, global_config_dict)
-        )
-        provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
-
-        if sandbox_id:
-            sandbox = await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=resolved_sandbox_provider)
-            return sandbox
-
-        if self.config.debug:
-            print("Creating new sandbox since one wasn't provided", file=sys.stderr)
-
-        resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
-        # TODO @bxyu-nvidia: Refactor this after swapping to PTY as this should be set on the SWE Bench resources server side
-        env = cpu_cap_env(resources.cpu) if self.config.sandbox_config.get("derive_cpu_env", True) else {}
-        env |= dict(self.config.sandbox_config.get("env", {}))  # explicit keys win over the derived caps
-
-        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
-        sandbox_spec = SandboxSpec(
-            image="swebench/sweb.eval.x86_64.astropy_1776_astropy-12907",  # This is just the first SWE Bench Verified image for now
-            ttl_s=self.config.sandbox_config.get("ttl_s", None),
-            ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
-            workdir=None,  # Default to container's WORKDIR
-            env=env,
-            files=dict(),
-            metadata=provider_default_metadata
-            | self.config.sandbox_config.get("metadata", {})
-            | {
-                "nemo_gym_agent": self.config.name,
-            },
-            resources=resources,
-            entrypoint=None,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
-        )
-
-        sandbox = AsyncSandbox(resolved_sandbox_provider)
-        await sandbox.start(sandbox_spec)
-
-        return sandbox
-
-    def _agent_sandbox_observation(
-        self,
-        *,
-        sandbox: AsyncSandbox,
-        return_code: Any,
-        error_type: Any,
-        finished: bool,
-    ) -> SandboxObservation:
-        handle = getattr(sandbox, "_handle", None)
-        handle_provider = getattr(handle, "provider_name", None)
-        handle_sandbox_id = getattr(handle, "sandbox_id", None)
-        normalized_error = error_type.lower() if isinstance(error_type, str) else ""
-        if "timeout" in normalized_error:
-            outcome = "timeout"
-        elif normalized_error:
-            outcome = "sandbox_error"
-        elif return_code == 0 and finished:
-            outcome = "completed"
-        elif isinstance(return_code, int):
-            outcome = "failed" if return_code != 0 else "unknown"
-        else:
-            outcome = "unknown"
-        return SandboxObservation(
-            role="agent",
-            provider=handle_provider if isinstance(handle_provider, str) else None,
-            sandbox_id=handle_sandbox_id if isinstance(handle_sandbox_id, str) else None,
-            outcome=outcome,
-            exit_code=return_code if not normalized_error and isinstance(return_code, int) else None,
-            error_type=error_type if isinstance(error_type, str) else None,
-        )
+    harness_name: ClassVar[str] = "OpenCode"
+    harness_id: ClassVar[str] = "opencode"
+    finished_marker: ClassVar[str] = "OpenCode run finished"
+    verify_response_class: ClassVar[type[SandboxedHarnessAgentVerifyResponse]] = OpenCodeSandboxedAgentVerifyResponse
 
     async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
         base_url = (
@@ -645,26 +541,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         return messages
 
-    async def responses(
-        self,
-        request: Request,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
-    ) -> NeMoGymResponse:
-        sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
-
-        query = None
-        # This can be modified to handle system/developer prompts too.
-        for input_item in body.input:
-            if input_item.role == "user":
-                assert not query, body.input
-                if isinstance(input_item.content, str):
-                    query = input_item.content
-                elif isinstance(input_item.content, list):
-                    assert len(input_item.content) == 1, body.input
-                    query = input_item.content[0]["text"]
-
-        assert query, body.input
-
+    async def _harness_command(
+        self, request: Request, query: str, collect_observations: bool
+    ) -> tuple[str, Optional[str]]:
         opencode_debug_str = ""
         if self.config.debug:
             opencode_debug_str = "--print-logs --log-level DEBUG"
@@ -693,9 +572,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && VERSION={self.config.opencode_version} bash "$installer\""""
 
         opencode_config_content = json.dumps(await self._create_opencode_config(request))
-        observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
-        observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
-        collect_observations = observation_invocation_id is not None
         xdg_home_str = ""
         remote_data_home = None
         if collect_observations:
@@ -714,28 +590,23 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed OpenCode" \
         && OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
-        && echo "OpenCode run finished"
+        && echo "{self.finished_marker}"
         """
 
         if self.config.debug:
             print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
             print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
 
-        run_error_type = None
-        try:
-            result = await sandbox.exec(
-                command=command,
-                timeout_s=self.config.sandbox_timeout,
-            )
-        except Exception as exc:
-            result = None
-            run_error_type = type(exc).__name__
-            print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
+        return command, remote_data_home
 
-        if self.config.debug and result:
-            print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
-            print("OpenCode install and run stderr:\n", result.stderr, file=sys.stderr)
-
+    async def _harness_collect(
+        self,
+        request: Request,
+        sandbox: AsyncSandbox,
+        remote_data_home: Optional[str],
+        collect_observations: bool,
+        observation_invocation_id: Optional[str],
+    ) -> HarnessTranscript:
         export_fname = "export.json"
         # Kept outside the sandbox workdir on purpose: SWE-bench-style environments set the workdir
         # to the git repo, and resources servers extract the model patch with `git add -N . && git
@@ -829,143 +700,23 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             output = self._opencode_export_to_output_items(opencode_export)[1:]
             usage = NeMoGymResponseUsage.sum_from_list(self._opencode_export_to_usages(opencode_export))
 
-        result_stdout = (result.stdout if result else "") or ""
-        result_stderr = (result.stderr if result else "") or ""
-        opencode_finished = False
-        std_out_split = result_stdout.rsplit("Shell: ", maxsplit=1)
-        if len(std_out_split) > 1:
-            opencode_finished = "OpenCode run finished" in std_out_split[1]
-
-        if collect_observations and observations is not None:
-            agent_sandbox_observation = self._agent_sandbox_observation(
-                sandbox=sandbox,
-                return_code=getattr(result, "return_code", None),
-                error_type=getattr(result, "error_type", None) or run_error_type,
-                finished=opencode_finished,
-            )
-            for record in observations.records:
-                if isinstance(record, ToolCallObservation):
-                    record.sandbox_id = agent_sandbox_observation.sandbox_id
-                elif isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
-                    status = {
-                        "completed": "completed",
-                        "failed": "failed",
-                        "sandbox_error": "failed",
-                        "timeout": "incomplete",
-                        "cancelled": "incomplete",
-                    }.get(agent_sandbox_observation.outcome)
-                    if status is not None:
-                        record.status = status
-            observations.records.append(agent_sandbox_observation)
-            observations.gaps.append(ObservationGap(code="sandbox_lifecycle_timing_unavailable"))
-
-        run_result = {
-            "opencode_results_fpath": str(results_local_fpath) if opencode_export_found else "",
-            "opencode_run_stdout": result_stdout,
-            "opencode_run_stderr": result_stderr,
-            "opencode_export_found": opencode_export_found,
-            "opencode_finished": opencode_finished,
-        }
-        if collect_observations:
-            run_result["_ng_agent_observations"] = observations
-        self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = run_result
-
-        return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
-            created_at=int(time()),
-            model=body.model or self.config.model_server.name,
-            object="response",
+        return HarnessTranscript(
             output=output,
-            tool_choice=body.tool_choice,
-            tools=body.tools,
-            parallel_tool_calls=body.parallel_tool_calls,
             usage=usage,
+            results_fpath=results_local_fpath if opencode_export_found else None,
+            observations=observations,
         )
 
     async def run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
     ) -> OpenCodeSandboxedAgentVerifyResponse:
-        cookies = request.cookies
-        session_key = request.session[SESSION_ID_KEY]
-        rollout_id = self.rollout_id_from_run(body)
+        # FastAPI builds the /run request and response models from these annotations, so they stay OpenCode's.
+        return await super().run(request, body)
 
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
-        cookies = cookies | seed_session_response.cookies
-
-        # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
-        # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
-        seed_session_result = await seed_session_response.json()
-        sandbox = await self._start_sandbox(
-            sandbox_id=seed_session_result.get("sandbox_handle"),
-        )
-        self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
-
-        # Propagating the sandbox handle
-        cookies["sandbox_id"] = session_key
-
-        request._cookies = cookies
-        request.state._ng_observation_invocation_id = rollout_id
-        observations = None
-        try:
-            response = await self.responses(request, body.responses_create_params)
-        finally:
-            del request.state._ng_observation_invocation_id
-            run_result = self._sandbox_id_to_run_result.get(session_key, {})
-            observations = run_result.pop("_ng_agent_observations", None)
-
-        verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
-
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-
-        try:
-            await sandbox.stop()
-        except Exception:
-            print("Failed to stop sandbox", format_exc(), file=sys.stderr)
-
-        self._sandbox_id_to_sandbox.pop(session_key, None)
-
-        # @bxyu-nvidia: This is scraped from the raw create params. Later on we can dynamically set this if OpenCode exports this :rofl:
-        opencode_system_prompt = "You are opencode, an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.\n\nIMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.\n\nIf the user asks for help or wants to give feedback inform them of the following:\n- /help: Get help with using opencode\n- To give feedback, users should report the issue at https://github.com/anomalyco/opencode/issues\n\nWhen the user directly asks about opencode (eg 'can opencode do...', 'does opencode have...') or asks in second person (eg 'are you able...', 'can you do...'), first use the WebFetch tool to gather information to answer the question from opencode docs at https://opencode.ai\n\n# Tone and style\nYou should be concise, direct, and to the point. When you run a non-trivial bash command, you should explain what the command does and why you are running it, to make sure the user understands what you are doing (this is especially important when you are running a command that will make changes to the user's system).\nRemember that your output will be displayed on a command line interface. Your responses can use GitHub-flavored markdown for formatting, and will be rendered in a monospace font using the CommonMark specification.\nOutput text to communicate with the user; all text you output outside of tool use is displayed to the user. Only use tools to complete tasks. Never use tools like Bash or code comments as means to communicate with the user during the session.\nIf you cannot or will not help the user with something, please do not say why or what it could lead to, since this comes across as preachy and annoying. Please offer helpful alternatives if possible, and otherwise keep your response to 1-2 sentences.\nOnly use emojis if the user explicitly requests it. Avoid using emojis in all communication unless asked.\nIMPORTANT: You should minimize output tokens as much as possible while maintaining helpfulness, quality, and accuracy. Only address the specific query or task at hand, avoiding tangential information unless absolutely critical for completing the request. If you can answer in 1-3 sentences or a short paragraph, please do.\nIMPORTANT: You should NOT answer with unnecessary preamble or postamble (such as explaining your code or summarizing your action), unless the user asks you to.\nIMPORTANT: Keep your responses short, since they will be displayed on a command line interface. You MUST answer concisely with fewer than 4 lines (not including tool use or code generation), unless user asks for detail. Answer the user's question directly, without elaboration, explanation, or details. One word answers are best. Avoid introductions, conclusions, and explanations. You MUST avoid text before/after your response, such as \"The answer is <answer>.\", \"Here is the content of the file...\" or \"Based on the information provided, the answer is...\" or \"Here is what I will do next...\". Here are some examples to demonstrate appropriate verbosity:\n<example>\nuser: what is 2+2?\nassistant: 4\n</example>\n\n<example>\nuser: is 11 a prime number?\nassistant: Yes\n</example>\n\n<example>\nuser: what command should I run to list files in the current directory?\nassistant: ls\n</example>\n\n<example>\nuser: what command should I run to watch files in the current directory?\nassistant: [use the ls tool to list the files in the current directory, then read docs/commands in the relevant file to find out how to watch files]\nnpm run dev\n</example>\n\n<example>\nuser: what files are in the directory src/?\nassistant: [runs ls and sees foo.c, bar.c, baz.c]\nuser: which file contains the implementation of foo?\nassistant: src/foo.c\n</example>\n\n<example>\nuser: write tests for new feature\nassistant: [uses grep and glob search tools to find where similar tests are defined, uses concurrent read file tool use blocks in one tool call to read relevant files at the same time, uses edit file tool to write new tests]\n</example>\n\n# Proactiveness\nYou are allowed to be proactive, but only when the user asks you to do something. You should strive to strike a balance between:\n1. Doing the right thing when asked, including taking actions and follow-up actions\n2. Not surprising the user with actions you take without asking\nFor example, if the user asks you how to approach something, you should do your best to answer their question first, and not immediately jump into taking actions.\n3. Do not add additional code explanation summary unless requested by the user. After working on a file, just stop, rather than providing an explanation of what you did.\n\n# Following conventions\nWhen making changes to files, first understand the file's code conventions. Mimic code style, use existing libraries and utilities, and follow existing patterns.\n- NEVER assume that a given library is available, even if it is well known. Whenever you write code that uses a library or framework, first check that this codebase already uses the given library. For example, you might look at neighboring files, or check the package.json (or cargo.toml, and so on depending on the language).\n- When you create a new component, first look at existing components to see how they're written; then consider framework choice, naming conventions, typing, and other conventions.\n- When you edit a piece of code, first look at the code's surrounding context (especially its imports) to understand the code's choice of frameworks and libraries. Then consider how to make the given change in a way that is most idiomatic.\n- Always follow security best practices. Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository.\n\n# Code style\n- IMPORTANT: DO NOT ADD ***ANY*** COMMENTS unless asked\n\n# Doing tasks\nThe user will primarily request you perform software engineering tasks. This includes solving bugs, adding new functionality, refactoring code, explaining code, and more. For these tasks the following steps are recommended:\n- Use the available search tools to understand the codebase and the user's query. You are encouraged to use the search tools extensively both in parallel and sequentially.\n- Implement the solution using all tools available to you\n- Verify the solution if possible with tests. NEVER assume specific test framework or test script. Check the README or search codebase to determine the testing approach.\n- VERY IMPORTANT: When you have completed a task, you MUST run the lint and typecheck commands (e.g. npm run lint, npm run typecheck, ruff, etc.) with Bash if they were provided to you to ensure your code is correct. If you are unable to find the correct command, ask the user for the command to run and if they supply it, proactively suggest writing it to AGENTS.md so that you will know to run it next time.\nNEVER commit changes unless the user explicitly asks you to. It is VERY IMPORTANT to only commit when explicitly asked, otherwise the user will feel that you are being too proactive.\n\n- Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are NOT part of the user's provided input or the tool result.\n\n# Tool usage policy\n- When doing file search, prefer to use the Task tool in order to reduce context usage.\n- You have the capability to call multiple tools in a single response. When multiple independent pieces of information are requested, batch your tool calls together for optimal performance. When making multiple bash tool calls, you MUST send a single message with multiple tools calls to run the calls in parallel. For example, if you need to run \"git status\" and \"git diff\", send a single message with two tool calls to run the calls in parallel.\n\nYou MUST answer concisely with fewer than 4 lines of text (not including tool use or code generation), unless user asks for detail.\n\nIMPORTANT: Before you begin work, think about what the code you're editing is supposed to do based on the filenames directory structure.\n\n# Code References\n\nWhen referencing specific functions or pieces of code include the pattern `file_path:line_number` to allow the user to easily navigate to the source code location.\n\n<example>\nuser: Where are errors from the client handled?\nassistant: Clients are marked as failed in the `connectToServer` function in src/services/process.ts:712.\n</example>\n\nYou are powered by the model named dummy_model. The exact model ID is nemo_gym/dummy_model\nHere is some useful information about the environment you are running in:\n<env>\n  Working directory: /testbed\n  Workspace root folder: /testbed\n  Is directory a git repo: yes\n  Platform: linux\n  Today's date: Tue Aug 04 2026\n</env>\nSkills provide specialized instructions and workflows for specific tasks.\nUse the skill tool to load a skill when a task matches its description.\n<available_skills>\n  <skill>\n    <name>customize-opencode</name>\n    <description>Use ONLY when the user is editing or creating opencode's own configuration: opencode.json, opencode.jsonc, files under .opencode/, or files under ~/.config/opencode/. Also use when creating or fixing opencode agents, subagents, skills, plugins, MCP servers, or permission rules. Do not use for the user's own application code, or for any project that is not configuring opencode itself.</description>\n    <location>file:///testbed/%3Cbuilt-in%3E</location>\n  </skill>\n</available_skills>"
-
-        response_dict = await get_response_json(verify_response)
-        run_result = self._sandbox_id_to_run_result.pop(session_key)
-        response_dict |= run_result
-        raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)
-        response_dict["responses_create_params"]["input"].insert(
-            0, {"content": opencode_system_prompt, "role": "system"}
-        )
-
-        if rollout_id is not None:
-            if observations is None:
-                observations = AgentObservationBundle(
-                    source="opencode",
-                    records=[AgentInvocation(invocation_id=rollout_id)],
-                    gaps=[ObservationGap(code="observation_capture_failed")],
-                )
-            if raw_verifier_sandbox_observation is not None:
-                try:
-                    verifier_observation = SandboxObservation.model_validate(raw_verifier_sandbox_observation)
-                    if verifier_observation.role != "verifier":
-                        raise ValueError("resources server returned a non-verifier sandbox observation")
-                    observations.records.append(verifier_observation)
-                except Exception:
-                    observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_invalid"))
-            else:
-                observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_unavailable"))
-            response_dict["ng_agent_observations"] = observations.model_dump(mode="json")
-        return OpenCodeSandboxedAgentVerifyResponse.model_validate(response_dict)
+    # @bxyu-nvidia: This is scraped from the raw create params. Later on we can dynamically set this if OpenCode exports this :rofl:
+    system_prompt: ClassVar[Optional[str]] = (
+        "You are opencode, an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.\n\nIMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.\n\nIf the user asks for help or wants to give feedback inform them of the following:\n- /help: Get help with using opencode\n- To give feedback, users should report the issue at https://github.com/anomalyco/opencode/issues\n\nWhen the user directly asks about opencode (eg 'can opencode do...', 'does opencode have...') or asks in second person (eg 'are you able...', 'can you do...'), first use the WebFetch tool to gather information to answer the question from opencode docs at https://opencode.ai\n\n# Tone and style\nYou should be concise, direct, and to the point. When you run a non-trivial bash command, you should explain what the command does and why you are running it, to make sure the user understands what you are doing (this is especially important when you are running a command that will make changes to the user's system).\nRemember that your output will be displayed on a command line interface. Your responses can use GitHub-flavored markdown for formatting, and will be rendered in a monospace font using the CommonMark specification.\nOutput text to communicate with the user; all text you output outside of tool use is displayed to the user. Only use tools to complete tasks. Never use tools like Bash or code comments as means to communicate with the user during the session.\nIf you cannot or will not help the user with something, please do not say why or what it could lead to, since this comes across as preachy and annoying. Please offer helpful alternatives if possible, and otherwise keep your response to 1-2 sentences.\nOnly use emojis if the user explicitly requests it. Avoid using emojis in all communication unless asked.\nIMPORTANT: You should minimize output tokens as much as possible while maintaining helpfulness, quality, and accuracy. Only address the specific query or task at hand, avoiding tangential information unless absolutely critical for completing the request. If you can answer in 1-3 sentences or a short paragraph, please do.\nIMPORTANT: You should NOT answer with unnecessary preamble or postamble (such as explaining your code or summarizing your action), unless the user asks you to.\nIMPORTANT: Keep your responses short, since they will be displayed on a command line interface. You MUST answer concisely with fewer than 4 lines (not including tool use or code generation), unless user asks for detail. Answer the user's question directly, without elaboration, explanation, or details. One word answers are best. Avoid introductions, conclusions, and explanations. You MUST avoid text before/after your response, such as \"The answer is <answer>.\", \"Here is the content of the file...\" or \"Based on the information provided, the answer is...\" or \"Here is what I will do next...\". Here are some examples to demonstrate appropriate verbosity:\n<example>\nuser: what is 2+2?\nassistant: 4\n</example>\n\n<example>\nuser: is 11 a prime number?\nassistant: Yes\n</example>\n\n<example>\nuser: what command should I run to list files in the current directory?\nassistant: ls\n</example>\n\n<example>\nuser: what command should I run to watch files in the current directory?\nassistant: [use the ls tool to list the files in the current directory, then read docs/commands in the relevant file to find out how to watch files]\nnpm run dev\n</example>\n\n<example>\nuser: what files are in the directory src/?\nassistant: [runs ls and sees foo.c, bar.c, baz.c]\nuser: which file contains the implementation of foo?\nassistant: src/foo.c\n</example>\n\n<example>\nuser: write tests for new feature\nassistant: [uses grep and glob search tools to find where similar tests are defined, uses concurrent read file tool use blocks in one tool call to read relevant files at the same time, uses edit file tool to write new tests]\n</example>\n\n# Proactiveness\nYou are allowed to be proactive, but only when the user asks you to do something. You should strive to strike a balance between:\n1. Doing the right thing when asked, including taking actions and follow-up actions\n2. Not surprising the user with actions you take without asking\nFor example, if the user asks you how to approach something, you should do your best to answer their question first, and not immediately jump into taking actions.\n3. Do not add additional code explanation summary unless requested by the user. After working on a file, just stop, rather than providing an explanation of what you did.\n\n# Following conventions\nWhen making changes to files, first understand the file's code conventions. Mimic code style, use existing libraries and utilities, and follow existing patterns.\n- NEVER assume that a given library is available, even if it is well known. Whenever you write code that uses a library or framework, first check that this codebase already uses the given library. For example, you might look at neighboring files, or check the package.json (or cargo.toml, and so on depending on the language).\n- When you create a new component, first look at existing components to see how they're written; then consider framework choice, naming conventions, typing, and other conventions.\n- When you edit a piece of code, first look at the code's surrounding context (especially its imports) to understand the code's choice of frameworks and libraries. Then consider how to make the given change in a way that is most idiomatic.\n- Always follow security best practices. Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository.\n\n# Code style\n- IMPORTANT: DO NOT ADD ***ANY*** COMMENTS unless asked\n\n# Doing tasks\nThe user will primarily request you perform software engineering tasks. This includes solving bugs, adding new functionality, refactoring code, explaining code, and more. For these tasks the following steps are recommended:\n- Use the available search tools to understand the codebase and the user's query. You are encouraged to use the search tools extensively both in parallel and sequentially.\n- Implement the solution using all tools available to you\n- Verify the solution if possible with tests. NEVER assume specific test framework or test script. Check the README or search codebase to determine the testing approach.\n- VERY IMPORTANT: When you have completed a task, you MUST run the lint and typecheck commands (e.g. npm run lint, npm run typecheck, ruff, etc.) with Bash if they were provided to you to ensure your code is correct. If you are unable to find the correct command, ask the user for the command to run and if they supply it, proactively suggest writing it to AGENTS.md so that you will know to run it next time.\nNEVER commit changes unless the user explicitly asks you to. It is VERY IMPORTANT to only commit when explicitly asked, otherwise the user will feel that you are being too proactive.\n\n- Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are NOT part of the user's provided input or the tool result.\n\n# Tool usage policy\n- When doing file search, prefer to use the Task tool in order to reduce context usage.\n- You have the capability to call multiple tools in a single response. When multiple independent pieces of information are requested, batch your tool calls together for optimal performance. When making multiple bash tool calls, you MUST send a single message with multiple tools calls to run the calls in parallel. For example, if you need to run \"git status\" and \"git diff\", send a single message with two tool calls to run the calls in parallel.\n\nYou MUST answer concisely with fewer than 4 lines of text (not including tool use or code generation), unless user asks for detail.\n\nIMPORTANT: Before you begin work, think about what the code you're editing is supposed to do based on the filenames directory structure.\n\n# Code References\n\nWhen referencing specific functions or pieces of code include the pattern `file_path:line_number` to allow the user to easily navigate to the source code location.\n\n<example>\nuser: Where are errors from the client handled?\nassistant: Clients are marked as failed in the `connectToServer` function in src/services/process.ts:712.\n</example>\n\nYou are powered by the model named dummy_model. The exact model ID is nemo_gym/dummy_model\nHere is some useful information about the environment you are running in:\n<env>\n  Working directory: /testbed\n  Workspace root folder: /testbed\n  Is directory a git repo: yes\n  Platform: linux\n  Today's date: Tue Aug 04 2026\n</env>\nSkills provide specialized instructions and workflows for specific tasks.\nUse the skill tool to load a skill when a task matches its description.\n<available_skills>\n  <skill>\n    <name>customize-opencode</name>\n    <description>Use ONLY when the user is editing or creating opencode's own configuration: opencode.json, opencode.jsonc, files under .opencode/, or files under ~/.config/opencode/. Also use when creating or fixing opencode agents, subagents, skills, plugins, MCP servers, or permission rules. Do not use for the user's own application code, or for any project that is not configuring opencode itself.</description>\n    <location>file:///testbed/%3Cbuilt-in%3E</location>\n  </skill>\n</available_skills>"
+    )
 
 
 if __name__ == "__main__":

@@ -47,12 +47,12 @@ from nemo_gym.rollout_observability import (
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
-from responses_api_agents.opencode_sandboxed_agent import app as app_module
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
     OpenCodeSandboxedAgentRunRequest,
 )
+from responses_api_agents.sandboxed_harness_agent import app as harness_app_module
 
 
 class TestOpenCodeSandboxedAgent:
@@ -84,11 +84,11 @@ class TestOpenCodeSandboxedAgent:
         sandbox = MagicMock()
         sandbox.start = AsyncMock()
         sandbox.pty = AsyncMock()
-        monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
-        monkeypatch.setattr(app_module, "create_provider", lambda *_: MagicMock())
-        monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
-        monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
-        monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+        monkeypatch.setattr(harness_app_module, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(harness_app_module, "create_provider", lambda *_: MagicMock())
+        monkeypatch.setattr(harness_app_module, "resolve_provider_config", lambda *_: MagicMock())
+        monkeypatch.setattr(harness_app_module, "resolve_provider_metadata", lambda *_: {})
+        monkeypatch.setattr(harness_app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
 
         async def created_spec(sandbox_config: Dict[str, Any]) -> Any:
             config = self._create_config()
@@ -217,10 +217,10 @@ class TestOpenCodeSandboxedAgent:
             lambda self: json.dumps(opencode_export_test_data),
         )
         monkeypatch.setattr(
-            "responses_api_agents.opencode_sandboxed_agent.app.uuid4", MagicMock(return_value=MagicMock(hex=""))
+            "responses_api_agents.sandboxed_harness_agent.app.uuid4", MagicMock(return_value=MagicMock(hex=""))
         )
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
-        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.time", MagicMock(return_value=0.0))
+        monkeypatch.setattr("responses_api_agents.sandboxed_harness_agent.app.time", MagicMock(return_value=0.0))
 
         actual_response = await server.responses(
             request=MagicMock(

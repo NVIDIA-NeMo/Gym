@@ -59,6 +59,7 @@
       "_ng_rollout_index": 2,
       "_ng_task_index": 7,
       "failure_reason": null,
+      "harness_finished": false,
       "ng_agent_observations": {
         "gaps": [
           {
@@ -280,6 +281,7 @@
       "_ng_rollout_index": 2,
       "_ng_task_index": 7,
       "failure_reason": null,
+      "harness_finished": false,
       "ng_agent_observations": {
         "gaps": [
           {
@@ -555,6 +557,7 @@
       "_ng_rollout_index": 2,
       "_ng_task_index": 7,
       "failure_reason": null,
+      "harness_finished": true,
       "ng_agent_observations": {
         "gaps": [
           {
@@ -822,6 +825,7 @@
       "_ng_rollout_index": 2,
       "_ng_task_index": 7,
       "failure_reason": null,
+      "harness_finished": false,
       "ng_agent_observations": {
         "gaps": [
           {
