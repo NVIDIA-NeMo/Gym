@@ -718,3 +718,53 @@ class TestLmLogprobs:
         )
         assert result.status == "ok"
         assert result.reward == pytest.approx(1.0)
+
+
+class TestRationalizationFallbackScope:
+    """Upstream sets _raw only on a parse FAILURE (predict.py:303)."""
+
+    def test_parsed_dict_without_a_rationale_key_scores_empty(self):
+        """It must not be scored on its own JSON text; upstream gives it "".
+
+        A dict that parsed has no _raw upstream, so post_rationalization yields
+        "" and coverage_f1 is 0. Falling back to the reply here would credit
+        token overlap between the JSON and the gold rationale.
+        """
+        result = _verify(
+            _make_server(),
+            '{"note":"unsure"}',
+            task_type="rationalization",
+            ground_truth=GOLD["rationalization"],
+        )
+        assert result.status == "ok"
+        assert result.reward == 0.0
+
+    def test_unparsed_reply_still_falls_back(self):
+        result = _verify(
+            _make_server(),
+            "Calcium activates the carbonyl.",
+            task_type="rationalization",
+            ground_truth=GOLD["rationalization"],
+        )
+        assert result.status == "no_json_found"
+        assert result.reward == pytest.approx(1.0)
+
+
+class TestOneCleaningRule:
+    """Every raw-text fallback receives the think-stripped reply, not output_text."""
+
+    def test_ordering_recovery_ignores_a_reasoning_trace(self):
+        """Digits inside a trace must not be recovered as step ids."""
+        traced = "<think>step 2 then 0 then 1 seems right</think>no answer here"
+        result = _verify(_make_server(), traced, task_type="ordering", ground_truth=GOLD["ordering"])
+        assert result.reward == 0.0
+
+    def test_contrastive_recovery_ignores_a_reasoning_trace(self):
+        traced = "<think>the answer is surely $5$</think>I cannot decide."
+        result = _verify(
+            _make_server(),
+            traced,
+            task_type="contrastive_choice",
+            ground_truth=GOLD["contrastive_choice"],
+        )
+        assert result.reward == 0.0

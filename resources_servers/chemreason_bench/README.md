@@ -69,9 +69,10 @@ A prepared row is flat:
 | `ground_truth` | Upstream's gold record; shape depends on `task_type` |
 | `expected_step_ids` | `ordering` only: the legal step ids, in presentation order |
 | `options` | `contrastive_choice` only: the option list |
+| `legend` | `step_completion` only: placeholder to name map |
 
-`expected_step_ids` and `options` are question-side vocabulary, not gold. Upstream's
-post-processors need them to canonicalize and range-check a prediction, and neither is
+`expected_step_ids`, `options` and `legend` are question-side vocabulary, not gold. Upstream's
+post-processors need them to canonicalize, resolve and range-check a prediction, and none is
 rendered into `question`.
 
 ## Scoring
@@ -87,7 +88,16 @@ Model output is post-processed as upstream does: step tokens are canonicalized (
 unmentioned ids are appended in presentation order -- while an answer matching nothing yields
 an empty list rather than a fabricated order. A contrastive choice is recovered from raw text
 when the index is missing, and an out-of-range index becomes -1 rather than defaulting to
-option 0.
+option 0. Step-completion slots additionally pass through upstream's `canonicalize_slots`,
+which resolves alias keys, splits blobs like `"10 mL"`, maps reagent names to `$n$` through the
+legend, and drops anything outside the whitelist.
+
+One further departure: every raw-text fallback receives the reply with reasoning blocks
+stripped. Upstream's `_raw` is the whole answer, so this differs deliberately — scoring a
+reasoning model's trace measures the trace, not the answer. The rule is applied uniformly to
+ordering, contrastive choice and rationalization. Note also that upstream sets `_raw` only when
+JSON parsing *fails*, so a dict that parsed but lacks the requested key scores empty rather
+than being scored on its own text; that behaviour is matched.
 
 Two upstream inconsistencies were resolved deliberately:
 

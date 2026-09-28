@@ -65,9 +65,10 @@ def _iter_json_objects(text: str):
 def clean_text(raw: Optional[str]) -> str:
     """Bounded text with reasoning blocks removed.
 
-    Upstream's ``_raw`` fallback holds post-extraction text, not the whole reply,
-    so anything falling back to it must use this rather than ``output_text`` --
-    otherwise a reasoning model's entire trace is scored by ``token_f1``.
+    DEPARTURE, deliberate: upstream's ``_raw`` is the whole answer, think blocks
+    included. Every raw-text fallback here uses this instead, because scoring a
+    reasoning model's trace measures the trace and not the answer. One rule for
+    all three fallbacks -- ordering, contrastive choice and rationalization.
     """
     if not raw:
         return ""
@@ -198,9 +199,11 @@ def to_prediction(
     """
     no_object = not isinstance(obj, dict)
     obj = obj if isinstance(obj, dict) else {}
+    # One rule for every raw-text fallback; see clean_text on why this departs.
+    raw = clean_text(raw).strip()
 
     if task_type == "ordering":
-        return {"predicted_order": post_ordering(None if no_object else obj, expected_step_ids or [], raw)}
+        return {"predicted_order": post_ordering(None if no_object else obj, expected_step_ids or [], raw)}  # noqa: E501
 
     if task_type == "contrastive_choice":
         return {"predicted_option_idx": post_contrastive(None if no_object else obj, options or [], raw)}
@@ -230,11 +233,12 @@ def to_prediction(
                 value = " ".join(str(item) for item in value)
             if isinstance(value, str) and value.strip():
                 return {"gold_rationale": value[:MAX_RATIONALE_CHARS]}
-        # Upstream's extractor yields {"_raw": text} on a parse failure and
-        # post_rationalization falls through to it, so a prose-only reply is still
-        # scored rather than zeroed. Use the CLEANED text: upstream's _raw is
-        # post-extraction, and scoring a whole reasoning trace would be neither.
-        return {"gold_rationale": clean_text(raw).strip()[:MAX_RATIONALE_CHARS]}
+        # Upstream sets _raw ONLY when parsing fails (predict.py:303), so a dict
+        # that parsed but lacks every rationale key scores "" there -- not its own
+        # JSON text. Mirror that: fall back to the reply only when nothing parsed.
+        if no_object:
+            return {"gold_rationale": raw[:MAX_RATIONALE_CHARS]}
+        return {"gold_rationale": ""}
 
     raise ValueError(f"unknown task_type: {task_type!r}")
 
