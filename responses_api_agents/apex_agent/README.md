@@ -19,6 +19,11 @@ model turn. MCP calls time out after 60 seconds. Long text output uses a 20,000-
 tail excerpt when it exceeds a 24,000-token budget, estimated at four characters per token; Stirrup compresses image
 blocks to about one megapixel when serializing them for the model.
 
+Stirrup summarizes the conversation once it reaches 70% of the client's context window. Stirrup 0.1 reads that window
+from the same `max_tokens` value it sends as `max_completion_tokens`, so by default summarization starts at 70% of
+`max_output_tokens`. Set `context_window_tokens` (`apex_agent_context_window_tokens`) to the served model's context
+length to summarize at 70% of the real window instead; requests keep `max_output_tokens` as their output cap.
+
 `finish` is the only submission mechanism. A completed submission is rejected while any todo is pending or in
 progress. A max-turn exit or `status="incomplete"` does not call the grader; its initial/final snapshots are still
 saved under the configured artifact output directory for inspection.

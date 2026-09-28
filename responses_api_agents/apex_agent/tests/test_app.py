@@ -442,6 +442,15 @@ def test_sandbox_config_never_contains_verifier_secrets() -> None:
     assert "FOUNDRY_LOCAL_ROOT" not in spec.env
 
 
+def test_sandbox_config_passes_the_policy_context_window_when_set() -> None:
+    agent = _agent()
+    agent.config.context_window_tokens = 262_144
+    runner = json.loads(agent._sandbox_spec(_body(), "Do the work").files["/app/apex-gym/runner_config.json"])
+
+    assert runner["context_window_tokens"] == 262_144
+    assert runner["max_output_tokens"] == 32_768
+
+
 def test_sandbox_config_propagates_text_only_model_capability() -> None:
     spec = _agent(supports_vision=False)._sandbox_spec(_body(), "Do the work")
     runner = json.loads(spec.files["/app/apex-gym/runner_config.json"])
