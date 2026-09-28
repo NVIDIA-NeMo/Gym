@@ -2931,10 +2931,34 @@ class TestRolloutRunLabels:
         ]
 
         assert [rollout_run_key(row) for row in rows] == ["hermes_relay", "hermes_turn", "episode_server", "simple"]
-        # Twin servers for one agent stay separate: the second takes its own name.
-        assert rollout_run_labels(rows) == {
-            "hermes_relay": "hermes",
+        # Every server that fronts a shared agent is labelled by its own name, so the result is order-independent.
+        expected = {
+            "hermes_relay": "hermes_relay",
             "hermes_turn": "hermes_turn",
             "episode_server": "episode_server",
             "simple": "simple",
         }
+        assert rollout_run_labels(rows) == expected
+        assert rollout_run_labels(reversed(rows)) == expected
+
+    def test_a_stamped_record_and_an_older_record_of_one_agent_get_distinct_labels(self) -> None:
+        from nemo_gym.global_config import rollout_run_labels
+
+        stamped = {"agent_ref": {"name": "hermes"}, "_ng_environment_server": "hermes_relay"}
+        older = {"agent_ref": {"name": "hermes"}}
+
+        labels = rollout_run_labels([stamped, older])
+
+        assert labels == {"hermes_relay": "hermes_relay", "hermes": "hermes"}
+
+    def test_labels_stay_unique_when_a_server_name_matches_another_agent(self) -> None:
+        from nemo_gym.global_config import label_runs
+
+        # Servers "judge" and "judge_twin" share agent "policy", so both use their own names.
+        # Server "grader" fronts an agent that happens to be named "judge", which would repeat that label.
+        agent_by_key = {"judge": "policy", "judge_twin": "policy", "grader": "judge"}
+
+        labels = label_runs(agent_by_key)
+
+        assert labels == {"judge": "judge", "judge_twin": "judge_twin", "grader": "grader"}
+        assert label_runs(dict(reversed(list(agent_by_key.items())))) == labels

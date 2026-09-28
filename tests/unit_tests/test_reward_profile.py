@@ -345,7 +345,7 @@ class TestRewardProfile:
         _, agent_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
 
         rewards = {m["agent_ref"]["name"]: m["mean/reward"] for m in agent_level_metrics}
-        assert rewards == {"hermes": 1.0, "hermes_turn": 0.0}
+        assert rewards == {"hermes_relay": 1.0, "hermes_turn": 0.0}
 
     def test_profile_from_data_series(self) -> None:
         rows = [

@@ -197,6 +197,12 @@ class TestTaskDataValidator:
         )
         assert v.report.error_rows == 1
 
+    def test_materialized_task_data_that_is_not_an_object_is_an_invalid_row(self):
+        v = self._validator()
+        v.validate_row(0, {"task_id": {"taskset": "t", "task_id": "0"}, "task_input": {"task_data": "bad"}})
+        assert v.report.error_rows == 1
+        assert "task_input.task_data must be an object, got str" in v.report.errors[0]
+
     def test_validate_jsonl_rows_wrapper(self):
         from pydantic import TypeAdapter
 

@@ -16,7 +16,7 @@ import logging
 import re
 import sys
 from argparse import ArgumentParser
-from collections import defaultdict
+from collections import Counter, defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
@@ -247,22 +247,42 @@ def rollout_run_key(row: Mapping[str, Any]) -> Optional[str]:
     return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
 
 
+def label_runs(agent_by_key: Mapping[str, Optional[str]]) -> Dict[str, str]:
+    """Label each run key by its agent's name when that name identifies exactly one run, else by the key.
+
+    A run with one Environment Server per agent keeps its agent's name, so existing labels do not change.
+    Every run of an agent that several Environment Servers front is labelled by its own Environment Server.
+    A label that would still repeat, because one server's name equals another run's agent name, also falls back
+    to the key. The result depends only on the mapping, not on its order, and every label is unique.
+    """
+    keys_by_agent: Dict[str, set] = defaultdict(set)
+    for key, agent_name in agent_by_key.items():
+        if agent_name is not None:
+            keys_by_agent[agent_name].add(key)
+    labels = {
+        key: agent_name if agent_name is not None and len(keys_by_agent[agent_name]) == 1 else key
+        for key, agent_name in agent_by_key.items()
+    }
+    while True:
+        counts = Counter(labels.values())
+        clashing = [key for key, label in labels.items() if counts[label] > 1 and label != key]
+        if not clashing:
+            return labels
+        for key in clashing:
+            labels[key] = key
+
+
 def rollout_run_labels(rows: Iterable[Mapping[str, Any]]) -> Dict[str, str]:
     """Label each ``rollout_run_key`` for reports, the same way rollout collection labels aggregate metrics.
 
-    A key is labelled by its agent's name, so a run with one Environment Server per agent keeps its
-    existing labels.
-    When two Environment Servers front the same agent, the second is labelled by its own name.
-    A row without an ``agent_ref`` is labelled by its Environment Server.
+    See ``label_runs``. A row without an ``agent_ref`` is labelled by its Environment Server.
     """
-    labels: Dict[str, str] = {}
+    agent_by_key: Dict[str, Optional[str]] = {}
     for row in rows:
         key = rollout_run_key(row)
-        if key is None or key in labels:
-            continue
-        agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-        labels[key] = agent_name if agent_name is not None and agent_name not in labels.values() else key
-    return labels
+        if key is not None and key not in agent_by_key:
+            agent_by_key[key] = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+    return label_runs(agent_by_key)
 
 
 def rollout_agent_label(row: Mapping[str, Any]) -> Optional[str]:
