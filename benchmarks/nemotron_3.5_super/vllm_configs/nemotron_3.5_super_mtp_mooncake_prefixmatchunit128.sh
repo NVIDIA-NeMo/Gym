@@ -101,5 +101,5 @@ VLLM_DECODE_ARGS=(
     }'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --max-num-batched-tokens 33920
-    --max-num-seqs 1024
+    --max-num-seqs 128
 )
