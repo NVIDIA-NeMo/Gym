@@ -395,6 +395,10 @@ class TestCli:
         written = yaml.safe_load(config_path.read_text())
         assert written["environment_server_routes"] == {"ds": "harbor_ds_environment"}
         assert written["harbor_ds_agent"]["responses_api_agents"]["hermes_agent"]["enabled_toolsets"] == ["terminal"]
+        terminus = AgentSelection(tmp_path / "t.yaml", "terminus_2_sandboxed_agent", "terminus_2_sandboxed_agent")
+        _, _ = build_run(prepared, terminus, sandbox=None, overrides=[])
+        written = yaml.safe_load(config_path.read_text())
+        assert written["harbor_ds_agent"]["responses_api_agents"]["terminus_2_sandboxed_agent"]["num_workers"] == 1
         assert "+split=train" in tokens
         assert not any(token.startswith("+agent_name") for token in tokens)
         config_paths = next(token for token in tokens if token.startswith("+config_paths="))

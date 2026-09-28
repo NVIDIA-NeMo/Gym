@@ -452,6 +452,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
     async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
         """Borrow the resources server's sandbox for this episode."""
+        if self.config.num_workers not in (None, 1):
+            # Session state lives in this process; another worker would answer the next request with a 404.
+            raise HTTPException(500, "Episode sessions require num_workers=1 for terminus_2_sandboxed_agent")
         agent_session_id = body.agent_session_id
         request.session[_AGENT_SESSION_ID_KEY] = agent_session_id
         lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())

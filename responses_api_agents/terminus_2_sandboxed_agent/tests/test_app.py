@@ -379,6 +379,15 @@ class TestNativeSessions:
         assert connect.await_count == 1
         assert client.post("/v1/agent_sessions", json=_seed_body(rollout="other")).status_code == 409
 
+    def test_seed_refuses_multiple_workers(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        config = _native_config()
+        config.num_workers = 4
+        agent = Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
+        response = TestClient(agent.setup_webserver()).post("/v1/agent_sessions", json=_seed_body())
+        assert response.status_code == 500 and "num_workers=1" in response.json()["detail"]
+
     def test_seed_requires_sandbox_access(self, monkeypatch):
         _, client, _, _ = self._client(monkeypatch)
         assert client.post("/v1/agent_sessions", json=_seed_body(with_sandbox=False)).status_code == 422

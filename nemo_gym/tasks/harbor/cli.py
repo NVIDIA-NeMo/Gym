@@ -53,6 +53,8 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
         "enabled_toolsets": ["terminal"],
         "chat_template_kwargs_enabled": False,
     },
+    # Episode sessions are process-local, so the harness must run as one worker.
+    "terminus_2_sandboxed_agent": {"num_workers": 1},
 }
 
 
