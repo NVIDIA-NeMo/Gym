@@ -118,7 +118,8 @@ class LocalProvider:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
             except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError) as exc:
                 with contextlib.suppress(ProcessLookupError):
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    # start_new_session makes the PID the group ID, even after the shell exits.
+                    os.killpg(process.pid, signal.SIGKILL)
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(process.wait(), timeout=REAP_TIMEOUT_S)
                 if isinstance(exc, asyncio.CancelledError):

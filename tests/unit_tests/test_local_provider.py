@@ -69,23 +69,43 @@ async def test_timeout_kills_the_whole_process_tree(tmp_path: Path) -> None:
     assert not marker.exists(), "backgrounded child outlived the timed-out command"
 
 
-async def test_cancellation_kills_the_whole_process_tree(tmp_path: Path) -> None:
+@pytest.mark.parametrize("shell_waits", [True, False])
+async def test_cancellation_kills_the_whole_process_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell_waits: bool
+) -> None:
+    processes: list[asyncio.subprocess.Process] = []
+    create_subprocess_exec = asyncio.create_subprocess_exec
+
+    async def record_process(*args, **kwargs) -> asyncio.subprocess.Process:
+        process = await create_subprocess_exec(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", record_process)
     sandbox = AsyncSandbox(create_provider({"local": {}}))
     await sandbox.start(SandboxSpec(workdir=str(tmp_path)))
     async with sandbox:
-        task = asyncio.create_task(sandbox.exec("(touch ready && sleep 1 && touch survived) & wait"))
+        command = "(touch ready && while [ ! -e release ]; do sleep 0.01; done; touch survived) &"
+        task = asyncio.create_task(sandbox.exec(command + (" wait" if shell_waits else "")))
         try:
             async with asyncio.timeout(5):
-                while not (tmp_path / "ready").exists():
+                while (
+                    not (tmp_path / "ready").exists()
+                    or not processes
+                    or (not shell_waits and processes[0].returncode is None)
+                ):
                     await asyncio.sleep(0.01)
 
+            assert not task.done(), "The child must still hold the command's output pipes open."
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, timeout=10)
 
+            (tmp_path / "release").touch()
             await asyncio.sleep(2)
             assert not (tmp_path / "survived").exists(), "backgrounded child outlived the cancelled command"
         finally:
+            (tmp_path / "release").touch()
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
