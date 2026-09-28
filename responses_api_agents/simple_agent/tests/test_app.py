@@ -359,6 +359,21 @@ class TestApp:
         with pytest.raises(ValueError, match="does not support required MCP"):
             await server.seed_agent_session(request, body)
 
+    async def test_several_workers_are_allowed_but_reject_sessions(self) -> None:
+        """The legacy /run path keeps no session, so only session seeding needs a single worker."""
+        server, _ = _make_agent(False)
+        server = type(server)(
+            config=server.config.model_copy(update={"num_workers": 2}), server_client=server.server_client
+        )
+        body = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example", task_id="0"),
+        )
+
+        with pytest.raises(ValueError, match="sessions require num_workers=1"):
+            await server.seed_agent_session(MagicMock(session={}), body)
+
     async def test_native_session_seed_and_close_are_idempotent(self) -> None:
         server, _ = _make_agent(False)
         request = MagicMock(session={})

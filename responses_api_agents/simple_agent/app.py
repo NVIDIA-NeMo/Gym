@@ -99,16 +99,15 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     _agent_session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
     _closed_agent_session_ids: set[str] = PrivateAttr(default_factory=set)
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Process-local Simple Agent sessions require num_workers=1")
-
     async def seed_agent_session(
         self,
         request: Request,
         body: AgentSeedSessionRequest,
     ) -> AgentSeedSessionResponse:
+        # Sessions live in this worker's memory, so every call for a session must reach this worker.
+        # The legacy /run path keeps no session and still supports several workers.
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("Simple Agent sessions require num_workers=1")
         if body.sandbox_access is not None:
             raise ValueError("Simple Agent does not support sandbox access")
 
