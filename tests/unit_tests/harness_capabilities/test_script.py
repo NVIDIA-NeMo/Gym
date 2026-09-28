@@ -1,17 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Exercise native command routing, retained payload joins, and report publication."""
+"""Exercise script command routing, retained payload joins, and report publication."""
 
 import json
+import runpy
 import sys
 from pathlib import Path
 
 import pytest
 
-from nemo_gym.cli.main import main as gym_main
 from nemo_gym.harness_capabilities import cli
 from nemo_gym.harness_capabilities.reader import hydrate_record
+
+
+SCRIPT = Path(__file__).resolve().parents[3] / "scripts/check_harness_conformance.py"
 
 
 @pytest.fixture
@@ -23,17 +26,15 @@ def record():
     "relative_path",
     ["rollouts.jsonl", "artifacts/rollouts.jsonl", "evaluator_rollouts.jsonl", "artifacts/evaluator_rollouts.jsonl"],
 )
-def test_native_cli_discovers_bundle(record, tmp_path, monkeypatch, relative_path):
+def test_script_discovers_bundle(record, tmp_path, monkeypatch, relative_path):
     path = tmp_path / relative_path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record) + "\n")
     quality = tmp_path / "quality_summary.json"
     quality.write_text('{"health": "unchanged"}\n')
-    monkeypatch.setattr(
-        sys, "argv", ["gym", "eval", "conformance", "--bundle", str(tmp_path), "--output", str(tmp_path / "reports")]
-    )
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--bundle", str(tmp_path), "--output", str(tmp_path / "reports")])
     with pytest.raises(SystemExit) as exit_info:
-        gym_main()
+        runpy.run_path(str(SCRIPT), run_name="__main__")
     assert exit_info.value.code == 0
     (summary_path,) = (tmp_path / "reports").glob("*/capability_summary.json")
     summary = json.loads(summary_path.read_text())
@@ -45,16 +46,14 @@ def test_native_cli_discovers_bundle(record, tmp_path, monkeypatch, relative_pat
 @pytest.mark.parametrize(
     "profile,code", [("gym-artifacts-p1/v1", 1), ("gym-artifacts-all/v1", 1), ("onboarding-p0/v1", 2)]
 )
-def test_native_cli_gate_exit_codes(record, tmp_path, monkeypatch, profile, code):
+def test_script_gate_exit_codes(record, tmp_path, monkeypatch, profile, code):
     path = tmp_path / "rollouts.jsonl"
     path.write_text(json.dumps(record) + "\n")
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "gym",
-            "eval",
-            "conformance",
+            str(SCRIPT),
             "--bundle",
             str(path),
             "--output",
@@ -64,7 +63,7 @@ def test_native_cli_gate_exit_codes(record, tmp_path, monkeypatch, profile, code
         ],
     )
     with pytest.raises(SystemExit) as exit_info:
-        gym_main()
+        runpy.run_path(str(SCRIPT), run_name="__main__")
     assert exit_info.value.code == code
     if code == 2:
         assert not (tmp_path / "reports").exists()
@@ -76,10 +75,10 @@ def test_rejects_hydra_overrides_before_writing(record, tmp_path, monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["gym", "eval", "conformance", "--bundle", str(path), "--output", str(tmp_path / "reports"), "+model=other"],
+        [str(SCRIPT), "--bundle", str(path), "--output", str(tmp_path / "reports"), "+model=other"],
     )
     with pytest.raises(SystemExit) as exit_info:
-        gym_main()
+        runpy.run_path(str(SCRIPT), run_name="__main__")
     assert exit_info.value.code == 2
     assert not (tmp_path / "reports").exists()
 
@@ -96,7 +95,7 @@ def test_ambiguous_directory_requires_explicit_file(record, tmp_path):
 
 
 @pytest.mark.parametrize("sidecar_state", ["complete", "missing", "incomplete", "extra_call"])
-def test_native_cli_recovers_payloads_and_validates_sidecars(record, tmp_path, monkeypatch, sidecar_state):
+def test_script_recovers_payloads_and_validates_sidecars(record, tmp_path, monkeypatch, sidecar_state):
     full = hydrate_record(record)
     capture_dir = tmp_path / "model-calls"
     capture_dir.mkdir()
@@ -116,9 +115,7 @@ def test_native_cli_recovers_payloads_and_validates_sidecars(record, tmp_path, m
         sys,
         "argv",
         [
-            "gym",
-            "eval",
-            "conformance",
+            str(SCRIPT),
             "--bundle",
             str(path),
             "--output",
@@ -128,7 +125,7 @@ def test_native_cli_recovers_payloads_and_validates_sidecars(record, tmp_path, m
         ],
     )
     with pytest.raises(SystemExit) as exit_info:
-        gym_main()
+        runpy.run_path(str(SCRIPT), run_name="__main__")
     assert exit_info.value.code == (0 if sidecar_state == "complete" else 1)
     (summary_file,) = (tmp_path / "reports").glob("*/capability_summary.json")
     summary = json.loads(summary_file.read_text())

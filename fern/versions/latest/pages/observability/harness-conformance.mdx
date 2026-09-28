@@ -8,10 +8,10 @@ position: 3
 
 Harness conformance checks whether collected rollouts retain model-call payloads,
 token counts, invocation ownership, semantic turns, and tool execution evidence.
-Run it after collecting an evaluation with observability enabled:
+From the repository root, run it after collecting an evaluation with observability enabled:
 
 ```bash
-gym eval conformance \
+python scripts/check_harness_conformance.py \
     --bundle results/my-harness/rollouts.jsonl \
     --profile gym-artifacts-p0/v1 \
     --output results/my-harness/capabilities

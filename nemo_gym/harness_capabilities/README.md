@@ -8,10 +8,10 @@ after changes to their harness or its export path.
 ## Run the checker
 
 Install Gym using the repository's development setup (`uv sync --extra dev`),
-then inspect a completed evaluation:
+then inspect a completed evaluation from the repository root:
 
 ```bash
-gym eval conformance \
+python scripts/check_harness_conformance.py \
     --bundle results/my-harness/rollouts.jsonl \
     --profile gym-artifacts-p0/v1 \
     --output results/my-harness/capabilities
@@ -132,7 +132,7 @@ and `nemo_gym/rollout_observability.py` for the producer contracts.
 
 Run a small representative evaluation with your harness configuration and capture
 enabled, using normal `gym env start` / `gym eval run` commands. Wait for collection
-to finish, then run `gym eval conformance` on the output JSONL. Inspect failing
+to finish, then run `python scripts/check_harness_conformance.py` on the output JSONL. Inspect failing
 assertions in `capability_results.jsonl`, fix the producer, and collect a fresh run.
 Editing the report or fabricating missing evidence cannot qualify the harness.
 
