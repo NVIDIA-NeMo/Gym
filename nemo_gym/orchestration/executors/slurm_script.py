@@ -472,16 +472,27 @@ def _pool_of(compute: SlurmComputeConfig, node: int) -> str | None:
     return None
 
 
+_GPU_RELAY_VAR = "GYM_CUDA_VISIBLE_DEVICES"
+
+
 def _with_gpus(env: dict[str, str], pre_command: str, gpus: str | None) -> tuple[dict[str, str] | None, str]:
-    """The step's env and pre_command, exporting the CUDA_VISIBLE_DEVICES plan_gpus gave it.
+    """The step's env and pre_command, exporting the CUDA_VISIBLE_DEVICES plan_gpus gave it,
+    else the service's own.
 
     Exported inside the step: Slurm resets CUDA_VISIBLE_DEVICES to the step's GPUs, so an
-    `env K=V srun` value never reaches the task.
+    `env K=V srun` value never reaches the task. A runtime:VAR value is relayed under another
+    name, so the step still exports the batch shell's $VAR.
     """
+    gpus = gpus if gpus is not None else env.get("CUDA_VISIBLE_DEVICES")
     if gpus is None:
         return env or None, pre_command
     env = {k: v for k, v in env.items() if k != "CUDA_VISIBLE_DEVICES"}
-    return env or None, f"export CUDA_VISIBLE_DEVICES={shlex.quote(gpus)}\n{pre_command}".rstrip()
+    if gpus.startswith(RUNTIME_ENV_PREFIX):
+        env[_GPU_RELAY_VAR] = gpus
+        export = f'export CUDA_VISIBLE_DEVICES="${_GPU_RELAY_VAR}"'
+    else:
+        export = f"export CUDA_VISIBLE_DEVICES={shlex.quote(gpus)}"
+    return env or None, f"{export}\n{pre_command}".rstrip()
 
 
 def _render_ray_service(
