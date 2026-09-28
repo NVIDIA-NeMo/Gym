@@ -252,6 +252,50 @@ trigger_prefill_profile() {
     fi
 }
 
+ensure_nsys() {
+    if command -v nsys >/dev/null 2>&1; then return; fi
+    if [[ \$(id -u) != 0 ]] || ! command -v apt-get >/dev/null 2>&1; then
+        echo "ERROR: Installing Nsight Systems requires root inside an Ubuntu container; otherwise preinstall nsys in the image." >&2
+        return 1
+    fi
+    local ID="" VERSION_ID="" arch
+    source /etc/os-release
+    if [[ "\$ID" != ubuntu ]]; then
+        echo "ERROR: Automatic Nsight Systems installation supports Ubuntu; preinstall nsys for \$ID." >&2
+        return 1
+    fi
+    arch=\$(dpkg --print-architecture)
+    if [[ "\$arch" != arm64 && "\$arch" != amd64 ]]; then
+        echo "ERROR: Unsupported Nsight Systems architecture: \$arch." >&2
+        return 1
+    fi
+    echo "Prefill profiling: installing Nsight Systems CLI for Ubuntu \$VERSION_ID / \$arch." >&2
+    # NVIDIA's devtools repository provides both the Arm SBSA and x86 CLI.
+    # Install only in this worker's container; existing nsys installations are reused.
+    if ! (
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update &&
+        apt-get install -y --no-install-recommends wget gnupg ca-certificates &&
+        mkdir -p /usr/share/keyrings &&
+        wget -qO- --timeout=30 --tries=3 \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub \
+            | gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-devtools-keyring.gpg &&
+        printf '%s\\n' "deb [signed-by=/usr/share/keyrings/nvidia-devtools-keyring.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu\${VERSION_ID//./}/\$arch/ /" \
+            | tee /etc/apt/sources.list.d/nvidia-devtools.list >/dev/null &&
+        apt-get update &&
+        apt-get install -y --no-install-recommends nsight-systems-cli curl
+    ); then
+        echo "ERROR: Nsight Systems installation failed; check container write permissions and access to the Ubuntu/NVIDIA package repositories." >&2
+        return 1
+    fi
+    hash -r
+    if ! command -v nsys >/dev/null 2>&1; then
+        echo "ERROR: Nsight Systems installation completed but nsys is still missing from PATH." >&2
+        return 1
+    fi
+    nsys --version
+}
+
 serve_prefill() {
     if [[ "\${PROFILE_PREFILL:-0}" != 1 ]]; then
         vllm serve "\$@"
@@ -260,10 +304,6 @@ serve_prefill() {
     local steps="\${PREFILL_PROFILE_STEPS:-20}"
     if [[ ! "\$steps" =~ ^[1-9][0-9]*\$ ]]; then
         echo "ERROR: PREFILL_PROFILE_STEPS must be a positive integer." >&2
-        return 1
-    fi
-    if ! command -v nsys >/dev/null 2>&1; then
-        echo "ERROR: PROFILE_PREFILL=1 requires Nsight Systems (nsys) in the vLLM container." >&2
         return 1
     fi
     local profile_delay="\${PREFILL_PROFILE_DELAY_SECONDS:-300}"
@@ -275,6 +315,7 @@ serve_prefill() {
     for arg in "\$@"; do
         if [[ "\$arg" == --headless ]]; then api_worker=0; fi
     done
+    ensure_nsys || return 1
     if [[ "\$profile_delay" != manual ]] && (( api_worker )) && ! command -v curl >/dev/null 2>&1; then
         echo "ERROR: Automatic prefill profiling requires curl in the vLLM container." >&2
         return 1

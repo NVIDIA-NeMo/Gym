@@ -2,7 +2,7 @@
 
 NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
 
-# Optional Nsight Systems capture on PD prefill nodes (requires nsys in the container).
+# Optional Nsight Systems capture on PD prefill nodes (auto-installs nsys in root Ubuntu containers).
 # Launch with PROFILE_PREFILL=1 to capture automatically 300 seconds after /health is ready.
 # Adjust PREFILL_PROFILE_DELAY_SECONDS for workload warmup, or set it to manual to use /start_profile yourself.
 # Capture stops automatically after PREFILL_PROFILE_STEPS worker steps; serving continues.
