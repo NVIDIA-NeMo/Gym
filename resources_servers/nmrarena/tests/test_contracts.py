@@ -87,3 +87,6 @@ class TestExampleData:
             assert row["verifier_metadata"]["smiles"] == rec["smiles"]
             assert row["verifier_metadata"]["primary_class"] == cls
             assert row["verifier_metadata"]["compound_id"].startswith("synthetic-")
+            # The committed file must be the collated stage-2 output: a stage-1-only
+            # regeneration emits the deprecated ``agent_ref`` instead of ``task_source``.
+            assert row["task_source"] == "nmrarena_simple_agent" and "agent_ref" not in row
