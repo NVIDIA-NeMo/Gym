@@ -352,13 +352,21 @@ class Scores:
     answered: float
 
 
-def score_candidates(truth_canonical: str, candidates: list[Optional[str]], k: int = 10) -> Scores:
+def score_candidates(
+    truth_canonical: str,
+    candidates: list[Optional[str]],
+    k: int = 10,
+    *,
+    max_chars: int = DEFAULT_MAX_SMILES_CHARS,
+) -> Scores:
     rank = hit_rank(truth_canonical, candidates)
     first = candidates[0] if candidates else None
     return Scores(
         hit_rank=rank,
         top1=1.0 if rank == 1 else 0.0,
         top10=1.0 if rank is not None and rank <= k else 0.0,
-        tanimoto_top1=tanimoto(truth_canonical, first) if first is not None else None,
+        # ``max_chars`` must be the caller's cap, or a candidate the cap admitted would
+        # score Top-1 and still leave the Tanimoto undefined.
+        tanimoto_top1=tanimoto(truth_canonical, first, max_chars=max_chars) if first is not None else None,
         answered=1.0 if any(c is not None for c in candidates) else 0.0,
     )

@@ -184,7 +184,9 @@ class NMRArenaResourcesServer(SimpleResourcesServer):
 
         text = sanitize_strings(_extract_last_assistant_text(body))
         if not text:
-            return _response(body, NMRArenaStatus.EMPTY_OUTPUT, task=task, truth=truth)
+            return _response(
+                body, NMRArenaStatus.EMPTY_OUTPUT, task=task, truth=truth, max_chars=self.config.max_smiles_chars
+            )
 
         parsed = parse_candidates(
             text,
@@ -201,7 +203,7 @@ class NMRArenaResourcesServer(SimpleResourcesServer):
             status = NMRArenaStatus.NO_VALID_CANDIDATE
         else:
             status = NMRArenaStatus.SCORED
-        return _response(body, status, task=task, truth=truth, parsed=parsed)
+        return _response(body, status, task=task, truth=truth, parsed=parsed, max_chars=self.config.max_smiles_chars)
 
 
 def _response(
@@ -211,9 +213,10 @@ def _response(
     task: Optional[_Task] = None,
     truth: Optional[str] = None,
     parsed=None,
+    max_chars: int = DEFAULT_MAX_SMILES_CHARS,
 ) -> NMRArenaVerifyResponse:
     candidates = parsed.candidates if parsed is not None else []
-    scores = score_candidates(truth, candidates) if truth is not None else None
+    scores = score_candidates(truth, candidates, max_chars=max_chars) if truth is not None else None
     extra: dict[str, Any] = {
         "status": status.value,
         "compound_id": task.compound_id if task else None,

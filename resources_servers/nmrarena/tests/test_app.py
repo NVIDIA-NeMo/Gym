@@ -169,6 +169,13 @@ class TestVerify:
         assert r.status == NMRArenaStatus.SCORED.value and r.reward == 1.0
         assert (r.primary_class, r.n_complex, r.compound_id) == (None, None, None)
 
+    def test_raised_cap_reaches_the_tanimoto_too(self) -> None:
+        """A candidate the configured cap admits must not silently lose its Tanimoto."""
+        long_gold = "C" * 600
+        r = verify(make_server(max_smiles_chars=2000), cands(long_gold), metadata(smiles=long_gold))
+        assert r.status == NMRArenaStatus.SCORED.value and (r.reward, r.answered) == (1.0, 1.0)
+        assert r.tanimoto_top1 == pytest.approx(1.0)
+
     def test_num_candidates_config_bounds_positions(self) -> None:
         r = verify(make_server(num_candidates=2), cands("C", "CC", GOLD))
         assert r.reward == 0.0 and r.top10 == 0.0 and len(r.candidates) == 2
