@@ -42,6 +42,7 @@ from functools import lru_cache
 from math import isfinite
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
+import orjson
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
@@ -124,8 +125,6 @@ class _GroupAttemptWatermark:
 
     latest_attempt: int
     prompt_digest: str
-    updated_at: float
-    active_cohort: Optional[_CohortState] = None
 
 
 class GenRMCompareConfig(BaseResourcesServerConfig):
@@ -306,22 +305,20 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
     config: GenRMCompareConfig
     _verify_cohorts: Dict[str, _CohortState] = PrivateAttr(default_factory=dict)
-    # Terminal records are ordered by completion; watermarks by last accepted request.
+    # Terminal records are ordered by completion.
     _terminal_cohorts: OrderedDict[str, _CohortState] = PrivateAttr(default_factory=OrderedDict)
-    _latest_group_attempts: OrderedDict[str, _GroupAttemptWatermark] = PrivateAttr(default_factory=OrderedDict)
-    # Cache the count so pruning an all-active registry requires no scan.
-    _active_group_count: int = PrivateAttr(default=0)
+    _latest_group_attempts: Dict[str, _GroupAttemptWatermark] = PrivateAttr(default_factory=dict)
+    # Only groups whose latest attempt is terminal can be evicted, ordered by completion or last replay.
+    _idle_groups: OrderedDict[str, float] = PrivateAttr(default_factory=OrderedDict)
+    # Never suspend while holding either lock, except to acquire a cohort lock.
+    # In particular, model calls and timer waits must remain outside these sections.
     _cohort_registry_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
     _cohort_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
     _closed: bool = PrivateAttr(default=False)
 
     def _own_task(self, coro, *, name: str) -> asyncio.Task:
-        try:
-            task = asyncio.create_task(coro, name=name, context=Context())
-        except BaseException:
-            coro.close()
-            raise
+        task = asyncio.create_task(coro, name=name, context=Context())
         self._cohort_tasks.add(task)
         task.add_done_callback(self._cohort_tasks.discard)
         return task
@@ -394,7 +391,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                         cohort.conversation_history = _input_to_conversation_history(input_messages)
                         cohort.principle = principle
                 except Exception as error:
-                    logger.exception("GenRM cohort input conversion failed for %s", prompt_key)
                     self._fail_verify_cohort_locked(
                         cohort,
                         f"GenRM cohort input conversion failed: {type(error).__name__}: {str(error)[:1000]}",
@@ -405,31 +401,21 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     response_digest=response_digest,
                     waiters=[future],
                 )
-                del response_obj  # Only the cohort owns the compact scoring payload while this request waits.
 
-            try:
-                if cohort.collection_timeout_task is None and cohort.phase == "collecting":
-                    cohort.collection_timeout_task = self._own_task(
-                        self._expire_collecting_cohort(prompt_key, cohort, cfg.cohort_collection_timeout_s),
-                        name=f"genrm-cohort-collection-{cohort_identity}-attempt-{body.group_attempt}",
-                    )
-                if len(cohort.members) == cfg.num_rollouts_per_prompt and cohort.phase == "collecting":
-                    cohort.phase = "evaluating"
-                    if cohort.collection_timeout_task is not None:
-                        cohort.collection_timeout_task.cancel()
-                        cohort.collection_timeout_task = None
-                    members = dict(cohort.members)
-                    cohort.evaluation_task = self._own_task(
-                        self._evaluate_verify_cohort(prompt_key, cohort, members),
-                        name=f"genrm-cohort-evaluation-{cohort_identity}",
-                    )
-            except Exception as error:
-                logger.exception("GenRM cohort task startup failed for %s", prompt_key)
-                # Complete the failure before releasing the lock. A disconnect
-                # must not leave a group with neither a timer nor a judging task.
-                self._fail_verify_cohort_locked(
-                    cohort,
-                    f"GenRM cohort task startup failed: {type(error).__name__}: {str(error)[:1000]}",
+            if cohort.collection_timeout_task is None and cohort.phase == "collecting":
+                cohort.collection_timeout_task = self._own_task(
+                    self._expire_collecting_cohort(prompt_key, cohort, cfg.cohort_collection_timeout_s),
+                    name=f"genrm-cohort-collection-{cohort_identity}-attempt-{body.group_attempt}",
+                )
+            if len(cohort.members) == cfg.num_rollouts_per_prompt and cohort.phase == "collecting":
+                cohort.phase = "evaluating"
+                if cohort.collection_timeout_task is not None:
+                    cohort.collection_timeout_task.cancel()
+                    cohort.collection_timeout_task = None
+                members = dict(cohort.members)
+                cohort.evaluation_task = self._own_task(
+                    self._evaluate_verify_cohort(prompt_key, cohort, members),
+                    name=f"genrm-cohort-evaluation-{cohort_identity}",
                 )
 
         # A disconnected request must not cancel the shared cohort result.
@@ -503,7 +489,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             if self._closed:
                 raise HTTPException(status_code=503, detail="GenRM server is shutting down")
             self._prune_terminal_cohorts()
-            now = time.monotonic()
             watermark = self._latest_group_attempts.get(body.group_id)
             if watermark is not None and watermark.prompt_digest != prompt_digest:
                 raise HTTPException(
@@ -524,17 +509,21 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     group_id=body.group_id,
                     new_attempt=body.group_attempt,
                 )
-                # Commit the new identity only after older work is retired.
-                # Cancellation while acquiring its lock leaves the old watermark intact.
-                watermark = _GroupAttemptWatermark(
+                # Retire older work before publishing the replacement identity.
+                self._latest_group_attempts[body.group_id] = _GroupAttemptWatermark(
                     latest_attempt=body.group_attempt,
                     prompt_digest=prompt_digest,
-                    updated_at=time.monotonic(),
                 )
-                self._latest_group_attempts[body.group_id] = watermark
-            else:
-                watermark.updated_at = now
-            self._latest_group_attempts.move_to_end(body.group_id)
+            elif prompt_key not in self._verify_cohorts:
+                # This attempt already finished and its tombstone was evicted.
+                # Recreating it would wait out the collection deadline or judge a duplicate group.
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"GenRM group {body.group_id!r} attempt {body.group_attempt} already finished and its "
+                        f"result is no longer retained; retry with a higher {GROUP_ATTEMPT_KEY_NAME}"
+                    ),
+                )
 
             cohort = self._verify_cohorts.get(prompt_key)
             if cohort is None:
@@ -545,8 +534,11 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     group_attempt=body.group_attempt,
                 )
                 self._verify_cohorts[prompt_key] = cohort
-                watermark.active_cohort = cohort
-                self._active_group_count += 1
+                self._idle_groups.pop(body.group_id, None)
+            elif cohort.terminal_at is not None:
+                # A replay keeps the fence for this finished attempt alive.
+                self._idle_groups.pop(body.group_id, None)
+                self._idle_groups[body.group_id] = time.monotonic()
             return cohort
 
     async def _supersede_older_group_attempts(
@@ -557,11 +549,14 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     ) -> None:
         """Release waiters and payloads owned by older active attempts."""
         watermark = self._latest_group_attempts.get(group_id)
-        cohort = watermark.active_cohort if watermark is not None else None
-        if cohort is None or cohort.group_attempt >= new_attempt:
+        if watermark is None:
+            return
+        cohort = self._verify_cohorts.get(self._group_cohort_key(group_id, watermark.latest_attempt))
+        if cohort is None:
             return
         async with cohort.lock:
-            # The final member may have started judging while this lock was contended.
+            # Registry operations acquire cohort locks, so no cohort lock section
+            # may suspend: one slow group must not block every group's arrivals.
             self._fail_verify_cohort_locked(
                 cohort,
                 f"GenRM group {group_id!r} attempt {cohort.group_attempt} was superseded by attempt {new_attempt}",
@@ -610,7 +605,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         """
         reasoning, answer = extract_from_response_obj(response)
         return {
-            "id": response.get("id") if isinstance(response, dict) else response.id,
             "output": [
                 {"type": "reasoning", "summary": [{"text": reasoning}]},
                 {"type": "message", "content": [{"type": "output_text", "text": answer}]},
@@ -621,8 +615,25 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     def _response_digest(response: Any) -> str:
         """Hash the exact response payload whose tokens will receive the reward."""
         payload = response.model_dump(mode="json") if hasattr(response, "model_dump") else response
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        try:
+            if isinstance(response, dict):
+                # Direct Python inputs can contain non-finite numbers. Unlike
+                # validated JSON-mode models, these have not normalized them to null.
+                pending = [payload]
+                while pending:
+                    value = pending.pop()
+                    if isinstance(value, dict):
+                        pending.extend(value.values())
+                    elif isinstance(value, (list, tuple)):
+                        pending.extend(value)
+                    elif isinstance(value, float) and not isfinite(value):
+                        raise TypeError("preserve non-finite Python input")
+            canonical = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
+        except TypeError:
+            # Preserve support for lone surrogates, wide integers and non-finite
+            # Python inputs; orjson otherwise rejects or normalizes these values.
+            canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
 
     async def _evaluate_verify_cohort(
         self,
@@ -775,16 +786,13 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         if cohort.group_id is not None or cohort.phase == "failed":
             self._terminal_cohorts[cohort.key] = cohort
         watermark = self._latest_group_attempts.get(cohort.group_id)
-        if watermark is not None and watermark.active_cohort is cohort:
-            watermark.active_cohort = None
-            self._active_group_count -= 1
+        if watermark is not None and watermark.latest_attempt == cohort.group_attempt:
+            self._idle_groups[cohort.group_id] = cohort.terminal_at
 
     def _prune_terminal_cohorts(self) -> None:
         """Evict the oldest eligible records, stopping at the first retained deadline.
 
-        Active attempts keep their watermarks even past the retention deadline.
-        They may be skipped at the head, but terminal records need no full scan
-        or sort on every arrival.
+        Active groups are absent from the idle order, so they keep their watermarks without being scanned.
         """
         now = time.monotonic()
         ttl = self.config.cohort_result_ttl_s
@@ -799,25 +807,19 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             if self._verify_cohorts.get(key) is cohort:
                 self._verify_cohorts.pop(key)
 
-        watermarks = self._latest_group_attempts
-        # If every watermark owns active work, nothing can be evicted.
-        prunable = len(watermarks) - self._active_group_count
-        if prunable <= 0:
-            return
-        excess = len(watermarks) - limit
-        evicted = []
-        for group_id, watermark in watermarks.items():
-            expired = ttl is not None and now - watermark.updated_at >= ttl
-            if not expired and excess <= 0:
+        while self._idle_groups:
+            group_id, idle_since = next(iter(self._idle_groups.items()))
+            expired = ttl is not None and now - idle_since >= ttl
+            if not expired and len(self._latest_group_attempts) <= limit:
                 break
-            if watermark.active_cohort is None:
-                evicted.append(group_id)
-                excess -= 1
-                prunable -= 1
-                if prunable == 0:
-                    break
-        for group_id in evicted:
-            watermarks.pop(group_id)
+            self._idle_groups.popitem(last=False)
+            watermark = self._latest_group_attempts.pop(group_id)
+            # Replays refresh idle order, but not result expiry. Count eviction
+            # can therefore select a group whose newest result is still retained.
+            # Remove that result too, rather than expose it without its attempt fence.
+            key = self._group_cohort_key(group_id, watermark.latest_attempt)
+            self._terminal_cohorts.pop(key, None)
+            self._verify_cohorts.pop(key, None)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -851,7 +853,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         self._verify_cohorts.clear()
         self._terminal_cohorts.clear()
         self._latest_group_attempts.clear()
-        self._active_group_count = 0
+        self._idle_groups.clear()
 
     def _get_verify_cohort_key(
         self,
@@ -861,7 +863,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     ) -> str:
         """Return an attempt-scoped key so replacement cohorts cannot mix with old responses."""
         if body.group_id is not None:
-            return f"group_id::{body.group_id}::group_attempt::{body.group_attempt}"
+            return self._group_cohort_key(body.group_id, body.group_attempt)
 
         prompt_key = get_prompt_key_from_input(input_messages, principle)
         if body.task_index is not None:
@@ -871,6 +873,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         else:
             logical_key = prompt_key
         return f"{logical_key}::group_attempt::{body.group_attempt}"
+
+    @staticmethod
+    def _group_cohort_key(group_id: str, group_attempt: int) -> str:
+        return f"group_id::{group_id}::group_attempt::{group_attempt}"
 
     async def _run_compare(
         self,

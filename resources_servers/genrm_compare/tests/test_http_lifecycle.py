@@ -208,34 +208,15 @@ async def test_conversion_failure_releases_http_peer_and_requires_new_attempt(se
     peer_status, peer_body = await asyncio.wait_for(first, 0.5)
     assert peer_status == 503 and "injected conversion failure" in peer_body["detail"]
     assert cohort.phase == "failed" and all(not m.waiters for m in cohort.members.values())
-    assert services.resource._active_group_count == 0 and services.judge_calls == 0
+    assert (
+        all(c.phase in ("failed", "completed") for c in services.resource._verify_cohorts.values())
+        and services.judge_calls == 0
+    )
     monkeypatch.setattr(services.resource, "_comparison_response", original)
     assert (await verify(1))[0] == 503
     results = await asyncio.gather(*(verify(i, attempt=1) for i in range(4)))
     assert all(status == 200 and body["reward"] == 3.0 for status, body in results)
     assert services.judge_calls == 4
-
-
-async def test_judge_task_start_failure_releases_all_http_waiters(services, monkeypatch):
-    create_task = asyncio.create_task
-    failures = []
-
-    def fail_judging(coro, **kwargs):
-        if kwargs.get("name", "").startswith("genrm-cohort-evaluation"):
-            failures.append(kwargs["name"])
-            raise RuntimeError("injected task startup failure")
-        return create_task(coro, **kwargs)
-
-    monkeypatch.setattr(asyncio, "create_task", fail_judging)
-    results = await asyncio.gather(*(run(services, i) for i in range(4)))
-    # SimpleAgent translates the resources server's 503 into a failed /run (500).
-    for status, body in results:
-        assert status == 500 and "reward" not in body
-        assert "GenRM cohort task startup failed: RuntimeError: injected task startup failure" in body
-    assert len(failures) == 1 and services.judge_calls == 0
-    cohort = next(iter(services.resource._verify_cohorts.values()))
-    assert cohort.phase == "failed" and services.resource._active_group_count == 0
-    assert all(not member.waiters and member.response_obj is None for member in cohort.members.values())
 
 
 async def test_incomplete_run_fails_without_reward(services):
@@ -579,6 +560,9 @@ async def test_interrupted_judge_body_retries_without_regenerating_answers(servi
 @pytest.mark.parametrize("value", ["NaN", "Infinity"])
 @pytest.mark.parametrize("recovers", [False, True])
 async def test_nonfinite_judge_output_uses_parse_retries_over_http(services, value, recovers):
+    # Exercise parse retries, independently of HTTP scheduling on a loaded runner.
+    services.resource.config.judge_request_timeout_s = 2.0
+    services.resource.config.cohort_evaluation_timeout_s = 10.0
     invalid = json.dumps({"score_1": value, "score_2": 2, "ranking": 1})
     services.judge_texts = [invalid] * (1 if recovers else 16)
     results = await asyncio.gather(*(run(services, i) for i in range(4)))

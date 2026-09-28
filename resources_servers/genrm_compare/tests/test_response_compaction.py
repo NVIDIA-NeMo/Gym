@@ -69,26 +69,29 @@ async def test_active_judging_keeps_attempt_watermark_after_other_records_expire
     server.config.cohort_result_ttl_s = 10
     server.config.max_terminal_cohorts = 1
     started = asyncio.Queue()
+    started_calls = []
     release = asyncio.Event()
 
     async def compare(*, response_objs, **kwargs):
-        started.put_nowait(response_objs[0]["id"])
+        started.put_nowait(len(started_calls))
+        started_calls.append(response_objs)
         await release.wait()
         return [3.0, 3.0], {}, [], []
 
     server._run_compare = compare
     old = [asyncio.create_task(server.verify(member(i))) for i in range(2)]
-    assert await asyncio.wait_for(started.get(), 1) == "answer-0"
+    assert await asyncio.wait_for(started.get(), 1) == 0
     latest = [asyncio.create_task(server.verify(member(i, attempt=1, response_id=f"new-{i}"))) for i in range(2)]
     try:
-        assert await asyncio.wait_for(started.get(), 1) == "new-0"
+        assert await asyncio.wait_for(started.get(), 1) == 1
         old_results = await asyncio.gather(*old, return_exceptions=True)
         assert all(isinstance(r, HTTPException) and r.status_code == 503 for r in old_results)
         clock[0] += 11
         server._prune_terminal_cohorts()
         assert not server._terminal_cohorts
         watermark = server._latest_group_attempts["group"]
-        assert watermark.latest_attempt == 1 and watermark.active_cohort.phase == "evaluating"
+        assert watermark.latest_attempt == 1
+        assert server._verify_cohorts[server._group_cohort_key("group", 1)].phase == "evaluating"
         assert all(not task.done() for task in latest)
         with pytest.raises(HTTPException) as error:
             await server.verify(member(0))

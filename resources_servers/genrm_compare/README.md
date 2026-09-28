@@ -405,6 +405,14 @@ Run the resources server with one HTTP worker. State is process-local. Completed
 failed groups retain compact response digests, rewards when completed, and failure/attempt information;
 full answer bodies and waiters are released. Retention is bounded by `cohort_result_ttl_s` and `max_terminal_cohorts`.
 
+Results expire from completion time. The newest-attempt record remains until at least that result expires;
+an exact replay refreshes the attempt record, without extending the result's lifetime. If Gym still remembers
+an attempt but its result has been evicted, another request for that attempt receives 409 immediately.
+Recover by dispatching a complete group with a higher shared `_ng_group_attempt`.
+
+Cleanup visits finished groups only. If the count cap removes a newest-attempt record before its result
+expires, Gym removes that result with it. Active groups keep their attempt records.
+
 The count cap can evict state before the TTL. After eviction or restart, replay and stale-attempt detection
 are no longer guaranteed. The caller must enforce accepted attempt identity across those boundaries and
 use fresh group IDs for unrelated work. This cache does not provide durable recovery.

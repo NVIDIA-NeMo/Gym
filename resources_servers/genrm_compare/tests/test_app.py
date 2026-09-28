@@ -465,7 +465,15 @@ class TestGenRMCompareResourcesServer:
                     tools=[],
                     parallel_tool_calls=True,
                     tool_choice="auto",
-                    output=[],
+                    output=[
+                        {
+                            "id": f"message_{rollout_index}",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": f"answer_{rollout_index}", "annotations": []}],
+                        }
+                    ],
                     object="response",
                 ),
                 task_index=11,
@@ -479,8 +487,11 @@ class TestGenRMCompareResourcesServer:
 
         assert [result.reward for result in results] == [30.0, 10.0, 20.0]
         run_compare.assert_awaited_once()
-        response_ids = [response_obj["id"] for response_obj in run_compare.await_args.kwargs["response_objs"]]
-        assert response_ids == ["resp_0", "resp_1", "resp_2"]
+        answer_texts = [
+            response_obj["output"][1]["content"][0]["text"]
+            for response_obj in run_compare.await_args.kwargs["response_objs"]
+        ]
+        assert answer_texts == ["answer_0", "answer_1", "answer_2"]
 
     async def test_identical_duplicate_attaches_to_existing_rollout_slot(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
