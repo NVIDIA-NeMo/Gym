@@ -402,37 +402,29 @@ class TestValidationSummary:
     def test_summarizes_rollouts(self, tmp_path):
         from nemo_gym.tasks.harbor.cli import summarize_validation
 
+        # Rows are the verify response as returned plus the collector's `_ng_task_id` stamp.
         rows = [
             {
-                "task_id": {"taskset": "ds", "task_id": "solved"},
+                "_ng_task_id": {"taskset": "ds", "task_id": "solved"},
                 "reward": 1.0,
                 "mask_sample": False,
-                "result": {"verification": {"reward": 1.0, "response": {"metadata": {"oracle": "solved"}}}},
+                "response": {"metadata": {"oracle": "solved"}},
             },
             {
-                "task_id": {"taskset": "ds", "task_id": "wrong"},
+                "_ng_task_id": {"taskset": "ds", "task_id": "wrong"},
                 "reward": 0.0,
                 "mask_sample": False,
-                "result": {
-                    "verification": {
-                        "reward": 0.0,
-                        "failure_kind": "harbor:missing_reward",
-                        "response": {"metadata": {"oracle": "solved"}},
-                    }
-                },
+                "failure_kind": "harbor:missing_reward",
+                "response": {"metadata": {"oracle": "solved"}},
             },
             {
-                "task_id": {"taskset": "ds", "task_id": "skipped"},
+                "_ng_task_id": {"taskset": "ds", "task_id": "skipped"},
                 "reward": 0.0,
                 "mask_sample": False,
-                "result": {"verification": {"reward": 0.0, "response": {"metadata": {"oracle": "unvalidated"}}}},
+                "response": {"metadata": {"oracle": "unvalidated"}},
             },
             {
-                "task_id": {"taskset": "ds", "task_id": "broken"},
-                "failure": {"message": "seed exploded", "terminal": True},
-            },
-            {
-                "task_id": {"taskset": "ds", "task_id": "masked"},
+                "_ng_task_id": {"taskset": "ds", "task_id": "masked"},
                 "reward": 0.0,
                 "mask_sample": True,
                 "failure_kind": "provider_unavailable",
@@ -440,6 +432,18 @@ class TestValidationSummary:
         ]
         rollouts = tmp_path / "rollouts.jsonl"
         rollouts.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        # An episode that failed before verification lands in the failures sidecar.
+        (tmp_path / "rollouts_failures.jsonl").write_text(
+            json.dumps(
+                {
+                    "_ng_task_id": {"taskset": "ds", "task_id": "broken"},
+                    "_ng_failure_class": "environment_server_failed",
+                    "_ng_failure_terminal": True,
+                    "_ng_failure_message": "seed exploded",
+                }
+            )
+            + "\n"
+        )
 
         report = summarize_validation(rollouts, ["never_ran"])
 
@@ -448,7 +452,7 @@ class TestValidationSummary:
         assert "solved\toracle solved\t1.0" in lines
         assert "wrong\toracle solved (harbor:missing_reward)\t0.0" in lines
         assert "skipped\tunvalidated (no solution/)\t-" in lines
-        assert any(line.startswith("broken\tfailed: seed exploded") for line in lines)
+        assert "broken\tfailed: seed exploded\t-" in lines
         assert "masked\tmasked (provider_unavailable)\t-" in lines
         assert "never_ran\tunvalidated (no solution/)\t-" in lines
         assert report.ok is False
@@ -457,7 +461,7 @@ class TestValidationSummary:
         from nemo_gym.tasks.harbor.cli import summarize_validation
 
         rollouts = tmp_path / "rollouts.jsonl"
-        rollouts.write_text(json.dumps({"task_id": {"taskset": "ds", "task_id": "a"}, "reward": 1.0}) + "\n")
+        rollouts.write_text(json.dumps({"_ng_task_id": {"taskset": "ds", "task_id": "a"}, "reward": 1.0}) + "\n")
         report = summarize_validation(rollouts, [])
         assert report.ok is True and "a\toracle ran\t1.0" in report.text
 
