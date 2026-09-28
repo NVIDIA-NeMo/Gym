@@ -23,6 +23,7 @@ from typing import Any
 import yaml
 
 from nemo_gym import component_search_roots
+from nemo_gym.path_utils import failures_path_for
 from nemo_gym.tasks.harbor.hub import HubRef, datasets_dir, fetch_ref, is_hub_ref
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tasks
@@ -244,8 +245,18 @@ def _dig(mapping: Any, *keys: str) -> Any:
     return mapping
 
 
+def _task_name(row: dict[str, Any]) -> str:
+    identity = row.get("_ng_task_id") or row.get("task_id") or {}
+    return str(identity.get("task_id", "?")) if isinstance(identity, dict) else str(identity)
+
+
 def summarize_validation(rollouts: Path, unvalidated: list[str]) -> ValidationReport:
-    """One line per task: the oracle's reward, or why there is none."""
+    """One line per task: the oracle's reward, or why there is none.
+
+    Rollout collection stores an environment server's result as returned, so a row is the verify
+    response itself (``reward``, ``mask_sample``, ``failure_kind``, ``response``) plus ``_ng_task_id``.
+    Episodes that failed before verification are in the failures sidecar next to the rollouts file.
+    """
     lines = ["task_id\tstatus\treward"]
     ok = True
     if rollouts.is_file():
@@ -253,28 +264,29 @@ def summarize_validation(rollouts: Path, unvalidated: list[str]) -> ValidationRe
             if not raw.strip():
                 continue
             row = json.loads(raw)
-            task_id = _dig(row, "task_id", "task_id") or "?"
-            failure = row.get("failure") or _dig(row, "result", "failure")
-            oracle = _dig(row, "result", "verification", "response", "metadata", "oracle") or _dig(
-                row, "response", "metadata", "oracle"
-            )
+            task_id = _task_name(row)
+            oracle = _dig(row, "response", "metadata", "oracle")
             reward = row.get("reward")
-            if failure:
+            if row.get("mask_sample"):
                 ok = False
-                lines.append(f"{task_id}\tfailed: {str(_dig(failure, 'message') or failure)[:120]}\t-")
-            elif row.get("mask_sample"):
-                ok = False
-                lines.append(
-                    f"{task_id}\tmasked ({row.get('failure_kind') or _dig(row, 'result', 'verification', 'failure_kind')})\t-"
-                )
+                lines.append(f"{task_id}\tmasked ({row.get('failure_kind')})\t-")
             elif oracle == "unvalidated":
                 lines.append(f"{task_id}\tunvalidated (no solution/)\t-")
             else:
                 if reward is None or reward < 1.0:
                     ok = False
-                kind = _dig(row, "result", "verification", "failure_kind")
+                kind = row.get("failure_kind")
                 note = f" ({kind})" if kind else ""
                 lines.append(f"{task_id}\toracle {oracle or 'ran'}{note}\t{reward}")
+        failures = failures_path_for(rollouts)
+        if failures.is_file():
+            for raw in failures.read_text().splitlines():
+                if not raw.strip():
+                    continue
+                row = json.loads(raw)
+                ok = False
+                message = row.get("_ng_failure_message") or row.get("_ng_failure_class") or "failed"
+                lines.append(f"{_task_name(row)}\tfailed: {str(message)[:120]}\t-")
     else:
         ok = False
         lines.append(f"-\tno rollouts written at {rollouts}\t-")
