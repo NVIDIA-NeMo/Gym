@@ -521,9 +521,16 @@ class TestAggregation:
         assert result.harness_failure == 1.0 and result.failure_reason and result.reward == 0.0
         assert result.feasibility == 0.0 and result.quality == 0.0
 
-    @pytest.mark.parametrize("status", [s for s in Status if s not in HARNESS_FAULTS])
-    def test_policy_outcomes_are_never_excused(self, status):
-        assert status not in HARNESS_FAULTS and HARNESS_FAULTS.get(status) is None
+    def test_harness_fault_partition_is_exactly_the_intended_one(self):
+        # Literal, not derived from HARNESS_FAULTS: moving a policy outcome (e.g. VERIFIER_TIMEOUT)
+        # into the excused set must fail here rather than silently drop out of a parametrization.
+        assert set(HARNESS_FAULTS) == {
+            Status.BAD_TASK_FOLDER,
+            Status.SANDBOX_FAILED,
+            Status.STEP_SETUP_FAILED,
+            Status.TESTS_UPLOAD_FAILED,
+            Status.NO_SESSION,
+        }
 
 
 class TestMetrics:
