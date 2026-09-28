@@ -390,6 +390,100 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
     return task_id, rollout_id
 
 
+def _turn_content(request: Any, response: Any) -> tuple[Any, Any, Any, int]:
+    """Split one captured model call into the turn's question, answer, reasoning, and tool-call count.
+
+    Handles Responses API output items and chat-completions messages, the two dialects the Model
+    Server captures.
+    """
+    question = request.get("input", request.get("messages")) if isinstance(request, dict) else request
+    if isinstance(request, dict) and isinstance(request.get("input"), list):
+        # Responses API input messages may omit `type`, which defaults to "message"; turns state it.
+        question = [
+            {"type": "message", **item} if isinstance(item, dict) and "role" in item and "type" not in item else item
+            for item in request["input"]
+        ]
+    if isinstance(response, dict) and isinstance(response.get("output"), list):
+        output = [item for item in response["output"] if isinstance(item, dict)]
+        reasoning = [item for item in output if item.get("type") == "reasoning"] or None
+        answer = [item for item in output if item.get("type") != "reasoning"]
+        tool_calls = sum(1 for item in answer if item.get("type") == "function_call")
+        return question, answer, reasoning, tool_calls
+    choices = response.get("choices") if isinstance(response, dict) else None
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message") or {}
+        reasoning = message.get("reasoning_content") or message.get("reasoning")
+        answer = {key: value for key, value in message.items() if key not in ("reasoning_content", "reasoning")}
+        return question, answer, reasoning, len(message.get("tool_calls") or [])
+    return question, None, None, 0
+
+
+def _turns_from_model_calls(
+    task_id: str,
+    rollout_id: str,
+    invocations: list[AgentInvocation],
+    model_calls: list[TrajectoryModelCall],
+    resolved: Any,
+) -> list[TrajectoryTurn]:
+    """Build one turn per captured model call that returned a response, for an agent that sent no trajectory.
+
+    A call belongs to the invocation whose ``model_calls`` reference it. With a single invocation
+    every call belongs to it, and with none they belong to ``root``. A call that cannot be attributed
+    to one of several invocations is skipped rather than guessed.
+    """
+    invocation_by_call_id: dict[str, str] = {}
+    invocation_by_response_id: dict[str, str] = {}
+    for invocation in invocations:
+        for ref in invocation.model_calls:
+            if ref.model_call_id:
+                invocation_by_call_id[ref.model_call_id] = invocation.invocation_id
+            if ref.response_id:
+                invocation_by_response_id[ref.response_id] = invocation.invocation_id
+    default_invocation = invocations[0].invocation_id if len(invocations) == 1 else None if invocations else "root"
+
+    turns: list[TrajectoryTurn] = []
+    turn_counts: Counter = Counter()
+    tool_counts: Counter = Counter()
+    for call in model_calls:
+        if call.response is None:
+            # A call that returned nothing is not a model decision.
+            continue
+        metadata = call.response_metadata
+        invocation_id = (
+            invocation_by_call_id.get(call.model_call_id or "")
+            or invocation_by_response_id.get(metadata.response_id or "")
+            or default_invocation
+        )
+        if invocation_id is None:
+            continue
+        question, answer, reasoning, tool_calls = _turn_content(call.request, call.response)
+        turn_counts[invocation_id] += 1
+        turns.append(
+            TrajectoryTurn(
+                invocation_id=invocation_id,
+                task_id=task_id,
+                rollout_id=rollout_id,
+                turn_no=turn_counts[invocation_id],
+                timestamp=call.started_at or call.completed_at or 0.0,
+                question=question,
+                answer=answer,
+                reasoning_content=reasoning,
+                step_count=tool_counts[invocation_id],
+                model_calls=[
+                    ModelCallRef(
+                        model_call_id=call.model_call_id,
+                        model_ref=metadata.model_ref,
+                        response_id=metadata.response_id,
+                    )
+                ],
+            )
+        )
+        tool_counts[invocation_id] += tool_calls
+    if turns and isinstance(resolved, bool):
+        turns[-1] = turns[-1].model_copy(update={"resolved": resolved})
+    return turns
+
+
 def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> TrajectoryRecord:
     task_id, rollout_id = _trajectory_identity(row)
     gaps: list[ObservationGap] = []
@@ -529,6 +623,10 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 gaps.append(ObservationGap.model_validate(raw_gap))
             except Exception:
                 gaps.append(ObservationGap(code="model_call_capture_gap_invalid"))
+    if not isinstance(raw_trajectory, dict):
+        # An agent that sends its own trajectory owns its turns, and an empty list there means no turn
+        # completed. Agents that report only invocations, or nothing, get turns from the captured calls.
+        turns = _turns_from_model_calls(task_id, rollout_id, invocations, model_calls, result.get("resolved"))
     if not model_calls:
         gaps.append(ObservationGap(code="model_calls_unavailable"))
     if not turns:
