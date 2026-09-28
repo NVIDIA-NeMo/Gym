@@ -18,7 +18,7 @@
 One vocabulary across the Lean benchmarks so a rollout dump means the same thing everywhere,
 and so the distinction that matters -- a wrong proof versus broken infrastructure -- is made
 once. A benchmark with a rule of its own adds a status next to these rather than redefining
-them (formal_conjectures adds `unproved`: compiled, but the target still rests on `sorryAx`).
+them.
 """
 
 import re

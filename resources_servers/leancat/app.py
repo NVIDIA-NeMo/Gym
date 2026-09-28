@@ -19,10 +19,9 @@ LeanCat (arXiv:2512.24796) is 100 statement-level 1-category-theory problems in 
 Mathlib v4.19.0.
 
 The task is *whole-file*: the model returns the entire Lean file (imports, preamble, any
-auxiliary definitions, the target theorem with its proof), unlike ``math_formal_lean``
-where the model writes only a proof body and the server reassembles the file. Because the
-model owns the whole file it could also weaken the theorem, so
-``proof_utils.check_statement_preserved`` compares the submission against the reference.
+auxiliary definitions, the target theorem with its proof), rather than a proof body the server
+reassembles a file around. Because the model owns the whole file it could also weaken the
+theorem, so ``proof_utils.check_statement_preserved`` compares it against the reference.
 
 Verification runs through ``lean_proof.lean_sandbox``: one sandbox per server process,
 created from an image carrying Lean and Mathlib at the version the rows are written against

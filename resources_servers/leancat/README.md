@@ -15,10 +15,9 @@ definitions the problem needs, and a target theorem whose proof is `sorry` — a
 holes filled. The prompt is the paper's Appendix D.1 template, applied at run time from
 `benchmarks/prompts/eval/leancat/paper.yaml` — see **Prompt** below.
 
-This is a **whole-file** task, which is what separates this server from `math_formal_lean`. There, the model writes a
-proof body and the harness reassembles the file around it. Here the model returns the entire file, because many
-LeanCat problems set up their own structures and instances before the statement and a reassembly step would have to
-guess where the model's additions belong.
+This is a **whole-file** task: the model returns the entire file rather than a proof body the harness reassembles a
+file around. Many LeanCat problems set up their own structures and instances before the statement, so a reassembly
+step would have to guess where the model's additions belong.
 
 ## Verification
 
@@ -35,16 +34,11 @@ submission that has already lost does not cost a five-minute Mathlib compile.
 
 `reward` is 1.0 only for `completed`, and 0.0 otherwise.
 
-Layout, field names and status vocabulary follow `math_formal_lean`, the repo's other Lean server, so the two read as
-siblings: same module split (`app.py` / `proof_utils.py` / `task_data.py`), same response fields (`proof_status`,
-`predicted_proof`, `compiler_output`), same words for the outcomes that exist in both (`completed`, `empty_generation`,
-`timeout`). `banned_tokens`, `statement_modified` and `compile_error` have no counterpart there — that server
-reassembles the file itself, so it has nothing to catch a tampered statement.
+Response fields (`proof_status`, `predicted_proof`, `compiler_output`) and the status vocabulary come from
+`resources_servers/lean_proof`, so a rollout dump reads the same across Lean benchmarks.
 
-Everything that is not specific to the whole-file task is **imported** from `math_formal_lean`, not copied: the
-sandbox HTTP client (`sandbox_client.py`), the `CompilerOutput` model, the one-shot Mathlib version probe
-(`toolchain.py`) and the Lean comment/string stripper (`proof_utils.strip_lean_comments_and_strings`). This server
-has no `sandbox_client.py` of its own.
+Everything not specific to LeanCat is **imported** from `resources_servers/lean_proof`: the sandbox runner, the
+`CompilerOutput` model, the Mathlib version probe, and the text checks.
 
 The fifth upstream criterion, "maintained mathematical intent", is a human judgement and is not automated. Check 3 is
 the closest mechanical proxy: the reference file is split on `sorry`, and every remaining fragment must appear in the
@@ -86,7 +80,7 @@ Two checks guard it:
 ```yaml
 sandbox_provider: sandbox            # any nemo_gym.sandbox provider config
 sandbox_config:
-  image: ${oc.env:GYM_LEAN_IMAGE_V4_19_0,gym-lean:v4.19.0}
+  image: ${oc.env:LEANCAT_SANDBOX_IMAGE,gym-lean:v4.19.0}
 compilation_timeout: 300.0           # upstream's per-attempt budget
 check_lean_version: true
 expected_lean_version: "4.19.0"
@@ -219,15 +213,13 @@ gym eval run --benchmark leancat \
 ```
 
 **One dataset serves both.** Rows are flat (`formal_statement`, `level`, `problem_id`, …) with no
-`responses_create_params`, the same shape `benchmarks/minif2f` uses, and the prompt is applied at run time by
+`responses_create_params`, and the prompt is applied at run time by
 `fill_prompt`. So switching templates is a flag, not a second dataset, and a per-problem diff of the two runs
 isolates the prompt's contribution exactly. `{formal_statement}` is substituted from the row's top-level field,
 which carries the pinned `CAT_statement/*.lean` bytes verbatim — trailing newline included — so the rendered prompt
 is byte-identical to the reference harness's.
 
-They live under `benchmarks/prompts/eval/` because they are benchmark-specific rather than reusable — contrast
-`benchmarks/prompts/lean4/`, whose one template is shared by minif2f, proofnet and putnam_bench. Several variants in
-one `eval/<benchmark>/` directory follows `benchmarks/prompts/eval/aai/`, which ships three.
+They live under `benchmarks/prompts/eval/` because they are benchmark-specific rather than reusable.
 
 ### Why the paper's is the default
 

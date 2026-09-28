@@ -2,18 +2,16 @@ leancat:
   resources_servers:
     leancat:
       entrypoint: app.py
-      # Verification runs in a nemo_gym sandbox, not an out-of-band HTTP service.
       # `sandbox` is the instance name every shipped provider config binds, so the provider
-      # is chosen by which one is on +config_paths (opensandbox, docker, apptainer, ...).
+      # is chosen by which config is on +config_paths.
       sandbox_provider: sandbox
       sandbox_config:
-        # Built by resources_servers/math_formal_lean/lean_image (./build.sh v4.19.0).
-        # Pin the digest, not the tag: leancat's statements need Mathlib v4.19.0 exactly, and
-        # on v4.12.0 36 of the 100 reference statements fail to compile with their `sorry`
-        # still intact -- a silent cap at 64/100 rather than a visible error.
-        image: ${oc.env:GYM_LEAN_IMAGE_V4_19_0,gym-lean:v4.19.0}
-        # Long-lived: one sandbox serves a whole run, and there is no server shutdown hook,
-        # so this is also what reclaims it if the server dies.
+        # Built by resources_servers/lean_proof/lean_image (./build.sh v4.19.0). Pin a digest
+        # rather than a tag: LeanCat's statements need Mathlib v4.19.0 exactly, and an older
+        # Mathlib caps the score silently instead of failing.
+        image: ${oc.env:LEANCAT_SANDBOX_IMAGE,gym-lean:v4.19.0}
+        # One sandbox serves a whole run; with no server shutdown hook this is what reclaims
+        # it if the server dies.
         ttl_s: 86400
         ready_timeout_s: 1200
         resources:
@@ -21,16 +19,14 @@ leancat:
           memory_mib: 16384
           disk_gib: 30
         provider_options:
-          # Requests are what the scheduler reserves; `resources` above are burst limits.
-          # Without these the reservation follows the limits, and a 4-CPU/16-GiB reservation
-          # occupies the capacity of ~30 ordinary sandboxes. Not minimal, though: every
-          # verify imports Mathlib, so this is not a bursty agent workload.
+          # Scheduling reservations, well under the burst limits above: every verify imports
+          # Mathlib, so these are not minimal, but reserving the limits would occupy the
+          # capacity of ~30 ordinary sandboxes.
           resource_requests:
             cpu: 1
             memory_mib: 4096
             disk_gib: 30
-        # `lake` sizes its worker pool from the host core count, which on a node without
-        # LXCFS is 128-192, not this sandbox's 4.
+        # `lake` sizes its worker pool from the host core count on clusters without LXCFS.
         derive_cpu_env: true
         metadata:
           benchmark: leancat

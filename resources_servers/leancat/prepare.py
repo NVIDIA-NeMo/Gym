@@ -24,8 +24,8 @@ unchanged and no ``sorry``/``admit``/``axiom``/``unsafe`` declarations.
 Upstream: https://github.com/sciencraft/LeanCat (paper: arXiv:2512.24796).
 Dataset contents are CC BY 4.0; upstream evaluation code is MIT.
 
-Rows are flat (one field per upstream column, no ``responses_create_params``), the same
-shape ``benchmarks/minif2f`` uses. The prompt is applied at run time via ``prompt_config``,
+Rows are flat (one field per upstream column, no ``responses_create_params``). The prompt is
+applied at run time via ``prompt_config``,
 so one dataset serves both shipped templates:
 
     benchmarks/prompts/eval/leancat/paper.yaml           the paper's Appendix D.1 template

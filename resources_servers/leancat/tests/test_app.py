@@ -209,7 +209,7 @@ class TestLeanCatApp:
 
     @pytest.mark.asyncio
     async def test_verify_compiles_the_whole_submitted_file(self, server):
-        # The model owns the file here, unlike math_formal_lean: nothing is prepended.
+        # The model owns the whole file: nothing is prepended.
         captured = {}
 
         async def capture_code(code: str, timeout_s: float | None = None):
@@ -297,7 +297,7 @@ class TestPrompt:
 
 
 class TestToolchainCheck:
-    """The probe itself is tested in math_formal_lean; this is only the wiring."""
+    """The probe itself is tested in lean_proof; this is only the wiring."""
 
     @pytest.mark.asyncio
     async def test_mismatch_against_the_rows_pin_is_logged(self, server, caplog):

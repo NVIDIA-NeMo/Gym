@@ -24,7 +24,7 @@ least once during development, and a fix should land in one place.
 
 ``check_statement_preserved`` is for whole-file tasks, where the model returns the entire file
 and could weaken the theorem it was asked to prove. Servers that reassemble the file around a
-model-written proof body (``math_formal_lean``) do not need it.
+model-written proof body do not need it.
 """
 
 import re

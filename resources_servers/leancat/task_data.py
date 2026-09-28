@@ -2,13 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the leancat server (LeanCat formal category theory in Lean 4).
 
-Fields are top-level row columns (``prepare.py``), the same flat shape ``benchmarks/minif2f``
-uses; ``app.py`` also accepts them nested under ``verifier_metadata``. Only
-``formal_statement`` is required, mirroring ``LeanCatRunRequest``.
+Fields are top-level row columns (``prepare.py``); ``app.py`` also accepts them nested under
+``verifier_metadata``. Only ``formal_statement`` is required, mirroring ``LeanCatRunRequest``.
 
-This schema does not subclass ``math_formal_lean.task_data.TaskData``: both have a
-``formal_statement`` field, but there it is the bare theorem signature paired with a separate
-``header``, while here it is the entire reference file.
+``formal_statement`` here is the entire reference file, not a bare theorem signature paired
+with a separate header.
 
 ``level`` is not read by ``verify()`` but ``compute_metrics`` groups on it for the
 Easy/Medium/High breakdown; a row without it drops out of that breakdown.

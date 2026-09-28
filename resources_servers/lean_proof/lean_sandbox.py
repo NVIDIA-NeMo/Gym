@@ -16,7 +16,7 @@
 """A Lean compile sandbox, shared by the Lean benchmarks.
 
 Any Lean server needs the same thing: a sandbox holding a Mathlib build, and a way to compile
-one file in it. That is all this is. The image is built by ``lean_image/`` -- one per Mathlib
+one file in it. That is all this is. The image comes from ``lean_image/`` -- one per Mathlib
 version, because compiled oleans do not carry across versions.
 
 One sandbox per server process, created on first use and reused. A sandbox per rollout is not
@@ -44,8 +44,7 @@ logger = logging.getLogger(__name__)
 class CompilerOutput(BaseModel):
     """What the Lean toolchain said, carried on a verify response for debugging a rollout.
 
-    Field names match ``math_formal_lean``'s so a rollout dump reads the same across the Lean
-    benchmarks; `process_status` holds this library's `proof_status` vocabulary.
+    ``process_status`` holds this library's ``proof_status`` vocabulary.
     """
 
     process_status: str
@@ -155,8 +154,7 @@ class LeanSandbox:
         """Log an error unless the sandbox's Lean matches ``expected``. Returns what it found.
 
         A wrong Mathlib fails statements with ordinary compile errors, so the score looks
-        plausible and is meaningless -- on v4.12.0, 36 of leancat's 100 reference statements
-        fail to compile with their `sorry` still intact.
+        plausible and is meaningless.
         """
         from resources_servers.lean_proof.toolchain import normalize_version, parse_lean_version
 
