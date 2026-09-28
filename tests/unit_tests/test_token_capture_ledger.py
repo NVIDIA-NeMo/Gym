@@ -210,13 +210,14 @@ async def test_has_rows_is_false_for_untouched_rollout(store):
     assert RolloutManifest.model_validate(await store.manifest("r-none")).records == []
 
 
-async def _admit(store, request_items, rollout_id="r1", model_call_id="c2"):
+async def _admit(store, request_items, rollout_id="r1", model_call_id="c2", unresolved_as_root=False):
     context = CaptureContext(
         rollout_id=rollout_id,
         model_call_id=model_call_id,
         token_sink=None,
         lineage_store=store,
         external_staging=True,
+        unresolved_as_root=unresolved_as_root,
     )
     token = set_token_sink(context)
     try:
@@ -302,6 +303,17 @@ async def test_admission_unresolved_poisons_instead_of_new_root(store):
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
     assert [failure.reason for failure in manifest.failures] == [UNRESOLVED_PARENT_REASON]
     assert manifest.failures[0].model_call_id == "c2"
+
+
+@pytest.mark.asyncio
+async def test_admission_unresolved_as_root_opens_new_text_root(store):
+    await _record_call_1(store)
+    context = await _admit(store, [USER_1, ASSISTANT_SEEDED, USER_2], unresolved_as_root=True)
+    admission = context.capture_admission
+    assert admission is not None and admission.mode == "text"
+    assert admission.parent_call_id is None
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.failures == []
 
 
 @pytest.mark.asyncio
