@@ -190,10 +190,15 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output(reasoning
     assert second.content == "answer 2"
     assert third.content == "answer 3"
     expected_reasoning = (
-        [{"id": "", "summary": [{"text": reasoning_content, "type": "summary_text"}], "type": "reasoning"}]
+        [{"summary": [{"text": reasoning_content, "type": "summary_text"}], "type": "reasoning"}]
         if reasoning_content
         else []
     )
+    # Replayed assistant and reasoning items carry fresh well-formed ids; compare everything else.
+    for request_body in client.requests:
+        for item in request_body["input"]:
+            if item.get("type") in ("message", "reasoning") and item.get("id", "").split("_")[0] in ("msg", "rs"):
+                item.pop("id")
     assert client.requests == [
         {"model": "policy_model", "input": [{"content": "first", "role": "user", "type": "message"}]},
         {
@@ -202,7 +207,6 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output(reasoning
                 {"content": "first", "role": "user", "type": "message"},
                 *expected_reasoning,
                 {
-                    "id": "",
                     "content": [{"annotations": [], "text": "answer 1", "type": "output_text"}],
                     "role": "assistant",
                     "status": "completed",

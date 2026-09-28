@@ -233,17 +233,18 @@ class NeMoGymLLM(BaseLLM):
                     NeMoGymEasyInputMessage(role=message.get("role", "user"), content=message.get("content", ""))
                 )
             elif message.get("role") == "assistant":
+                # Replayed items need well-formed ids: OpenAI-compatible backends reject an empty string.
                 if message.get("reasoning_content"):
                     res.append(
                         NeMoGymResponseReasoningItem(
-                            id="",
+                            id=f"rs_{uuid4().hex}",
                             summary=[NeMoGymSummary(text=message.get("reasoning_content"), type="summary_text")],
                             type="reasoning",
                         )
                     )
                 res.append(
                     NeMoGymResponseOutputMessage(
-                        id="",
+                        id=f"msg_{uuid4().hex}",
                         content=[NeMoGymResponseOutputText(annotations=[], text=message.get("content", ""))],
                     )
                 )
