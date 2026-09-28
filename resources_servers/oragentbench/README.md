@@ -27,11 +27,17 @@ Pinned revision (no upstream tag or release exists; this is a pin we chose):
 | Reward | 1.0 iff `feasibility > 0` and `quality / 2 > 0.4` (the paper's pass predicate), else 0.0 |
 
 The reward is a literal port of `scripts/summarize_results.py::is_pass` at the pinned commit.
-Upstream's `reward.json` carries `quality` on [0, 2] (1.0 = reference objective, 2.0 = reaches the
-best bound); the paper's `q` on [0, 1] is `quality / 2` and is returned as `quality`. For
-multi-step tasks feasibility is the conjunction over steps and quality the mean over steps with
-a missing step counting 0 (`summarize_trial`). `upstream_scalar_reward` is the `(F + q) / 3`
-value upstream writes to `reward.txt`; it is returned for reference and is not the reward.
+Upstream's `reward.json` carries `quality` on [0, 2], scored by `tests/test.sh` in one of two
+regimes: when the reference comes with a best bound whose distance from the reference objective
+exceeds the MIP gap, 1.0 = the reference objective and 2.0 = reaches the best bound
+(`quality_status: scored_with_best_bound`); when the reference is proven optimal within the MIP
+gap or no bound is reported, matching the reference scores 2.0 and shortfalls are scaled by the
+MIP gap (`bound_gap_below_mip_gap`, `scored_with_mip_gap_fallback`; the committed example
+rollouts are in this regime). The paper's `q` on [0, 1] is `quality / 2` and is returned as
+`quality`. For multi-step tasks feasibility is the conjunction over steps and quality the mean
+over steps with a missing step counting 0 (`summarize_trial`). `upstream_scalar_reward` is the
+`(F + q) / 3` value upstream writes to `reward.txt`; it is returned for reference and is not the
+reward.
 
 Every verify response carries a `status`. A zero reward that is not a judgement on the policy
 also carries a `failure_reason` and `harness_failure: 1.0`:

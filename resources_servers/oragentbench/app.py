@@ -6,7 +6,8 @@ Each task is a Harbor task directory from https://github.com/ORAgentBench/ORAgen
 the agent works inside a per-task container and writes decision artefacts under
 ``/app/submissions``; upstream's own validator (``tests/test.sh`` + ``evaluate_solution.py``)
 then runs inside the same container and writes ``/logs/verifier/reward.json`` with
-``feasibility`` in {0, 1} and ``quality`` on [0, 2] (1.0 = matches the reference objective).
+``feasibility`` in {0, 1} and ``quality`` on [0, 2] (2.0 = matches a proven-optimal reference or
+reaches the best bound; 1.0 = the reference objective when a wider best bound exists).
 
 The reward is the paper's pass predicate, ported literally from upstream's
 ``scripts/summarize_results.py``: a task passes iff ``feasibility > 0`` and
