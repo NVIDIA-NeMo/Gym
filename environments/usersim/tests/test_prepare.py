@@ -9,7 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from benchmarks.usersim import prepare as prepare_module
+from environments.usersim import prepare as prepare_module
 
 
 def _write_parquet(path: Path) -> None:
@@ -18,9 +18,7 @@ def _write_parquet(path: Path) -> None:
 
 
 def test_prepare_invokes_usersim_panel_and_records_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    output_path = tmp_path / "usersim.jsonl"
-    source_rows = [json.loads(line) for line in prepare_module.EXAMPLE_FPATH.read_text().splitlines() if line.strip()]
-    monkeypatch.setattr(prepare_module, "OUTPUT_FPATH", output_path)
+    source_rows = [json.loads(line) for line in prepare_module.TASKS_FPATH.read_text().splitlines() if line.strip()]
     monkeypatch.setattr(prepare_module.shutil, "which", lambda executable: f"/bin/{executable}")
     calls: list[tuple[list[str], dict[str, object]]] = []
 
@@ -33,11 +31,9 @@ def test_prepare_invokes_usersim_panel_and_records_manifest(tmp_path: Path, monk
 
     result = prepare_module.prepare(personas_cache_dir=tmp_path / "personas", personas_panel_size=1)
 
-    assert result == output_path.absolute()
-    prepared_rows = [json.loads(line) for line in output_path.read_text().splitlines()]
-    assert len(source_rows) == len(prepared_rows) == 13
-    assert {row["task_id"]["task_id"] for row in prepared_rows} == {row["task_id"]["task_id"] for row in source_rows}
-    assert all(row["task_id"]["taskset"] == "usersim:benchmark" for row in prepared_rows)
+    assert result == prepare_module.TASKS_FPATH.absolute()
+    assert len(source_rows) == 13
+    assert all(row["task_id"]["taskset"] == "usersim:example" for row in source_rows)
     command, kwargs = calls[0]
     assert command[:6] == ["/bin/usersim", "panel", "--locale", "en_US", "--num-personas", "1"]
     assert "env" not in kwargs
@@ -51,14 +47,12 @@ def test_prepare_invokes_usersim_panel_and_records_manifest(tmp_path: Path, monk
 def test_prepare_reuses_matching_panel_without_invoking_usersim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    output_path = tmp_path / "usersim.jsonl"
     example_path = tmp_path / "example.jsonl"
     example_path.write_text(
         '{"task_id":{"taskset":"usersim:example","task_id":"1042"},'
         '"task_input":{"sampling":{"locale":"en_US","seed":1042}}}\n'
     )
-    monkeypatch.setattr(prepare_module, "OUTPUT_FPATH", output_path)
-    monkeypatch.setattr(prepare_module, "EXAMPLE_FPATH", example_path)
+    monkeypatch.setattr(prepare_module, "TASKS_FPATH", example_path)
     monkeypatch.setattr(prepare_module.shutil, "which", lambda executable: f"/bin/{executable}")
 
     def fake_panel(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
@@ -75,6 +69,6 @@ def test_prepare_reuses_matching_panel_without_invoking_usersim(
 
     prepare_module.prepare(personas_cache_dir=tmp_path / "personas", personas_panel_size=1)
 
-    assert output_path.is_file()
+    assert example_path.is_file()
     panel_path = tmp_path / "personas" / "0.0.2" / "panels" / "en_US.parquet"
     assert panel_path.with_suffix(".manifest.json").is_file()

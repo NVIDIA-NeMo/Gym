@@ -9,11 +9,11 @@ panel at runtime.
 
 ## Environment initialization
 
-The benchmark configuration pins the persona dataset version to `0.0.2` and
+The environment configuration pins the persona dataset version to `0.0.2` and
 uses:
 
 ```text
-benchmarks/usersim/data/personas/
+environments/usersim/data/personas/
 └── 0.0.2/
     └── panels/
         ├── en_US.parquet
@@ -22,11 +22,11 @@ benchmarks/usersim/data/personas/
 
 For every configured locale, server startup:
 
-1. Requires the panel and manifest prepared by the benchmark recipe.
+1. Requires the panel and manifest prepared by the environment recipe.
 2. Validates the panel's version, size, row count, and SHA-256.
 3. Loads the panel into memory for episode sampling.
 
-Run `gym eval prepare --benchmark usersim` before starting the Resources
+Run `gym eval prepare --config environments/usersim/config.yaml` before starting the Resources
 Server. Preparation delegates population sampling to NeMo UserSim and treats
 the resulting panel as the immutable artifact. Startup fails with that
 instruction when the panel is absent or does not match its manifest.
@@ -34,7 +34,7 @@ instruction when the panel is absent or does not match its manifest.
 ## Episode data contracts
 
 The episode uses separate contracts for each lifecycle. Static protocol and
-population settings live in YAML. A benchmark dataset row contains only task
+population settings live in YAML. An environment task row contains only task
 selectors and optional per-role Agent request parameters:
 
 ```json
@@ -179,11 +179,12 @@ Configure `policy_base_url`, `policy_api_key`, and `policy_model_name`, then
 prepare the UserSim panel before collecting rollouts:
 
 ```bash
-gym eval prepare --benchmark usersim
+gym eval prepare --config environments/usersim/config.yaml
 
 .venv/bin/gym eval run \
-  --benchmark usersim \
+  --environment usersim \
   --agent usersim_assistant \
+  --split benchmark \
   --output results/usersim.jsonl \
   ++observability_enabled=true \
   ++model_call_capture_dir=/absolute/path/to/model-calls
