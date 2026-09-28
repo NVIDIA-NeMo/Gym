@@ -16,8 +16,9 @@
 """NMRArena verifier: ranked SMILES from 1H/13C NMR peak lists, scored by exact structure match.
 
 The policy answers with a JSON object of up to ten ranked SMILES. Following
-upstream (odanchem/NMRArena), the candidates are canonicalised with RDKit with
-stereochemistry stripped, de-duplicated and truncated to ten; a molecule is solved
+upstream (odanchem/NMRArena), the first ten positions are read and canonicalised with
+RDKit with stereochemistry stripped; an entry that does not parse is a miss at its
+position and a repeated entry still occupies its own position. A molecule is solved
 when a candidate equals the canonical truth. ``reward`` is Top-1 (the rank-1
 candidate is the truth); ``top10`` and the rank-1 Tanimoto similarity are carried
 as additional fields. Everything is deterministic and model-free.
