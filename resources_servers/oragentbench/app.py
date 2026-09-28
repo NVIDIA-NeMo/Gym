@@ -34,7 +34,7 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import PARENT_DIR, failure_kinds
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionResponse,
@@ -91,6 +91,17 @@ HARNESS_FAULTS = {
         "so no validator verdict exists"
     ),
     Status.NO_SESSION: "verify() was called without a seeded session for this rollout",
+}
+
+# The groupable half of each harness fault (``BaseVerifyResponse.failure_kind``): Gym's shared
+# vocabulary where a name fits, this server's namespace where the fault is in the task data.
+HARNESS_FAULT_KINDS = {
+    Status.BAD_TASK_FOLDER: "oragentbench:bad_task_folder",
+    Status.SANDBOX_FAILED: failure_kinds.PROVIDER_UNAVAILABLE,
+    Status.STEP_SETUP_FAILED: "oragentbench:step_setup_failed",
+    Status.TESTS_UPLOAD_FAILED: failure_kinds.PROVIDER_UNAVAILABLE,
+    Status.VERIFIER_EXEC_FAILED: failure_kinds.VERIFIER_ERROR,
+    Status.NO_SESSION: failure_kinds.SESSION_LOST,
 }
 
 
@@ -728,6 +739,7 @@ class ORAgentBenchResourcesServer(SimpleResourcesServer):
         computed = dict(
             reward=reward,
             failure_reason=HARNESS_FAULTS.get(status),
+            failure_kind=HARNESS_FAULT_KINDS.get(status),
             status=status.value,
             harness_failure=1.0 if harness_fault else 0.0,
             task_name=body.task_name,

@@ -14,9 +14,11 @@ import yaml
 from fastapi.testclient import TestClient
 
 import resources_servers.oragentbench.app as app_module
+from nemo_gym.failure_kinds import is_namespaced, is_registered
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import ServerClient
 from resources_servers.oragentbench.app import (
+    HARNESS_FAULT_KINDS,
     HARNESS_FAULTS,
     ORAgentBenchResourcesServer,
     ORAgentBenchResourcesServerConfig,
@@ -543,7 +545,7 @@ class TestAggregation:
         result = aggregate(StepResult(name="a", status="scored", feasibility=1.0, quality_raw=2.0), num_steps=2)
         assert result.status == Status.STEP_INCOMPLETE.value
         assert result.feasibility == 0.0 and result.quality_raw == 1.0 and result.reward == 0.0
-        assert result.harness_failure == 0.0 and result.failure_reason is None
+        assert result.harness_failure == 0.0 and result.failure_reason is None and result.failure_kind is None
 
     def test_first_non_scored_step_status_names_the_outcome(self):
         result = aggregate(
@@ -560,6 +562,10 @@ class TestAggregation:
         )
         assert result.harness_failure == 1.0 and result.failure_reason and result.reward == 0.0
         assert result.feasibility == 0.0 and result.quality == 0.0
+        # Harness rows stay in the denominator at reward 0 but are groupable by a valid kind.
+        assert result.mask_sample is False
+        assert result.failure_kind == HARNESS_FAULT_KINDS[status]
+        assert is_registered(result.failure_kind) or is_namespaced(result.failure_kind)
 
     def test_harness_fault_partition_is_exactly_the_intended_one(self):
         # Literal, not derived from HARNESS_FAULTS: moving a policy outcome (e.g. VERIFIER_TIMEOUT)
@@ -572,6 +578,7 @@ class TestAggregation:
             Status.VERIFIER_EXEC_FAILED,
             Status.NO_SESSION,
         }
+        assert set(HARNESS_FAULT_KINDS) == set(HARNESS_FAULTS)
 
 
 class TestMetrics:

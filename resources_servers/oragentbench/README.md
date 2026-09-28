@@ -52,7 +52,11 @@ also carries a `failure_reason` and `harness_failure: 1.0`:
 | `no_session` | `verify()` called without a seeded session | yes |
 
 Verifier timeouts and missing verifier output are charged to the policy because an agent's
-artefact or container changes can cause both. Headline selection: `mean/reward`,
+artefact or container changes can cause both. Harness-fault rows are not masked: they stay in
+the `pass_rate/<band>` denominator at reward 0 (as the Surveyor how-to and `terminal_bench_2_1`
+do) and are distinguishable through `mean/harness_failure` and the row's `failure_kind`
+(`provider_unavailable`, `verifier_error`, `session_lost`, or `oragentbench:<status>`), so a
+run with infrastructure incidents reads as a lower bound rather than a clean score. Headline selection: `mean/reward`,
 `mean/feasibility`, `mean/quality`, `mean/harness_failure`, token counts, and the per-stratum
 `pass_rate/<band>`, `feasibility_rate/<band>`, `mean_quality/<band>`, `count/<band>` are promoted
 to `key_metrics`; published baselines differ by more than 2x across strata, so the pooled
