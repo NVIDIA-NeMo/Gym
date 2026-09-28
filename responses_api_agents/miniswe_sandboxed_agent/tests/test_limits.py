@@ -24,6 +24,49 @@ async def make_harness(tmp_path, query, runner_factory):
     return harness
 
 
+@pytest.mark.parametrize("cap", [None, 8, 16, 128])
+async def test_native_runner_preserves_output_token_cap(tmp_path, runner_factory, cap):
+    requests = []
+
+    async def query(params):
+        requests.append(params)
+        return NeMoGymResponse(
+            id="submitted",
+            created_at=0,
+            object="response",
+            model="model",
+            tools=[],
+            tool_choice="auto",
+            parallel_tool_calls=False,
+            output=[
+                {
+                    "type": "function_call",
+                    "call_id": "submit",
+                    "name": "bash",
+                    "arguments": json.dumps({"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}),
+                }
+            ],
+        )
+
+    params = NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=cap)
+    harness = await runner_factory(
+        context=HarnessContext(session_id="token-cap", instruction="Submit"),
+        config=MiniSWEConfig(step_limit=1),
+        params=params,
+        query=query,
+        model_name="model",
+        directory=tmp_path / "artifacts",
+    )
+    _, outcome, _ = await harness.execute(15)
+    assert outcome.reason == "completed"
+    assert len(requests) == 1
+    if cap is None:
+        assert "max_output_tokens" not in requests[0]
+    else:
+        assert requests[0]["max_output_tokens"] == cap
+    assert params.max_output_tokens == cap
+
+
 @pytest.mark.parametrize("recover", [True, False])
 @pytest.mark.parametrize("length_limited", [True, False])
 @pytest.mark.parametrize("malformed_call", [True, False])

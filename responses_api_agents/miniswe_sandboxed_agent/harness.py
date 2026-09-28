@@ -315,6 +315,10 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             extra_headers={"x-session-id": self.context.session_id},
             extra_body={"tools": [{**BASH_TOOL_RESPONSE_API, "strict": False}]},
         )
+        if "max_output_tokens" in model_kwargs:
+            # LiteLLM's OpenAI adapter raises caps below 16, even for Gym URLs.
+            # Pass the requested cap unchanged and let the model server validate it.
+            model_kwargs["extra_body"]["max_output_tokens"] = model_kwargs.pop("max_output_tokens")
         payload = {
             "run": {"task": self.context.instruction + self.extra_instruction},
             "agent": {
