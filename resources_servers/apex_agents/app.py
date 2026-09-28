@@ -15,7 +15,7 @@ import tempfile
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -79,6 +79,9 @@ class ApexSeedSessionResponse(BaseSeedSessionResponse):
 
 class ApexVerifierMetadata(BaseModel):
     rubric: List[Dict[str, Any]]
+    # all_pass (APEX-Agents): reward 1 only when every criterion passes. weighted_average: the weighted mean of
+    # criterion scores, using each rubric item's optional `weight` (default 1).
+    scoring: Literal["all_pass", "weighted_average"] = "all_pass"
     expected_output: Optional[str] = None
     gold_response: Optional[str] = None
     gold_response_type: Optional[str] = None
@@ -453,6 +456,7 @@ class ApexResourcesServer(SimpleResourcesServer):
                         judge_create_params_overrides=self.config.judge_create_params_overrides,
                         judge_context_window_size=self.config.judge_context_window_size,
                         document_converter_image=document_converter_image,
+                        scoring_method=metadata.scoring,
                         metadata={
                             "task_id": body.task_id,
                             "execution": {

@@ -418,6 +418,27 @@ async def _judge_criterion(
     return parsed
 
 
+SCORING_METHODS = ("all_pass", "weighted_average")
+
+
+def weighted_rubric_score(rubric: list[dict[str, Any]], scores: list[dict[str, Any]]) -> float:
+    """Weighted mean of criterion scores, in rubric order.
+
+    A criterion's ``weight`` defaults to 1. Zero-weight criteria are skipped, as in the weighted-average scoring
+    methods of Mercor's Archipelago grader.
+    """
+    earned = total = 0.0
+    for index, (criterion, score) in enumerate(zip(rubric, scores, strict=True)):
+        raw = criterion.get("weight")
+        weight = 1.0 if raw is None else float(raw)
+        if weight < 0:
+            raise ValueError(f"rubric criterion {index} has a negative weight: {weight}")
+        if weight:
+            earned += weight * float(score["score"])
+            total += weight
+    return earned / total if total else 0.0
+
+
 async def grade_apex_output(
     *,
     server_client: Any,
@@ -435,9 +456,16 @@ async def grade_apex_output(
     judge_context_window_size: int,
     document_converter_image: str | None = None,
     metadata: dict[str, Any] | None = None,
+    scoring_method: str = "all_pass",
 ) -> tuple[float, dict[str, Any], dict[str, Any]]:
-    """Grade every APEX rubric criterion; a rollout passes only when all pass."""
+    """Grade every APEX rubric criterion.
+
+    With ``all_pass`` (the default) a rollout scores 1 only when every criterion passes. With ``weighted_average``
+    it scores the weighted mean of its criterion scores (see ``weighted_rubric_score``).
+    """
     del world_id, metadata
+    if scoring_method not in SCORING_METHODS:
+        raise ValueError(f"unknown APEX scoring method: {scoring_method!r}")
     overrides = dict(judge_create_params_overrides or {})
 
     async def grade_one(index: int, criterion: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -517,14 +545,19 @@ async def grade_apex_output(
     total_count = len(rubric_scores)
     failed_count = total_count - passed_count
     criteria_pass_rate = passed_count / total_count if total_count else 0.0
-    reward = 1.0 if total_count and passed_count == total_count else 0.0
+    all_pass = 1.0 if total_count and passed_count == total_count else 0.0
+    weighted_score = weighted_rubric_score(rubric, [score for _, score in results])
+    reward = weighted_score if scoring_method == "weighted_average" else all_pass
     scoring = {
         "final_score": reward,
+        "scoring_method": scoring_method,
         "scoring_method_result_values": {
             "passed_count": passed_count,
             "failed_count": failed_count,
             "total_count": total_count,
             "criteria_pass_rate": criteria_pass_rate,
+            "all_pass": all_pass,
+            "weighted_score": weighted_score,
             "grade_score_percentage": reward * 100,
         },
     }

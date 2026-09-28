@@ -79,12 +79,15 @@ No judge receives the agent trajectory.
 
 The verify response follows the same three-part contract as the upstream wrapper:
 
-- `reward`: `1` only when every rubric criterion passed; otherwise `0`.
+- `reward`: `1` only when every rubric criterion passed; otherwise `0`. Rows whose `verifier_metadata.scoring` is
+  `weighted_average` instead get the weighted mean of their criterion scores, using each rubric item's optional
+  `weight` (default 1; zero-weight criteria are skipped), as in Archipelago's weighted-average scoring methods.
 - `rubric_scores`: the criterion-level score/status/message/value mapping keyed by verifier ID.
 - `judge_response`: grading metadata including `ok`, `grading_run_id`, `status`, `scoring`, `verifier_count`, and
   `document_extraction`.
 
-The fractional criterion pass rate is retained in grading metadata for analysis.
+The fractional criterion pass rate, the all-pass result, and the weighted score are retained in grading metadata for
+analysis whichever scoring method sets the reward.
 
 The snapshot is excluded from the verify response so large Office artifacts are not embedded in rollout
 JSONL files. Consequently this initial integration declares re-verification unsupported.
