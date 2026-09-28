@@ -21,6 +21,11 @@ from harbor.models.metric.usage_info import UsageInfo
 from harbor.utils.logger import logger as harbor_logger
 from pydantic import ConfigDict, Field
 
+from nemo_gym.adapters.turn_counter_proxy import (
+    TurnConstraintConfig,
+    start_turn_counter_proxy,
+    turn_constraint_metadata,
+)
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -50,6 +55,7 @@ from nemo_gym.server_utils import (
 
 
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
+    turn_constraint: Optional[TurnConstraintConfig] = None
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_turns: int | None
@@ -327,10 +333,39 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         return sandbox
 
     async def _execute(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming, sandbox: AsyncSandbox
+    ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
+        constraint = self.config.turn_constraint
+        if constraint is None:
+            return await self._execute_with_model_url(request, body, sandbox)
+        upstream = (
+            self.base_url_for_run(base_url=get_server_url(self.config.model_server.name), body=await request.json())
+            + "/v1"
+        )
+        proxy = await start_turn_counter_proxy(
+            upstream_base_url=upstream,
+            api_key="dummy",
+            max_turns=constraint.limit,
+            position=constraint.reminder.position,
+            trigger=constraint.reminder.trigger,
+            label=request.session[SESSION_ID_KEY],
+            exhaustion_status=400,
+        )
+        try:
+            response, metrics = await self._execute_with_model_url(request, body, sandbox, proxy.base_url)
+            metrics["turn_constraint"] = turn_constraint_metadata(
+                constraint, proxy, harness_version="terminus_2"
+            ).model_dump()
+            return response, metrics
+        finally:
+            await proxy.stop()
+
+    async def _execute_with_model_url(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming,
         sandbox: AsyncSandbox,
+        constrained_model_url: Optional[str] = None,
     ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
         start_time = perf_counter()
         instruction = _instruction(body.input)
@@ -339,6 +374,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             self.base_url_for_run(base_url=get_server_url(self.config.model_server.name), body=await request.json())
             + "/v1"
         )
+        model_base_url = constrained_model_url or model_base_url
         llm = NeMoGymLLM(
             client=NeMoGymAsyncOpenAI(base_url=model_base_url, api_key="dummy", internal=True),
             model_name=self.config.model_server.name,
