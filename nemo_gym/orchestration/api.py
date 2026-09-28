@@ -158,31 +158,33 @@ def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per
 
 class RayServiceConfig(BaseServiceConfig):
     type: Literal["ray"]
-    # "head" starts a cluster; "worker" joins the one at `address`. A worker is how a
-    # second node joins the driver's Ray cluster and offers its GPUs to actors the
-    # benchmark schedules (e.g. a scorer that runs off the policy's node).
-    mode: Literal["head", "worker"] = "head"
-    # For mode="worker": the head's host:port, or `head`, the name of a ray head
-    # service in this config whose address is only known once the job is placed.
-    address: str | None = None
-    head: str | None = None
-    # Head only; ignored by a worker, which takes the port from `address`.
+    # Node pools the cluster spans. The head starts on the driver's node and every
+    # other node of these pools joins it as a worker. Empty: a single-node cluster.
+    node_pools: list[str] = []
     port: int = 6379
-    # Custom Ray resources this node advertises, e.g. {"extra_gpu": 4}. A benchmark
-    # asks for these by name rather than by num_gpus when it manages device placement
-    # itself.
-    resources: dict[str, float] = {}
+    # Custom Ray resources advertised by each spanned pool's nodes, keyed by pool,
+    # e.g. {"aux": {"extra_gpu": 4}}. A benchmark asks for these by name when it
+    # manages device placement itself.
+    resources: dict[str, dict[str, float]] = {}
     num_cpus: int | None = None
     num_gpus: int | None = None
-    # Raw extra flags appended verbatim to `ray start` (e.g. fixed ports).
+    # Raw extra flags appended verbatim to `ray start` on every node (e.g. fixed ports).
     extra_args: str = ""
 
     @model_validator(mode="after")
-    def _validate_mode(self) -> "RayServiceConfig":
-        if self.mode == "worker" and bool(self.address) == bool(self.head):
-            raise ValueError("A ray service with mode='worker' needs exactly one of `address` or `head`.")
-        if self.mode == "head" and (self.address or self.head):
-            raise ValueError("A ray service with mode='head' starts its own cluster; remove `address`/`head`.")
+    def _validate_shape(self) -> "RayServiceConfig":
+        if self.node_pool is not None:
+            raise ValueError(
+                f"A ray service spans `node_pools`, not a single `node_pool`; use node_pools: [{self.node_pool}]."
+            )
+        if len(set(self.node_pools)) != len(self.node_pools):
+            raise ValueError(f"A ray service's node_pools lists a pool more than once: {self.node_pools}.")
+        unspanned = sorted(set(self.resources) - set(self.node_pools))
+        if unspanned:
+            raise ValueError(
+                f"A ray service sets resources for {', '.join(unspanned)}, which it does not span "
+                f"(node_pools: {self.node_pools}). Add the pool to node_pools or drop its resources."
+            )
         return self
 
 
@@ -348,11 +350,12 @@ class SubmitConfig(_StrictModel):
                     f"({', '.join(sorted(compute_names))})."
                 )
 
-            if isinstance(service, RayServiceConfig) and service.head is not None:
-                head = self.services.get(service.head)
-                if not isinstance(head, RayServiceConfig) or head.mode != "head":
+            if isinstance(service, RayServiceConfig):
+                unknown = [pool for pool in service.node_pools if pool not in pool_names]
+                if unknown:
                     raise ValueError(
-                        f"Service '{service_name}' head '{service.head}' must name a ray service with mode='head'."
+                        f"Service '{service_name}' node_pools {unknown} do not match any node pool of compute "
+                        f"'{service.placement}' ({', '.join(sorted(pool_names)) or 'none declared'})."
                     )
 
             if service.node_pool is not None and service.node_pool not in pool_names:

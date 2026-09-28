@@ -354,31 +354,42 @@ def _build_vllm_ray_serve_command(
     )
 
 
-def _build_ray_command(service: RayServiceConfig) -> str:
+# Flags `ray start` refuses on a worker. They reach a worker through the service's
+# shared extra_args; Gym decides which nodes are workers, so Gym drops them there.
+_RAY_HEAD_ONLY_FLAG = re.compile(r"\s--(?:port|redis-shard-ports|include-dashboard)(?:[= ]\S+)?")
+
+
+def _build_ray_command(
+    service: RayServiceConfig, *, pool: str | None = None, address_var: str | None = None, worker: bool = False
+) -> str:
+    """`ray start` for one node of a ray service: the head, or with `worker` a node joining it.
+
+    `address_var` names the env var holding the head's host:port (see ray_head_address_var).
+    """
     # --block keeps the srun step alive. `ray start` daemonises and returns, so
     # without it the step exits the moment the node is up and Slurm tears the
     # service down again.
     cmd = "ray start --block"
-    if service.mode == "head":
-        cmd += f" --head --port {service.port}"
-    elif service.head is not None:
-        # Double-quoted, not shlex-quoted: the head's address is only known once
-        # Slurm places the job, and build_sbatch_script exports it under this name.
-        cmd += f' --address "${ray_head_address_var(service.head)}"'
+    if worker:
+        cmd += f' --address "${address_var}"'
     else:
-        cmd += f" --address {shlex.quote(str(service.address))}"
+        cmd += f" --head --port {service.port}"
+        if address_var is not None:
+            # Bind the head to the address the workers and the driver dial.
+            cmd += f' --node-ip-address "${{{address_var}%:*}}"'
     if service.num_cpus is not None:
         cmd += f" --num-cpus {service.num_cpus}"
     if service.num_gpus is not None:
         cmd += f" --num-gpus {service.num_gpus}"
-    if service.resources:
+    resources = service.resources.get(pool, {}) if pool is not None else {}
+    if resources:
         # Ray takes fractional custom resources, so the field is float-typed, but a
-        # whole number is written as one: {"extra_gpu": 4}, not 4.0, so the rendered
-        # command reads the way the config does.
-        resources = {k: int(v) if v.is_integer() else v for k, v in service.resources.items()}
+        # whole number is written as one: {"extra_gpu": 4}, not 4.0.
+        resources = {k: int(v) if v.is_integer() else v for k, v in resources.items()}
         cmd += " --resources=" + shlex.quote(json.dumps(resources, sort_keys=True))
-    if service.extra_args:
-        cmd += " " + service.extra_args
+    extra_args = _RAY_HEAD_ONLY_FLAG.sub("", " " + service.extra_args).strip() if worker else service.extra_args
+    if extra_args:
+        cmd += " " + extra_args
     return cmd
 
 
@@ -390,9 +401,14 @@ def pool_nodes_var(pool: str) -> str:
     return f"GYM_POOL_{bash_var(pool)}_NODES"
 
 
+def _places_services(config: SubmitConfig, is_multi_node: bool) -> bool:
+    """Whether the script declares the allocation's host array to place services with."""
+    return is_multi_node or any(s.node_pool for s in config.services.values())
+
+
 def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig, is_multi_node: bool) -> str:
     """Declare the allocation's hosts, and export each node pool's, for --nodelist."""
-    if not is_multi_node and not any(s.node_pool for s in config.services.values()):
+    if not _places_services(config, is_multi_node):
         return ""
     lines = [_NODE_ARRAY]
     for name, (start, count) in _pool_offsets(compute).items():
@@ -401,29 +417,107 @@ def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig, is_mul
     return "\n".join(lines)
 
 
-def ray_head_address_var(head_service: str) -> str:
-    """The env var build_sbatch_script exports with a ray head service's host:port."""
-    return f"GYM_RAY_ADDRESS_{bash_var(head_service)}"
+def ray_head_address_var(ray_service: str) -> str:
+    """The env var build_sbatch_script exports with a ray service's head host:port."""
+    return f"GYM_RAY_ADDRESS_{bash_var(ray_service)}"
+
+
+def ray_workers_var(ray_service: str, pool: str) -> str:
+    """The env var build_sbatch_script exports with a ray service's worker hosts in one pool."""
+    return f"GYM_RAY_{bash_var(ray_service)}_{bash_var(pool)}_WORKERS"
+
+
+def _ray_worker_ranges(
+    service: RayServiceConfig, compute: SlurmComputeConfig, head_node: int
+) -> dict[str, tuple[int, int]]:
+    """Each spanned pool's worker nodes as (first index, count): every node but the head.
+
+    The head is the driver's node, which is always the first node of some pool.
+    """
+    offsets = _pool_offsets(compute)
+    ranges: dict[str, tuple[int, int]] = {}
+    for pool in service.node_pools:
+        start, count = offsets[pool]
+        if start == head_node:
+            start, count = start + 1, count - 1
+        if count > 0:
+            ranges[pool] = (start, count)
+    return ranges
 
 
 def _render_ray_head_addresses(config: SubmitConfig, compute: SlurmComputeConfig) -> str:
-    """Export every ray head service's address, resolved from the node Slurm gave it.
+    """Export every ray service's head address, and its worker hosts, from the nodes Slurm gave it.
 
-    A worker or the driver in another step can then join it without knowing,
+    The head runs beside the driver. Workers and the driver join it without knowing,
     when the config is written, which host the job will land on.
     """
-    heads = {n: s for n, s in config.services.items() if isinstance(s, RayServiceConfig) and s.mode == "head"}
-    if not heads:
+    services = {n: s for n, s in config.services.items() if isinstance(s, RayServiceConfig)}
+    if not services:
         return ""
-    offsets = _pool_offsets(compute)
-    # _render_pool_nodes already declared the host array in a multi-node or pinned job.
-    declared = _node_totals(compute)[0] > 1 or any(s.node_pool for s in config.services.values())
-    lines = [] if declared else [_NODE_ARRAY]
-    for name, service in heads.items():
-        index = offsets[service.node_pool][0] if service.node_pool else 0
-        ip = f"$(getent hosts ${{gym_nodes[{index}]}} | awk '{{print $1}}')"
+    head_node = _driver_node(config, compute)
+    lines = [] if _places_services(config, _node_totals(compute)[0] > 1) else [_NODE_ARRAY]
+    for name, service in services.items():
+        ip = f"$(getent hosts ${{gym_nodes[{head_node}]}} | awk '{{print $1}}')"
         lines.append(f'export {ray_head_address_var(name)}="{ip}:{service.port}"')
+        for pool, (start, count) in _ray_worker_ranges(service, compute, head_node).items():
+            lines.append(f'export {ray_workers_var(name, pool)}="$(IFS=,; echo "${{gym_nodes[*]:{start}:{count}}}")"')
     return "\n".join(lines)
+
+
+def _pool_of(compute: SlurmComputeConfig, node: int) -> str | None:
+    for name, (start, count) in _pool_offsets(compute).items():
+        if start <= node < start + count:
+            return name
+    return None
+
+
+def _render_ray_service(
+    name: str,
+    service: RayServiceConfig,
+    config: SubmitConfig,
+    compute: SlurmComputeConfig,
+    driver_node: int | None,
+) -> str:
+    """A ray service's srun steps: the head beside the driver, then one step per spanned pool's workers.
+
+    Every step uses the service's one container, env and mounts.
+    """
+    total_nodes, total_ntasks = _node_totals(compute)
+    head_node = _driver_node(config, compute)
+    head_pool = _pool_of(compute, head_node)
+    address_var = ray_head_address_var(name)
+    steps = [
+        _render_service_command(
+            name,
+            service.container,
+            _build_ray_command(
+                service, pool=head_pool if head_pool in service.node_pools else None, address_var=address_var
+            ),
+            service.env or None,
+            service.mounts or None,
+            nodes=_srun_nodes(service, compute, total_nodes),
+            ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
+            pre_command=service.pre_command,
+            nodelist=_service_nodelist(service, driver_node, total_nodes),
+        )
+    ]
+    # A worker only joins a running head, and the head may still be installing.
+    wait_for_head = f'until ray status --address "${address_var}" >/dev/null 2>&1; do sleep 5; done'
+    for pool, (_, count) in _ray_worker_ranges(service, compute, head_node).items():
+        steps.append(
+            _render_service_command(
+                f"{name}_{pool}_workers",
+                service.container,
+                _build_ray_command(service, pool=pool, address_var=address_var, worker=True),
+                service.env or None,
+                service.mounts or None,
+                nodes=count,
+                ntasks=count,
+                pre_command=f"{service.pre_command.rstrip()}\n{wait_for_head}".lstrip(),
+                nodelist=ray_workers_var(name, pool),
+            )
+        )
+    return "\n\n".join(steps)
 
 
 _BUILDERS = {
@@ -672,6 +766,12 @@ def build_sbatch_script(
                 nodelist=_service_nodelist(service, driver_node, total_nodes),
             )
             for name, service in config.services.items()
+            if not isinstance(service, RayServiceConfig)
+        ]
+        + [
+            _render_ray_service(name, service, config, compute, driver_node)
+            for name, service in config.services.items()
+            if isinstance(service, RayServiceConfig)
         ]
     )
 
