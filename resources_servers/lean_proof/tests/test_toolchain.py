@@ -18,9 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.server_utils import ServerClient
-from resources_servers.math_formal_lean.app import MathFormalLeanResourcesServer, MathFormalLeanResourcesServerConfig
-from resources_servers.math_formal_lean.toolchain import (
+from resources_servers.lean_proof.toolchain import (
     PROBE_TIMEOUT,
     TOOLCHAIN_PROBE,
     ToolchainCheck,
@@ -100,23 +98,3 @@ class TestToolchainCheck:
         check = ToolchainCheck("4.19.0")
         await asyncio.gather(*(check.run(client) for _ in range(10)))
         assert client.execute_lean4.await_count == 1, "concurrent verifies must not each pay a Mathlib compile"
-
-
-class TestServerIntegration:
-    def _server(self, **overrides) -> MathFormalLeanResourcesServer:
-        config = MathFormalLeanResourcesServerConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="math_formal_lean",
-            **overrides,
-        )
-        return MathFormalLeanResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-
-    def test_probe_is_off_unless_a_version_is_pinned(self):
-        assert self._server()._toolchain is None
-
-    def test_probe_is_on_when_pinned(self):
-        toolchain = self._server(expected_lean_version="4.12.0")._toolchain
-        assert isinstance(toolchain, ToolchainCheck)
-        assert toolchain.expected == "4.12.0"

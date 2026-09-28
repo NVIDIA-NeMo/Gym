@@ -15,10 +15,10 @@
 
 import pytest
 
-from resources_servers.leancat.proof_utils import (
+from resources_servers.lean_proof.proof_utils import (
     check_statement_preserved,
     extract_lean_code,
-    find_banned_tokens,
+    find_banned_declarations,
 )
 
 
@@ -88,8 +88,8 @@ def test_extract_lean_code(text, expected):
         ("theorem no_sorry_needed : True := trivial", []),
     ],
 )
-def test_find_banned_tokens(code, expected):
-    assert find_banned_tokens(code) == expected
+def test_find_banned_declarations(code, expected):
+    assert find_banned_declarations(code) == expected
 
 
 @pytest.mark.parametrize(

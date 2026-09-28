@@ -24,17 +24,17 @@ where the model writes only a proof body and the server reassembles the file. Be
 model owns the whole file it could also weaken the theorem, so
 ``proof_utils.check_statement_preserved`` compares the submission against the reference.
 
-Verification runs through ``math_formal_lean.lean_sandbox``: one sandbox per server process,
+Verification runs through ``lean_proof.lean_sandbox``: one sandbox per server process,
 created from an image carrying Lean and Mathlib at the version the rows are written against
-(``math_formal_lean/lean_image`` builds one per version), reused across rollouts. Each attempt
+(``lean_proof/lean_image`` builds one per version), reused across rollouts. Each attempt
 is compiled with ``lake env lean``, which is what upstream's ``verify_lean`` does.
 
-``CompilerOutput`` and the Lean comment stripper are imported from ``math_formal_lean``.
-Only the whole-file logic lives here.
+The text checks, status vocabulary, toolchain probe and sandbox runner come from
+``resources_servers/lean_proof``, the library the Lean benchmarks share. Only what is
+specific to LeanCat lives here: its row schema, its Easy/Medium/High metrics, and the
+decision to require statement preservation by default.
 """
 
-import logging
-import re
 from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import model_validator
@@ -53,57 +53,23 @@ from nemo_gym.reward_profile import (
     highest_k_metrics,
 )
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from resources_servers.leancat.proof_utils import (
+from resources_servers.lean_proof.lean_sandbox import (
+    DEFAULT_LEAN_PROJECT_DIR,
+    CompilerOutput,
+    LeanSandbox,
+)
+from resources_servers.lean_proof.proof_utils import (
     check_statement_preserved,
     extract_lean_code,
-    find_banned_tokens,
+    find_banned_declarations,
 )
-from resources_servers.math_formal_lean.app import CompilerOutput
-from resources_servers.math_formal_lean.lean_sandbox import DEFAULT_LEAN_PROJECT_DIR, LeanSandbox
-
-
-# Terminal values of `proof_status`. Only COMPLETED scores 1.0. "completed",
-# "empty_generation" and "timeout" match math_formal_lean's vocabulary; the rest are
-# specific to the whole-file task.
-logger = logging.getLogger(__name__)
-
-STATUS_COMPLETED = "completed"
-STATUS_EMPTY_GENERATION = "empty_generation"
-STATUS_BANNED_TOKENS = "banned_tokens"
-STATUS_STATEMENT_MODIFIED = "statement_modified"
-STATUS_COMPILE_ERROR = "compile_error"
-STATUS_TIMEOUT = "timeout"
-STATUS_SANDBOX_ERROR = "sandbox_error"
-
-
-def determine_proof_status(compiler_output: Dict[str, Any]) -> tuple[str, Optional[str]]:
-    """Map a sandbox result onto a proof status and, when it failed, a one-line reason.
-
-    A zero exit is not sufficient: a build that declares a ``sorry`` exits zero with only a
-    warning, so the output is scanned for ``error:`` and ``sorry`` as well.
-
-    ``error_type`` distinguishes the sandbox failing to run the command from Lean rejecting
-    the proof. A non-zero exit with no ``error_type`` is an ordinary compile error, which is
-    what most wrong proofs look like and must not be reported as infrastructure trouble.
-    """
-    error_type = compiler_output.get("error_type")
-    if error_type:
-        if "timeout" in str(error_type).lower():
-            return STATUS_TIMEOUT, "Lean compilation timed out."
-        return STATUS_SANDBOX_ERROR, f"Sandbox reported {error_type!r}."
-
-    stdout = compiler_output.get("stdout") or ""
-    stderr = compiler_output.get("stderr") or ""
-    combined = f"{stdout}\n{stderr}".lower()
-
-    if compiler_output.get("return_code", 0) != 0:
-        return STATUS_COMPILE_ERROR, "Lean rejected the proof."
-    if "error:" in combined:
-        return STATUS_COMPILE_ERROR, "Lean reported compilation errors."
-    if re.search(r"\bsorry\b", combined) is not None:
-        return STATUS_COMPILE_ERROR, "Lean reported a declaration that uses 'sorry'."
-
-    return STATUS_COMPLETED, None
+from resources_servers.lean_proof.status import (
+    STATUS_BANNED_TOKENS,
+    STATUS_COMPLETED,
+    STATUS_EMPTY_GENERATION,
+    STATUS_STATEMENT_MODIFIED,
+    determine_proof_status,
+)
 
 
 def score_leancat_rollout(rollout: Dict[str, Any]) -> Dict[str, float]:
@@ -200,7 +166,10 @@ class LeanCatResourcesServer(SimpleResourcesServer):
         if not self.config.check_lean_version or self._toolchain_checked:
             return
         self._toolchain_checked = True
-        await self._lean.check_toolchain(expected or self.config.expected_lean_version)
+        await self._lean.check_toolchain(
+            expected or self.config.expected_lean_version,
+            compile_fn=lambda code, timeout_s: self._run_lean(code, timeout_s=timeout_s),
+        )
 
     async def _run_lean(self, code: str, timeout_s: Optional[float] = None) -> SandboxExecResult:
         """Compile one submission. Kept as a method so tests can stub the sandbox away."""
@@ -227,7 +196,7 @@ class LeanCatResourcesServer(SimpleResourcesServer):
             )
 
         if self.config.ban_proof_shortcuts:
-            banned = find_banned_tokens(code)
+            banned = find_banned_declarations(code)
             if banned:
                 return LeanCatVerifyResponse(
                     **body_dict,

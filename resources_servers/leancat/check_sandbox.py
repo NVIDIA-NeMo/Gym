@@ -34,7 +34,7 @@ from pathlib import Path
 
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config
-from resources_servers.math_formal_lean.toolchain import TOOLCHAIN_PROBE, parse_lean_version
+from resources_servers.lean_proof.toolchain import TOOLCHAIN_PROBE, parse_lean_version
 
 
 EXPECTED_LEAN_VERSION = "4.19.0"

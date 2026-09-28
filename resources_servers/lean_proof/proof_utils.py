@@ -13,25 +13,112 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Text-level checks for LeanCat submissions, run before compilation.
+"""Text-level checks shared by the Lean benchmarks, run before the sandbox call.
 
-Upstream (``EVALUATION.md``) calls a submission valid when it compiles under the pinned
-toolchain, preserves the statement, definitions and assumptions, and contains no
-``sorry``/``admit``/``axiom``/``unsafe``. Compilation is the sandbox's job; this module
-covers the two criteria checkable from text: shortcut declarations and statement
-preservation. Both run on text with comments and string literals blanked out by
-``math_formal_lean.proof_utils.strip_lean_comments_and_strings``.
+These are free; a Mathlib compile is not. Anything that has already lost -- no code block, a
+fabricated `axiom`, a weakened statement -- is rejected here rather than after paying for one.
 
-``extract_lean_code`` keeps upstream's regex and last-block-wins rule
-(``scripts/eval_common.py``) rather than ``math_formal_lean``'s extractor, which prefers a
-``lean4``-tagged block over a later untagged one. It additionally skips ``<think>`` reasoning
-and accepts an unfenced answer after it, which upstream's rule does not.
+Shared rather than copied per server because these are exactly the functions that accumulate
+subtle bugs: comment-aware scanning, fence extraction, `<think>` stripping. Each was wrong at
+least once during development, and a fix should land in one place.
+
+``check_statement_preserved`` is for whole-file tasks, where the model returns the entire file
+and could weaken the theorem it was asked to prove. Servers that reassemble the file around a
+model-written proof body (``math_formal_lean``) do not need it.
 """
 
 import re
 from typing import List, Optional, Tuple
 
-from resources_servers.math_formal_lean.proof_utils import strip_lean_comments_and_strings, strip_thinking
+
+def strip_comments_and_strings(code: str) -> str:
+    """Blank out comment and string-literal contents with spaces, preserving offsets and line structure.
+
+    Block comments nest in Lean, so the scanner tracks depth. Doc comments are block comments.
+    """
+    out: List[str] = []
+    i = 0
+    n = len(code)
+    depth = 0  # block-comment nesting depth
+    in_line_comment = False
+    in_string = False
+
+    while i < n:
+        ch = code[i]
+        two = code[i : i + 2]
+
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+                out.append(ch)
+            else:
+                out.append(" ")
+            i += 1
+        elif depth > 0:
+            if two == "/-":
+                depth += 1
+                out.append("  ")
+                i += 2
+            elif two == "-/":
+                depth -= 1
+                out.append("  ")
+                i += 2
+            else:
+                out.append("\n" if ch == "\n" else " ")
+                i += 1
+        elif in_string:
+            if ch == "\\" and i + 1 < n:
+                # Consume the escape as a unit so a `\"` does not close the string.
+                out.append("  ")
+                i += 2
+            elif ch == '"':
+                in_string = False
+                out.append(" ")
+                i += 1
+            else:
+                out.append("\n" if ch == "\n" else " ")
+                i += 1
+        else:
+            if two == "/-":
+                depth = 1
+                out.append("  ")
+                i += 2
+            elif two == "--":
+                in_line_comment = True
+                out.append("  ")
+                i += 2
+            elif ch == '"':
+                in_string = True
+                out.append(" ")
+                i += 1
+            else:
+                out.append(ch)
+                i += 1
+
+    return "".join(out)
+
+
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
+_THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
+
+
+def strip_thinking(text: str) -> str:
+    """Drop a reasoning model's thinking so only its answer remains.
+
+    Handles the three shapes seen in practice: closed ``<think>...</think>`` blocks; a bare
+    ``</think>`` when the chat template put the opener in the prompt (everything before the
+    last close is thinking); and an unclosed ``<think>`` when the model ran out of budget
+    (everything after it is thinking).
+    """
+    text = _THINK_BLOCK_RE.sub("", text)
+    closes = list(_THINK_CLOSE_RE.finditer(text))
+    if closes:
+        text = text[closes[-1].end() :]
+    opener = _THINK_OPEN_RE.search(text)
+    if opener:
+        text = text[: opener.start()]
+    return text
 
 
 # Upstream takes the *last* fenced block; an unfenced response falls back to the whole text.
@@ -77,9 +164,9 @@ def extract_lean_code(text: str) -> str:
     return answer.strip()
 
 
-def find_banned_tokens(code: str) -> List[str]:
+def find_banned_declarations(code: str) -> List[str]:
     """Return the shortcut keywords present in ``code``, ignoring comments and strings."""
-    stripped = strip_lean_comments_and_strings(code)
+    stripped = strip_comments_and_strings(code)
     return sorted({match.group(1) for match in _BANNED_TOKEN_RE.finditer(stripped)})
 
 
@@ -90,7 +177,7 @@ def _normalize(text: str) -> str:
 
 def split_preamble_and_body(formal_statement: str) -> Tuple[List[str], str]:
     """Split a reference file into its preamble lines (checked individually) and its declaration body."""
-    lines = strip_lean_comments_and_strings(formal_statement).splitlines()
+    lines = strip_comments_and_strings(formal_statement).splitlines()
     for idx, line in enumerate(lines):
         if _DECL_START_RE.match(line):
             preamble = [ln for ln in lines[:idx] if ln.strip()]
@@ -107,7 +194,7 @@ def check_statement_preserved(formal_statement: str, submission: str) -> Tuple[b
 
     Returns ``(True, None)`` or ``(False, reason)``.
     """
-    submission_norm = _normalize(strip_lean_comments_and_strings(submission))
+    submission_norm = _normalize(strip_comments_and_strings(submission))
     preamble, body = split_preamble_and_body(formal_statement)
 
     for line in preamble:

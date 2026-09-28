@@ -28,7 +28,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
-from resources_servers.leancat.app import (
+from resources_servers.lean_proof.status import (
     STATUS_BANNED_TOKENS,
     STATUS_COMPILE_ERROR,
     STATUS_COMPLETED,
@@ -36,6 +36,8 @@ from resources_servers.leancat.app import (
     STATUS_SANDBOX_ERROR,
     STATUS_STATEMENT_MODIFIED,
     STATUS_TIMEOUT,
+)
+from resources_servers.leancat.app import (
     LeanCatResourcesServer,
     LeanCatResourcesServerConfig,
     LeanCatVerifyRequest,

@@ -27,7 +27,9 @@ shutdown hook, so ``sandbox_config.ttl_s`` is what reclaims it if the process di
 import asyncio
 import logging
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
+
+from pydantic import BaseModel
 
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
@@ -37,6 +39,19 @@ from nemo_gym.sandbox.utils import cpu_cap_env
 
 
 logger = logging.getLogger(__name__)
+
+
+class CompilerOutput(BaseModel):
+    """What the Lean toolchain said, carried on a verify response for debugging a rollout.
+
+    Field names match ``math_formal_lean``'s so a rollout dump reads the same across the Lean
+    benchmarks; `process_status` holds this library's `proof_status` vocabulary.
+    """
+
+    process_status: str
+    stdout: str
+    stderr: str
+
 
 # Where lean_image/ puts the prebuilt Mathlib project. `lake env lean` runs here so imports
 # resolve against it.
@@ -136,16 +151,24 @@ class LeanSandbox:
             timeout_s=timeout_s + 30,
         )
 
-    async def check_toolchain(self, expected: Optional[str]) -> Optional[str]:
+    async def check_toolchain(
+        self,
+        expected: Optional[str],
+        compile_fn: Optional[Callable[[str, float], Awaitable[Any]]] = None,
+    ) -> Optional[str]:
         """Log an error unless the sandbox's Lean matches ``expected``. Returns what it found.
 
         A wrong Mathlib fails statements with ordinary compile errors, so the score looks
         plausible and is meaningless -- on v4.12.0, 36 of leancat's 100 reference statements
         fail to compile with their `sorry` still intact.
         """
-        from resources_servers.math_formal_lean.toolchain import normalize_version, parse_lean_version
+        from resources_servers.lean_proof.toolchain import normalize_version, parse_lean_version
 
-        result = await self.compile(TOOLCHAIN_PROBE, timeout_s=600)
+        # Callers that wrap `compile` (for retries, metrics, or so tests can stub the
+        # sandbox away) pass their wrapper; the probe must go through the same path a
+        # real verify does, or it is not testing the same thing.
+        run = compile_fn or self.compile
+        result = await run(TOOLCHAIN_PROBE, 600)
         found = parse_lean_version({"stdout": result.stdout or "", "stderr": result.stderr or ""})
         want = normalize_version(expected)
 
