@@ -54,7 +54,15 @@ def determine_proof_status(compiler_output: Dict[str, Any]) -> Tuple[str, Option
     stderr = compiler_output.get("stderr") or ""
     combined = f"{stdout}\n{stderr}".lower()
 
-    if compiler_output.get("return_code", 0) != 0:
+    return_code = compiler_output.get("return_code", 0)
+    # `timeout` exits 124 when it had to stop Lean, and 137 when Lean ignored TERM and was
+    # killed -- which is also what an out-of-memory kill looks like, hence the hedged reason.
+    # Without this a killed compile reads as an ordinary non-zero exit, i.e. a rejected proof.
+    if return_code == 124:
+        return STATUS_TIMEOUT, "Lean compilation timed out."
+    if return_code == 137:
+        return STATUS_TIMEOUT, "Lean was killed (timeout grace expired, or out of memory)."
+    if return_code != 0:
         return STATUS_COMPILE_ERROR, "Lean rejected the proof."
     if "error:" in combined:
         return STATUS_COMPILE_ERROR, "Lean reported compilation errors."

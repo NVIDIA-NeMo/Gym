@@ -167,9 +167,22 @@ class TestLeanCatApp:
             # must not be reported as infrastructure trouble.
             ({"return_code": 1}, STATUS_COMPILE_ERROR),
             ({"return_code": -1, "error_type": "TimeoutError"}, STATUS_TIMEOUT),
+            # `timeout` stopping Lean at the documented budget: exit 124, no error_type. Without
+            # a mapping this reads as an ordinary non-zero exit, i.e. a rejected proof.
+            ({"return_code": 124}, STATUS_TIMEOUT),
+            # Lean ignored TERM and was killed after the grace (also what an OOM kill looks like).
+            ({"return_code": 137}, STATUS_TIMEOUT),
             ({"return_code": -1, "error_type": "SandboxConnectionError"}, STATUS_SANDBOX_ERROR),
         ],
-        ids=["compile-error", "zero-exit-with-sorry", "non-zero-lake-exit", "timeout", "sandbox-down"],
+        ids=[
+            "compile-error",
+            "zero-exit-with-sorry",
+            "non-zero-lake-exit",
+            "timeout",
+            "lean-killed-at-budget",
+            "lean-killed-after-grace",
+            "sandbox-down",
+        ],
     )
     async def test_verify_maps_sandbox_outcomes_to_statuses(self, server, sandbox_output, expected_status):
         self._stub_sandbox(server, **sandbox_output)

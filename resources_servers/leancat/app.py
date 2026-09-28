@@ -169,11 +169,13 @@ class LeanCatResourcesServer(SimpleResourcesServer):
         """Probe the sandbox's Lean version once per process; see LeanSandbox.check_toolchain."""
         if not self.config.check_lean_version or self._toolchain_checked:
             return
-        self._toolchain_checked = True
+        # Set only after it succeeds: a probe that failed because the sandbox was not up yet
+        # would otherwise never run again, and a wrong Mathlib would go unlogged all run.
         await self._lean.check_toolchain(
             expected or self.config.expected_lean_version,
             compile_fn=lambda code, timeout_s: self._run_lean(code, timeout_s=timeout_s),
         )
+        self._toolchain_checked = True
 
     async def _run_lean(self, code: str, timeout_s: Optional[float] = None) -> SandboxExecResult:
         """Compile one submission."""

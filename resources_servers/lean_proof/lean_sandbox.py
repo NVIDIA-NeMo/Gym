@@ -145,12 +145,12 @@ class LeanSandbox:
         delimiter = f"LEAN_EOF_{uuid.uuid4().hex}"
         # `timeout` bounds Lean itself at the documented budget, as upstream does
         # (subprocess.run(..., timeout=300)); the exec budget below is headroom on top, so the
-        # sandbox is what reports a timeout rather than the client dropping the output that
-        # explains it. Without the inner bound a proof taking 300-330s would pass here and
-        # fail upstream.
+        # sandbox reports it rather than the client dropping the output that explains it.
+        # TERM with a 10s grace, not -s KILL: TERM exits 124, which determine_proof_status
+        # can tell apart from the 137 an out-of-memory kill also produces.
         command = (
             f"cat > {path} <<'{delimiter}'\n{code}\n{delimiter}\n"
-            f"timeout -s KILL {int(timeout_s)} lake env lean {path}; status=$?; rm -f {path}; exit $status"
+            f"timeout -k 10 {int(timeout_s)} lake env lean {path}; status=$?; rm -f {path}; exit $status"
         )
         return await sandbox.exec(
             command,
