@@ -193,7 +193,7 @@ export VLLM_HTTP_TIMEOUT_KEEP_ALIVE=180
 export UCX_TLS=rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc
 export UCX_RNDV_SCHEME=get_zcopy
 export UCX_RNDV_THRESH=0
-# export UCX_NET_DEVICES=all
+# On OCI-HSG, only these NICs are available
 export UCX_NET_DEVICES=mlx5_0,mlx5_1,mlx5_3,mlx5_4
 
 # Helpful NCCL env vars to set on modern clusters.
