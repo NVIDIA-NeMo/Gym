@@ -187,7 +187,7 @@ class RewardProfiler:
                 rollout_info[k] = v
 
         for k, v in result.items():
-            if k in {TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, "reward", "response"}:
+            if k.startswith("_") or k in {"reward", "response"}:
                 continue
             if isinstance(v, bool):
                 rollout_info[k] = int(v)
@@ -425,6 +425,8 @@ class RewardProfiler:
                 ROLLOUT_INDEX_KEY_NAME: rollout_idx,
             }
             for k, v in result.items():
+                if k.startswith("_"):
+                    continue
                 if isinstance(v, bool):
                     numeric_result[k] = int(v)
                 elif isinstance(v, (int, float)):

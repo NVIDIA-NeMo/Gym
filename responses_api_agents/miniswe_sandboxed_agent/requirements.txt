@@ -2,3 +2,5 @@
 mini-swe-agent==2.4.6
 mcp==1.29.0
 httpx-aiohttp==0.2.0
+opensandbox==0.1.16
+pathspec==1.1.1

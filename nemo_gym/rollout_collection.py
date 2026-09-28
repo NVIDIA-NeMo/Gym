@@ -956,7 +956,14 @@ def _failure_rows_counted_as_zero(
             continue
         # Diagnostics stay in the sidecar: an HTTP status is a number, and the aggregator
         # averages every number it is handed.
-        scored = {k: v for k, v in row.items() if not k.startswith("_ng_failure_")}
+        scored = {
+            k: v
+            for k, v in row.items()
+            if not k.startswith("_ng_failure_") and k not in ("failure_kind", "failure_reason")
+        }
+        # This metrics-only copy honors the explicit denominator policy. The original
+        # answer, failure diagnostics, and training mask remain untouched in the sidecar.
+        scored["mask_sample"] = False
         scored.setdefault("reward", 0.0)
         counted.append(scored)
     return counted
@@ -1691,7 +1698,14 @@ class RolloutCollectionHelper(BaseModel):
         results_file.close()
         failures_file.close()
 
-        if input_rows and not persisted_results:
+        # Explicitly counted failures can provide a score even when no rollout
+        # succeeded. Determine eligibility before rejecting an otherwise empty run.
+        counted = _failure_rows_counted_as_zero(
+            [failures_fpath],
+            config.count_failure_classes_as_zero,
+            {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in persisted_results},
+        )
+        if input_rows and not persisted_results and not counted:
             raise RuntimeError(
                 f"None of the {len(input_rows)} dispatched rollouts produced a result "
                 f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
@@ -1709,10 +1723,8 @@ class RolloutCollectionHelper(BaseModel):
         persisted_rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         persisted_results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
-        # Compute and write aggregate metrics via /aggregate_metrics using only the
-        # rows written to the main rollouts jsonl so runtime aggregation matches
-        # `gym eval aggregate`.
-        counted: List[Dict] = []
+        # Aggregate persisted results plus explicitly counted metrics-only failures and missing
+        # rollouts, matching `gym eval aggregate` without changing either rollout artifact.
         missing: List[Dict[str, Any]] = []
         if config.disable_aggregation:
             print(
@@ -1722,20 +1734,15 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            scored_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in persisted_results}
-            counted[:] = _failure_rows_counted_as_zero(
-                [failures_fpath],
-                config.count_failure_classes_as_zero,
-                scored_keys,
-            )
             if config.count_failure_classes_as_zero:
                 print(
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
                 )
             if config.count_missing_rollouts_as_zero:
-                scored_keys |= {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in counted}
                 missing = _missing_rollout_rows_counted_as_zero(
-                    [config.materialized_jsonl_fpath], [failures_fpath], scored_keys
+                    [config.materialized_jsonl_fpath],
+                    [failures_fpath],
+                    {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in persisted_results + counted},
                 )
                 print(f"Counting {len(missing)} materialized rollout(s) with no row as scored zeros")
                 counted.extend(missing)
