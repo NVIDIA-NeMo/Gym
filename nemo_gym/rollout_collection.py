@@ -46,6 +46,7 @@ from nemo_gym.base_responses_api_model import (
 )
 from nemo_gym.config_types import (
     AgentWithoutEnvironmentServerError,
+    AmbiguousEnvironmentServerError,
     BaseNeMoGymCLIConfig,
     BaseServerConfig,
     ConfigError,
@@ -192,12 +193,9 @@ _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw"
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
 
-def _environment_server_for_agent(agent_name: str, global_config_dict: DictConfig) -> str:
-    """Return the environment server that fronts an agent.
-
-    Resolving from the agent only describes an episode that has exactly one. Routing should name
-    the server directly once tasksets can.
-    """
+def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, list[str]]:
+    """Map each agent name to the environment servers whose ``agent_server`` names it."""
+    servers_by_agent: dict[str, list[str]] = {}
     for name, instance in global_config_dict.items():
         if not isinstance(instance, DictConfig):
             continue
@@ -206,11 +204,30 @@ def _environment_server_for_agent(agent_name: str, global_config_dict: DictConfi
             continue
         for server in servers.values():
             reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-            if isinstance(reference, DictConfig) and reference.get("name") == agent_name:
-                return str(name)
-    raise AgentWithoutEnvironmentServerError(
-        f"Agent '{agent_name}' has no environment server, so collection cannot reach it. "
-        "Config validation should have caught this before any server started."
+            agent_name = reference.get("name") if isinstance(reference, DictConfig) else None
+            if agent_name is not None:
+                servers_by_agent.setdefault(str(agent_name), []).append(str(name))
+    return servers_by_agent
+
+
+def _environment_server_for_agent(agent_name: str, servers_by_agent: Mapping[str, list[str]]) -> str:
+    """Return the one environment server that fronts an agent.
+
+    A row routed by its agent cannot choose between several environment servers.
+    Several servers may still front one agent when every row names its server directly.
+    """
+    servers = servers_by_agent.get(agent_name, [])
+    if len(servers) == 1:
+        return servers[0]
+    if not servers:
+        raise AgentWithoutEnvironmentServerError(
+            f"Agent '{agent_name}' has no environment server, so collection cannot reach it. "
+            "Config validation should have caught this before any server started."
+        )
+    raise AmbiguousEnvironmentServerError(
+        f"Agent '{agent_name}' is fronted by several environment servers: {sorted(servers)}. "
+        "Rows that route by agent cannot choose between them. "
+        "Remove all but one, or route these rows to an environment server by name."
     )
 
 
@@ -1759,6 +1776,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             agent_results.setdefault(agent_name, []).append(result)
 
         server_client = self.setup_server_client()
+        servers_by_agent = _environment_servers_by_agent(server_client.global_config_dict)
 
         async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
             # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.
@@ -1790,7 +1808,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
             agg_request = AggregateMetricsRequest(verify_responses=stripped)
             agg_response = await server_client.post(
-                server_name=_environment_server_for_agent(agent_name, server_client.global_config_dict),
+                server_name=_environment_server_for_agent(agent_name, servers_by_agent),
                 url_path="/aggregate_metrics",
                 json=agg_request,
             )
@@ -2005,6 +2023,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         self.resolve_task_sources(examples, server_client.global_config_dict)
         self._validate_agent_names(examples, server_client.global_config_dict)
         self._validate_agent_pairings(examples, server_client.global_config_dict)
+        # Resolve every agent before dispatch, so an unroutable agent fails the run instead of one future.
+        servers_by_agent = _environment_servers_by_agent(server_client.global_config_dict)
+        server_for_agent = {
+            agent_name: _environment_server_for_agent(agent_name, servers_by_agent)
+            for agent_name in {row[AGENT_REF_KEY_NAME]["name"] for row in examples}
+        }
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
@@ -2012,10 +2036,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started_at = time()
                 res = None
                 try:
-                    server_name = _environment_server_for_agent(
-                        row[AGENT_REF_KEY_NAME]["name"],
-                        server_client.global_config_dict,
-                    )
+                    server_name = server_for_agent[row[AGENT_REF_KEY_NAME]["name"]]
                     res = await server_client.post(server_name=server_name, url_path="/run", json=row)
                     await raise_for_status(res)
                     result = await get_response_json(res)
