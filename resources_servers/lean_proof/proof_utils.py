@@ -122,10 +122,18 @@ def strip_thinking(text: str) -> str:
 
 
 # Upstream takes the *last* fenced block; an unfenced response falls back to the whole text.
-_CODE_BLOCK_RE = re.compile(r"```(?:lean4?|Lean4?)?\s*\n(.*?)```", re.DOTALL)
+# The newline after the tag is optional: a single-line ```lean4 theorem ...``` is still a
+# fenced block, and requiring it silently dropped those responses.
+_CODE_BLOCK_RE = re.compile(r"```(?:lean4?|Lean4?)?[ \t]*\n?(.*?)```", re.DOTALL)
 
 # An unfenced answer counts as a Lean file if some line opens with a file-level keyword.
-_LEAN_FILE_START_RE = re.compile(r"^\s*(import|open|theorem|lemma|example|def|variable|universe)\b", re.M)
+# `open` and `def` start English sentences as often as Lean files, so they only count when
+# the line looks like Lean: a declaration keyword followed by an identifier, not prose.
+_LEAN_FILE_START_RE = re.compile(
+    r"^\s*(?:import\s+[A-Z]|universe\s+\w|variable\s*[\(\{\[]|open\s+[A-Z][\w.]*\s*$"
+    r"|(?:theorem|lemma|example|def|abbrev|instance)\s+\w)",
+    re.M,
+)
 
 # Upstream's shortcut list. Banning the `axiom` keyword does not ban classical reasoning:
 # Mathlib's axioms are used by name, not declared.

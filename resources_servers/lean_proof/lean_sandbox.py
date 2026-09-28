@@ -31,11 +31,12 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from pydantic import BaseModel
 
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.global_config import maybe_get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.utils import cpu_cap_env
+from resources_servers.lean_proof.toolchain import PROBE_TIMEOUT, TOOLCHAIN_PROBE
 
 
 logger = logging.getLogger(__name__)
@@ -59,9 +60,6 @@ DEFAULT_LEAN_PROJECT_DIR = "/opt/mathlib"
 # OpenSandbox requires an entry process when creating from an image; the image's own CMD is
 # `sleep infinity`, and this is the same thing made explicit for providers that need it.
 DEFAULT_ENTRYPOINT = ["sleep", "infinity"]
-
-# Reports the Lean version Mathlib was built against.
-TOOLCHAIN_PROBE = "import Mathlib\n#eval Lean.versionString"
 
 
 class LeanSandbox:
@@ -95,9 +93,18 @@ class LeanSandbox:
             if self._sandbox is not None:
                 return self._sandbox
 
-            global_config = get_global_config_dict()
+            # Only a *named* provider needs the global config to resolve against. An inline
+            # {provider: {...}} mapping is self-contained, and requiring a config for it would
+            # make this unusable outside a Gym run: get_global_config_dict() falls through to a
+            # Hydra parse of sys.argv, which chokes on any script's own flags.
+            global_config = maybe_get_global_config_dict() if isinstance(self._provider, str) else None
+            if isinstance(self._provider, str) and global_config is None:
+                raise RuntimeError(
+                    f"sandbox_provider {self._provider!r} names a config block, but no Gym global config is "
+                    "loaded. Pass an inline {provider: {...}} mapping when running outside a Gym run."
+                )
             provider = resolve_provider_config(self._provider, global_config)
-            default_metadata = resolve_provider_metadata(self._provider, global_config)
+            default_metadata = resolve_provider_metadata(self._provider, global_config) if global_config else {}
 
             resources = SandboxResources.from_mapping(self._config.get("resources", {}))
             env = dict(self._config.get("env", {}))
@@ -161,7 +168,7 @@ class LeanSandbox:
         # The probe must take the same path a real verify does, so callers that wrap
         # `compile` pass their wrapper.
         run = compile_fn or self.compile
-        result = await run(TOOLCHAIN_PROBE, 600)
+        result = await run(TOOLCHAIN_PROBE, PROBE_TIMEOUT)
         found = parse_lean_version({"stdout": result.stdout or "", "stderr": result.stderr or ""})
         want = normalize_version(expected)
 

@@ -89,8 +89,6 @@ def config() -> LeanCatResourcesServerConfig:
         port=8080,
         entrypoint="",
         name="leancat",
-        sandbox_host="127.0.0.1",
-        sandbox_port=6000,
         compilation_timeout=300.0,
     )
 

@@ -34,6 +34,7 @@ specific to LeanCat lives here: its row schema, its Easy/Medium/High metrics, an
 decision to require statement preservation by default.
 """
 
+import logging
 from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import model_validator
@@ -66,9 +67,13 @@ from resources_servers.lean_proof.status import (
     STATUS_BANNED_TOKENS,
     STATUS_COMPLETED,
     STATUS_EMPTY_GENERATION,
+    STATUS_SANDBOX_ERROR,
     STATUS_STATEMENT_MODIFIED,
     determine_proof_status,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def score_leancat_rollout(rollout: Dict[str, Any]) -> Dict[str, float]:
@@ -219,7 +224,21 @@ class LeanCatResourcesServer(SimpleResourcesServer):
 
         await self._check_toolchain_once(body.lean_toolchain)
 
-        result = await self._run_lean(code)
+        try:
+            result = await self._run_lean(code)
+        except Exception as exc:  # noqa: BLE001 - any start/exec failure is a sandbox outcome
+            # Without this a sandbox that will not start raises out of verify() as a 500,
+            # while the same failure during exec comes back as `sandbox_error`. One rollout
+            # should not take the run down, and the two paths should look the same.
+            logger.error("sandbox failed for problem %s: %s: %s", body.problem_id, type(exc).__name__, exc)
+            return LeanCatVerifyResponse(
+                **body_dict,
+                reward=0.0,
+                proof_status=STATUS_SANDBOX_ERROR,
+                predicted_proof=code,
+                statement_preserved=preserved,
+                failure_reason=f"Sandbox unavailable: {type(exc).__name__}: {exc}",
+            )
         proof_status, failure_reason = determine_proof_status(
             {
                 "stdout": result.stdout,
@@ -272,6 +291,11 @@ class LeanCatResourcesServer(SimpleResourcesServer):
 
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy"]))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["accuracy"]))
+
+        # The tier split is the paper's central claim -- High is a flat zero -- and the pooled
+        # number hides it, so the headline carries it too.
+        for tier in ("Easy", "Medium", "High"):
+            key.update(highest_k_metrics(agent_metrics, tier + "/pass@{k}", score_names=["accuracy"]))
 
         return key
 

@@ -58,8 +58,8 @@ RAW_BASE = f"https://raw.githubusercontent.com/sciencraft/LeanCat/{LEANCAT_COMMI
 
 RECORDS_URL = f"{RAW_BASE}/data/leancat_records.jsonl"
 TARBALL_URL = f"https://codeload.github.com/sciencraft/LeanCat/tar.gz/{LEANCAT_COMMIT}"
-# Upstream's own template. `upstream-repo.yaml` transcribes it; the tests refetch this URL
-# to check the two still agree.
+# Upstream's own template, transcribed into `upstream-repo.yaml`. Not checked automatically:
+# a test that refetched this would need egress and would skip in CI. See the README.
 UPSTREAM_PROMPT_URL = f"{RAW_BASE}/prompts/static_passk.md"
 
 # Both shipped prompts, applied at run time via `prompt_config`.

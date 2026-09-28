@@ -16,7 +16,7 @@
 """Confirm the sandbox runs the Mathlib a benchmark's statements were written against.
 
 Each Lean benchmark pins its own Mathlib, and a sandbox image carries exactly one:
-``/execute`` takes no project parameter, so the version is fixed when the container starts.
+A sandbox image carries one Mathlib build, so the version is fixed when the container starts.
 A mismatch does not error at startup; tasks fail with ordinary compile errors and the run
 reports a plausible but meaningless score.
 
