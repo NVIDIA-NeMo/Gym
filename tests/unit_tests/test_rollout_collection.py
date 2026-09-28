@@ -4433,6 +4433,88 @@ class TestPreprocessExamples:
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
 
 
+class TestTurnsFromModelCalls:
+    """Turns come from captured model calls when the agent reports no turns of its own."""
+
+    @staticmethod
+    def _call(call_id: str, response: dict, *, started_at: float, response_id: str | None = None):
+        from nemo_gym.rollout_observability import TrajectoryModelCall
+
+        return TrajectoryModelCall.model_validate(
+            {
+                "model_call_id": call_id,
+                "started_at": started_at,
+                "request": {"input": [{"role": "user", "content": call_id}]},
+                "response": response,
+                "response_metadata": {
+                    "response_id": response_id,
+                    "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                },
+            }
+        )
+
+    @staticmethod
+    def _invocation(invocation_id: str, call_ids: list[str]):
+        from nemo_gym.rollout_observability import AgentInvocation
+
+        return AgentInvocation.model_validate(
+            {"invocation_id": invocation_id, "model_calls": [{"model_call_id": call_id} for call_id in call_ids]}
+        )
+
+    def test_responses_calls_become_turns_of_the_referencing_invocation(self) -> None:
+        tool_call = {"type": "function_call", "call_id": "c1", "name": "get_weather", "arguments": "{}"}
+        reasoning = {"type": "reasoning", "id": "r1", "summary": []}
+        message = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "cold"}]}
+        calls = [
+            self._call("first", {"output": [reasoning, tool_call]}, started_at=1.0),
+            self._call("second", {"output": [message]}, started_at=2.0),
+        ]
+
+        turns = nemo_gym.rollout_collection._turns_from_model_calls(
+            "task", "rollout", [self._invocation("root", ["first", "second"])], calls, resolved=True
+        )
+
+        assert [(turn.invocation_id, turn.turn_no) for turn in turns] == [("root", 1), ("root", 2)]
+        assert turns[0].answer == [tool_call]
+        assert turns[0].reasoning_content == [reasoning]
+        assert turns[0].question == [{"type": "message", "role": "user", "content": "first"}]
+        # step_count counts tool calls made before the turn, as agents that build their own turns do.
+        assert [turn.step_count for turn in turns] == [0, 1]
+        assert turns[0].model_calls[0].model_call_id == "first"
+        assert [turn.resolved for turn in turns] == [None, True]
+
+    def test_chat_completion_calls_split_the_message_and_its_reasoning(self) -> None:
+        message = {"role": "assistant", "content": "", "reasoning_content": "think", "tool_calls": [{"id": "t1"}]}
+        calls = [self._call("only", {"choices": [{"message": message}]}, started_at=1.0)]
+
+        [turn] = nemo_gym.rollout_collection._turns_from_model_calls("task", "rollout", [], calls, resolved=None)
+
+        assert turn.invocation_id == "root"
+        assert turn.reasoning_content == "think"
+        assert turn.answer == {"role": "assistant", "content": "", "tool_calls": [{"id": "t1"}]}
+
+    def test_a_call_that_returned_nothing_is_not_a_turn(self) -> None:
+        from nemo_gym.rollout_observability import TrajectoryModelCall
+
+        failed = TrajectoryModelCall.model_validate({"model_call_id": "failed", "started_at": 1.0})
+        answered = self._call("answered", {"output": []}, started_at=2.0)
+
+        turns = nemo_gym.rollout_collection._turns_from_model_calls("task", "rollout", [], [failed, answered], None)
+
+        assert [(turn.model_calls[0].model_call_id, turn.turn_no) for turn in turns] == [("answered", 1)]
+
+    def test_a_call_no_invocation_references_is_skipped_when_several_exist(self) -> None:
+        calls = [
+            self._call("owned", {"output": []}, started_at=1.0),
+            self._call("orphan", {"output": []}, started_at=2.0),
+        ]
+        invocations = [self._invocation("assistant", ["owned"]), self._invocation("user", [])]
+
+        turns = nemo_gym.rollout_collection._turns_from_model_calls("task", "rollout", invocations, calls, None)
+
+        assert [turn.model_calls[0].model_call_id for turn in turns] == ["owned"]
+
+
 class TestMaskingStepMetrics:
     """Progress accounting covers persisted rollouts; dropped attempts are counted apart."""
 
