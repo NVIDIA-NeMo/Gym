@@ -64,6 +64,23 @@ def truncate_tool_text(text: str) -> str:
     return text[:TOOL_OUTPUT_HEAD_CHARACTERS] + marker + text[-TOOL_OUTPUT_TAIL_CHARACTERS:]
 
 
+def context_window_client(client_class: Any, context_window_tokens: int) -> Any:
+    """Subclass a Stirrup client so context summarization uses the policy's real context window.
+
+    Stirrup 0.1 uses the client's ``max_tokens`` argument both as each request's ``max_completion_tokens`` and, via
+    the ``max_tokens`` property, as the context window whose 70% triggers summarization. The runner passes
+    ``max_output_tokens`` there, so without this override summarization starts at ~70% of the output cap. The
+    subclass keeps the output cap on requests and changes only the property the agent reads.
+    """
+
+    class ContextWindowClient(client_class):
+        @property
+        def max_tokens(self) -> int:
+            return context_window_tokens
+
+    return ContextWindowClient
+
+
 def mcp_call_arguments(params: Any) -> dict[str, Any]:
     """Forward only concrete MCP arguments; omitted optional fields must stay omitted."""
     return params.model_dump(exclude_none=True)
@@ -878,7 +895,10 @@ async def run_stirrup_rollout(
         "temperature": float(config["temperature"]),
         "top_p": float(config["top_p"]),
     }
-    client = ChatCompletionsClient(
+    client_class = ChatCompletionsClient
+    if config.get("context_window_tokens"):
+        client_class = context_window_client(ChatCompletionsClient, int(config["context_window_tokens"]))
+    client = client_class(
         model=config["policy_model"],
         base_url=config["model_base_url"],
         api_key="unused",

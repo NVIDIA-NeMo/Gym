@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 import zipfile
 from inspect import getsource
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from pydantic import BaseModel
 
 from responses_api_agents.apex_agent import stirrup_runtime
@@ -16,6 +18,40 @@ def test_stirrup_repackages_image_tool_responses_for_chat_completions() -> None:
     source = getsource(stirrup_runtime.run_stirrup_rollout)
 
     assert "text_only_tool_responses=True" in source
+
+
+def test_context_window_client_reports_the_window_and_keeps_the_output_cap() -> None:
+    from stirrup.clients.chat_completions_client import ChatCompletionsClient
+
+    client_class = stirrup_runtime.context_window_client(ChatCompletionsClient, 262_144)
+    client = client_class(
+        model="policy",
+        base_url="http://127.0.0.1:9/v1",
+        api_key="unused",  # pragma: allowlist secret
+        max_tokens=32_768,
+    )
+    request: dict = {}
+
+    async def create(**kwargs):
+        request.update(kwargs)
+        raise RuntimeError("request captured")
+
+    client._client.chat.completions.create = create
+    with pytest.raises(RuntimeError, match="request captured"):
+        asyncio.run(client.generate([], {}))
+
+    assert isinstance(client, ChatCompletionsClient)
+    assert client.max_tokens == 262_144
+    assert request["max_completion_tokens"] == 32_768
+
+
+def test_policy_client_uses_the_context_window_only_when_configured() -> None:
+    source = getsource(stirrup_runtime.run_stirrup_rollout)
+
+    assert 'if config.get("context_window_tokens"):' in source
+    assert 'context_window_client(ChatCompletionsClient, int(config["context_window_tokens"]))' in source
+    assert "client = client_class(" in source
+    assert 'max_tokens=int(config["max_output_tokens"])' in source
 
 
 def test_text_only_model_replaces_tool_images_and_preserves_other_content() -> None:
