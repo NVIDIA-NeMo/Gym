@@ -37,11 +37,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from nemo_gym import failure_kinds
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
-    ResourcesVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
@@ -69,6 +70,28 @@ VERIFIER_TIMEOUT_KIND = "harbor:verifier_timeout"
 MISSING_REWARD_KIND = "harbor:missing_reward"
 INVALID_REWARD_KIND = "harbor:invalid_reward"
 
+
+
+class HarborVerifyRequest(BaseVerifyRequest):
+    """The flat verify body the environment server posts: the row's ``task_data`` keys beside the params
+    and the response. The session cookie identifies the episode; the digest, when present, must match it.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    ng_digest: str | None = Field(default=None, alias=DIGEST_KEY)
+
+
+class HarborVerifyResponse(BaseVerifyResponse):
+    """The verify response plus what the Harbor verifier produced.
+
+    ``verifier_rewards`` is the parsed ``reward.json`` (``reward.txt`` becomes ``{"reward": value}``).
+    The ``verifier_*`` fields are ``None`` when ``test.sh`` never ran.
+    """
+
+    verifier_rewards: dict[str, float] | None = None
+    verifier_return_code: int | None = None
+    verifier_logs_dir: str | None = None
 
 class HarborTasksetConfig(BaseModel):
     """Where one taskset's folders live and which digest each task was materialized with."""
@@ -315,11 +338,11 @@ class HarborResourcesServer(SimpleResourcesServer):
             raise HTTPException(409, "Verification digest does not match the seeded task")
         return session
 
-    async def verify(self, request: Request, body: HarborVerifyRequest) -> ResourcesVerifyResponse:
+    async def verify(self, request: Request, body: HarborVerifyRequest) -> HarborVerifyResponse:
         session = self._session_for(request, body.ng_digest)
         session_id = request.session[SESSION_ID_KEY]
         outcome = await self._run_verifier(session, session_id)
-        return ResourcesVerifyResponse(
+        return HarborVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,
             **outcome,
