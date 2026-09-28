@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from traceback import format_exc
 from typing import Any, ClassVar, Literal
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -209,17 +210,41 @@ async def run_detached(
     env: dict[str, str] | None,
     timeout_s: float,
     user: str | int | None,
+    poll_interval_s: float = 5.0,
 ) -> SandboxExecResult:
-    """Run a long command without holding a connection open for its whole duration.
+    """Run a long command without holding a provider connection open for its whole duration.
 
-    Providers with PTY support (OpenSandbox) run it detached and poll for completion, so a
-    verifier that takes an hour does not trip the provider's per-request timeout. Others fall
-    back to a plain exec.
+    The command starts in the background under its own session (`setsid`), writes its exit
+    code to a file, and the caller polls for that file with short execs. Two things follow:
+    an hour-long verifier never trips the provider's per-request timeout, and services the
+    command leaves running (a QEMU guest, a database) survive, because no PTY closes on them.
+    The caller is expected to redirect the command's output to a file itself.
     """
-    try:
-        return await sandbox.pty.exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, detach=True)
-    except (NotImplementedError, AttributeError):
-        return await sandbox.exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+    token = uuid4().hex
+    rc_file = f"/tmp/.nemo-gym-rc-{token}"
+    inner = f"{command}; echo $? > {shlex.quote(rc_file)}"
+    launch = f"nohup setsid bash -c {shlex.quote(inner)} > /dev/null 2>&1 &"
+    started = await sandbox.exec(launch, cwd=cwd, env=env, timeout_s=60, user=user)
+    if started.return_code != 0:
+        return started
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    interval = 1.0
+    while True:
+        probe = await sandbox.exec(f"cat {shlex.quote(rc_file)} 2>/dev/null", cwd="/", timeout_s=60)
+        text = (probe.stdout or "").strip()
+        if probe.return_code == 0 and text.isdigit():
+            await sandbox.exec(f"rm -f {shlex.quote(rc_file)}", cwd="/", timeout_s=60)
+            return SandboxExecResult(stdout="", stderr=None, return_code=int(text))
+        if loop.time() >= deadline:
+            return SandboxExecResult(
+                stdout=None,
+                stderr=f"command still running after {timeout_s:g}s",
+                return_code=125,
+                error_type="timeout",
+            )
+        await asyncio.sleep(interval)
+        interval = min(poll_interval_s, interval * 2)
 
 
 def _sandbox_resources(task: HarborTask) -> dict[str, Any]:

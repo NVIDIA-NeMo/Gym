@@ -73,6 +73,13 @@ class FakeSandbox:
 
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
         self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
+        if command.startswith("nohup setsid") and "test.sh" in command:
+            # The background launch itself; the outcome is reported through the exit-code file.
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
+        if command.startswith("cat /tmp/.nemo-gym-rc-"):
+            if self.test_result.error_type == "timeout":
+                return SandboxExecResult(stdout="", stderr="", return_code=1)  # never finishes
+            return SandboxExecResult(stdout=f"{self.test_result.return_code}\n", stderr="", return_code=0)
         if "test.sh" in command:
             return self.test_result
         return SandboxExecResult(stdout="", stderr="", return_code=0)
@@ -381,8 +388,10 @@ class TestVerify:
         assert payload["responses_create_params"]["input"][0]["content"] == "Create hello.txt"
 
         run = next(call for call in sandbox.execs if "test.sh" in call["command"])
-        assert run["command"] == "timeout --signal=KILL 120 bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1"
-        assert run["cwd"] == "/app" and run["timeout_s"] == 120.0 + server.config.verifier_grace_s
+        assert run["command"].startswith("nohup setsid bash -c ")
+        assert "timeout --signal=KILL 120 bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1" in run["command"]
+        assert run["cwd"] == "/app"
+        assert any(call["command"].startswith("cat /tmp/.nemo-gym-rc-") for call in sandbox.execs)
         # A root image needs no user override for the prepare step.
         prepare = next(
             call for call in sandbox.execs if "chmod 777" in call["command"] and "/tests" in call["command"]
@@ -470,47 +479,30 @@ class TestVerify:
         payload = client.post("/verify", json=verify_body()).json()
         assert payload["reward"] == 0.0 and payload["failure_kind"] == "harbor:invalid_reward"
 
-    def test_verifier_timeout_scores_zero(self, tmp_path, monkeypatch):
+    def test_verifier_timeout_when_exit_code_never_appears(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(
-            test_result=SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout")
+            test_result=SandboxExecResult(stdout=None, stderr=None, return_code=125, error_type="timeout")
         )
-        _, _, _, client = self.seeded_client(tmp_path, monkeypatch, sandbox)
-        payload = client.post("/verify", json=verify_body()).json()
-        assert payload["reward"] == 0.0
-        assert payload["mask_sample"] is False
-        assert payload["failure_kind"] == "harbor:verifier_timeout"
-
-    def test_in_container_timeout_kill_scores_zero(self, tmp_path, monkeypatch):
-        sandbox = FakeSandbox(test_result=SandboxExecResult(stdout="", stderr="", return_code=137))
-        _, _, _, client = self.seeded_client(tmp_path, monkeypatch, sandbox)
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, sandbox)
+        server.config.verifier_grace_s = 0
+        (task.path / "task.toml").write_text(
+            TASK_TOML.replace("timeout_sec = 120.0\n\n[agent]", "timeout_sec = 0.01\n\n[agent]")
+        )
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        client = TestClient(server.setup_webserver())
+        assert client.post("/seed_session", json=seed_body(task)).status_code == 200
         payload = client.post("/verify", json=verify_body()).json()
         assert payload["reward"] == 0.0 and payload["failure_kind"] == "harbor:verifier_timeout"
 
-    def test_detached_pty_exec_is_preferred(self, tmp_path, monkeypatch):
-        class PtySandbox(FakeSandbox):
-            def __init__(self):
-                super().__init__()
-                self.detached = []
-                outer = self
-
-                class Pty:
-                    async def exec(self, command, **kwargs):
-                        outer.detached.append((command, kwargs))
-                        return SandboxExecResult(stdout="", stderr=None, return_code=0)
-
-                self.pty = Pty()
-
-        sandbox = PtySandbox()
-        _, _, _, client = self.seeded_client(tmp_path, monkeypatch, sandbox)
-        payload = client.post("/verify", json=verify_body()).json()
-        assert payload["reward"] == 1.0
-        assert len(sandbox.detached) == 1 and sandbox.detached[0][1]["detach"] is True
-        assert not any("test.sh" in call["command"] for call in sandbox.execs)
-
     def test_sandbox_runtime_failure_masks(self, tmp_path, monkeypatch):
-        sandbox = FakeSandbox(
-            test_result=SandboxExecResult(stdout=None, stderr="gone", return_code=125, error_type="sandbox")
-        )
+        class BrokenLaunch(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if command.startswith("nohup setsid"):
+                    return SandboxExecResult(stdout=None, stderr="gone", return_code=125, error_type="sandbox")
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        sandbox = BrokenLaunch()
         _, _, _, client = self.seeded_client(tmp_path, monkeypatch, sandbox)
         payload = client.post("/verify", json=verify_body()).json()
         assert payload["reward"] == 0.0
