@@ -200,6 +200,13 @@ dependencies = [
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
     "ray[default]>=2.58.0",
 
+    # jinja2: Ray Serve's HAProxy-based ingress (ray.serve._private.haproxy, since ray 2.57)
+    # imports jinja2 unconditionally, but ray[default] doesn't declare it (only ray[serve] does).
+    # nemo_gym.orchestration.ray_serve_gateway imports ray.serve at module level, so pin it directly.
+    # Updated: Mon Sep 28, 2026 with jinja2>=3.1
+    # License: BSD 3-Clause https://github.com/pallets/jinja/blob/main/LICENSE.txt
+    "jinja2>=3.1",
+
     # psutil: Cross-platform process and system utilities
     # Updated: Fri Nov 07, 2025 with psutil==6.1.1
     # License: BSD 3-Clause https://github.com/giampaolo/psutil/blob/master/LICENSE
