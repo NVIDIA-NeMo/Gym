@@ -28,7 +28,6 @@ client, as the repository requires.
 
 import asyncio
 import logging
-import re
 import uuid
 from typing import Any, Optional
 
@@ -36,6 +35,7 @@ from aiohttp import ClientTimeout
 
 from nemo_gym.server_utils import request
 from resources_servers.combibench.fine_eval import LeanResult
+from resources_servers.lean_proof.toolchain import TOOLCHAIN_PROBE, parse_lean_version
 
 
 LOG = logging.getLogger(__name__)
@@ -51,11 +51,10 @@ HTTP_TIMEOUT_MARGIN_SECONDS = 30.0
 DEFAULT_MAX_CONCURRENCY = 8
 
 # Kimina exposes no version endpoint, so the toolchain is read by compiling a
-# one-line program through the same path a submission takes. The header is the
-# one submissions use, so the probe also pays the cold ``import Mathlib`` that
-# would otherwise land on the first scored rollout.
-VERSION_PROBE = "import Mathlib\n\n#eval Lean.versionString\n"
-_VERSION_RE = re.compile(r"\"([0-9]+\.[0-9]+\.[0-9]+[^\"]*)\"")
+# one-line program through the same path a submission takes. ``TOOLCHAIN_PROBE``
+# is the shared one, so every Lean benchmark asks the question the same way; its
+# header is the one submissions use, so the probe also pays the cold
+# ``import Mathlib`` that would otherwise land on the first scored rollout.
 
 
 class KiminaLeanClient:
@@ -123,12 +122,13 @@ class KiminaLeanClient:
         async with self._version_lock:
             if self._version_probed:
                 return self._version
-            result = await self.verify(VERSION_PROBE, timeout_seconds)
-            for message in result.messages:
-                match = _VERSION_RE.search(str(message.get("data", "")))
-                if match:
-                    self._version = match.group(1)
-                    break
+            result = await self.verify(TOOLCHAIN_PROBE, timeout_seconds)
+            # parse_lean_version reads a sandbox's stdout/stderr; the REPL answers in
+            # structured messages instead, so they are joined into the shape it expects
+            # rather than the version regex being written a second time.
+            self._version = parse_lean_version(
+                {"stdout": "\n".join(str(message.get("data", "")) for message in result.messages)}
+            )
             self._version_probed = True
             if self._version is not None:
                 LOG.info("Lean server at %s reports Lean %s", self.base_url, self._version)

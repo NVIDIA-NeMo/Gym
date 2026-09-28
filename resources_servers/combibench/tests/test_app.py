@@ -278,7 +278,7 @@ class TestHttpBoundary:
         response = client.post("/verify", json=_request_dict(_fenced(SOLUTION)))
         assert response.status_code == 200
         payload = response.json()
-        assert payload["reward"] == 1.0 and payload["status"] == "success"
+        assert payload["reward"] == 1.0 and payload["status"] == CombibenchStatus.SUCCESS.value
 
 
 class TestMetrics:

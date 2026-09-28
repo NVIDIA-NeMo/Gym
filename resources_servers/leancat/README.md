@@ -30,7 +30,14 @@ submission that has already lost does not cost a five-minute Mathlib compile.
 | 1 | A Lean code block was produced (last fenced block wins, as upstream) | `empty_generation` |
 | 2 | No `sorry` / `admit` / `axiom` / `unsafe`, ignoring comments and strings | `banned_tokens` |
 | 3 | The reference statement, assumptions and definitions are preserved | `statement_modified` |
-| 4 | The file compiles clean under Lean 4.19.0 / Mathlib v4.19.0 | `compile_error`, `timeout`, `sandbox_error` |
+| 4 | The file compiles clean under Lean 4.19.0 / Mathlib v4.19.0 | `compile_error`, `has_sorry`, `timeout`, `sandbox_error` |
+
+A build that still declares a `sorry` exits zero, so it is caught by scanning the output
+rather than by the exit code, and is reported as `has_sorry` rather than `compile_error`:
+nothing was rejected, the proof is simply absent. Both score 0; the distinction is what
+separates a model writing wrong proofs from one writing none. (Check 2 bans a *literal*
+`sorry` in the submission; this is a `sorry` Lean itself reports, e.g. from a tactic that
+silently left a hole.)
 
 `reward` is 1.0 only for `completed`, and 0.0 otherwise.
 

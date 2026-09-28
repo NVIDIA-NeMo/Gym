@@ -74,8 +74,16 @@ rewrite the rows; the task fields are identical.
 rules (`evaluation/util.py`, `evaluation/verifier/one_stage_verify.py`); the
 `status` field names the first one that failed.
 
+Status names come from [`lean_proof/status.py`](../lean_proof/status.py)
+wherever the concept is shared, so `completed`, `empty_generation`,
+`banned_tokens`, `statement_modified`, `compile_error`, `has_sorry`, `timeout`
+and `sandbox_error` mean the same thing here as in `leancat`. CombiBench adds
+`format_error`, `code_too_long`, `lean_error`, `header_timeout` and `bad_task`
+next to them, which is the extension that module describes: upstream's
+Fine-Eval distinguishes outcomes a whole-file benchmark has no equivalent for.
+
 1. **Extract** the last ```` ```lean4 ```` block (falling back to ```` ```lean ````);
-   none → `format_error`; empty output → `empty_output`; a block longer than
+   none → `format_error`; empty output → `empty_generation`; a block longer than
    `max_code_characters` (200,000; the longest pinned statement is 3,054) →
    `code_too_long`, so nothing pathological is put on the wire.
 2. **Remove comments.** The paper's Appendix A.2 shows a model passing the Lean
@@ -84,14 +92,14 @@ rules (`evaluation/util.py`, `evaluation/verifier/one_stage_verify.py`); the
 3. **Prepend** upstream's default header (`import Mathlib`, `import Aesop`,
    `set_option maxHeartbeats 0`, `open BigOperators Real Nat Topology Rat`) only
    when the code does not start with an import.
-4. **Forbid** the substrings `axiom` and `local_instance` → `forbidden_keyword`.
+4. **Forbid** the substrings `axiom` and `local_instance` → `banned_tokens`.
 5. **Statement check.** Every non-header paragraph of the reference statement,
-   with `sorry` removed, must appear verbatim in the code → `statement_mismatch`.
+   with `sorry` removed, must appear verbatim in the code → `statement_modified`.
    This is the guard against proving a weaker theorem.
 6. **Answer check.** For each `abbrev <name>_solution`, append
    `example : <name>_solution = (<gold> : <type>) := by try rfl; try norm_num`.
 7. **Compile** through the Lean server with a 60 s timeout. Any error message →
-   `proof_failed`; a `sorry` warning or REPL `sorries` entry → `has_sorry`;
+   `compile_error`; a `sorry` warning or REPL `sorries` entry → `has_sorry`;
    the REPL timing out on the submission → `timeout`; any other REPL error
    string → `lean_error`, which is charged to the model because upstream's
    `is_error` fails the submission on it too.
@@ -101,7 +109,7 @@ rules (`evaluation/util.py`, `evaluation/verifier/one_stage_verify.py`); the
 
 | Status | Cause |
 | --- | --- |
-| `lean_server_error` | the Lean server is unreachable or replied malformed |
+| `sandbox_error` | the Lean server is unreachable or replied malformed |
 | `header_timeout` | a cold REPL could not finish `import Mathlib` inside the timeout — Kimina reports this as `Lean REPL header command timed out`, distinct from the submission timing out |
 | `bad_task` | the row cannot be scored (no `formal_statement`, malformed `answers`) |
 
@@ -111,7 +119,7 @@ is the model's output, and excusing it would make hanging reward-neutral.
 Every response carries `lean_version`, the Lean version the server reports for
 `#eval Lean.versionString`. It is probed once per process, before the first
 compile (which also warms the REPL). A server built for another toolchain
-otherwise scores every row `proof_failed` with nothing in the rollouts saying
+otherwise scores every row `compile_error` with nothing in the rollouts saying
 why.
 
 `compute_metrics` adds `hackmath/`, `brualdi/`, `imo/` and
@@ -184,10 +192,10 @@ Negative controls through `verify()`, all 100 rows, every one scoring 0:
 
 | Control | Denominator | Status observed |
 | --- | --- | --- |
-| Empty output | 100 | `empty_output` |
-| Statement echoed back with `sorry` | 100 | `has_sorry` (55 proof-only), `proof_failed` (45 fill-in: the answer check cannot reduce a `sorry` abbrev) |
-| `axiom cheat : False` prepended | 100 | `forbidden_keyword` |
-| Main theorem's goal replaced by `True` | 99 (one statement's theorem is not the last declaration) | `statement_mismatch` |
+| Empty output | 100 | `empty_generation` |
+| Statement echoed back with `sorry` | 100 | `has_sorry` (55 proof-only), `compile_error` (45 fill-in: the answer check cannot reduce a `sorry` abbrev) |
+| `axiom cheat : False` prepended | 100 | `banned_tokens` |
+| Main theorem's goal replaced by `True` | 99 (one statement's theorem is not the last declaration) | `statement_modified` |
 
 The controls cover these named failure classes and no others. Upstream publishes
 no reference proofs, so there is no gold-as-prediction check over the real
@@ -241,20 +249,42 @@ exhausts the client timeout is not retried (`_max_connection_retries=1`):
 Gym's shared client would otherwise spend three REPL jobs and three times the
 wall clock to reach the same verdict.
 
-### Why not the existing `math_formal_lean` sandbox
+### What is shared with the other Lean benchmarks, and what is not
 
-| | `math_formal_lean` sandbox | Kimina Lean Server |
+Reused from [`lean_proof/`](../lean_proof/):
+
+- **`status.py`** — the status vocabulary, as above.
+- **`toolchain.py`** — `TOOLCHAIN_PROBE` and `parse_lean_version`. The REPL
+  answers in structured messages rather than on stdout, so the client joins them
+  into the shape the parser expects rather than writing the version regex twice.
+
+Not reused, and deliberately:
+
+- **`proof_utils.py`.** Its extraction strips thinking, accepts any fenced
+  block, and falls back to an unfenced Lean file. Upstream CombiBench takes the
+  last ```` ```lean4 ```` block (falling back to ```` ```lean ````), prepends a
+  default header, and calls anything else a format error. Its banned-token set
+  is `sorry`/`admit`/`axiom`/`unsafe`; CombiBench's is `axiom`/`local_instance`
+  as substrings. Its statement check is whole-file; CombiBench's is upstream's
+  paragraph-substring test. Sharing any of these would change scores relative to
+  the published numbers, which is the one thing this server exists not to do.
+- **`lean_sandbox.py`.** It shells `lake env lean` through `nemo_gym.sandbox`,
+  one process per request. CombiBench needs Kimina's header-keyed REPL pool —
+  both because it is what upstream's harness talks to, and because a fresh
+  `import Mathlib` per proof is unaffordable at 100 problems × 16 repeats.
+
+| | `math_formal_lean` / `lean_proof` sandbox | Kimina Lean Server |
 | --- | --- | --- |
-| Lean/Mathlib | v4.12.0 (v4.19.0 image also built) | pinned here to v4.24.0, upstream's toolchain |
+| Lean/Mathlib | v4.12.0 and v4.19.0 images | pinned here to v4.24.0, upstream's toolchain |
 | REPL reuse | one process per request | header-keyed REPL pool, so `import Mathlib` is paid once |
 | Relation to upstream | none | the server upstream's own harness talks to |
 
 The toolchain is the blocking difference: these statements do not compile on
-v4.12.0, so reusing that path would have meant rebuilding its image at v4.24.0
-anyway. Having rebuilt it, the remaining choice was between re-deriving
-upstream's REPL handling on top of the sandbox's request shape and talking to
-the server upstream already uses, whose `/verify` contract this client
-reproduces. The Kimina pin is a commit rather than a release because the
+v4.12.0 or v4.19.0, so reusing either image would have meant building one at
+v4.24.0 anyway. [`kimina_image/`](kimina_image/) does that, following
+`lean_proof/lean_image`'s Dockerfile rather than upstream Kimina's — same
+checksummed toolchain, pinned Mathlib commit, toolchain assertion and offline
+final build — with the REPL and the server added on top. The Kimina pin is a commit rather than a release because the
 project publishes no tags at all: `fb2393de` (2026-01-11) is the head of
 `main`, and still the latest commit. Its own default is Lean v4.26.0; the
 version is a build argument, so the image here is built with

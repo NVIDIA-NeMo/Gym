@@ -41,6 +41,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from resources_servers.lean_proof.status import (
+    STATUS_COMPILE_ERROR,
+    STATUS_COMPLETED,
+    STATUS_HAS_SORRY,
+    STATUS_SANDBOX_ERROR,
+    STATUS_TIMEOUT,
+)
+
 
 # Upstream prepends this when the model's code does not begin with an import.
 DEFAULT_HEADER = """import Mathlib
@@ -255,17 +263,17 @@ def classify_lean_result(result: LeanResult) -> str:
     cause or avoid, so the caller charges it to the harness.
     """
     if result.transport_failure:
-        return "lean_server_error"
+        return STATUS_SANDBOX_ERROR
     if result.error:
         if HEADER_TIMEOUT_MARKER in result.error:
             return "header_timeout"
-        return "timeout" if "timed out" in result.error else "lean_error"
+        return STATUS_TIMEOUT if "timed out" in result.error else "lean_error"
     if any(message.get("severity") == "error" for message in result.messages):
-        return "proof_failed"
+        return STATUS_COMPILE_ERROR
     has_sorry_warning = any(
         message.get("severity") == "warning" and SORRY_WARNING in str(message.get("data", ""))
         for message in result.messages
     )
     if has_sorry_warning or result.sorries:
-        return "has_sorry"
-    return "success"
+        return STATUS_HAS_SORRY
+    return STATUS_COMPLETED

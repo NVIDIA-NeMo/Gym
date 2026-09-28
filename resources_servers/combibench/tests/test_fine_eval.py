@@ -30,6 +30,13 @@ from resources_servers.combibench.fine_eval import (
     statement_chunks,
 )
 from resources_servers.combibench.lean_client import parse_verify_response
+from resources_servers.lean_proof.status import (
+    STATUS_COMPILE_ERROR,
+    STATUS_COMPLETED,
+    STATUS_HAS_SORRY,
+    STATUS_SANDBOX_ERROR,
+    STATUS_TIMEOUT,
+)
 
 
 STATEMENT = """import Mathlib
@@ -171,25 +178,25 @@ class TestAnswers:
 
 class TestClassification:
     def test_clean_compile_is_success(self) -> None:
-        assert classify_lean_result(LeanResult(messages=[{"severity": "info", "data": "ok"}])) == "success"
+        assert classify_lean_result(LeanResult(messages=[{"severity": "info", "data": "ok"}])) == STATUS_COMPLETED
 
     def test_error_message_fails_the_proof(self) -> None:
         result = LeanResult(messages=[{"severity": "error", "data": "unsolved goals"}])
-        assert classify_lean_result(result) == "proof_failed"
+        assert classify_lean_result(result) == STATUS_COMPILE_ERROR
 
     def test_sorry_warning_is_not_a_pass(self) -> None:
         result = LeanResult(messages=[{"severity": "warning", "data": "declaration uses 'sorry'"}])
-        assert classify_lean_result(result) == "has_sorry"
+        assert classify_lean_result(result) == STATUS_HAS_SORRY
 
     def test_structured_sorries_are_not_a_pass(self) -> None:
-        assert classify_lean_result(LeanResult(sorries=[{"goal": "⊢ True"}])) == "has_sorry"
+        assert classify_lean_result(LeanResult(sorries=[{"goal": "⊢ True"}])) == STATUS_HAS_SORRY
 
     def test_other_warnings_do_not_fail(self) -> None:
         result = LeanResult(messages=[{"severity": "warning", "data": "unused variable `h`"}])
-        assert classify_lean_result(result) == "success"
+        assert classify_lean_result(result) == STATUS_COMPLETED
 
     def test_server_timeout_is_charged_to_the_model(self) -> None:
-        assert classify_lean_result(LeanResult(error="Lean REPL command timed out in 60 seconds")) == "timeout"
+        assert classify_lean_result(LeanResult(error="Lean REPL command timed out in 60 seconds")) == STATUS_TIMEOUT
 
     def test_header_timeout_is_told_apart_from_the_proof_timing_out(self) -> None:
         """Kimina's two timeout messages differ by one word and mean opposite things."""
@@ -197,7 +204,7 @@ class TestClassification:
         assert classify_lean_result(header) == "header_timeout"
 
     def test_transport_failure_is_a_harness_fault(self) -> None:
-        assert classify_lean_result(LeanResult(error="boom", transport_failure=True)) == "lean_server_error"
+        assert classify_lean_result(LeanResult(error="boom", transport_failure=True)) == STATUS_SANDBOX_ERROR
 
 
 class TestVerifyResponseParsing:

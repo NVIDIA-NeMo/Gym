@@ -99,9 +99,15 @@ RUN git init /opt/kimina && cd /opt/kimina && \
 # keeps this image's Python dependencies the ones the project tests against.
 # `prisma generate` is not optional: server/prisma_client.py imports the generated client
 # unconditionally, even though the proof log it backs is disabled here.
+#
+# --no-hashes: `uv export` writes hashes, which puts pip into --require-hashes mode, and
+# that mode requires *every* requirement to be `==`-pinned. One transitive dependency
+# (google-api-core[grpc], via google-cloud-appengine-logging) is specified as a range, so
+# the install aborts. Versions stay pinned exactly as uv.lock resolved them either way;
+# only per-file hash verification is given up.
 RUN pip install --no-cache-dir uv && \
     cd /opt/kimina && \
-    uv export --extra server --no-dev --no-emit-project > requirements.txt && \
+    uv export --extra server --no-dev --no-emit-project --no-hashes > requirements.txt && \
     pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir -e . && \
     prisma generate

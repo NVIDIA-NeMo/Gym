@@ -44,6 +44,16 @@ from resources_servers.combibench.fine_eval import (
     statement_chunks,
 )
 from resources_servers.combibench.lean_client import DEFAULT_MAX_CONCURRENCY, KiminaLeanClient
+from resources_servers.lean_proof.status import (
+    STATUS_BANNED_TOKENS,
+    STATUS_COMPILE_ERROR,
+    STATUS_COMPLETED,
+    STATUS_EMPTY_GENERATION,
+    STATUS_HAS_SORRY,
+    STATUS_SANDBOX_ERROR,
+    STATUS_STATEMENT_MODIFIED,
+    STATUS_TIMEOUT,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -55,18 +65,30 @@ MAX_MESSAGE_CHARACTERS = 2000
 
 
 class CombibenchStatus(str, Enum):
-    SUCCESS = "success"
-    EMPTY_OUTPUT = "empty_output"
+    """CombiBench's outcomes, named from ``lean_proof.status`` wherever the concept is shared.
+
+    The six statuses every Lean benchmark has mean the same string here as in
+    ``leancat``, so a rollout dump reads the same across them. The rest are
+    CombiBench's own, which is the extension ``lean_proof.status`` describes:
+    upstream's Fine-Eval distinguishes outcomes a whole-file benchmark has no
+    equivalent for (a missing fence, an oversized submission, the Kimina REPL's
+    two kinds of timeout) and those are added next to the shared names, not
+    folded into them.
+    """
+
+    SUCCESS = STATUS_COMPLETED
+    EMPTY_OUTPUT = STATUS_EMPTY_GENERATION
+    FORBIDDEN_KEYWORD = STATUS_BANNED_TOKENS  # axiom / local_instance
+    STATEMENT_MISMATCH = STATUS_STATEMENT_MODIFIED  # reference statement not reproduced
+    PROOF_FAILED = STATUS_COMPILE_ERROR  # Lean reported an error
+    HAS_SORRY = STATUS_HAS_SORRY
+    TIMEOUT = STATUS_TIMEOUT  # Lean server timed out compiling the submission
+    # CombiBench-specific outcomes.
     FORMAT_ERROR = "format_error"  # no fenced Lean block
-    FORBIDDEN_KEYWORD = "forbidden_keyword"  # axiom / local_instance
-    STATEMENT_MISMATCH = "statement_mismatch"  # reference statement not reproduced
     CODE_TOO_LONG = "code_too_long"
-    PROOF_FAILED = "proof_failed"  # Lean reported an error
-    HAS_SORRY = "has_sorry"
-    TIMEOUT = "timeout"  # Lean server timed out compiling the submission
     LEAN_ERROR = "lean_error"  # Lean server reported a non-timeout REPL error
     # Harness faults: the model did not cause these.
-    LEAN_SERVER_ERROR = "lean_server_error"
+    LEAN_SERVER_ERROR = STATUS_SANDBOX_ERROR
     HEADER_TIMEOUT = "header_timeout"  # a cold REPL could not load 'import Mathlib' in time
     BAD_TASK = "bad_task"
 
