@@ -3,11 +3,10 @@
 
 """Resources-backed single-agent environment server."""
 
-import logging
 from typing import Any, Literal
 from uuid import uuid4
 
-from aiohttp import ClientConnectionError, ClientResponseError
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_environment_server import (
@@ -47,9 +46,6 @@ from nemo_gym.tool_access import (
     MCPToolAccess,
     ToolAccess,
 )
-
-
-LOGGER = logging.getLogger(__name__)
 
 
 class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
@@ -92,7 +88,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             await raise_for_status(close_response)
 
         # Register cleanup before seed so a lost seed response cannot hide the caller-assigned session ID.
-        resources_cleanup = cleanup.register_cleanup("resources session", close_resources)
+        # Final cleanup closes this session after run() returns, outside the episode deadline.
+        cleanup.register_cleanup("resources session", close_resources)
 
         try:
             seed_http_response = await self.server_client.post(
@@ -265,13 +262,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 partial_response=agent_response,
             ) from error
 
-        try:
-            await resources_cleanup.close()
-        except Exception:
-            # Verification already produced a reward-bearing result. Final cleanup retries
-            # this still-active handle and reports any persistent failure through logs.
-            LOGGER.exception(f"Resources cleanup failed after verification: episode_id={request.episode_id}")
-
         return SingleAgentTurnResponse(
             episode_id=request.episode_id,
             task_id=request.task.task_id,
@@ -321,7 +311,8 @@ def _cookies(response: Any) -> dict[str, str]:
 def _is_retryable_dependency_error(error: Exception) -> bool:
     if isinstance(error, ClientResponseError):
         return error.status in {408, 425, 429} or error.status >= 500
-    return isinstance(error, (ClientConnectionError, TimeoutError))
+    # A dropped connection mid-body raises ClientPayloadError, which is transient like a refused connection.
+    return isinstance(error, (ClientConnectionError, ClientPayloadError, TimeoutError))
 
 
 if __name__ == "__main__":

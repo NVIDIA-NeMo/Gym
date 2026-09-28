@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import runpy
 from pathlib import Path
 from typing import Literal
 
 import orjson
 import pytest
+from aiohttp import ClientPayloadError
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict
 
@@ -21,6 +23,7 @@ from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSee
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
 
@@ -72,6 +75,8 @@ class _Client(ServerClient):
     calls: list[tuple[str, str, dict]]
     responses: list[_Response]
     fail_path: str | None = None
+    slow_path: str | None = None
+    rollout_ids: list[str | None] = []
 
     async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
         body = kwargs.get("json")
@@ -83,6 +88,9 @@ class _Client(ServerClient):
                 AgentSeedSessionRequest.model_validate_json(encoded)
             kwargs["json"] = orjson.loads(encoded)
         self.calls.append((server_name, url_path, kwargs))
+        self.rollout_ids.append(current_rollout_id())
+        if url_path == self.slow_path:
+            await asyncio.sleep(0.2)
         if url_path == self.fail_path:
             self.fail_path = None
             raise TimeoutError(f"response lost for {url_path}")
@@ -289,7 +297,28 @@ async def test_resources_close_failure_after_verification_keeps_result() -> None
 
     assert result.result is not None
     assert result.result.reward == 1.0
-    assert [path for _, path, _ in client.calls].count("/close_session") == 2
+    assert [path for _, path, _ in client.calls].count("/close_session") == 1
+
+
+async def test_slow_resources_close_after_verification_keeps_result() -> None:
+    environment_server, client = _environment_server()
+    environment_server.config.default_episode_timeout_seconds = 0.1
+    client.slow_path = "/close_session"
+
+    result = await environment_server.run_request(_request())
+
+    assert result.failure is None
+    assert result.result.reward == 1.0
+    assert client.calls[-1][1] == "/close_session"
+
+
+async def test_every_downstream_call_carries_the_attempt_rollout_id() -> None:
+    environment_server, client = _environment_server()
+
+    await environment_server.run_request(_request())
+
+    assert [path for _, path, _ in client.calls][-2:] == ["/verify", "/close_session"]
+    assert client.rollout_ids == ["rollout-a2"] * len(client.calls)
 
 
 def test_dependency_failure_messages_are_bounded() -> None:
@@ -300,4 +329,5 @@ def test_dependency_failure_messages_are_bounded() -> None:
 
 def test_retry_requires_a_transient_dependency_error() -> None:
     assert _is_retryable_dependency_error(TimeoutError()) is True
+    assert _is_retryable_dependency_error(ClientPayloadError("response body interrupted")) is True
     assert _is_retryable_dependency_error(ValueError("invalid response")) is False
