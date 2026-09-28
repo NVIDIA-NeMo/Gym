@@ -48,5 +48,3 @@ class TestParsing:
     )
     def test_normalize_version(self, raw, expected):
         assert normalize_version(raw) == expected
-
-
