@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import multiprocessing
+import pickle
 import socket
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
@@ -23,7 +24,8 @@ from aiohttp import ClientOSError, ClientResponseError, RequestInfo
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pydantic import ValidationError
-from pytest import CaptureFixture, MonkeyPatch, raises
+from pytest import CaptureFixture, MonkeyPatch, mark, raises
+from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
 
 import nemo_gym.global_config
@@ -44,6 +46,7 @@ from nemo_gym.server_utils import (
     DictConfig,
     GlobalAIOHTTPAsyncClientConfig,
     HeadServer,
+    KeepaliveHttpToolsProtocol,
     ServerClient,
     SimpleServer,
     UvicornProxyHeadersConfig,
@@ -514,6 +517,29 @@ class TestServerUtils:
         factory(_TEST_ADDR_INFO)
 
         mock_sock.setsockopt.assert_called_once_with(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+    @mark.parametrize("family", [socket.AF_INET, socket.AF_UNIX])
+    def test_keepalive_httptools_protocol_enables_keepalive_on_tcp_only(
+        self, monkeypatch: MonkeyPatch, family: int
+    ) -> None:
+        parent_connection_made = MagicMock()
+        monkeypatch.setattr(HttpToolsProtocol, "__init__", lambda self, *args, **kwargs: None)
+        monkeypatch.setattr(HttpToolsProtocol, "connection_made", parent_connection_made)
+        protocol = KeepaliveHttpToolsProtocol(
+            keepalive=(_TCP_KEEPALIVE_TEST_IDLE, _TCP_KEEPALIVE_TEST_INTERVAL, _TCP_KEEPALIVE_TEST_PROBES)
+        )
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        transport = MagicMock()
+        transport.get_extra_info.return_value = sock
+        try:
+            protocol.connection_made(transport)  # A Unix socket must not raise on TCP-level options.
+            keepalive_on = sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
+            assert keepalive_on is (family == socket.AF_INET)
+            if family == socket.AF_INET and hasattr(socket, "TCP_KEEPIDLE"):
+                assert sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE) == _TCP_KEEPALIVE_TEST_IDLE
+        finally:
+            sock.close()
+        parent_connection_made.assert_called_once_with(transport)
 
     def test_GlobalAIOHTTPAsyncClientConfig_keepalive_defaults(self) -> None:
         cfg = GlobalAIOHTTPAsyncClientConfig()
@@ -1082,10 +1108,27 @@ class TestRunWebserverProxyKwargs:
         """The issue calls out parser, keepalive, access-log, and graceful-shutdown as must-not-change."""
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
 
-        assert "httptools" == kwargs["http"]
+        # Still the httptools parser (never an h11 fallback), now with TCP keepalive on accepted connections.
+        assert issubclass(kwargs["http"].func, HttpToolsProtocol)
         assert 30 == kwargs["timeout_keep_alive"]
         assert kwargs["access_log"] is False
         assert 0.5 == kwargs["timeout_graceful_shutdown"]
+
+    def test_server_tcp_keepalive_uses_global_aiohttp_keepalive_config(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
+        assert kwargs["http"].func is KeepaliveHttpToolsProtocol
+        assert kwargs["http"].keywords["keepalive"] == (60, 10, 3)
+
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch,
+            {"global_aiohttp_tcp_keepalive_idle_seconds": 90, "global_aiohttp_tcp_keepalive_probes": 5},
+            num_workers=4,
+        )
+        assert kwargs["http"].keywords["keepalive"] == (90, 10, 5)
+        # Multi-worker uvicorn pickles its config into spawned worker processes.
+        restored = pickle.loads(pickle.dumps(kwargs["http"]))
+        assert restored.func is KeepaliveHttpToolsProtocol
+        assert restored.keywords["keepalive"] == (90, 10, 5)
 
     def test_trusted_proxy_opt_in_is_forwarded_to_uvicorn(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(
