@@ -608,6 +608,8 @@ def _resources_server_app(module_name: str) -> str:
 
 
         class {class_name}ResourcesServer({class_name}Verifier, SimpleResourcesServer):
+            ray_enabled = False
+
             config: {class_name}ResourcesServerConfig
 
 
@@ -714,6 +716,8 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
 
 
         class {class_name}Agent(SimpleAgent):
+            ray_enabled = False
+
             async def responses(
                 self,
                 request: Request,
@@ -737,6 +741,8 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
 
 
         class {class_name}Agent(SimpleAgent):
+            ray_enabled = False
+
             async def responses(
                 self,
                 request: Request,

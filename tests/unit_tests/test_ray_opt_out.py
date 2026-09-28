@@ -9,7 +9,7 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.server_utils import _WARNED_IMPLICIT_RAY_SERVERS, _server_uses_ray
 
 
-RAY_BACKED_COMPONENTS = {
+DIRECT_RAY_COMPONENTS = {
     "resources_servers": {
         "code_fim",
         "code_gen",
@@ -34,12 +34,15 @@ RAY_BACKED_COMPONENTS = {
 
 INHERITED_RAY_DECLARATIONS = {
     ("resources_servers/gpqa_diamond/app.py", "GPQADiamondResourcesServer"): False,
+    ("resources_servers/legal_agent_bench/harbor_bridge.py", "LegalAgentBenchHarborBridge"): True,
+    ("responses_api_models/genrm_model/app.py", "GenRMModel"): True,
 }
 
 
 def _component_imports_ray(component_dir: Path) -> bool:
     for path in component_dir.rglob("*.py"):
-        if any(part.startswith(".") or part in {"scripts", "tests"} for part in path.parts):
+        relative_path = path.relative_to(component_dir)
+        if any(part.startswith(".") or part in {"scripts", "tests"} for part in relative_path.parts):
             continue
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", SyntaxWarning)
@@ -58,11 +61,13 @@ def _component_imports_ray(component_dir: Path) -> bool:
     return False
 
 
-def _server_class_declarations() -> list[tuple[Path, ast.ClassDef, bool]]:
+def _server_class_declarations(root: Path = PARENT_DIR) -> list[tuple[Path, ast.ClassDef, bool]]:
     declarations: list[tuple[Path, ast.ClassDef, bool]] = []
-    for server_type, ray_backed_components in RAY_BACKED_COMPONENTS.items():
-        for path in (PARENT_DIR / server_type).glob("*/**/*.py"):
-            if any(part.startswith(".") or part in {"scripts", "tests"} for part in path.parts):
+    for server_type, ray_backed_components in DIRECT_RAY_COMPONENTS.items():
+        component_root = root / server_type
+        for path in component_root.glob("*/**/*.py"):
+            relative_path = path.relative_to(component_root)
+            if any(part.startswith(".") or part in {"scripts", "tests"} for part in relative_path.parts):
                 continue
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", SyntaxWarning)
@@ -79,9 +84,13 @@ def _server_class_declarations() -> list[tuple[Path, ast.ClassDef, bool]]:
                 and node.func.attr == "run_webserver"
                 and isinstance(node.func.value, ast.Name)
             }
-            component = path.relative_to(PARENT_DIR).parts[1]
-            expected = component in ray_backed_components
-            declarations.extend((path, classes[name], expected) for name in invoked_classes if name in classes)
+            component = relative_path.parts[0]
+            for name in invoked_classes:
+                if name not in classes:
+                    continue
+                key = (str(path.relative_to(root)), name)
+                expected = INHERITED_RAY_DECLARATIONS.get(key, component in ray_backed_components)
+                declarations.append((path, classes[name], expected))
     return declarations
 
 
@@ -125,10 +134,27 @@ def test_ray_backed_inventory_matches_production_imports() -> None:
             for component_dir in (PARENT_DIR / server_type).iterdir()
             if component_dir.is_dir() and _component_imports_ray(component_dir)
         }
-        for server_type in RAY_BACKED_COMPONENTS
+        for server_type in DIRECT_RAY_COMPONENTS
     }
 
-    assert discovered == RAY_BACKED_COMPONENTS
+    assert discovered == DIRECT_RAY_COMPONENTS
+
+
+def test_inventory_uses_paths_relative_to_the_checkout(tmp_path: Path) -> None:
+    root = tmp_path / ".worktrees" / "review"
+    component_dir = root / "resources_servers" / "example"
+    component_dir.mkdir(parents=True)
+    (component_dir / "app.py").write_text(
+        "import ray\n"
+        "class ExampleServer:\n"
+        "    ray_enabled = False\n"
+        "if __name__ == '__main__':\n"
+        "    ExampleServer.run_webserver()\n"
+    )
+
+    assert _component_imports_ray(component_dir) is True
+    declarations = _server_class_declarations(root)
+    assert [(node.name, expected) for _path, node, expected in declarations] == [("ExampleServer", False)]
 
 
 def test_shipped_server_classes_declare_ray_usage() -> None:
