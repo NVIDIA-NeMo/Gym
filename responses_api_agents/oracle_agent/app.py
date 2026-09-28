@@ -50,10 +50,13 @@ from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.tasks.harbor import HarborTask, load_task
 from nemo_gym.tasks.harbor.task import HarborTaskError
+from resources_servers.harbor.app import run_detached
 from resources_servers.harbor.sandbox_io import upload_dir
 
 
 SOLUTION_DIR = "/solution"
+SOLVE_LOG_DIR = "/logs/agent"
+SOLVE_LOG = f"{SOLVE_LOG_DIR}/solve-stdout.txt"
 ORACLE_METADATA_KEY = "oracle"
 ORACLE_STATUS_SOLVED = "solved"
 ORACLE_STATUS_UNVALIDATED = "unvalidated"
@@ -180,15 +183,19 @@ class OracleAgent(SimpleResponsesAPIAgent):
         settings = task.config
         timeout = min(settings.agent.timeout_sec, self.config.max_solve_timeout_s)
         await upload_dir(session.sandbox, task.path / "solution", SOLUTION_DIR)
-        result = await session.sandbox.exec(
-            f"bash {SOLUTION_DIR}/solve.sh",
+        await session.sandbox.exec(f"mkdir -p {SOLVE_LOG_DIR} && chmod 777 {SOLVE_LOG_DIR}", cwd="/", timeout_s=60)
+        # Detached so a long solution does not hold a provider connection; output goes to a file we tail.
+        result = await run_detached(
+            session.sandbox,
+            f"bash {SOLUTION_DIR}/solve.sh > {SOLVE_LOG} 2>&1",
             cwd=session.workdir,
             env=dict(settings.solution.env),
             timeout_s=timeout,
             user=task.user,
         )
         tail = self.config.output_tail_chars
-        output = "\n".join(part for part in ((result.stdout or "")[-tail:], (result.stderr or "")[-tail:]) if part)
+        log = await session.sandbox.exec(f"tail -c {tail} {SOLVE_LOG} 2>/dev/null || true", cwd="/", timeout_s=60)
+        output = "\n".join(part for part in ((log.stdout or "")[-tail:], (result.stderr or "")[-tail:]) if part)
         status = ORACLE_STATUS_SOLVED if result.return_code == 0 else ORACLE_STATUS_FAILED
         extra = {"oracle_return_code": str(result.return_code)}
         if result.error_type:

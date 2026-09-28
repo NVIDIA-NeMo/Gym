@@ -262,6 +262,52 @@ class TestSeed:
         assert spec.metadata["harbor_task"] == "hello"
 
 
+class TestSeedWorkdirAndResources:
+    def test_image_workdir_used_when_task_sets_none(self, tmp_path, monkeypatch):
+        server, task, sandbox, created = make_server(tmp_path, monkeypatch)
+        # A task with a real Dockerfile and a prebuilt image declares no workdir; the image's WORKDIR is used.
+        (task.path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nRUN true\n")
+        (task.path / "task.toml").write_text(TASK_TOML.replace("cpus = 1", 'docker_image = "org/task:1"\ncpus = 1'))
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        assert task.workdir is None
+
+        class PwdSandbox(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if command == "pwd":
+                    return SandboxExecResult(stdout="/work\n", stderr="", return_code=0)
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        pwd_sandbox = PwdSandbox()
+
+        async def create(task, workdir):
+            created.append((task.task_id, workdir))
+            return pwd_sandbox
+
+        monkeypatch.setattr(server, "_create_sandbox", create)
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+
+        assert response.status_code == 200, response.text
+        assert created == [("hello", None)]
+        assert response.json()["sandbox_access"]["workdir"] == "/work"
+
+    def test_resources_override_and_cpu_env(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "resources_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        spec = server._sandbox_spec(task, "/app")
+        assert spec.resources.cpu == 1.0 and spec.env["OMP_NUM_THREADS"] == "1"
+
+        server.config.sandbox_resources_override = {"cpu": 4, "memory_mib": 16384, "disk_gib": 30}
+        spec = server._sandbox_spec(task, "/app")
+        assert (spec.resources.cpu, spec.resources.memory_mib, spec.resources.disk_gib) == (4.0, 16384, 30)
+        assert spec.env["OMP_NUM_THREADS"] == "4"
+
+        server.config.derive_cpu_env = False
+        assert "OMP_NUM_THREADS" not in server._sandbox_spec(task, "/app").env
+
+
 class TestVerify:
     def seeded_client(self, tmp_path, monkeypatch, sandbox=None):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch, sandbox)
@@ -284,8 +330,8 @@ class TestVerify:
         assert payload["responses_create_params"]["input"][0]["content"] == "Create hello.txt"
 
         run = next(call for call in sandbox.execs if "test.sh" in call["command"])
-        assert run["command"] == "bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1"
-        assert run["cwd"] == "/app" and run["timeout_s"] == 120.0
+        assert run["command"] == "timeout --signal=KILL 120 bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1"
+        assert run["cwd"] == "/app" and run["timeout_s"] == 120.0 + server.config.verifier_grace_s
         # tests/ was uploaded as an archive and unpacked into /tests.
         assert any(remote.endswith(".tar.gz") for _, remote in sandbox.uploads)
         assert any("tar -xzf" in call["command"] and "/tests" in call["command"] for call in sandbox.execs)
@@ -333,6 +379,33 @@ class TestVerify:
         assert payload["reward"] == 0.0
         assert payload["mask_sample"] is False
         assert payload["failure_kind"] == "harbor:verifier_timeout"
+
+    def test_in_container_timeout_kill_scores_zero(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(test_result=SandboxExecResult(stdout="", stderr="", return_code=137))
+        _, _, _, client = self.seeded_client(tmp_path, monkeypatch, sandbox)
+        payload = client.post("/verify", json=verify_body()).json()
+        assert payload["reward"] == 0.0 and payload["failure_kind"] == "harbor:verifier_timeout"
+
+    def test_detached_pty_exec_is_preferred(self, tmp_path, monkeypatch):
+        class PtySandbox(FakeSandbox):
+            def __init__(self):
+                super().__init__()
+                self.detached = []
+                outer = self
+
+                class Pty:
+                    async def exec(self, command, **kwargs):
+                        outer.detached.append((command, kwargs))
+                        return SandboxExecResult(stdout="", stderr=None, return_code=0)
+
+                self.pty = Pty()
+
+        sandbox = PtySandbox()
+        _, _, _, client = self.seeded_client(tmp_path, monkeypatch, sandbox)
+        payload = client.post("/verify", json=verify_body()).json()
+        assert payload["reward"] == 1.0
+        assert len(sandbox.detached) == 1 and sandbox.detached[0][1]["detach"] is True
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
 
     def test_sandbox_runtime_failure_masks(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(

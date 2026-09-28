@@ -48,9 +48,10 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.task import HarborTaskError
@@ -59,7 +60,6 @@ from resources_servers.harbor.sandbox_io import download_dir, upload_dir
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_WORKDIR = "/app"
 TESTS_DIR = "/tests"
 VERIFIER_LOGS_DIR = "/logs/verifier"
 AGENT_LOGS_DIR = "/logs/agent"
@@ -114,6 +114,15 @@ class HarborResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_ttl_slack_s: float = Field(default=900, ge=0)
     sandbox_provider_options: dict[str, Any] = Field(default_factory=dict)
     sandbox_metadata: dict[str, str] = Field(default_factory=dict)
+    # Replaces the task's declared cpus, memory_mb and storage_mb when set (keys: cpu, memory_mib, disk_gib).
+    # Used to run a benchmark at fixed resources, for example to compare against another server.
+    sandbox_resources_override: dict[str, Any] | None = None
+    # Export CPU-count env vars (OMP_NUM_THREADS and friends) matching the sandbox CPU limit.
+    derive_cpu_env: bool = True
+    # Operator environment for every sandbox; a task's own `[environment.env]` wins.
+    sandbox_env: dict[str, str] = Field(default_factory=dict)
+    # Extra seconds granted to `test.sh` beyond `[verifier].timeout_sec` before the in-container `timeout` kills it.
+    verifier_grace_s: float = Field(default=30, ge=0)
     # Verifier logs are downloaded here, one folder per resources session.
     artifacts_dir: Path = Path("results/harbor/verifier")
 
@@ -161,6 +170,27 @@ def select_reward(rewards: dict[str, float]) -> float | None:
     if len(rewards) == 1:
         return next(iter(rewards.values()))
     return None
+
+
+async def run_detached(
+    sandbox: AsyncSandbox,
+    command: str,
+    *,
+    cwd: str | None,
+    env: dict[str, str] | None,
+    timeout_s: float,
+    user: str | int | None,
+) -> SandboxExecResult:
+    """Run a long command without holding a connection open for its whole duration.
+
+    Providers with PTY support (OpenSandbox) run it detached and poll for completion, so a
+    verifier that takes an hour does not trip the provider's per-request timeout. Others fall
+    back to a plain exec.
+    """
+    try:
+        return await sandbox.pty.exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, detach=True)
+    except (NotImplementedError, AttributeError):
+        return await sandbox.exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
 
 
 def _sandbox_resources(task: HarborTask) -> dict[str, Any]:
@@ -240,7 +270,7 @@ class HarborResourcesServer(SimpleResourcesServer):
 
     # -- sandbox ---------------------------------------------------------------------------
 
-    def _sandbox_spec(self, task: HarborTask, workdir: str) -> SandboxSpec:
+    def _sandbox_spec(self, task: HarborTask, workdir: str | None) -> SandboxSpec:
         global_config_dict = get_global_config_dict()
         metadata = (
             resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
@@ -248,30 +278,41 @@ class HarborResourcesServer(SimpleResourcesServer):
             | {"nemo_gym_resources_server": self.config.name, "harbor_task": task.task_id[:63]}
         )
         ttl = task.config.agent.timeout_sec + task.config.verifier.timeout_sec + self.config.sandbox_ttl_slack_s
+        resources = self.config.sandbox_resources_override or _sandbox_resources(task)
+        env = dict(self.config.sandbox_env) | dict(task.env)
+        if self.config.derive_cpu_env:
+            env = cpu_cap_env(resources.get("cpu")) | env
         return SandboxSpec(
             image=task.image,
             ttl_s=ttl,
             ready_timeout_s=self.config.sandbox_ready_timeout_s,
             workdir=workdir,
-            env=dict(task.env),
+            env=env,
             metadata=metadata,
-            resources=_sandbox_resources(task),
+            resources=resources,
             provider_options=dict(self.config.sandbox_provider_options),
         )
 
-    async def _create_sandbox(self, task: HarborTask, workdir: str) -> AsyncSandbox:
+    async def _create_sandbox(self, task: HarborTask, workdir: str | None) -> AsyncSandbox:
         provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
         sandbox = AsyncSandbox(provider_config)
         await sandbox.start(self._sandbox_spec(task, workdir))
         return sandbox
 
-    async def _prepare_workdir(self, sandbox: AsyncSandbox, task: HarborTask, workdir: str) -> None:
+    async def _prepare_workdir(self, sandbox: AsyncSandbox, task: HarborTask, workdir: str | None) -> str:
+        """Create the working directory, or resolve the image's own WORKDIR when the task sets none."""
+        if workdir is None:
+            result = await sandbox.exec("pwd", timeout_s=60)
+            if result.return_code != 0 or not (result.stdout or "").strip():
+                raise RuntimeError(f"Could not resolve the image working directory: {result.stderr or result.stdout}")
+            workdir = (result.stdout or "").strip().splitlines()[-1]
         commands = [f"mkdir -p {shlex.quote(workdir)}"]
         if task.user:
             commands.append(f"chown {shlex.quote(task.user)} {shlex.quote(workdir)}")
         result = await sandbox.exec(" && ".join(commands), cwd="/", timeout_s=60)
         if result.return_code != 0:
             raise RuntimeError(f"Could not prepare {workdir}: {result.stderr or result.stdout}")
+        return workdir
 
     async def _sandbox_access(self, session: HarborSession) -> SandboxAccess:
         return SandboxAccess(
@@ -306,14 +347,13 @@ class HarborResourcesServer(SimpleResourcesServer):
                 raise HTTPException(
                     422, f"Task {task.task_id!r} declares no image; sandbox-less tasks are not supported yet"
                 )
-            workdir = task.workdir or DEFAULT_WORKDIR
             try:
-                sandbox = await self._create_sandbox(task, workdir)
+                sandbox = await self._create_sandbox(task, task.workdir)
             except Exception as exc:
                 LOGGER.exception(f"Sandbox creation failed for {task.task_id}")
                 raise HTTPException(503, f"Could not start sandbox for {task.task_id!r}: {exc}") from exc
             try:
-                await self._prepare_workdir(sandbox, task, workdir)
+                workdir = await self._prepare_workdir(sandbox, task, task.workdir)
                 session = HarborSession(
                     task=task,
                     taskset=body.task_id.taskset,
@@ -369,14 +409,17 @@ class HarborResourcesServer(SimpleResourcesServer):
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
             await upload_dir(sandbox, task.path / "tests", TESTS_DIR)
-            result = await sandbox.exec(
-                f"bash {TESTS_DIR}/test.sh > {VERIFIER_STDOUT} 2>&1",
+            # `timeout` inside the container stops the tests even when the provider only stops its client.
+            budget = int(settings.timeout_sec)
+            result = await run_detached(
+                sandbox,
+                f"timeout --signal=KILL {budget} bash {TESTS_DIR}/test.sh > {VERIFIER_STDOUT} 2>&1",
                 cwd=session.workdir,
                 env=dict(settings.env),
-                timeout_s=settings.timeout_sec,
+                timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
                 user=settings.user,
             )
-            if result.error_type == "timeout":
+            if result.error_type == "timeout" or result.return_code == 137:
                 return self._measured(
                     0.0, VERIFIER_TIMEOUT_KIND, f"test.sh exceeded [verifier].timeout_sec={settings.timeout_sec}"
                 )
