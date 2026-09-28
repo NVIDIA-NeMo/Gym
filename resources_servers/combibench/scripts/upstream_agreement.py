@@ -35,9 +35,9 @@ nothing left to explain, rescore the same rollouts through
 ``normalize_trailing_whitespace: false``, and pass that file as
 ``--rescore-with``.
 
-Needs the two dependencies upstream's modules import that Gym does not ship:
+Needs the dependencies upstream's modules import that Gym does not ship:
 
-    uv pip install loguru strenum
+    uv pip install loguru strenum tenacity tqdm
 
     python resources_servers/combibench/scripts/upstream_agreement.py \
         --rollouts results/combibench/rollouts.jsonl \
@@ -54,7 +54,7 @@ import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 # _text_of is deliberately the server's own reader: if it and this script
 # disagreed about which part of the response is the model's answer, the
@@ -92,12 +92,42 @@ def import_upstream(root: Path):
         from evaluation.client.lean_client import Lean4Client
         from evaluation.verifier.one_stage_verify import one_stage_verify
     except ModuleNotFoundError as exc:
-        if exc.name in {"loguru", "strenum"}:
+        if exc.name in {"loguru", "strenum", "tenacity", "tqdm"}:
             raise SystemExit(
-                f"upstream's modules import {exc.name}; install it first: uv pip install loguru strenum"
+                f"upstream's modules import {exc.name}; install it first: uv pip install loguru strenum tenacity tqdm"
             ) from exc
         raise
     return Lean4Client, one_stage_verify
+
+
+def compat_client(lean4_client_cls, url: str, api_key: Optional[str]):
+    """Upstream's client, with the one transport-level fix it needs to run at all.
+
+    ``evaluation/client/lean_client.py::verify`` reads ``res["error"]`` by
+    subscript. Kimina at the pinned commit omits that key entirely when there
+    was no error, so the read raises ``KeyError``, upstream's blanket
+    ``except Exception`` swallows it, and *every* submission that reaches the
+    compile stage is reported as a failed proof -- including proofs that
+    compile cleanly. Upstream was written against an older server that always
+    sent ``"error": null``.
+
+    Filling the absent key restores the reply shape upstream expects. This
+    touches the transport only: no scoring rule, regex, threshold or verdict of
+    upstream's is modified, and a genuine error still arrives as one. Without
+    it the comparison would measure that incompatibility rather than whether
+    the two harnesses agree. (This server's own client reads the field with
+    ``.get``, which is why it is unaffected.)
+    """
+
+    class ErrorKeyCompatClient(lean4_client_cls):
+        def verify(self, codes, timeout, infotree_type=None):
+            body = super().verify(codes, timeout, infotree_type)
+            for result in (body or {}).get("results", []):
+                if isinstance(result, dict):
+                    result.setdefault("error", None)
+            return body
+
+    return ErrorKeyCompatClient(url, api_key=api_key)
 
 
 def model_text(row: dict) -> str:
@@ -144,7 +174,7 @@ def main() -> None:
     for index, row in enumerate(source):
         gym_verdicts[row_key(row, index)] = row
 
-    client = Lean4Client(args.lean_server_url, api_key=args.lean_server_api_key)
+    client = compat_client(Lean4Client, args.lean_server_url, args.lean_server_api_key)
 
     def one(item: tuple[int, dict]) -> tuple[str, dict[str, Any]]:
         index, row = item
