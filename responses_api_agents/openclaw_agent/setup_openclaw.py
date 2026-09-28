@@ -29,6 +29,12 @@ environment variables:
 * ``OPENCLAW_VERSION`` - npm version spec of the ``openclaw`` package.
 * ``OPENCLAW_NODE_VERSION`` - Node.js version downloaded when ``npm`` is absent.
 
+Installed runtimes are validated before reuse: an ``openclaw`` already on
+``PATH`` is accepted only when it reports the requested version, and a Node
+toolchain (local cache or system ``npm``) is accepted only when its ``node``
+satisfies the ``engines.node`` range of the ``openclaw`` release being pinned.
+Otherwise the incompatible artifact is replaced.
+
 Examples:
     Install the pinned default and make it importable by the agent::
 
@@ -53,6 +59,7 @@ import ctypes
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -84,6 +91,12 @@ _NPM_INSTALL_ATTEMPTS = 3
 _LOCAL_PREFIX = Path(__file__).parent / ".openclaw_node"
 _USER_LOCAL_BIN = Path.home() / ".local" / "bin"
 
+# `openclaw` declares this `engines.node` range (e.g. 2026.6.11 declared
+# ">=22.19.0"). It encodes every engine constraint the installer must honour, so
+# when upstream changes it this constant — not a parsed node version — decides
+# whether an existing runtime is reusable.
+OPENCLAW_ENGINES_NODE = ">=24.16.0 <25 || >=26.1.0"
+
 #: ``sys.platform`` value -> the OS token nodejs.org uses in its archive names.
 _NODE_OS = {"linux": "linux", "darwin": "darwin", "win32": "win", "cygwin": "win"}
 
@@ -103,6 +116,87 @@ def resolve_openclaw_version(version: str | None = None) -> str:
 def resolve_node_version() -> str:
     """Return the Node.js version to download, honouring ``OPENCLAW_NODE_VERSION``."""
     return os.environ.get(NODE_VERSION_ENV) or DEFAULT_NODE_VERSION
+
+
+def _parse_version(version: str) -> tuple[int, ...]:
+    """Return the numeric ``(major[, minor[, patch]])`` prefix of *version*.
+
+    Accepts partial versions (``24``, ``24.16``) and ignores prerelease/build
+    suffixes (``24.21.0-rc.1``); npm range logic only needs the numeric prefix.
+    """
+    match = re.match(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?", version.strip().lstrip("v"))
+    if match is None:
+        raise ValueError(f"unparseable version {version!r}")
+    return tuple(int(part) for part in match.groups(default="0") if part is not None)
+
+
+def _range_comparator(op: str, operand: str, actual: tuple[int, int, int]) -> bool:
+    """Evaluate one npm range primitive (``>=X.Y.Z``, ``<X``, …) against *actual*."""
+    wanted = _parse_version(operand)
+    return {
+        ">=": actual >= wanted,
+        ">": actual > wanted,
+        "<=": actual <= wanted,
+        "<": actual < wanted,
+        "=": actual == wanted,
+    }[op]
+
+
+#: npm range primitives, longest operator first so ``>=`` is not read as ``>``.
+_RANGE_PRIMITIVE = re.compile(r"^(>=|<=|>|<|=|\^|~)?v?(\d+(?:\.\d+){0,2})")
+
+
+def _satisfies_range(node_version: str, node_range: str) -> bool:
+    """Return whether *node_version* satisfies the npm *node_range*.
+
+    Supports the constructs ``openclaw`` actually publishes — ``||``,
+    whitespace-AND, and ``>=``/``<``/``=`` comparators with partial operands.
+    npm pads a partial operand differently by comparison: ``>=24`` means
+    ``>=24.0.0`` while ``<24`` means ``<24.0.0``, so both are padded to the full
+    triple; ``^``/``~``/``x`` wildcards keep only the precision the operand
+    states, which is all coarse ranges like ``>=22`` need.
+    """
+    actual = _parse_version(node_version)
+    for alternative in node_range.split("||"):
+        if all(_primitive_matches(primitive, actual) for primitive in alternative.split()):
+            return True
+    return False
+
+
+def _primitive_matches(primitive: str, actual: tuple[int, int, int]) -> bool:
+    """Evaluate one npm range primitive against the actual version triple."""
+    match = _RANGE_PRIMITIVE.match(primitive)
+    if match is None:
+        raise ValueError(f"unsupported npm range primitive {primitive!r}")
+    op, operand = match.groups()
+    # Truncate at an x/X/* wildcard component; whatever remains is the
+    # precision the operand actually states ("22.x" == "22").
+    operand = re.split(r"[xX*]", operand, maxsplit=1)[0].rstrip(".")
+    if not operand:
+        return True
+    parts = [int(piece) for piece in operand.split(".")]
+
+    if op in (None, "^", "~"):
+        # Wildcard-ish: only the stated precision constrains.
+        return actual[: len(parts)] == tuple(parts)
+    padded = (parts + [0, 0, 0])[:3]
+    return _range_comparator(op, ".".join(map(str, padded)), actual)
+
+
+def _node_reported_version(node_bin: str) -> str | None:
+    """Return the version *node_bin* prints, or ``None`` when it fails to run.
+
+    A corrupt or half-extracted cached toolchain (e.g. one unpacked for a
+    different architecture) exits non-zero; treat that as "not usable" rather
+    than crashing startup.
+    """
+    try:
+        completed = subprocess.run([node_bin, "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip().lstrip("v") or None
 
 
 #: ``IsWow64Process2`` native-machine codes (IMAGE_FILE_MACHINE_*) we can map.
@@ -154,9 +248,7 @@ def _windows_machine() -> str:
 
         process_machine = wintypes.USHORT()
         native_machine = wintypes.USHORT()
-        ok = is_wow64_process2(
-            get_current_process(), ctypes.byref(process_machine), ctypes.byref(native_machine)
-        )
+        ok = is_wow64_process2(get_current_process(), ctypes.byref(process_machine), ctypes.byref(native_machine))
         if ok:
             return {
                 _IMAGE_FILE_MACHINE_ARM64: "ARM64",
@@ -284,10 +376,27 @@ def _flatten_extracted_node(prefix: Path) -> None:
 
 
 def _install_node_locally(node_version: str) -> Path:
-    """Unpack a private Node.js toolchain and return the directory holding ``node``."""
+    """Unpack a private Node.js toolchain and return the directory holding ``node``.
+
+    A cached toolchain is only reused when its ``node`` actually runs and
+    reports *node_version*; anything else (a leftover from an older pin or a
+    corrupt partial extraction) is wiped and re-provisioned so the runtime
+    always matches the resolved request.
+    """
     bin_dir = _node_bin_dir(_LOCAL_PREFIX)
-    if shutil.which("node", path=str(bin_dir)):
-        return bin_dir
+    cached = shutil.which("node", path=str(bin_dir))
+    if cached is not None:
+        reported = _node_reported_version(cached)
+        if reported == node_version:
+            LOG.info("reusing cached Node.js %s in %s", node_version, _LOCAL_PREFIX)
+            return bin_dir
+        LOG.info(
+            "cached Node.js toolchain reports %s but %s is requested; re-provisioning %s",
+            reported or "nothing (corrupt)",
+            node_version,
+            _LOCAL_PREFIX,
+        )
+        shutil.rmtree(_LOCAL_PREFIX)
 
     _LOCAL_PREFIX.mkdir(parents=True, exist_ok=True)
     url = _node_dist_url(node_version)
@@ -303,11 +412,27 @@ def _install_node_locally(node_version: str) -> Path:
 
 
 def _ensure_npm() -> str:
-    """Return a usable ``npm``, provisioning a local Node.js toolchain if needed."""
+    """Return a usable ``npm`` whose ``node`` satisfies OpenClaw's engine range.
+
+    A system ``npm`` is only reused when the ``node`` beside it satisfies
+    ``OPENCLAW_ENGINES_NODE``; anything outside the range (an older runtime,
+    or a newer major OpenClaw does not support yet) is ignored and a private
+    toolchain is provisioned instead, so the ``npm install -g`` below cannot
+    silently run against a runtime OpenClaw refuses to start on.
+    """
     npm = shutil.which("npm")
     if npm:
-        LOG.info("using system npm (%s)", npm)
-        return npm
+        node_version = _node_on_path()
+        if node_version is None or _satisfies_range(node_version, OPENCLAW_ENGINES_NODE):
+            LOG.info("using system npm (%s), node %s", npm, node_version or "unknown")
+            return npm
+        LOG.info(
+            "system npm (%s) runs node %s, which does not satisfy openclaw's engines.node %r; "
+            "provisioning a private Node.js toolchain",
+            npm,
+            node_version,
+            OPENCLAW_ENGINES_NODE,
+        )
 
     node_version = resolve_node_version()
     LOG.info("npm not found; installing local Node.js %s", node_version)
@@ -318,6 +443,50 @@ def _ensure_npm() -> str:
     if not npm:
         raise RuntimeError(f"npm not found after local Node.js install in {bin_dir}")
     return npm
+
+
+def _node_on_path() -> str | None:
+    """Return the reported version of the ``node`` first on ``PATH``, if any."""
+    found = shutil.which("node")
+    return _node_reported_version(found) if found else None
+
+
+def _openclaw_reported_version(openclaw_bin: str) -> str | None:
+    """Return the version *openclaw_bin* prints, or ``None`` when it fails.
+
+    The launcher may be a shim whose ``node`` is unusable (the exact failure
+    this module exists to fix), so a non-zero exit is treated the same as an
+    unknown version: not acceptable evidence of a compatible install.
+    """
+    try:
+        completed = subprocess.run([openclaw_bin, "--version"], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    match = re.search(r"(\d+(?:\.\d+)+)", completed.stdout)
+    return match.group(1) if match else None
+
+
+def _installed_openclaw_matches(openclaw_bin: str, requested: str) -> bool:
+    """Return whether *openclaw_bin* reports the *requested* ``openclaw`` version.
+
+    npm specs (``^2026.9.0``, ``2026.9``) are compared at the precision the
+    requested spec states, mirroring npm's own resolution semantics.
+    """
+    reported = _openclaw_reported_version(openclaw_bin)
+    if reported is None:
+        return False
+    requested_match = re.match(r"[\^~>=< ]*v?(\d+(?:\.\d+){0,2})", requested)
+    if requested_match is None:
+        return False
+    precision = len(requested_match.group(1).split("."))
+    try:
+        reported_parts = _parse_version(reported)
+        requested_parts = _parse_version(requested_match.group(1))
+    except ValueError:
+        return False
+    return reported_parts[:precision] == requested_parts[:precision]
 
 
 def _expose_installed_openclaw(npm_bin: str) -> str | None:
@@ -333,7 +502,13 @@ def _expose_installed_openclaw(npm_bin: str) -> str | None:
 
 
 def ensure_openclaw(version: str | None = None) -> None:
-    """Ensure ``openclaw`` is on ``PATH``, installing it via npm if necessary.
+    """Ensure the requested ``openclaw`` version is on ``PATH``.
+
+    An existing install is only accepted when ``openclaw --version`` reports
+    the resolved version, so changing ``OPENCLAW_VERSION`` (or the config pin)
+    takes effect instead of silently keeping whatever was installed earlier.
+    When the version differs — or the existing launcher fails to report one at
+    all — the requested release is installed over it via npm.
 
     Args:
         version: npm version spec to pin. Overridden by ``OPENCLAW_VERSION`` and
@@ -343,11 +518,18 @@ def ensure_openclaw(version: str | None = None) -> None:
         RuntimeError: the install reported success but ``openclaw`` is still not
             resolvable, or no ``npm`` could be provisioned.
     """
-    if _openclaw_on_path() or _adopt_user_local_bin():
+    requested = resolve_openclaw_version(version)
+    existing = _openclaw_on_path()
+    if existing is None and _adopt_user_local_bin():
+        existing = _openclaw_on_path()
+    if existing and _installed_openclaw_matches(existing, requested):
+        LOG.info("openclaw %s already installed at %s", requested, existing)
         return
+    if existing:
+        LOG.info("openclaw at %s does not report the requested version %s; reinstalling", existing, requested)
 
     npm = _ensure_npm()
-    _npm_install(npm, resolve_openclaw_version(version))
+    _npm_install(npm, requested)
 
     found = _expose_installed_openclaw(npm)
     if not found:

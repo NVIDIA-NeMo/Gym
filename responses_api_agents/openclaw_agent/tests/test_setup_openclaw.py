@@ -92,8 +92,12 @@ class _Kernel32WithoutIsWow64Process2:
 
 
 def _patch_kernel32(monkeypatch, kernel32) -> None:
-    """Point ``setup_openclaw.ctypes.windll.kernel32`` at a test double."""
-    monkeypatch.setattr(setup_openclaw.ctypes, "windll", _FakeWindll(kernel32))
+    """Point ``setup_openclaw.ctypes.windll.kernel32`` at a test double.
+
+    ``ctypes.windll`` only exists on Windows; give non-Windows interpreters a
+    stand-in attribute so the same test runs on both.
+    """
+    monkeypatch.setattr(setup_openclaw.ctypes, "windll", _FakeWindll(kernel32), raising=False)
 
 
 class TestNodeDistUrl:
@@ -163,6 +167,9 @@ class TestWindowsMachine:
         """A valid-but-unmapped kernel answer is authoritative truth we cannot
         translate; falling back to platform.machine() (the lying primitive) would
         be worse than surfacing the gap, so the caller sees the actionable error."""
+        # sys.platform only (not the fake_platform fixture, which would replace
+        # _windows_machine and bypass the kernel answer entirely).
+        monkeypatch.setattr(setup_openclaw.sys, "platform", "win32")
         monkeypatch.setattr(setup_openclaw.platform, "machine", lambda: "AMD64")
         _patch_kernel32(monkeypatch, _FakeKernel32(native_machine=0xFFFF))
         with pytest.raises(RuntimeError, match="architecture"):
@@ -270,3 +277,292 @@ class TestResolveVersions:
         """openclaw 2026.9.4 declares engines.node '>=24.16.0 <25 || >=26.1.0'."""
         major, minor, _ = (int(p) for p in setup_openclaw.DEFAULT_NODE_VERSION.split("."))
         assert (major == 24 and minor >= 16) or (major, minor) >= (26, 1)
+
+
+class TestSatisfiesRange:
+    """The npm engine-range matcher, against operands openclaw actually publishes."""
+
+    @pytest.mark.parametrize(
+        ("node_version", "expected"),
+        [
+            ("24.21.0", True),  # the default pin
+            ("24.16.0", True),  # inclusive lower bound
+            ("24.15.9", False),  # just below the 24-line bound
+            ("25.9.0", False),  # between the two alternatives (25 has no build)
+            ("22.15.0", False),  # the stale cache case
+            ("26.1.0", True),  # second alternative's lower bound
+            ("26.0.9", False),
+        ],
+    )
+    def test_openclaw_engine_range(self, node_version, expected):
+        assert setup_openclaw._satisfies_range(node_version, setup_openclaw.OPENCLAW_ENGINES_NODE) is expected
+
+    def test_old_release_range(self):
+        """openclaw 2026.6.11 declared '>=22.19.0' — 24.21.0 must still satisfy it."""
+        assert setup_openclaw._satisfies_range("24.21.0", ">=22.19.0")
+        assert not setup_openclaw._satisfies_range("22.15.0", ">=22.19.0")
+
+    def test_leading_v_is_accepted(self):
+        assert setup_openclaw._satisfies_range("v24.21.0", ">=22.19.0")
+
+    def test_prerelease_suffix_is_ignored(self):
+        assert setup_openclaw._satisfies_range("24.21.0-rc.1", ">=22.19.0")
+
+    def test_wildcard_operand(self):
+        assert setup_openclaw._satisfies_range("22.9.0", ">=22.x")
+        assert not setup_openclaw._satisfies_range("21.9.0", ">=22.x")
+
+
+class _FakeExecutables:
+    """Stands in for shutil.which plus version probes of the found binaries.
+
+    ``install(cmd, path, version)`` puts a binary at *path* whose ``--version``
+    prints *version* (or exits non-zero when *version* is ``None``, i.e. an
+    unusable binary). ``install_missing(cmd)`` hides it entirely.
+    """
+
+    def __init__(self, monkeypatch):
+        self._paths: dict[str, tuple[str, str | None] | None] = {}
+        self._versions: dict[str, str] = {}
+        self.version_calls: list[str] = []
+        monkeypatch.setattr(setup_openclaw.shutil, "which", self._which)
+        monkeypatch.setattr(setup_openclaw.subprocess, "run", self._run)
+
+    def _which(self, cmd, path=None):
+        entry = self._paths.get(cmd)
+        if not entry:
+            return None
+        if path is not None and not entry[0].startswith(str(path)):
+            return None
+        return entry[0]
+
+    def _run(self, cmd, **kwargs):
+        self.version_calls.append(cmd[0])
+        version = self._versions.get(cmd[0]) or self._versions.get(cmd[0].rsplit("/", 1)[-1])
+
+        class _Completed:
+            if version is None:
+                returncode = 1
+                stdout = ""
+                stderr = "cannot execute"
+            else:
+                returncode = 0
+                stdout = f"v{version}\n" if cmd[0].endswith("/node") else f"{version}\n"
+                stderr = ""
+
+        return _Completed()
+
+    def install(self, cmd: str, path: str, version: str | None) -> None:
+        """Register a binary at *path* whose ``--version`` prints *version*.
+
+        ``version=None`` simulates an unusable binary (non-zero exit).
+        """
+        self._paths[cmd] = (path, version)
+        if version is not None:
+            self._versions[path] = version
+            self._versions.setdefault(path.rsplit("/", 1)[-1], version)
+
+    def install_missing(self, cmd: str) -> None:
+        """Hide *cmd* from ``which`` entirely."""
+        self._paths[cmd] = None
+
+
+class TestEnsureNpmValidatesNode:
+    """Review comment 1: system npm must not be reused against an incompatible node."""
+
+    def test_incompatible_system_node_is_bypassed(self, monkeypatch, tmp_path):
+        """Node 25 is outside both range alternatives; system npm must be bypassed."""
+        fake = _FakeExecutables(monkeypatch)
+        fake.install("node", str(tmp_path / "node"), "25.9.0")
+        fake.install("npm", "/usr/bin/npm", "10.9.0")
+        monkeypatch.setattr(setup_openclaw, "_install_node_locally", lambda v: tmp_path / "local" / "bin")
+        monkeypatch.setattr(setup_openclaw, "_prepend_path", lambda _dir: None)
+
+        # After the local toolchain is prepended, PATH resolution picks it.
+        fake.install("npm", str(tmp_path / "local" / "bin" / "npm"), "10.9.0")
+
+        assert setup_openclaw._ensure_npm() == str(tmp_path / "local" / "bin" / "npm")
+
+    def test_compatible_system_node_is_reused(self, monkeypatch, tmp_path):
+        fake = _FakeExecutables(monkeypatch)
+        fake.install("node", str(tmp_path / "node"), "24.21.0")
+        fake.install("npm", "/usr/bin/npm", "10.9.0")
+
+        assert setup_openclaw._ensure_npm() == "/usr/bin/npm"
+
+    def test_system_node_that_fails_to_run_is_bypassed(self, monkeypatch, tmp_path):
+        """A corrupt system node reports no version; treat it as incompatible."""
+        fake = _FakeExecutables(monkeypatch)
+        fake.install("node", str(tmp_path / "node"), None)
+        fake.install("npm", "/usr/bin/npm", "10.9.0")
+        monkeypatch.setattr(setup_openclaw, "_install_node_locally", lambda v: tmp_path / "local" / "bin")
+        monkeypatch.setattr(setup_openclaw, "_prepend_path", lambda _dir: None)
+        fake.install("npm", str(tmp_path / "local" / "bin" / "npm"), "10.9.0")
+
+        assert setup_openclaw._ensure_npm() == str(tmp_path / "local" / "bin" / "npm")
+
+    def test_no_system_node_and_no_system_npm_provisions_locally(self, monkeypatch, tmp_path):
+        fake = _FakeExecutables(monkeypatch)
+        fake.install_missing("node")
+        fake.install_missing("npm")
+        monkeypatch.setattr(setup_openclaw, "_install_node_locally", lambda v: tmp_path / "local" / "bin")
+        monkeypatch.setattr(setup_openclaw, "_prepend_path", lambda _dir: None)
+        fake.install("npm", str(tmp_path / "local" / "bin" / "npm"), "10.9.0")
+
+        assert setup_openclaw._ensure_npm() == str(tmp_path / "local" / "bin" / "npm")
+
+
+class TestInstallNodeLocallyValidatesCache:
+    """Review comment 1: a cached toolchain must be replaced when incompatible."""
+
+    def _write_cached_node(self, prefix, version_script):
+        bin_dir = prefix / "bin"
+        bin_dir.mkdir(parents=True)
+        node = bin_dir / "node"
+        node.write_text(version_script)
+        node.chmod(0o755)
+        return node
+
+    def test_matching_cache_is_reused(self, monkeypatch, tmp_path):
+        requested = setup_openclaw.DEFAULT_NODE_VERSION
+        self._write_cached_node(tmp_path, f"#!/bin/sh\necho v{requested}\n")
+        monkeypatch.setattr(setup_openclaw, "_LOCAL_PREFIX", tmp_path)
+
+        assert setup_openclaw._install_node_locally(requested) == tmp_path / "bin"
+        # Nothing was re-downloaded: the cache survived intact.
+        assert (tmp_path / "bin" / "node").read_text().startswith("#!/bin/sh")
+
+    def test_stale_cache_is_replaced(self, monkeypatch, tmp_path):
+        """A cache from an older pin (22.15.0) must not survive a 24.21.0 request."""
+        self._write_cached_node(tmp_path, "#!/bin/sh\necho v22.15.0\n")
+        monkeypatch.setattr(setup_openclaw, "_LOCAL_PREFIX", tmp_path)
+
+        downloaded: list[str] = []
+
+        def fake_download(url, dest):
+            downloaded.append(url)
+            # Write an archive whose layout _flatten_extracted_node accepts.
+            with tarfile.open(dest, "w:xz") as tf:
+                import io
+
+                info = tarfile.TarInfo(f"node-v{setup_openclaw.DEFAULT_NODE_VERSION}-linux-x64/bin/node")
+                payload = b"#!/bin/sh\n"
+                info.size = len(payload)
+                tf.addfile(info, io.BytesIO(payload))
+
+        monkeypatch.setattr(setup_openclaw, "_download_node_archive", fake_download)
+
+        setup_openclaw._install_node_locally(setup_openclaw.DEFAULT_NODE_VERSION)
+
+        assert downloaded, "the stale cache must be wiped and re-provisioned"
+        assert (tmp_path / "bin" / "node").read_bytes() == b"#!/bin/sh\n"
+
+    def test_corrupt_cache_is_replaced(self, monkeypatch, tmp_path):
+        """A cache whose node exits non-zero (e.g. wrong-arch binary) is unusable."""
+        self._write_cached_node(tmp_path, "#!/bin/sh\nexit 1\n")
+        monkeypatch.setattr(setup_openclaw, "_LOCAL_PREFIX", tmp_path)
+        monkeypatch.setattr(setup_openclaw, "_download_node_archive", lambda url, dest: None)
+
+        # The download/extract pair is faked end-to-end: after "extraction" the
+        # prefix holds a working node of the requested version.
+        def fake_extract(archive, prefix):
+            nested = prefix / f"node-v{setup_openclaw.DEFAULT_NODE_VERSION}-linux-x64"
+            (nested / "bin").mkdir(parents=True, exist_ok=True)
+            fresh = nested / "bin" / "node"
+            fresh.write_text("#!/bin/sh\necho v24.21.0\n")
+            fresh.chmod(0o755)
+
+        monkeypatch.setattr(setup_openclaw, "_extract_node_archive", fake_extract)
+
+        setup_openclaw._install_node_locally(setup_openclaw.DEFAULT_NODE_VERSION)
+
+        # The prefix was wiped and re-provisioned: the launcher at bin/node now
+        # comes from the fresh extraction, not the corrupt original.
+        assert (tmp_path / "bin" / "node").read_text() == "#!/bin/sh\necho v24.21.0\n"
+
+    def test_missing_cache_is_provisioned(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(setup_openclaw, "_LOCAL_PREFIX", tmp_path)
+        monkeypatch.setattr(setup_openclaw, "_download_node_archive", lambda url, dest: None)
+
+        def fake_extract(archive, prefix):
+            nested = prefix / f"node-v{setup_openclaw.DEFAULT_NODE_VERSION}-linux-x64"
+            (nested / "bin").mkdir(parents=True)
+            fresh = nested / "bin" / "node"
+            fresh.write_text("#!/bin/sh\necho v24.21.0\n")
+            fresh.chmod(0o755)
+
+        monkeypatch.setattr(setup_openclaw, "_extract_node_archive", fake_extract)
+
+        assert setup_openclaw._install_node_locally(setup_openclaw.DEFAULT_NODE_VERSION) == tmp_path / "bin"
+
+
+class TestEnsureOpenclawRespectsRequestedVersion:
+    """Review comment 2: an existing install must not shadow a version override."""
+
+    def _fake_openclaw(self, monkeypatch, reported: str | None, npm: str = "/usr/bin/npm"):
+        fake = _FakeExecutables(monkeypatch)
+        fake.install("openclaw", "/usr/local/bin/openclaw", reported)
+        fake.install("npm", npm, "10.9.0")
+        return fake
+
+    def test_matching_existing_install_is_kept(self, monkeypatch):
+        self._fake_openclaw(monkeypatch, "2026.9.4")
+        installed: list[str] = []
+
+        def fake_install(npm, version):
+            installed.append(version)
+
+        monkeypatch.setattr(setup_openclaw, "_npm_install", fake_install)
+
+        setup_openclaw.ensure_openclaw("2026.9.4")
+        assert installed == []
+
+    def test_version_override_reinstalls_old_release(self, monkeypatch):
+        """An override must take effect even when openclaw is already installed."""
+        self._fake_openclaw(monkeypatch, "2026.6.11")
+        installed: list[str] = []
+        monkeypatch.setattr(setup_openclaw, "_npm_install", lambda npm, version: installed.append(version))
+        monkeypatch.setattr(setup_openclaw, "_expose_installed_openclaw", lambda npm: "/usr/local/bin/openclaw")
+
+        setup_openclaw.ensure_openclaw()
+        assert installed == [setup_openclaw.DEFAULT_OPENCLAW_VERSION]
+
+    def test_env_override_beats_existing_install(self, monkeypatch):
+        self._fake_openclaw(monkeypatch, "2026.9.4")
+        installed: list[str] = []
+        monkeypatch.setenv(setup_openclaw.OPENCLAW_VERSION_ENV, "2026.8.1")
+        monkeypatch.setattr(setup_openclaw, "_npm_install", lambda npm, version: installed.append(version))
+        monkeypatch.setattr(setup_openclaw, "_expose_installed_openclaw", lambda npm: "/usr/local/bin/openclaw")
+
+        setup_openclaw.ensure_openclaw("2026.9.4")
+        assert installed == ["2026.8.1"]
+
+    def test_unreporting_launcher_is_reinstalled(self, monkeypatch):
+        """A shim whose node cannot run reports no version — not acceptable."""
+        self._fake_openclaw(monkeypatch, None)
+        installed: list[str] = []
+        monkeypatch.setattr(setup_openclaw, "_npm_install", lambda npm, version: installed.append(version))
+        monkeypatch.setattr(setup_openclaw, "_expose_installed_openclaw", lambda npm: "/usr/local/bin/openclaw")
+
+        setup_openclaw.ensure_openclaw()
+        assert installed == [setup_openclaw.DEFAULT_OPENCLAW_VERSION]
+
+    def test_partial_spec_matches_at_stated_precision(self, monkeypatch):
+        """Requesting '2026.9' must accept a reported 2026.9.4 install."""
+        self._fake_openclaw(monkeypatch, "2026.9.4")
+        installed: list[str] = []
+        monkeypatch.setattr(setup_openclaw, "_npm_install", lambda npm, version: installed.append(version))
+
+        setup_openclaw.ensure_openclaw("2026.9")
+        assert installed == []
+
+    def test_no_existing_install_installs_normally(self, monkeypatch):
+        fake = _FakeExecutables(monkeypatch)
+        fake.install("openclaw", "/usr/local/bin/openclaw", None)
+        fake.install("npm", "/usr/bin/npm", "10.9.0")
+        installed: list[str] = []
+        monkeypatch.setattr(setup_openclaw, "_npm_install", lambda npm, version: installed.append(version))
+        monkeypatch.setattr(setup_openclaw, "_expose_installed_openclaw", lambda npm: "/usr/local/bin/openclaw")
+
+        setup_openclaw.ensure_openclaw()
+        assert installed == [setup_openclaw.DEFAULT_OPENCLAW_VERSION]
