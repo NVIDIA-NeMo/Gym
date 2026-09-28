@@ -189,11 +189,21 @@ if (( SLURM_PROCID == 0 )); then
             --vllm-pd-disaggregation
         )
         for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
-            router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
+            worker_ip=\$(getent ahostsv4 "\${nodes[i]}" | awk 'NR == 1 {print \$1}')
+            if [[ -z "\$worker_ip" ]]; then
+                echo "Cannot resolve worker \${nodes[i]}" >&2
+                exit 1
+            fi
+            router_args+=(--prefill "http://\$worker_ip:$WORKER_SERVER_PORT")
         done
         for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
             node_idx=\$(( $NUM_PREFILL_NODES + i ))
-            router_args+=(--decode "http://\${nodes[node_idx]}:$WORKER_SERVER_PORT")
+            worker_ip=\$(getent ahostsv4 "\${nodes[node_idx]}" | awk 'NR == 1 {print \$1}')
+            if [[ -z "\$worker_ip" ]]; then
+                echo "Cannot resolve worker \${nodes[node_idx]}" >&2
+                exit 1
+            fi
+            router_args+=(--decode "http://\$worker_ip:$WORKER_SERVER_PORT")
         done
     else
         router_args+=(--policy $ROUTER_POLICY --worker-urls)
