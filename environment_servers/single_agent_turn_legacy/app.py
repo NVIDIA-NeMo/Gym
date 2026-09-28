@@ -43,6 +43,7 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
         app.post("/run")(self.run_legacy)
+        app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
     async def run_legacy(self, row: dict[str, Any]) -> dict[str, Any]:
