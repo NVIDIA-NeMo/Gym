@@ -160,6 +160,8 @@ class TestVerify:
         r = verify(make_server(), cands(GOLD), meta)
         assert r.status == NMRArenaStatus.BAD_METADATA.value
         assert r.reward == 0.0 and r.harness_failure == 1.0 and r.failure_reason
+        # The zero is not the policy's doing, so it must not be a valid measurement.
+        assert r.mask_sample is True
         assert r.tanimoto_top1 is None
 
     def test_wrong_types_in_provenance_fields_cost_the_label_not_the_score(self) -> None:

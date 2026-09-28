@@ -230,6 +230,9 @@ def _response(
         "response_incomplete": _response_incomplete(body),
         "harness_failure": 1.0 if status in HARNESS_FAULTS else 0.0,
         "failure_reason": HARNESS_FAULTS.get(status),
+        # The reward of a harness fault is not a measurement of the policy, so it must not
+        # be averaged into mean/reward; the profiler partitions on this field.
+        "mask_sample": status in HARNESS_FAULTS,
     }
     fields = set(NMRArenaVerifyResponse.model_fields)
     # The echoed request is model-controlled too: sanitise it before it is re-encoded.
