@@ -203,6 +203,17 @@ class TestTaskDataValidator:
         assert v.report.error_rows == 1
         assert "task_input.task_data must be an object, got str" in v.report.errors[0]
 
+    @pytest.mark.parametrize("task_data", [[], "", 0, False, None])
+    def test_falsey_non_object_task_data_is_an_invalid_row(self, task_data):
+        v = self._validator()
+        v.validate_row(0, {"task_id": {"taskset": "t", "task_id": "0"}, "task_input": {"task_data": task_data}})
+        assert v.report.error_rows == 1
+
+    def test_missing_task_data_is_an_invalid_row(self):
+        v = self._validator()
+        v.validate_row(0, {"task_id": {"taskset": "t", "task_id": "0"}, "task_input": {"responses_create_params": {}}})
+        assert v.report.error_rows == 1
+
     def test_validate_jsonl_rows_wrapper(self):
         from pydantic import TypeAdapter
 

@@ -231,7 +231,7 @@ class TaskDataValidator:
         task_input = row.get("task_input")
         materialized = isinstance(row.get("task_id"), Mapping) and isinstance(task_input, Mapping)
         if materialized:
-            task_data = task_input.get("task_data") or {}
+            task_data = task_input.get("task_data")
             if not isinstance(task_data, Mapping):
                 self.report.error_rows += 1
                 if len(self.report.errors) < TaskDataValidationReport.MAX_RECORDED_ERRORS:
