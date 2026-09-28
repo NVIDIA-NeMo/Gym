@@ -15,6 +15,7 @@
 
 """The Lean client must turn every transport problem into a harness fault, never an exception."""
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -92,3 +93,49 @@ class TestKiminaLeanClient:
         _patch_request(monkeypatch, _FakeResponse(200, body))
         result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
         assert result.transport_failure is False and "timed out" in result.error
+
+    async def test_a_timed_out_compile_is_not_retried(self, monkeypatch) -> None:
+        """Three tries cost three REPL jobs and 3x the wall clock without changing the verdict."""
+        calls = _patch_request(monkeypatch, _FakeResponse(200, {"results": [{"custom_id": "x", "response": {}}]}))
+        await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert calls[0]["_max_connection_retries"] == 1
+
+
+class TestConcurrencyBound:
+    async def test_in_flight_requests_are_capped(self, monkeypatch) -> None:
+        """Rollout fan-out is unbounded; the Lean server runs LEAN_SERVER_MAX_REPLS at a time."""
+        in_flight = 0
+        peak = 0
+
+        async def fake_request(method, url, **kwargs):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0)
+            in_flight -= 1
+            return _FakeResponse(200, {"results": [{"custom_id": "x", "response": {}}]})
+
+        monkeypatch.setattr(lean_client, "request", fake_request)
+        client = KiminaLeanClient("http://lean:8000", max_concurrency=2)
+        await asyncio.gather(*(client.verify("code", 10) for _ in range(8)))
+        assert peak <= 2
+
+
+class TestToolchainProbe:
+    def _info(self, data: str) -> _FakeResponse:
+        return _FakeResponse(200, {"results": [{"custom_id": "x", "response": {"messages": [{"data": data}]}}]})
+
+    async def test_version_is_read_from_the_probe_and_cached(self, monkeypatch) -> None:
+        calls = _patch_request(monkeypatch, self._info('"4.24.0"'))
+        client = KiminaLeanClient("http://lean:8000")
+        assert await client.toolchain_version() == "4.24.0"
+        assert await client.toolchain_version() == "4.24.0"
+        assert len(calls) == 1
+        assert "Lean.versionString" in calls[0]["json"]["codes"][0]["proof"]
+
+    async def test_a_dead_server_is_probed_once(self, monkeypatch) -> None:
+        calls = _patch_request(monkeypatch, exc=ConnectionError("refused"))
+        client = KiminaLeanClient("http://lean:8000")
+        assert await client.toolchain_version() is None
+        assert await client.toolchain_version() is None
+        assert len(calls) == 1

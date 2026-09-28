@@ -43,7 +43,7 @@ from resources_servers.combibench.fine_eval import (
     missing_chunks,
     statement_chunks,
 )
-from resources_servers.combibench.lean_client import KiminaLeanClient
+from resources_servers.combibench.lean_client import DEFAULT_MAX_CONCURRENCY, KiminaLeanClient
 
 
 LOG = logging.getLogger(__name__)
@@ -67,10 +67,15 @@ class CombibenchStatus(str, Enum):
     LEAN_ERROR = "lean_error"  # Lean server reported a non-timeout REPL error
     # Harness faults: the model did not cause these.
     LEAN_SERVER_ERROR = "lean_server_error"
+    HEADER_TIMEOUT = "header_timeout"  # a cold REPL could not load 'import Mathlib' in time
     BAD_TASK = "bad_task"
 
 
-HARNESS_FAULTS = {CombibenchStatus.LEAN_SERVER_ERROR, CombibenchStatus.BAD_TASK}
+HARNESS_FAULTS = {
+    CombibenchStatus.LEAN_SERVER_ERROR,
+    CombibenchStatus.HEADER_TIMEOUT,
+    CombibenchStatus.BAD_TASK,
+}
 
 
 class CombibenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -89,6 +94,9 @@ class CombibenchResourcesServerConfig(BaseResourcesServerConfig):
     # See fine_eval.answer_check: elaborate the gold answer at the abbrev's
     # declared type. False reproduces upstream's unascribed check.
     answer_check_ascription: bool = True
+    # Bound on in-flight Lean calls. Rollout fan-out is unbounded, and the Lean
+    # server can only run LEAN_SERVER_MAX_REPLS (8 by default) of them at once.
+    max_concurrent_lean_requests: int = DEFAULT_MAX_CONCURRENCY
 
 
 class CombibenchRunRequest(BaseRunRequest):
@@ -111,6 +119,7 @@ class CombibenchRunRequest(BaseRunRequest):
     tag: Any = Field(default=None, description="Upstream source family: hackmath, brualdi, imo, math_competitions.")
     source: Any = Field(default=None, description="Upstream source URL where published. Provenance only.")
     split: Any = Field(default=None, description="'test' (answer withheld) or 'test_with_solution'.")
+    dataset_source: Any = Field(default=None, description="'github', 'hf' or 'synthetic': which upstream copy.")
     dataset_revision: Any = Field(default=None, description="Pinned upstream revision the row came from.")
 
 
@@ -129,6 +138,9 @@ class CombibenchVerifyResponse(CombibenchRunRequest, BaseVerifyResponse):
     lean_error: Optional[str] = None
     lean_messages: list[dict[str, Any]] = Field(default_factory=list)
     lean_time: Optional[float] = None
+    # Lean version the server actually ran, so a toolchain mismatch is visible
+    # in the rollouts rather than showing up as 100 failed proofs.
+    lean_version: Optional[str] = None
 
 
 def _text_of(body: BaseVerifyRequest) -> str:
@@ -211,12 +223,24 @@ class CombibenchVerifier:
 
         types = abbrev_types(chunks) if self.config.answer_check_ascription else None
         submission = build_submission(code, tags, body.answers, types)
+        # Probed once per process and cached; the first call also warms the REPL.
+        lean_version = await self.lean_client.toolchain_version()
         result: LeanResult = await self.lean_client.verify(submission, self.config.lean_timeout_seconds)
         status = CombibenchStatus(classify_lean_result(result))
         failure_reason = None
         if status is CombibenchStatus.LEAN_SERVER_ERROR:
             failure_reason = f"Lean server unavailable or replied malformed: {result.error}"
-        return self._respond(body, status, tags=tags, code=submission, result=result, failure_reason=failure_reason)
+        elif status is CombibenchStatus.HEADER_TIMEOUT:
+            failure_reason = f"Lean server could not load its import header in time: {result.error}"
+        return self._respond(
+            body,
+            status,
+            tags=tags,
+            code=submission,
+            result=result,
+            failure_reason=failure_reason,
+            lean_version=lean_version,
+        )
 
     def _respond(
         self,
@@ -227,6 +251,7 @@ class CombibenchVerifier:
         code: Optional[str] = None,
         result: Optional[LeanResult] = None,
         failure_reason: Optional[str] = None,
+        lean_version: Optional[str] = None,
     ) -> CombibenchVerifyResponse:
         extra = {
             "status": status.value,
@@ -236,6 +261,7 @@ class CombibenchVerifier:
             "lean_error": result.error if result else None,
             "lean_messages": _truncate_messages(result.messages) if result else [],
             "lean_time": result.time if result else None,
+            "lean_version": lean_version,
             "failure_reason": failure_reason,
         }
         payload = _clean_text({**body.model_dump(exclude=set(extra)), **extra})
@@ -249,7 +275,11 @@ class CombibenchResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
         self._verifier = CombibenchVerifier(
             self.config,
-            KiminaLeanClient(self.config.lean_server_url, self.config.lean_server_api_key),
+            KiminaLeanClient(
+                self.config.lean_server_url,
+                self.config.lean_server_api_key,
+                max_concurrency=self.config.max_concurrent_lean_requests,
+            ),
         )
 
     async def verify(self, body: CombibenchVerifyRequest) -> CombibenchVerifyResponse:
@@ -278,6 +308,9 @@ class _StubLeanClient:
         if "sorry" in code:
             return LeanResult(messages=[{"severity": "warning", "data": "declaration uses 'sorry'"}])
         return LeanResult()
+
+    async def toolchain_version(self) -> Optional[str]:
+        return None  # no Lean behind the fixture, so there is no version to report
 
 
 def _fixture_verifier() -> CombibenchVerifier:

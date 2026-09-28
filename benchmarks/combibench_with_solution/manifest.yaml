@@ -28,7 +28,7 @@ datasets:
   prompt_config: benchmarks/combibench/prompt.yaml
   num_repeats: 16
 model_server: policy_model
-canonical_split: combibench_with_solution
+canonical_split: benchmark
 standard_prompt_config: benchmarks/combibench/prompt.yaml
 adopted_from:
   source: https://github.com/MoonshotAI/CombiBench

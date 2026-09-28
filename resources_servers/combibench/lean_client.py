@@ -26,7 +26,9 @@ upstream's ``Lean4Client`` sends. All HTTP goes through Gym's shared aiohttp
 client, as the repository requires.
 """
 
+import asyncio
 import logging
+import re
 import uuid
 from typing import Any, Optional
 
@@ -43,11 +45,27 @@ LOG = logging.getLogger(__name__)
 # than cut off by the client first.
 HTTP_TIMEOUT_MARGIN_SECONDS = 30.0
 
+# The Kimina default (``LEAN_SERVER_MAX_REPLS``). Rollout fan-out is unbounded,
+# so without a matching bound here every extra request is a connection queued
+# against a server that can only run this many REPLs anyway.
+DEFAULT_MAX_CONCURRENCY = 8
+
+# Kimina exposes no version endpoint, so the toolchain is read by compiling a
+# one-line program through the same path a submission takes. The header is the
+# one submissions use, so the probe also pays the cold ``import Mathlib`` that
+# would otherwise land on the first scored rollout.
+VERSION_PROBE = "import Mathlib\n\n#eval Lean.versionString\n"
+_VERSION_RE = re.compile(r"\"([0-9]+\.[0-9]+\.[0-9]+[^\"]*)\"")
+
 
 class KiminaLeanClient:
-    def __init__(self, base_url: str, api_key: Optional[str] = None):
+    def __init__(self, base_url: str, api_key: Optional[str] = None, max_concurrency: int = DEFAULT_MAX_CONCURRENCY):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._version: Optional[str] = None
+        self._version_probed = False
+        self._version_lock = asyncio.Lock()
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
@@ -68,22 +86,59 @@ class KiminaLeanClient:
             "disable_cache": False,
         }
         try:
-            response = await request(
-                "POST",
-                f"{self.base_url}/verify",
-                json=payload,
-                headers=self._headers(),
-                timeout=ClientTimeout(total=timeout_seconds + HTTP_TIMEOUT_MARGIN_SECONDS),
-            )
-            if response.status != 200:
-                text = await response.text()
-                LOG.warning("Lean server returned HTTP %s: %s", response.status, text[:500])
-                return LeanResult(error=f"HTTP {response.status}: {text[:500]}", transport_failure=True)
-            body = await response.json()
+            async with self._semaphore:
+                response = await request(
+                    "POST",
+                    f"{self.base_url}/verify",
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=ClientTimeout(total=timeout_seconds + HTTP_TIMEOUT_MARGIN_SECONDS),
+                    # A compile that exhausts the client timeout has already cost
+                    # the server a REPL for that long. Retrying it twice more
+                    # triples the cost and cannot change the answer, so the shared
+                    # client's default of 3 tries is turned off here.
+                    _max_connection_retries=1,
+                )
+                if response.status != 200:
+                    text = await response.text()
+                    LOG.warning("Lean server returned HTTP %s: %s", response.status, text[:500])
+                    return LeanResult(error=f"HTTP {response.status}: {text[:500]}", transport_failure=True)
+                body = await response.json()
         except Exception as exc:  # network errors, timeouts, bad JSON
             LOG.warning("Lean server request failed: %r", exc)
             return LeanResult(error=f"{type(exc).__name__}: {exc}", transport_failure=True)
         return parse_verify_response(body)
+
+    async def toolchain_version(self, timeout_seconds: int = 120) -> Optional[str]:
+        """Lean version the server actually runs, probed once and cached.
+
+        A server built for another Lean version scores every row
+        ``proof_failed`` and nothing in the rollouts says why. The probe pays
+        one cold ``import`` on the first call. ``None`` means the probe itself
+        did not return a version; it is cached like a hit, so an unreachable
+        server is not re-probed once per rollout.
+        """
+        if self._version_probed:
+            return self._version
+        async with self._version_lock:
+            if self._version_probed:
+                return self._version
+            result = await self.verify(VERSION_PROBE, timeout_seconds)
+            for message in result.messages:
+                match = _VERSION_RE.search(str(message.get("data", "")))
+                if match:
+                    self._version = match.group(1)
+                    break
+            self._version_probed = True
+            if self._version is not None:
+                LOG.info("Lean server at %s reports Lean %s", self.base_url, self._version)
+            else:
+                LOG.warning(
+                    "Lean version probe returned no version (error=%r): the toolchain behind %s is unknown",
+                    result.error,
+                    self.base_url,
+                )
+        return self._version
 
 
 def parse_verify_response(body: Any) -> LeanResult:

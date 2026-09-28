@@ -13,6 +13,8 @@ combibench:
       max_code_characters: 200000
       normalize_trailing_whitespace: true
       answer_check_ascription: true
+      # Match LEAN_SERVER_MAX_REPLS on the Lean server; see README "Lean server".
+      max_concurrent_lean_requests: 8
 combibench_simple_agent:
   responses_api_agents:
     simple_agent:

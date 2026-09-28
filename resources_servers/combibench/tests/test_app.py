@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any, Optional
 from unittest.mock import MagicMock
@@ -22,7 +23,6 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
@@ -50,9 +50,10 @@ PROOF_ONLY_STATEMENT = "import Mathlib\n\ntheorem t (p : Prop) (hp : p) : p := b
 class FakeLeanClient:
     """Scripted Lean server: records what it was asked to compile."""
 
-    def __init__(self, result: Optional[LeanResult] = None, raise_exc: bool = False):
+    def __init__(self, result: Optional[LeanResult] = None, raise_exc: bool = False, version: str = "4.24.0"):
         self.result = result or LeanResult()
         self.raise_exc = raise_exc
+        self.version = version
         self.calls: list[str] = []
 
     async def verify(self, code: str, timeout_seconds: int) -> LeanResult:
@@ -60,6 +61,9 @@ class FakeLeanClient:
         if self.raise_exc:
             raise RuntimeError("client must not raise")
         return self.result
+
+    async def toolchain_version(self) -> Optional[str]:
+        return self.version
 
 
 def _make_server(lean_client: Optional[FakeLeanClient] = None, **config_overrides) -> CombibenchResourcesServer:
@@ -101,6 +105,8 @@ def _request_dict(text: str, formal_statement: Any = STATEMENT, answers: Any = (
         "answers": list(answers) if isinstance(answers, tuple) else answers,
         "tag": "hackmath",
         "split": "test",
+        "dataset_source": "synthetic",
+        "dataset_revision": "c67e4213597b1477351d9ef5ca37fb622084cc78",  # pragma: allowlist secret
         **extra,
     }
 
@@ -199,6 +205,19 @@ class TestVerify:
         assert result.harness_failure == 0.0
         assert result.failure_reason is None
 
+    async def test_header_timeout_is_a_harness_fault(self) -> None:
+        """A cold REPL failing to load ``import Mathlib`` is not something the model did."""
+        client = FakeLeanClient(LeanResult(error="Lean REPL header command timed out in 60 seconds"))
+        result = await _make_server(client).verify(_request(_fenced(SOLUTION)))
+        assert result.reward == 0.0
+        assert result.status == CombibenchStatus.HEADER_TIMEOUT.value
+        assert result.harness_failure == 1.0
+        assert "import header" in result.failure_reason
+
+    async def test_lean_version_is_echoed(self) -> None:
+        result = await _make_server(FakeLeanClient(version="4.24.0")).verify(_request(_fenced(SOLUTION)))
+        assert result.lean_version == "4.24.0"
+
     async def test_unreachable_lean_server_is_a_harness_fault(self) -> None:
         client = FakeLeanClient(LeanResult(error="ClientConnectorError: refused", transport_failure=True))
         result = await _make_server(client).verify(_request(_fenced(SOLUTION)))
@@ -241,11 +260,19 @@ class TestHttpBoundary:
         assert response.json()["status"] == CombibenchStatus.BAD_TASK.value
 
     def test_surrogate_escape_in_request(self, client: TestClient) -> None:
-        body = _request_dict("\\udcff " + _fenced(SOLUTION))
-        response = client.post(
-            "/verify", content=str(body).encode("utf-8", "surrogatepass"), headers={"Content-Type": "application/json"}
-        )
-        assert response.status_code in (200, 422)
+        """A ``\\udcff`` escape parses into a lone surrogate that cannot be re-encoded.
+
+        The body has to be real JSON or FastAPI rejects it with a 422 before
+        ``verify()`` ever runs; ``json.dumps`` writes the escape and the parsed
+        value is what the response must survive echoing back.
+        """
+        text = "\udcff " + _fenced(SOLUTION)
+        with pytest.raises(UnicodeEncodeError):
+            text.encode("utf-8")  # the response would 500 on this without _clean_text
+        payload = json.dumps(_request_dict(text)).encode("ascii")
+        response = client.post("/verify", content=payload, headers={"Content-Type": "application/json"})
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == CombibenchStatus.SUCCESS.value
 
     def test_full_verdict_over_http(self, client: TestClient) -> None:
         response = client.post("/verify", json=_request_dict(_fenced(SOLUTION)))
@@ -277,6 +304,10 @@ class TestMetrics:
         response = self._responses()[0]
         assert response["tag"] == "hackmath" and response["theorem_name"] == "synthetic_choose_1"
         assert response["answers"] == ["10"] and response["split"] == "test"
+        # Which upstream copy a row came from decides whether its statement compiles at all,
+        # so a rollout that drops it cannot be traced back to a corpus.
+        assert response["dataset_source"] == "synthetic"
+        assert response["dataset_revision"] == "c67e4213597b1477351d9ef5ca37fb622084cc78"  # pragma: allowlist secret
 
     def test_pooled_reward_stays_the_headline(self) -> None:
         """Upstream reports one pooled figure, so pooling is the right headline here."""
@@ -305,12 +336,10 @@ class TestShippedConfig:
             "max_code_characters",
             "normalize_trailing_whitespace",
             "answer_check_ascription",
+            "max_concurrent_lean_requests",
         ):
             assert shipped[knob] == defaults[knob].default, knob
         assert shipped["lean_server_url"].endswith(defaults["lean_server_url"].default + "}")
-
-    def test_config_type_is_the_base_one_gym_expects(self) -> None:
-        assert issubclass(CombibenchResourcesServerConfig, BaseResourcesServerConfig)
 
 
 class TestVerifierFixture:

@@ -191,6 +191,11 @@ class TestClassification:
     def test_server_timeout_is_charged_to_the_model(self) -> None:
         assert classify_lean_result(LeanResult(error="Lean REPL command timed out in 60 seconds")) == "timeout"
 
+    def test_header_timeout_is_told_apart_from_the_proof_timing_out(self) -> None:
+        """Kimina's two timeout messages differ by one word and mean opposite things."""
+        header = LeanResult(error="Lean REPL header command timed out in 60 seconds")
+        assert classify_lean_result(header) == "header_timeout"
+
     def test_transport_failure_is_a_harness_fault(self) -> None:
         assert classify_lean_result(LeanResult(error="boom", transport_failure=True)) == "lean_server_error"
 

@@ -278,6 +278,11 @@ def main() -> None:
 
     report = asyncio.run(runner())
     report["input"] = str(args.input)
+    # Which upstream copy the rows came from decides how many statements compile at all,
+    # so a report that does not name it cannot be checked against the README table.
+    report["dataset_source"] = sorted({row.get("dataset_source") for row in rows} - {None}) or None
+    report["dataset_revision"] = sorted({row.get("dataset_revision") for row in rows} - {None}) or None
+    report["split"] = sorted({row.get("split") for row in rows} - {None}) or None
     report["answer_check_ascription"] = not args.no_ascription
     report["lean_server_url"] = args.lean_server_url
     args.output.parent.mkdir(parents=True, exist_ok=True)

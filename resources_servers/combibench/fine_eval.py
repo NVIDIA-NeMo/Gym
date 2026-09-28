@@ -61,6 +61,12 @@ HEADER_PREFIXES = ("import", "set_option", "open")
 
 SORRY_WARNING = "declaration uses 'sorry'"
 
+# Kimina splits a submission into an import header and a body and runs them as
+# two REPL commands, reporting "Lean REPL header command timed out in N
+# seconds" for the first and "Lean REPL command timed out in N seconds" for the
+# second (``server/routers/check.py``). Only the second is the model's proof.
+HEADER_TIMEOUT_MARKER = "header command timed out"
+
 _LEAN4_BLOCK_RE = re.compile(r"```lean4\n(.*?)\n```", re.DOTALL)
 _LEAN_BLOCK_RE = re.compile(r"```lean\n(.*?)\n```", re.DOTALL)
 _BLOCK_COMMENT_RE = re.compile(r"/-[\s\S]*?-/")
@@ -131,12 +137,14 @@ def missing_chunks(code: str, chunks: list[str], normalize_trailing_whitespace: 
 
     Deliberate departure from upstream: with ``normalize_trailing_whitespace``
     (the default) trailing spaces and tabs are stripped from every line on both
-    sides before comparing. Thirteen of the hundred pinned statements contain
-    lines consisting only of spaces, left behind when upstream deleted comments
-    from the published dataset. Trailing whitespace is never significant to
-    Lean, so a model that copies the statement without those invisible
-    characters has not changed what it proves; upstream would reject it. Set
-    the flag to ``False`` for upstream's byte-exact behaviour.
+    sides before comparing. Statements carry lines of nothing but spaces, left
+    behind when comments were deleted from the published copy: 12 of the 100
+    Hugging Face ``test`` statements (13 counting any trailing whitespace), and
+    1 of the 100 prepared from the GitHub files, which is the default source.
+    Trailing whitespace is never significant to Lean, so a model that copies
+    the statement without those invisible characters has not changed what it
+    proves; upstream would reject it. Set the flag to ``False`` for upstream's
+    byte-exact behaviour.
     """
     if normalize_trailing_whitespace:
         code = _normalize_trailing_whitespace(code)
@@ -240,10 +248,17 @@ def classify_lean_result(result: LeanResult) -> str:
     any message has severity ``error``, or (with sorry not accepted) when a
     warning says the declaration uses ``sorry``. The REPL's ``sorries`` list is
     consulted too: it is the structured form of the same warning.
+
+    One departure from upstream's ``is_error``, which fails everything with an
+    error string: a header timeout is separated out. It means a cold REPL could
+    not finish ``import Mathlib`` inside the budget, which no model output can
+    cause or avoid, so the caller charges it to the harness.
     """
     if result.transport_failure:
         return "lean_server_error"
     if result.error:
+        if HEADER_TIMEOUT_MARKER in result.error:
+            return "header_timeout"
         return "timeout" if "timed out" in result.error else "lean_error"
     if any(message.get("severity") == "error" for message in result.messages):
         return "proof_failed"

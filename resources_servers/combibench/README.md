@@ -75,7 +75,9 @@ rules (`evaluation/util.py`, `evaluation/verifier/one_stage_verify.py`); the
 `status` field names the first one that failed.
 
 1. **Extract** the last ```` ```lean4 ```` block (falling back to ```` ```lean ````);
-   none → `format_error`; empty output → `empty_output`.
+   none → `format_error`; empty output → `empty_output`; a block longer than
+   `max_code_characters` (200,000; the longest pinned statement is 3,054) →
+   `code_too_long`, so nothing pathological is put on the wire.
 2. **Remove comments.** The paper's Appendix A.2 shows a model passing the Lean
    check by hiding the real theorem in a comment; stripping comments first is
    what defeats it.
@@ -90,13 +92,27 @@ rules (`evaluation/util.py`, `evaluation/verifier/one_stage_verify.py`); the
    `example : <name>_solution = (<gold> : <type>) := by try rfl; try norm_num`.
 7. **Compile** through the Lean server with a 60 s timeout. Any error message →
    `proof_failed`; a `sorry` warning or REPL `sorries` entry → `has_sorry`;
-   server-side timeout → `timeout`.
+   the REPL timing out on the submission → `timeout`; any other REPL error
+   string → `lean_error`, which is charged to the model because upstream's
+   `is_error` fails the submission on it too.
 
-`harness_failure` is 1.0 for the two outcomes the model cannot cause — the Lean
-server unreachable or replying malformed (`lean_server_error`), or a row that
-cannot be scored (`bad_task`) — and `failure_reason` is set only then. A
-timeout is charged to the model: a proof that does not terminate is the model's
-output, and excusing it would make hanging reward-neutral.
+`harness_failure` is 1.0 for the three outcomes the model cannot cause, and
+`failure_reason` is set only then:
+
+| Status | Cause |
+| --- | --- |
+| `lean_server_error` | the Lean server is unreachable or replied malformed |
+| `header_timeout` | a cold REPL could not finish `import Mathlib` inside the timeout — Kimina reports this as `Lean REPL header command timed out`, distinct from the submission timing out |
+| `bad_task` | the row cannot be scored (no `formal_statement`, malformed `answers`) |
+
+A submission `timeout` is charged to the model: a proof that does not terminate
+is the model's output, and excusing it would make hanging reward-neutral.
+
+Every response carries `lean_version`, the Lean version the server reports for
+`#eval Lean.versionString`. It is probed once per process, before the first
+compile (which also warms the REPL). A server built for another toolchain
+otherwise scores every row `proof_failed` with nothing in the rollouts saying
+why.
 
 `compute_metrics` adds `hackmath/`, `brualdi/`, `imo/` and
 `math_competitions/` pass rates keyed on `tag`. Upstream reports one pooled
@@ -118,14 +134,16 @@ declared type, `(<gold> : <type>)`, elaborates for **45 of 45**. Set
 `answer_check_ascription: false` for upstream's behaviour; both measurements are
 in `data/harness_validation_github_test*.json`.
 
-**Trailing whitespace is ignored in the statement check.** Thirteen of the
-hundred statements contain lines consisting only of spaces, left behind when
-comments were deleted from the published copy. Trailing whitespace is never
-significant to Lean, so a model that reproduces the statement without those
-invisible characters has not changed what it proves; upstream's byte-exact
-substring test would reject it. Indentation and every visible character are
-still compared exactly. Set `normalize_trailing_whitespace: false` for
-upstream's behaviour.
+**Trailing whitespace is ignored in the statement check.** Statements carry
+lines consisting only of spaces, left behind when comments were deleted from
+the published copy. The count depends on which copy is measured: **12 of the
+100** Hugging Face `test` statements at `882ba08b` (13 counting any trailing
+whitespace), and **1 of the 100** rows `prepare.py` writes from the GitHub
+files, the default source. Trailing whitespace is never significant to Lean, so
+a model that reproduces the statement without those invisible characters has
+not changed what it proves; upstream's byte-exact substring test would reject
+it. Indentation and every visible character are still compared exactly. Set
+`normalize_trailing_whitespace: false` for upstream's behaviour.
 
 ### Known blind spots, kept for fidelity
 
@@ -137,6 +155,11 @@ upstream's behaviour.
   `implemented_by`, `unsafe`) are not banned.
 - Extra declarations are allowed anywhere in the code; only the reference
   paragraphs are required.
+- A statement paragraph that opens with `open ... in` directly above its
+  `theorem` starts with a header prefix, so the whole paragraph — theorem
+  included — is skipped by the statement check. Upstream has the identical
+  blind spot and no paragraph in the pinned corpus is shaped that way, so the
+  behaviour is kept rather than diverging.
 - `REVERIFY_MODE` is `STATELESS`: the server carries nothing between calls.
   It is not a claim that Lean compilation is a pure function of the text —
   timeouts depend on the machine.
@@ -177,29 +200,67 @@ answer check.
 ## Lean server
 
 Upstream verifies through [Kimina Lean Server](https://github.com/project-numina/kimina-lean-server)
-(MIT). The published image defaults to a different Lean version, so build one
-pinned to upstream's toolchain (the REPL tag must match the Lean version):
+(MIT): a FastAPI service that pools Lean REPL processes keyed by import header,
+so `import Mathlib` is paid per pool member rather than per proof. The published
+image defaults to a different Lean version, so this server ships its own
+Dockerfile pinned to upstream CombiBench's toolchain —
+[`kimina_image/`](kimina_image/), with the Lean tarball checksummed and Mathlib,
+the REPL and the server each pinned by commit:
 
 ```bash
-git clone https://github.com/project-numina/kimina-lean-server.git
-cd kimina-lean-server && git checkout fb2393de3461db35eda4c714e3fd21187e92ec90
 docker build \
-    --build-arg LEAN_SERVER_LEAN_VERSION=v4.24.0 \
-    --build-arg REPL_REPO_URL=https://github.com/leanprover-community/repl.git \
-    --build-arg REPL_BRANCH=v4.24.0 \
-    -t kimina-lean-server:v4.24.0 .
+    --build-arg LEAN_VERSION=v4.24.0 \
+    --build-arg LEAN_SHA256=b14f5e5159219dd1a1956c3b806813319f5e94ccd5bdfd56f54520609a5bb5ec \
+    --build-arg MATHLIB_COMMIT=f897ebcf72cd16f89ab4577d0c826cd14afaafc7 \
+    --build-arg REPL_COMMIT=8fff8552292860d349b459d6a811e6915671dc0d \
+    --build-arg KIMINA_COMMIT=fb2393de3461db35eda4c714e3fd21187e92ec90 \
+    -t kimina-lean-server:v4.24.0 \
+    resources_servers/combibench/kimina_image
 docker run -d --name kimina-combibench -p 12332:8000 \
-    -e LEAN_SERVER_MAX_REPLS=8 -e LEAN_SERVER_MAX_REPL_MEM=8G \
+    -e LEAN_SERVER_MAX_REPLS=8 \
     kimina-lean-server:v4.24.0
 curl http://127.0.0.1:12332/health     # {"status":"ok"}
 ```
 
+Leave `LEAN_SERVER_MAX_REPL_MEM` at the image's 12G. It becomes `RLIMIT_AS` on
+each REPL and a REPL holding Mathlib exceeds 8G, at which point every `/verify`
+returns `Failed to start REPL` — note that `/health` answers `ok` regardless,
+because FastAPI is up long before a REPL is. The image's build gate starts a
+REPL and requires it to load Mathlib, so that failure cannot reach a run.
+
 The build downloads the Mathlib cache and takes a few minutes; the first proof
-after start-up pays a `import Mathlib` load, later ones reuse the REPL. Point
+after start-up pays an `import Mathlib` load, later ones reuse the REPL. Point
 the server at it with `COMBIBENCH_LEAN_SERVER_URL` (and
-`COMBIBENCH_LEAN_SERVER_API_KEY` if the server has one). Gym's existing
-`math_formal_lean` sandbox is on Lean v4.12.0 and cannot compile these
-statements.
+`COMBIBENCH_LEAN_SERVER_API_KEY` if the server has one).
+
+Keep `max_concurrent_lean_requests` equal to the server's
+`LEAN_SERVER_MAX_REPLS`. Rollout fan-out is otherwise unbounded, and a request
+beyond that number is a connection waiting for a REPL that does not exist yet;
+past the server's own queue it becomes a 429 charged to nobody. A compile that
+exhausts the client timeout is not retried (`_max_connection_retries=1`):
+Gym's shared client would otherwise spend three REPL jobs and three times the
+wall clock to reach the same verdict.
+
+### Why not the existing `math_formal_lean` sandbox
+
+| | `math_formal_lean` sandbox | Kimina Lean Server |
+| --- | --- | --- |
+| Lean/Mathlib | v4.12.0 (v4.19.0 image also built) | pinned here to v4.24.0, upstream's toolchain |
+| REPL reuse | one process per request | header-keyed REPL pool, so `import Mathlib` is paid once |
+| Relation to upstream | none | the server upstream's own harness talks to |
+
+The toolchain is the blocking difference: these statements do not compile on
+v4.12.0, so reusing that path would have meant rebuilding its image at v4.24.0
+anyway. Having rebuilt it, the remaining choice was between re-deriving
+upstream's REPL handling on top of the sandbox's request shape and talking to
+the server upstream already uses, whose `/verify` contract this client
+reproduces. The Kimina pin is a commit rather than a release because the
+project publishes no tags at all: `fb2393de` (2026-01-11) is the head of
+`main`, and still the latest commit. Its own default is Lean v4.26.0; the
+version is a build argument, so the image here is built with
+`LEAN_SERVER_LEAN_VERSION=v4.24.0` to match upstream CombiBench's toolchain.
+The consequence of the pin being head-of-branch is that it does not move on its
+own, and re-pinning it is a one-line change plus a rebuild.
 
 ## Quickstart
 

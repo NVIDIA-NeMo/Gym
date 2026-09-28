@@ -63,9 +63,5 @@
     "dataset_source": {
         "unique_count": 1,
         "total_count": 5
-    },
-    "prompt_config_used": {
-        "unique_count": 1,
-        "total_count": 5
     }
 }
