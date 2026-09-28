@@ -2100,3 +2100,156 @@ def test_a_lone_services_manual_value_is_rendered_as_before(tmp_path):
     script = _render(tmp_path, {"policy": _vllm(8000, None, env={"CUDA_VISIBLE_DEVICES": "lit:0"})}, _ONE_NODE)
     assert _step(script, "policy").startswith("env CUDA_VISIBLE_DEVICES=0 srun")
     assert "export CUDA_VISIBLE_DEVICES" not in script
+
+
+# ---------------------------------------------------------------------------
+# nodes: auto
+# ---------------------------------------------------------------------------
+
+
+def _auto_pool(gpus_per_node=4):
+    return {"gpu": {"partition": "batch", "nodes": "auto", "ntasks_per_node": 1, "gpus_per_node": gpus_per_node}}
+
+
+def _auto_config(tmp_path, services, pools=None, policy=None):
+    return SubmitConfig.model_validate(
+        {
+            "services": services,
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools or _auto_pool()}},
+            "driver": {"container": "gym:latest", "policy_model": policy, "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+def _auto_render(tmp_path, services, pools=None, policy=None):
+    config = _auto_config(tmp_path, services, pools, policy)
+    return config, build_sbatch_script(
+        config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+    )
+
+
+def test_auto_packs_a_judge_and_a_two_gpu_model_onto_one_node(tmp_path):
+    services = {"judge": _vllm(8001, None), "policy": _vllm(8000, None, tensor_parallel_size=2)}
+    config, script = _auto_render(tmp_path, services, policy="policy")
+    assert config.compute["hsg"].node_pools["gpu"].nodes == 1
+    assert "#SBATCH --nodes=1" in script
+    # GPU indices follow declaration order on a node.
+    assert _gpus(_step(script, "judge")) == "0"
+    assert _gpus(_step(script, "policy")) == "1,2"
+    # Exactly what the same config with an explicit `nodes: 1` renders.
+    _, explicit = _auto_render(tmp_path, services, {"gpu": {**_auto_pool()["gpu"], "nodes": 1}}, policy="policy")
+    assert script == explicit
+
+
+def test_auto_gives_a_service_bigger_than_a_node_whole_nodes_of_its_own(tmp_path):
+    # 6 GPUs on 4-GPU nodes: ceil(6 / 4) = 2 whole nodes, nothing else on them.
+    config, script = _auto_render(
+        tmp_path,
+        {
+            "judge": _vllm(8001, None, tensor_parallel_size=4),
+            "policy": _vllm(8000, None, number_of_instances=6),
+        },
+    )
+    pools = config.compute["hsg"].node_pools
+    assert {name: pool.nodes for name, pool in pools.items()} == {"gpu-0": 2, "gpu-1": 1}
+    assert config.services["policy"].node_pool == "gpu-0"
+    assert config.services["judge"].node_pool == "gpu-1"
+    assert "#SBATCH --nodes=3" in script
+    assert '--nodelist="${GYM_POOL_GPU_0_NODES}" --nodes=2 --ntasks=2' in _step(script, "policy")
+    assert '--nodelist="${GYM_POOL_GPU_1_NODES}" --nodes=1 --ntasks=1' in _step(script, "judge")
+    assert "--data-parallel-size-local 3" in _step(script, "policy")
+    # Each is alone on its nodes, so neither is narrowed.
+    assert "CUDA_VISIBLE_DEVICES" not in script
+
+
+def test_auto_packs_biggest_first_into_the_first_node_with_room(tmp_path):
+    config = _auto_config(
+        tmp_path,
+        {
+            "a": _vllm(8001, None),
+            "b": _vllm(8002, None, tensor_parallel_size=3),
+            "c": _vllm(8003, None, tensor_parallel_size=2),
+            "d": _vllm(8004, None, tensor_parallel_size=2),
+        },
+    )
+    placed = {name: service.node_pool for name, service in config.services.items()}
+    assert placed == {"b": "gpu-0", "c": "gpu-1", "d": "gpu-1", "a": "gpu-0"}
+
+
+def test_auto_puts_the_policy_on_node_0_beside_the_driver(tmp_path):
+    config, script = _auto_render(
+        tmp_path,
+        {"scorer": _vllm(8001, None, tensor_parallel_size=4), "policy": _vllm(8000, None)},
+        policy="policy",
+    )
+    assert config.services["policy"].node_pool == "gpu-0"
+    assert config.services["scorer"].node_pool == "gpu-1"
+    driver = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    assert '--nodelist="${gym_nodes[0]}"' in driver
+
+
+def test_explicit_node_counts_are_not_touched(tmp_path):
+    config = _placement_config(
+        tmp_path,
+        {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "scorer": _vllm(8001, "aux", tensor_parallel_size=4)},
+        _TWO_POOLS,
+    )
+    assert {name: pool.nodes for name, pool in config.compute["hsg"].node_pools.items()} == {"gpu": 1, "aux": 1}
+    assert config.services["policy"].node_pool == "gpu"
+
+
+def test_auto_gives_the_leftovers_to_ray_on_every_node(tmp_path):
+    config, script = _auto_render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, None, tensor_parallel_size=3),
+            "judge": _vllm(8001, None, tensor_parallel_size=2),
+            "ray": {"type": "ray", "container": "img", "node_pools": ["gpu"], "resources": {"gpu": {"x": 1}}},
+        },
+        policy="policy",
+    )
+    ray = config.services["ray"]
+    assert ray.node_pools == ["gpu-0", "gpu-1"]
+    assert set(ray.resources) == {"gpu-0", "gpu-1"}
+    assert _gpus(_step(script, "policy")) == "0,1,2"
+    assert _gpus(_step(script, "ray")) == "3"
+    assert _gpus(_step(script, "judge")) == "0,1"
+    assert _gpus(_step(script, "ray_gpu-1_workers")) == "2,3"
+
+
+def test_auto_keeps_a_manual_cuda_visible_devices(tmp_path):
+    config, script = _auto_render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, None, tensor_parallel_size=2),
+            "judge": _vllm(8001, None, env={"CUDA_VISIBLE_DEVICES": "lit:0"}),
+        },
+        policy="policy",
+    )
+    assert config.compute["hsg"].node_pools["gpu"].nodes == 1
+    assert _gpus(_step(script, "judge")) == "0"
+    assert _gpus(_step(script, "policy")) == "1,2"
+
+
+def test_auto_without_gpus_per_node_is_refused(tmp_path):
+    pools = {"gpu": {"partition": "batch", "nodes": "auto"}}
+    with pytest.raises(ValueError, match="nodes: auto but no gpus_per_node"):
+        _auto_config(tmp_path, {"policy": _vllm(8000, None)}, pools)
+
+
+def test_auto_with_no_vllm_service_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="no vLLM service runs on it"):
+        _auto_config(tmp_path, {"ray": {"type": "ray", "container": "img", "node_pools": ["gpu"]}})
+
+
+def test_auto_puts_services_with_clashing_manual_gpus_on_different_nodes(tmp_path):
+    config = _auto_config(
+        tmp_path,
+        {
+            "a": _vllm(8001, None, env={"CUDA_VISIBLE_DEVICES": "lit:0"}),
+            "b": _vllm(8002, None, env={"CUDA_VISIBLE_DEVICES": "lit:0"}),
+        },
+    )
+    assert config.services["a"].node_pool == "gpu-0"
+    assert config.services["b"].node_pool == "gpu-1"
