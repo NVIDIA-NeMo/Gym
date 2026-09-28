@@ -51,6 +51,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
+    AgentObservationBundle,
     ModelCallRef,
     ObservationGap,
     TrajectoryRecord,
@@ -73,6 +74,7 @@ class SimpleAgentSessionState:
     request: AgentSeedSessionRequest
     tool_access: DirectHTTPToolAccess | None
     resources_cookies: dict[str, str]
+    observations: AgentObservationBundle | None = None
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -160,6 +162,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             request.session.pop(_AGENT_SESSION_ID_KEY, None)
             return AgentCloseSessionResponse(
                 agent_session_id=agent_session_id,
+                agent_observations=state.observations,
                 resources_cookies=state.resources_cookies,
             )
 
@@ -416,6 +419,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         )
         if state is not None:
             state.resources_cookies = dict(resources_server_cookies or {})
+            if trajectory is not None:
+                # A session returns agent evidence at close, where the Environment Server records it.
+                state.observations = AgentObservationBundle(
+                    source="simple_agent", records=list(trajectory.invocations), gaps=list(trajectory.gaps)
+                )
 
         # Legacy self-dispatch propagates resources cookies for its later verification call.
         if state is None:

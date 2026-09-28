@@ -216,7 +216,10 @@ class TestApp:
         assert prefixed_response.status_code == 200
         assert prefixed_response.json()["_ng_trajectory"]["rollout_id"] == "0-0"
 
-    async def test_native_session_uses_seeded_direct_http_tool_access(self, monkeypatch: MonkeyPatch) -> None:
+    @pytest.mark.parametrize("observability_enabled", [False, True])
+    async def test_native_session_uses_seeded_direct_http_tool_access(
+        self, monkeypatch: MonkeyPatch, observability_enabled: bool
+    ) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
             port=8080,
@@ -225,7 +228,7 @@ class TestApp:
             model_server=ModelServerRef(type="responses_api_models", name="model"),
         )
         server_client = MagicMock(spec=ServerClient)
-        server_client.global_config_dict = {"observability_enabled": False}
+        server_client.global_config_dict = {"observability_enabled": observability_enabled}
         server = SimpleAgent(config=config, server_client=server_client)
 
         response_base = {
@@ -298,8 +301,9 @@ class TestApp:
         )
         assert seed.status_code == 200
 
+        # The Environment Server calls the attempt-qualified route, which enables trajectory collection.
         result = client.post(
-            "/v1/responses",
+            "/ng-rollout/rollout/v1/responses" if observability_enabled else "/v1/responses",
             json={
                 "input": [{"role": "user", "content": "weather?"}],
                 "tools": [
@@ -339,6 +343,13 @@ class TestApp:
         )
         assert close.status_code == 200
         assert close.json()["resources_cookies"] == {"session_id": "updated-resource-cookie"}
+        # A session returns its agent evidence at close, which becomes the episode's ng_agent_observations.
+        observations = close.json()["agent_observations"]
+        if observability_enabled:
+            assert [record["kind"] for record in observations["records"]] == ["agent_invocation"]
+            assert observations["source"] == "simple_agent"
+        else:
+            assert observations is None
 
     async def test_native_session_rejects_required_mcp_access(self) -> None:
         server, _ = _make_agent(False)
