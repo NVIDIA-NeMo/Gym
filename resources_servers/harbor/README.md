@@ -22,7 +22,7 @@ containers, multi-step tasks and in-sandbox MCP tools come in later milestones.
 ## Run
 
 ```bash
-gym eval run harbor:hello-world --agent hermes --sandbox opensandbox \
+gym eval run harbor:hello-world --agent hermes_agent --sandbox opensandbox \
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
