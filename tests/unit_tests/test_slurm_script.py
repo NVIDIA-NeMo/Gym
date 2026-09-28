@@ -1441,7 +1441,8 @@ def test_build_sbatch_script_non_vllm_service_omits_node_flags_in_multi_node_job
     vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
     ray_line = next(line for line in script.splitlines() if "ray:latest" in line)
     assert "--nodes=4" in vllm_line
-    assert "--nodes=" not in ray_line
+    # Once, on the driver's node -- not once per node of the allocation.
+    assert '--nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1' in ray_line
 
 
 # ---------------------------------------------------------------------------
@@ -1648,8 +1649,8 @@ def test_pinned_services_take_contiguous_node_ranges(tmp_path):
     )
     assert 'export GYM_POOL_GPU_NODES="$(IFS=,; echo "${gym_nodes[*]:0:1}")"' in script
     assert 'export GYM_POOL_AUX_NODES="$(IFS=,; echo "${gym_nodes[*]:1:1}")"' in script
-    assert '--nodelist="$GYM_POOL_GPU_NODES" --nodes=1 --ntasks=1' in script.split("# service: policy")[1]
-    assert '--nodelist="$GYM_POOL_AUX_NODES" --nodes=1 --ntasks=1' in script.split("# service: scorer")[1]
+    assert '--nodelist="${GYM_POOL_GPU_NODES}" --nodes=1 --ntasks=1' in script.split("# service: policy")[1]
+    assert '--nodelist="${GYM_POOL_AUX_NODES}" --nodes=1 --ntasks=1' in script.split("# service: scorer")[1]
 
 
 def test_a_pinned_single_node_service_is_not_built_as_multi_node(tmp_path):
@@ -1671,7 +1672,32 @@ def test_an_unpinned_service_keeps_the_whole_allocation(tmp_path):
         tmp_path,
         {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "tensor_parallel_size": 8}},
     )
+    policy_line = script.split("# service: policy")[1].splitlines()[1]
+    assert "--nodelist" not in policy_line
+    assert "--nodes=2" in policy_line
+
+
+def test_the_driver_runs_on_node_0_of_a_multi_node_job(tmp_path):
+    # A multi-node policy serves its API from node 0, and the driver reaches it on
+    # localhost. Left unpinned, Slurm may start the driver on any node.
+    script = _render(
+        tmp_path,
+        {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "tensor_parallel_size": 8}},
+    )
+    driver_line = next(line for line in script.splitlines() if "logs/driver.log" in line)
+    assert '--nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1' in driver_line
+    assert 'gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))' in script
+
+
+def test_a_single_node_job_places_nothing(tmp_path):
+    one = {"gpu": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4}}
+    script = _render(
+        tmp_path,
+        {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "tensor_parallel_size": 4}},
+        one,
+    )
     assert "--nodelist" not in script
+    assert "gym_nodes=" not in script
 
 
 def test_an_unknown_node_pool_is_named(tmp_path):
