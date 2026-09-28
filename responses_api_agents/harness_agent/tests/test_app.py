@@ -110,6 +110,11 @@ def test_config_defaults():
 
 
 def test_registry_exposes_all_harness_agents():
+    assert resolve_agent("simple_strands") == (
+        "responses_api_agents.simple_strands_agent.app",
+        "SimpleStrandsAgent",
+        "SimpleStrandsAgentConfig",
+    )
     assert resolve_agent("opencode") == (
         "responses_api_agents.opencode_agent.app",
         "OpenCodeAgent",
