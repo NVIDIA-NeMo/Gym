@@ -14,10 +14,13 @@
 # limitations under the License.
 import asyncio
 import time
-from unittest.mock import MagicMock
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from omegaconf import DictConfig
 
+import nemo_gym.server_utils
 from nemo_gym._checkpoint.agent import AgentBoundaryRecord, AgentCheckpointParticipant
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.base_responses_api_agent import (
@@ -28,9 +31,13 @@ from nemo_gym.base_responses_api_agent import (
 from nemo_gym.rollout_correlation import (
     MODEL_CALL_CAPTURE_OUTCOME_HEADER,
     MODEL_CALL_ID_HEADER,
+    PARENT_MODEL_CALL_ID_HEADER,
+    SOURCE_CAPTURE_KEY_HEADER,
     ModelCallCaptureOutcome,
+    checkpoint_parent_context,
+    take_checkpoint_parent,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import BaseServerConfig, ServerClient
 
 
 class TestBaseResponsesAPIAgent:
@@ -179,6 +186,136 @@ class TestBaseResponsesAPIAgent:
             await participant.resume()
             assert await asyncio.wait_for(request, timeout=1) == "done"
             assert operation_started.is_set()
+        finally:
+            participant.unbind(token)
+            await participant.finish(execution, outcome="failed")
+
+    @staticmethod
+    def _policy_server_client(monkeypatch: pytest.MonkeyPatch, statuses: list[int]) -> tuple[ServerClient, AsyncMock]:
+        class _Response:
+            def __init__(self, status: int) -> None:
+                self.status = status
+
+            async def read(self) -> bytes:
+                if self.status == 409:
+                    return b'{"error":{"code":"checkpoint_parked"}}'
+                return b"{}"
+
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=80),
+            global_config_dict=DictConfig(
+                {"policy": {"responses_api_models": {"model": {"host": "policy", "port": 80}}}}
+            ),
+        )
+        request_mock = AsyncMock(side_effect=[_Response(status) for status in statuses])
+        monkeypatch.setattr(nemo_gym.server_utils, "request", request_mock)
+        return server_client, request_mock
+
+    @staticmethod
+    def _restored_parent_headers(call: Any) -> tuple[str | None, str | None]:
+        headers = call.kwargs.get("headers") or {}
+        return headers.get(SOURCE_CAPTURE_KEY_HEADER), headers.get(PARENT_MODEL_CALL_ID_HEADER)
+
+    async def _start_refused_request(
+        self,
+        agent: SimpleResponsesAPIAgent,
+        operation: Any,
+        refusal_ready: asyncio.Event,
+    ) -> Any:
+        retried = asyncio.create_task(agent.retry_checkpoint_refusal(operation))
+        await refusal_ready.wait()
+        return retried
+
+    @staticmethod
+    async def _wait_until_parked(participant: AgentCheckpointParticipant) -> None:
+        async with asyncio.timeout(1):
+            while participant.status()["parked"] == 0:
+                await asyncio.sleep(0)
+
+    async def test_checkpoint_refusal_reissues_restored_parent_headers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        agent = self._agent({})
+        participant = AgentCheckpointParticipant("test-agent")
+        agent._checkpoint_participant = participant
+        execution = await participant.begin("rollout-a", 1, task=asyncio.current_task())
+        await participant.commit_boundary(
+            execution,
+            AgentBoundaryRecord(rollout_id="rollout-a", attempt_index=1, boundary_index=1, output_items=[]),
+        )
+        server_client, request_mock = self._policy_server_client(monkeypatch, [409, 200, 200])
+        refusal_ready = asyncio.Event()
+        release_refusal = asyncio.Event()
+
+        async def model_call() -> Any:
+            if request_mock.await_count == 0:
+                refusal_ready.set()
+                await release_refusal.wait()
+            return await server_client.post(server_name="policy", url_path="/v1/responses", json={})
+
+        token = participant.bind(execution)
+        try:
+            with checkpoint_parent_context("rollout-a", "committed-call"):
+                retried = await self._start_refused_request(agent, model_call, refusal_ready)
+                release_refusal.set()
+                await self._wait_until_parked(participant)
+                assert not retried.done()
+
+                await participant.resume()
+                response = await asyncio.wait_for(retried, timeout=1)
+                assert response.status == 200
+                await server_client.post(server_name="policy", url_path="/v1/responses", json={})
+
+            assert [self._restored_parent_headers(call) for call in request_mock.await_args_list] == [
+                ("rollout-a", "committed-call"),
+                ("rollout-a", "committed-call"),
+                (None, None),
+            ]
+        finally:
+            participant.unbind(token)
+            await participant.finish(execution, outcome="failed")
+
+    async def test_checkpoint_refusal_keeps_parent_claimed_by_overlapping_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent = self._agent({})
+        participant = AgentCheckpointParticipant("test-agent")
+        agent._checkpoint_participant = participant
+        execution = await participant.begin("rollout-a", 1, task=asyncio.current_task())
+        await participant.commit_boundary(
+            execution,
+            AgentBoundaryRecord(rollout_id="rollout-a", attempt_index=1, boundary_index=1, output_items=[]),
+        )
+        server_client, request_mock = self._policy_server_client(monkeypatch, [409, 200])
+        refusal_ready = asyncio.Event()
+        release_refusal = asyncio.Event()
+        overlapping_claims: list[tuple[str | None, str | None]] = []
+
+        async def model_call() -> Any:
+            if request_mock.await_count == 0:
+                # Another request claims the parent after the retry loop sees
+                # it unclaimed but before this request reaches the server.
+                overlapping_claims.append(await asyncio.create_task(_claim()))
+                refusal_ready.set()
+                await release_refusal.wait()
+            return await server_client.post(server_name="policy", url_path="/v1/responses", json={})
+
+        async def _claim() -> tuple[str | None, str | None]:
+            return take_checkpoint_parent()
+
+        token = participant.bind(execution)
+        try:
+            with checkpoint_parent_context("rollout-a", "committed-call"):
+                retried = await self._start_refused_request(agent, model_call, refusal_ready)
+                release_refusal.set()
+                await self._wait_until_parked(participant)
+                await participant.resume()
+                response = await asyncio.wait_for(retried, timeout=1)
+                assert response.status == 200
+
+            assert overlapping_claims == [("rollout-a", "committed-call")]
+            assert [self._restored_parent_headers(call) for call in request_mock.await_args_list] == [
+                (None, None),
+                (None, None),
+            ]
         finally:
             participant.unbind(token)
             await participant.finish(execution, outcome="failed")

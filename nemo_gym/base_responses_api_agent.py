@@ -69,6 +69,8 @@ from nemo_gym.rollout_correlation import (
     current_rollout_id,
     execution_identity_from_run_body,
     maybe_rollout_id_from_run_body,
+    pending_checkpoint_parent,
+    release_checkpoint_parent,
     rollout_context,
 )
 from nemo_gym.rollout_observability import AgentObservationBundle
@@ -352,11 +354,17 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     ) -> Any:
         execution = self.checkpoint_execution(request)
         while True:
+            pending_parent = pending_checkpoint_parent()
             response = await operation()
             if await _checkpoint_refusal_code(response) is None:
                 return response
             if execution is None or self._checkpoint_participant is None:
                 return response
+            if pending_parent is not None:
+                # The refused request never reached model admission. Its
+                # reissue remains the replacement attempt's first model call.
+                # Only this task's own claim can be released.
+                release_checkpoint_parent(pending_parent)
             await self._checkpoint_participant.park(execution)
 
     async def checkpointable_external_wait(

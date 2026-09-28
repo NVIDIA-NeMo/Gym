@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
@@ -42,6 +43,9 @@ class _CheckpointParentState:
     source_capture_key: str
     parent_model_call_id: str
     consumed: bool = False
+    # Child tasks inherit this context state. Record which task claimed the
+    # parent so a refused request cannot release another request's claim.
+    claimed_by: Optional["asyncio.Task[Any]"] = None
 
 
 _CHECKPOINT_PARENT: ContextVar[Optional[_CheckpointParentState]] = ContextVar(
@@ -247,7 +251,33 @@ def take_checkpoint_parent() -> tuple[Optional[str], Optional[str]]:
     if state is None or state.consumed:
         return None, None
     state.consumed = True
+    state.claimed_by = _current_task()
     return state.source_capture_key, state.parent_model_call_id
+
+
+def _current_task() -> Optional["asyncio.Task[Any]"]:
+    try:
+        return asyncio.current_task()
+    except RuntimeError:
+        return None
+
+
+def pending_checkpoint_parent() -> Optional[_CheckpointParentState]:
+    """Return the restored parent when no model request has claimed it yet."""
+    state = _CHECKPOINT_PARENT.get()
+    if state is None or state.consumed:
+        return None
+    return state
+
+
+def release_checkpoint_parent(state: _CheckpointParentState) -> bool:
+    """Release this task's claim after refusal before model admission."""
+    task = _current_task()
+    if not state.consumed or task is None or state.claimed_by is not task:
+        return False
+    state.consumed = False
+    state.claimed_by = None
+    return True
 
 
 @contextmanager
