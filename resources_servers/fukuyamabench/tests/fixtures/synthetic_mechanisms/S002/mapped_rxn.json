@@ -1,0 +1,8 @@
+{
+    "mechanism_rxn": [
+        {
+            "step": "1",
+            "mapped_rxn": "[CH3:1][CH2:2][Br:3].[OH-:4]>>CCO.[Br-]"
+        }
+    ]
+}

@@ -41,7 +41,7 @@ from step_utils import (
     process_problem_steps,
 )
 
-from nemo_gym.base_resources_server import BaseRunRequest
+from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, BaseRunRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
@@ -53,12 +53,15 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
 from nemo_gym.prompt import PromptConfig, load_prompt_config
 from nemo_gym.server_utils import raise_for_status
 
 
 LOG = logging.getLogger(__name__)
+TOKEN_USAGE_VERSION = 1
 
 
 class ScicodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -131,6 +134,38 @@ def _across_run_stats(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
     return metrics
 
 
+def _token_metrics(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Pool generated steps across attempts, rather than averaging per-problem ratios."""
+    rows = [r for task in tasks for r in task]
+    versions = {r.get("token_usage_version") for r in rows}
+    if not rows or versions == {None}:
+        # Historical rollouts contain only the last step's usage.
+        return {}
+    if versions != {TOKEN_USAGE_VERSION}:
+        raise ValueError("Cannot aggregate SciCode rollouts with different token accounting versions")
+
+    steps = [step for r in rows for step in r["step_usage"] if step["status"] != "prefilled"]
+    generated = [step for step in steps if step["status"] == "generated"]
+    metrics = {
+        # Aggregate values are exported as numeric scores by NeMo Evaluator.
+        "token_usage_version": TOKEN_USAGE_VERSION,
+        "num_subproblems": len(steps),
+        "num_generated_steps": len(generated),
+        "num_steps_with_usage": sum(step["usage"] is not None for step in generated),
+        "generation_coverage": len(generated) / len(steps) if steps else None,
+    }
+    complete = metrics["num_steps_with_usage"] == len(generated)
+    metrics["token_usage_complete"] = complete
+    # Override the generic means too: pandas would otherwise silently average only
+    # the rollouts with known usage, presenting a partial measurement as a full one.
+    for name in ("input_tokens", "output_tokens", "total_tokens"):
+        total = sum(step["usage"][name] for step in steps) if complete else None
+        metrics[f"mean/{name}"] = total / len(rows) if total is not None else None
+        metrics[f"mean/{name}_per_problem"] = metrics[f"mean/{name}"]
+        metrics[f"mean/{name}_per_subproblem"] = total / len(steps) if complete and steps else None
+    return metrics
+
+
 class ScicodeAgent(SimpleResponsesAPIAgent):
     """Agent that drives the SciCode per-sub-step generation + code-accumulation loop."""
 
@@ -173,13 +208,24 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         solutions: Dict[str, str] = {}
         out_of_context = False
         last_response_json = None
+        zero_usage = NeMoGymResponseUsage.sum_from_list([])
+        usage = zero_usage
+        usage_complete = True
+        step_usage = []
         response_create_params = body.responses_create_params.model_dump(exclude_unset=True, exclude_none=True)
         response_create_params.pop("input", None)
 
         for cur_step in range(total):
+            step_record = {
+                "step_number": sub_steps[cur_step]["step_number"],
+                "status": "skipped",
+                "usage": zero_usage.model_dump(),
+            }
+            step_usage.append(step_record)
             # Prefilled steps provide context for later steps but are not scored (no solution entry).
             if (body.problem_id, cur_step) in PREFILLED_STEPS_CODE:
                 previous_llm_code[cur_step] = PREFILLED_STEPS_CODE[(body.problem_id, cur_step)]
+                step_record["status"] = "prefilled"
                 continue
             if out_of_context:
                 solutions[f"{body.problem_id}.{cur_step + 1}"] = OUT_OF_CONTEXT
@@ -209,13 +255,19 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                 if is_context_window_error(error):
                     LOG.warning("SciCode step %s: context window exceeded; failing remaining steps.", cur_step)
                     out_of_context = True
+                    step_record["status"] = "context_window_exceeded"
                     solutions[f"{body.problem_id}.{cur_step + 1}"] = OUT_OF_CONTEXT
                     continue
                 raise
 
             cookies = gen_response.cookies
             last_response_json = await gen_response.json()
-            generation = NeMoGymResponse.model_validate(last_response_json).output_text
+            model_response = NeMoGymResponse.model_validate(last_response_json)
+            step_record["status"] = "generated"
+            step_record["usage"] = model_response.usage.model_dump() if model_response.usage is not None else None
+            usage_complete = usage_complete and model_response.usage is not None
+            usage = accumulate_response_usage(usage, model_response.usage)
+            generation = model_response.output_text
             extracted = extract_python_script(generation)
             previous_llm_code[cur_step] = extracted
             solutions[f"{body.problem_id}.{cur_step + 1}"] = f"{previous_code}\n{extracted}"
@@ -224,6 +276,10 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         verify_request_data["solutions"] = solutions
         # /verify requires a response; record the last sub-step's generation (empty if none ran).
         verify_request_data["response"] = last_response_json if last_response_json is not None else _empty_response()
+        # Keep the final generation for inspection, but account for the whole problem.
+        verify_request_data["response"]["usage"] = usage.model_dump() if usage_complete else None
+        verify_request_data["token_usage_version"] = TOKEN_USAGE_VERSION
+        verify_request_data["step_usage"] = step_usage
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
@@ -233,16 +289,46 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         await raise_for_status(verify_response)
         return await verify_response.json()
 
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        if any(
+            step["status"] == "generated" and step["usage"] is None
+            for row in body.verify_responses
+            for step in (row.get("step_usage") or [])
+        ):
+            # Suppress generic token statistics at every level (including per-task
+            # and per-repeat). Keep the caller's raw rollout records unchanged.
+            body = body.model_copy(
+                update={
+                    "verify_responses": [
+                        {**row, "response": {**(row.get("response") or {}), "usage": None}}
+                        for row in body.verify_responses
+                    ]
+                }
+            )
+        metrics = await super().aggregate_metrics(body)
+        # NeMo Evaluator requires numeric scores. Omit unavailable values rather
+        # than exporting nulls or inventing zero consumption.
+        metrics.agent_metrics = {k: v for k, v in metrics.agent_metrics.items() if v is not None}
+        metrics.key_metrics = {k: v for k, v in metrics.key_metrics.items() if v is not None}
+        return metrics
+
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Headline SciCode metric: sub-step-weighted accuracy = total passed / total over all rollouts."""
         passed = sum(r.get("num_steps_passed", 0) for task in tasks for r in task)
         total = sum(r.get("num_steps_total", 0) for task in tasks for r in task)
         metrics = {"subtask_accuracy": passed / total if total else 0.0}
         metrics.update(_across_run_stats(tasks))
+        metrics.update(_token_metrics(tasks))
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        return {k: v for k, v in agent_metrics.items() if k.startswith("mean/") or k.startswith("subtask_accuracy")}
+        return {
+            k: v
+            for k, v in agent_metrics.items()
+            if k.startswith("mean/")
+            or k.startswith("subtask_accuracy")
+            or k in {"generation_coverage", "token_usage_complete"}
+        }
 
 
 if __name__ == "__main__":
