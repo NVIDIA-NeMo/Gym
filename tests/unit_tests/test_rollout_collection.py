@@ -34,7 +34,7 @@ from pydantic import ValidationError
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
+from nemo_gym.config_types import AmbiguousEnvironmentServerError, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -1398,6 +1398,64 @@ class TestRolloutCollection:
         assert returned_row is row
         assert result == {"response": {}}
         assert "_ng_rollout_latency_ms" not in result
+
+    async def test_run_examples_rejects_agent_fronted_by_several_environment_servers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A row routed by its agent fails before any dispatch when two environment servers name that agent."""
+        row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock()
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "my_legacy_server": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}},
+                "my_native_server": {
+                    "environment_servers": {"single_agent_turn": {"agent_server": {"name": "my_agent"}}}
+                },
+            }
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+
+        with pytest.raises(AmbiguousEnvironmentServerError, match="my_legacy_server.*my_native_server"):
+            next(RolloutCollectionHelper().run_examples([row]))
+        mock_server_client.post.assert_not_awaited()
+
+    async def test_run_examples_allows_several_servers_for_an_agent_no_row_routes_by(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Twin servers for one agent are valid; only rows that route by that agent need a single server."""
+        row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        response = MagicMock()
+        response.status = 200
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "other_agent": {"responses_api_agents": {"impl": {}}},
+                "my_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}
+                },
+                "other_legacy_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "other_agent"}}}
+                },
+                "other_native_server": {
+                    "environment_servers": {"single_agent_turn": {"agent_server": {"name": "other_agent"}}}
+                },
+            }
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
+
+        await next(RolloutCollectionHelper().run_examples([row]))
+
+        assert mock_server_client.post.await_args.kwargs["server_name"] == "my_environment_server"
 
     async def test_run_examples_with_metadata_carries_rollout_latency_alongside_result(
         self, monkeypatch: pytest.MonkeyPatch
