@@ -3201,6 +3201,45 @@ class TestRolloutCollection:
         # Verify both agents were called
         assert mock_server_client.post.call_count == 2
 
+    async def test_call_aggregate_metrics_builds_the_agent_server_map_once(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Unstamped flat rows resolve their server from one map instead of scanning the config per row."""
+        agg = AggregateMetrics(agent_metrics={"mean/reward": 1.0}, key_metrics={}, group_level_metrics=[])
+        mock_response = AsyncMock()
+        mock_response.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+        mock_response.status = 200
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=mock_response)
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "my_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}
+                },
+            }
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        build_calls: list[int] = []
+        build_map = nemo_gym.rollout_collection._environment_servers_by_agent
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "_environment_servers_by_agent",
+            lambda config: build_calls.append(1) or build_map(config),
+        )
+        rows = [
+            {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0}
+            for i in range(100)
+        ]
+        results = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0} for i in range(100)]
+
+        await RolloutCollectionHelper()._call_aggregate_metrics(results, rows, tmp_path / "output.jsonl")
+
+        assert build_calls == [1]
+        assert mock_server_client.post.await_args.kwargs["server_name"] == "my_environment_server"
+
     async def test_call_aggregate_metrics_empty(self, tmp_path: Path) -> None:
         """_call_aggregate_metrics returns None for empty results."""
         helper = RolloutCollectionHelper()

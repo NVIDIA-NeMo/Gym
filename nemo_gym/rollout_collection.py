@@ -2035,10 +2035,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     f"running config (available: {available_servers}); aggregate with the config that produced them"
                 )
             server_results.setdefault(server_name, []).append(_verify_response_for_aggregation(result))
-            if agent_name is None:
-                # A native row names no agent; the environment server's own binding does.
-                agent_name = self._agent_name_for_row({NG_ENVIRONMENT_SERVER_KEY: server_name}, global_config_dict)
-            server_agents.setdefault(server_name, agent_name)
+            if server_name not in server_agents:
+                if agent_name is None:
+                    # A native row names no agent; the environment server's own binding does.
+                    agent_name = self._agent_name_for_row({NG_ENVIRONMENT_SERVER_KEY: server_name}, global_config_dict)
+                server_agents[server_name] = agent_name
 
         # One entry per environment server, labelled by the agent it binds so metric names and
         # `agent_ref` keep today's shape. Two servers bound to one agent (a native server and its
