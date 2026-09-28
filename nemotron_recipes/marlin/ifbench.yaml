@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# IFBench (no tools): 300 prompts x 8 repeats, each with one or more verifiable output
+# constraints (57 instruction types). The reward is the fraction of a prompt's instructions
+# the response follows, checked strictly by AllenAI's IFBench rules; there is no judge model.
+#
+#   nemotron_recipes/marlin/run.sh ifbench
+#
+# The dataset is not pinned to a revision: Gym downloads IFBench_test.jsonl from the main
+# branch of github.com/allenai/IFBench, which had 300 prompts when the published number was
+# produced. A different prompt count means a different prompt set.
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
+# Gym benchmark config this recipe builds on.
+benchmark_config: benchmarks/ifbench/config.yaml
+
+# 8 samples per prompt (the benchmark default is 5). Set on the dataset entry, where the
+# benchmark sets it: a top-level num_repeats would multiply the default instead. Lists are
+# replaced, not merged, hence the full entry.
+ifbench_benchmark_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: ifbench
+        type: benchmark
+        jsonl_fpath: benchmarks/ifbench/data/ifbench_benchmark.jsonl
+        prompt_config: benchmarks/ifbench/prompts/default.yaml
+        prepare_script: benchmarks/ifbench/prepare.py
+        num_repeats: 8
