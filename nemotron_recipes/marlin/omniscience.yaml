@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# AA-Omniscience (no tools): 600 questions x 10 repeats. A judge model grades each answer
+# as correct, incorrect, partially correct or not attempted. Reported: Omniscience Index
+# (correct minus incorrect), accuracy (correct) and hallucination rate (incorrect among all
+# answers that are not correct).
+#
+#   nemotron_recipes/marlin/run.sh omniscience
+#
+# Needs the judge endpoint in env.yaml (judge_base_url, judge_api_key) and JUDGE_API_KEY in
+# your shell. The endpoint must serve gpt-5.6-luna on <judge_base_url>/chat/completions and
+# accept Gym's judge request as it is: max_tokens 32768, temperature 0.0 and top_p 1.0 next
+# to reasoning_effort medium. Gym always sends these three; config can change their values
+# (and then no longer matches the published run) but cannot drop them. The published run's
+# OpenAI-compatible gateway accepted them; OpenAI's own API is expected to reject max_tokens
+# and temperature for this reasoning model, so use an endpoint that accepts or drops them.
+#
+# An answer whose judge call fails is left out of the score and written to
+# evaluator_rollouts_failures.jsonl; RESUME=1 retries it (the model answers again; 3 attempts
+# in all by default).
+#
+# The dataset is not pinned to a revision: Gym loads the latest
+# ArtificialAnalysis/AA-Omniscience-Public, which had 600 questions when the published number
+# was produced. A different question count means a different question set.
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
+# Gym benchmark config this recipe builds on.
+benchmark_config: benchmarks/omniscience/config.yaml
+
+# 10 samples per question (the benchmark default is 8). Set on the dataset entry: repeats
+# are applied when the data is prepared, so a top-level num_repeats would multiply them.
+# Lists are replaced, not merged, hence the full entry.
+omniscience_omniscience_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: omniscience
+        type: benchmark
+        jsonl_fpath: benchmarks/omniscience/data/omniscience_benchmark.jsonl
+        prompt_config: benchmarks/omniscience/prompts/generation.yaml
+        prepare_script: benchmarks/omniscience/prepare.py
+        num_repeats: 10
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      # As in the published run (Gym's default is true): a conversation that ends with
+      # reasoning but no answer is not sent back to the model to continue.
+      sequential_reasoning_allowed: false
+
+# Judge: gpt-5.6-luna at reasoning effort medium. Endpoint and key come from env.yaml; set
+# judge_model_name there only if your provider serves this model under a different id.
+# env.yaml overrides this file, so it must not carry a genrm_model block: the one in a
+# Lightning 3.5 env.yaml would silently swap this judge for gemini-3-flash-preview.
+judge_model_name: gpt-5.6-luna
+genrm_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+      extra_body:
+        reasoning_effort: medium
+      # At most 32 judge calls in flight; lower it if your endpoint rate-limits.
+      max_concurrent_requests: 32
+
+# Judge output cap (the benchmark default is 2048). Gym also sends the benchmark's
+# temperature 0.0 and top_p 1.0; whether the judge samples with them depends on the
+# endpoint.
+omniscience_omniscience_resources_server:
+  resources_servers:
+    omniscience:
+      judge_responses_create_params:
+        max_output_tokens: 32768
