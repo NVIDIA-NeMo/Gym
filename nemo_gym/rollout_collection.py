@@ -2013,7 +2013,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 res = None
                 try:
                     server_name = _environment_server_for_agent(
-                        row[AGENT_REF_KEY_NAME]["name"], server_client.global_config_dict
+                        row[AGENT_REF_KEY_NAME]["name"],
+                        server_client.global_config_dict,
                     )
                     res = await server_client.post(server_name=server_name, url_path="/run", json=row)
                     await raise_for_status(res)
