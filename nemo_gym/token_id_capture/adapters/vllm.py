@@ -11,6 +11,9 @@ from typing import Any
 PREFIX_IDS_FIELD = "required_prefix_token_ids"
 PROMPT_IDS_FIELD = "prompt_token_ids"
 ROUTED_EXPERTS_FIELD = "routed_experts"
+ROUTED_EXPERTS_BOUNDARY_FIELD = "routed_experts_boundary"
+ROUTED_EXPERTS_BOUNDARY_INDEX_FIELD = "routed_experts_boundary_index"
+ROUTED_EXPERTS_BOUNDARY_SCHEMA_VERSION = 1
 
 
 def _message(choice: dict[str, Any]) -> dict[str, Any]:
@@ -65,9 +68,23 @@ class VLLMCaptureAdapter:
         return extract_generation_token_info(_single_choice(response_payload))
 
     def extract_extras(self, response_payload: dict[str, Any]) -> dict[str, Any] | None:
-        routed_experts = _message(_single_choice(response_payload)).get(ROUTED_EXPERTS_FIELD)
+        message = _message(_single_choice(response_payload))
+        routed_experts = message.get(ROUTED_EXPERTS_FIELD)
+        boundary = message.get(ROUTED_EXPERTS_BOUNDARY_FIELD)
+        boundary_index = message.get(ROUTED_EXPERTS_BOUNDARY_INDEX_FIELD)
+        has_boundary = ROUTED_EXPERTS_BOUNDARY_FIELD in message or ROUTED_EXPERTS_BOUNDARY_INDEX_FIELD in message
         if routed_experts is None:
+            if has_boundary:
+                raise ValueError("a routed-experts boundary requires the delta routes")
             return None
         if not isinstance(routed_experts, (str, dict, list)):
             raise ValueError("vLLM routed_experts must use a JSON-compatible envelope")
-        return {ROUTED_EXPERTS_FIELD: routed_experts}
+        extras: dict[str, Any] = {ROUTED_EXPERTS_FIELD: routed_experts}
+        if has_boundary:
+            if not isinstance(boundary, str) or type(boundary_index) is not int or boundary_index < 0:
+                raise ValueError("a routed-experts boundary requires an envelope and a non-negative token index")
+            # The child owns this repair. Both the bytes and their source position
+            # must enter compute_extras_digest before the call is committed.
+            extras[ROUTED_EXPERTS_BOUNDARY_FIELD] = boundary
+            extras[ROUTED_EXPERTS_BOUNDARY_INDEX_FIELD] = boundary_index
+        return extras
