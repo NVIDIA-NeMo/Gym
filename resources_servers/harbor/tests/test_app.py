@@ -269,6 +269,32 @@ class TestSeed:
         assert spec.metadata["harbor_task"] == "hello"
 
 
+class TestSetupCommands:
+    def test_setup_commands_run_as_root_after_workdir(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.config.sandbox_setup_commands = ["sed -i s/a/b/ /etc/apt/sources.list", "apt-get update || true"]
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+        assert response.status_code == 200, response.text
+        commands = [call["command"] for call in sandbox.execs]
+        assert commands[0] == "mkdir -p /app"
+        assert commands[1:3] == server.config.sandbox_setup_commands
+        assert all(call["user"] == "root" for call in sandbox.execs[1:3])
+
+    def test_failing_setup_command_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
+        class Failing(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if command == "false":
+                    return SandboxExecResult(stdout="", stderr="nope", return_code=1)
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        sandbox = Failing()
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, sandbox)
+        server.config.sandbox_setup_commands = ["false"]
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+        assert response.status_code == 503
+        assert "nope" in response.json()["detail"] and sandbox.stopped
+
+
 class TestSeedWorkdirAndResources:
     def test_image_workdir_used_when_task_sets_none(self, tmp_path, monkeypatch):
         server, task, sandbox, created = make_server(tmp_path, monkeypatch)
