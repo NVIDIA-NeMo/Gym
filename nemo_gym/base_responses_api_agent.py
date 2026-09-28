@@ -19,6 +19,7 @@ from typing import Any, Optional
 from warnings import warn
 
 from fastapi import Body, FastAPI, Request
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -27,6 +28,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
@@ -38,6 +40,8 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -47,6 +51,53 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.tool_access import ToolAccess
+
+
+class AgentSeedSessionRequest(BaseModel):
+    """Initialize agent-server state for one episode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    episode_id: EpisodeId
+    task_id: TaskId
+    tool_accesses: list[ToolAccess] = Field(default_factory=list)
+    sandbox_access: SandboxAccess | None = None
+
+    @field_validator("tool_accesses")
+    @classmethod
+    def require_unique_tool_names(cls, tool_accesses: list[ToolAccess]) -> list[ToolAccess]:
+        names = [access.name for access in tool_accesses]
+        if len(names) != len(set(names)):
+            raise ValueError("tool access names must be unique within an agent session")
+        return tool_accesses
+
+
+class AgentSeedSessionResponse(BaseModel):
+    """Return the opaque agent session identifier."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_session_id: str
+
+
+class AgentCloseSessionRequest(BaseModel):
+    """Close agent-server state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_session_id: str
+    episode_id: EpisodeId
+
+
+class AgentCloseSessionResponse(BaseModel):
+    """Confirm closure and return captured observations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_session_id: str
+    agent_observations: AgentObservationBundle | None = None
+    resources_cookies: dict[str, str] | None = None
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
@@ -58,6 +109,15 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
     # The run-level ``token_id_capture.enabled`` setting gates the capture infrastructure.
     # The run-level ``token_id_capture.all_agents`` setting overrides this agent-level choice.
     token_id_capture: bool = False
+    tool_accesses: list[ToolAccess] = Field(default_factory=list)
+
+    @field_validator("tool_accesses")
+    @classmethod
+    def require_unique_tool_names(cls, tool_accesses: list[ToolAccess]) -> list[ToolAccess]:
+        names = [access.name for access in tool_accesses]
+        if len(names) != len(set(names)):
+            raise ValueError("configured tool access names must be unique")
+        return tool_accesses
 
 
 class BaseResponsesAPIAgent(BaseServer):
@@ -66,6 +126,12 @@ class BaseResponsesAPIAgent(BaseServer):
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
+
+    def effective_tool_accesses(self, request: AgentSeedSessionRequest) -> list[ToolAccess]:
+        """Overlay episode-scoped tool access onto configured declarations by name."""
+        accesses = {access.name: access for access in self.config.tool_accesses}
+        accesses.update((access.name, access) for access in request.tool_accesses)
+        return list(accesses.values())
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -98,8 +164,26 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         app.post("/run")(run_with_rollout_context)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
+        app.post("/v1/agent_sessions")(self.seed_agent_session)
+        app.post("/v1/agent_sessions/close")(self.close_agent_session)
 
         return app
+
+    async def seed_agent_session(
+        self,
+        request: Request,
+        body: AgentSeedSessionRequest,
+    ) -> AgentSeedSessionResponse:
+        """Create agent-owned session state."""
+        raise NotImplementedError("This agent does not implement episode sessions")
+
+    async def close_agent_session(
+        self,
+        request: Request,
+        body: AgentCloseSessionRequest,
+    ) -> AgentCloseSessionResponse:
+        """Close agent-owned session state."""
+        raise NotImplementedError("This agent does not implement episode sessions")
 
     def _capture_correlation_enabled(self) -> bool:
         """Return whether this agent needs rollout correlation.
