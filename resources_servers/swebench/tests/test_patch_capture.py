@@ -75,7 +75,7 @@ class _FakeSandbox:
             out = self.listing
         elif "add -N ." in command:
             out = self.worktree_diff
-        elif "diff --binary" in command:
+        elif "--no-pager diff " in command:
             out = self.committed_diff
         elif "config" in command:
             out = ""
@@ -131,7 +131,7 @@ async def test_committed_mode_diffs_base_to_branch_tip():
     cap = await capture_model_patch(sb, "/repo", BASE, mode="committed")
     assert cap.patch == COMMITTED_DIFF and cap.source == "committed"
     assert cap.tip_commit == C2 and cap.branch == "fix-123" and cap.commits == 3 and cap.warnings == []
-    assert any(f"diff --binary {BASE} {C2}" in c for c in sb.commands)
+    assert any(f"--no-pager diff {BASE} {C2}" in c for c in sb.commands)
 
 
 @pytest.mark.asyncio
@@ -167,14 +167,19 @@ async def test_pristine_untracked_files_and_nested_repo_dirs_are_stripped():
     )
     assert cap.committed_patch_bytes == 0 and cap.worktree_patch_bytes == 0 and cap.untracked_files == 0
 
-    # ls-files reports a nested checkout as "extern/cmake/"; add -N turns it into a gitlink section.
+    # ls-files reports a nested checkout as "extern/cmake/"; a diff names it "extern/cmake". The
+    # committed diff drops it; the worktree diff is deliberately left as it always was.
     sb2 = _FakeSandbox(
-        status="?? extern/\n", listing=_listing(("fix", C1, 1, 1), head=C1), worktree_diff=COMMITTED_DIFF + GITLINK
+        status="?? extern/\n",
+        listing=_listing(("fix", C1, 1, 1), head=C1),
+        committed_diff=COMMITTED_DIFF + GITLINK,
+        worktree_diff=COMMITTED_DIFF + GITLINK,
     )
     cap2 = await capture_model_patch(
         sb2, "/repo", BASE, mode="committed", pristine_untracked=frozenset({"extern/cmake/"})
     )
-    assert cap2.worktree_patch_bytes == cap2.committed_patch_bytes
+    assert cap2.patch == COMMITTED_DIFF
+    assert cap2.worktree_patch_bytes == len(COMMITTED_DIFF + GITLINK)
 
 
 @pytest.mark.asyncio

@@ -16,14 +16,14 @@
 swemer_v1, swemer_v2, swe_next).
 
 ``worktree``
-    ``git add -N . && git diff --binary <base>``: everything on disk that differs from the base
-    commit, committed or not. The historical default.
+    ``git add -N . && git diff <base>``: everything on disk that differs from the base commit,
+    committed or not. The historical default, unchanged.
 
 ``committed``
-    ``git diff --binary <base> <tip>``, where ``<tip>`` is the most advanced commit the agent left
-    on HEAD or any local branch (so a branch the agent switched away from still counts).
-    Uncommitted edits and untracked files are ignored, as in DeepSWE grading. Pair it with a
-    prompt that asks the model to work on a new branch and commit.
+    ``git diff <base> <tip>``, where ``<tip>`` is the most advanced commit the agent left on HEAD
+    or any local branch (so a branch the agent switched away from still counts). Uncommitted
+    edits and untracked files are ignored, as in DeepSWE grading. Pair it with a prompt that asks
+    the model to work on a new branch and commit.
 
 After the anti-cheat scrub the repo's only branch is ``_nel_work`` and git has no committer
 identity; :func:`prepare_git_for_commits` fixes the latter at seed time.
@@ -207,16 +207,13 @@ async def capture_model_patch(
     wd, base = shlex.quote(workdir), shlex.quote(base_commit)
     cap = PatchCapture(patch="", mode=mode, source="none", base_commit=base_commit)
 
-    # `git ls-files --others` reports a nested checkout as "dir/", while `git add -N .` emits a
-    # gitlink section for "dir" -- so treat "dir/" entries as prefixes, not exact paths.
-    pristine_dirs = tuple(p.rstrip("/") for p in pristine_untracked if p.endswith("/"))
-
     def _clean(patch: str) -> str:
-        if drop_sections and pristine_untracked:
-            patch = drop_sections(patch, pristine_untracked)
-        if pristine_dirs:
-            patch = drop_sections_under(patch, pristine_dirs)
-        return patch
+        return drop_sections(patch, pristine_untracked) if drop_sections and pristine_untracked else patch
+
+    # `git ls-files --others` reports a nested checkout as "dir/", while a diff names it "dir", so
+    # the exact-path drop above misses it; treat "dir/" entries as prefixes for the committed diff.
+    # The worktree diff is left exactly as it always was.
+    pristine_dirs = tuple(p.rstrip("/") for p in pristine_untracked if p.endswith("/"))
 
     # Working-tree state, read before `add -N` touches the index.
     status = await _exec(sandbox, f"git -C {wd} status --porcelain --untracked-files=all")
@@ -233,14 +230,14 @@ async def capture_model_patch(
         cap.tip_commit, cap.branch, cap.commits = tip.sha, tip.ref, tip.commits_since_base
         if not tip.is_descendant:
             cap.warnings.append(f"tip {tip.sha[:12]} ({tip.ref}) does not descend from base; history was rewritten")
-        diff = await _exec(sandbox, f"git -C {wd} --no-pager diff --binary {base} {shlex.quote(tip.sha)}")
-        committed_patch = _clean(diff.stdout or "")
+        diff = await _exec(sandbox, f"git -C {wd} --no-pager diff {base} {shlex.quote(tip.sha)}")
+        committed_patch = drop_sections_under(_clean(diff.stdout or ""), pristine_dirs)
     cap.committed_patch_bytes = len(committed_patch.encode("utf-8", errors="replace"))
 
     # Working tree vs base; intent-to-add so new files appear. Diagnostic only in `committed` mode,
     # so a failure there must not throw away a committed patch that was already captured.
     try:
-        diff = await _exec(sandbox, f"git -C {wd} add -N . && git -C {wd} --no-pager diff --binary {base}")
+        diff = await _exec(sandbox, f"git -C {wd} add -N . && git -C {wd} --no-pager diff {base}")
         worktree_patch = _clean(diff.stdout or "")
     except RuntimeError as exc:
         if mode == "committed" and tip is not None:
