@@ -86,6 +86,9 @@ class BaseServiceConfig(_StrictModel):
     # that cannot share a GPU with the policy, or a prefill/decode split. Pools take
     # contiguous node ranges in declaration order. None means the whole allocation.
     node_pool: str | None = None
+    # Services sharing a node get disjoint GPUs by default (see plan_gpus). True lets this
+    # one see every GPU instead, e.g. two small models each capped by --gpu-memory-utilization.
+    share_gpus: bool = False
     health_check: HealthCheckConfig | None = None
     # Values may be prefixed `lit:` (literal), `host:VAR` (read from the submitting
     # machine's env), or `runtime:VAR` (resolved from the job's own env at run time).
@@ -418,6 +421,7 @@ class SubmitConfig(_StrictModel):
                     # vLLM doesn't require auth; dummy key satisfies clients that require the header.
                     benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret
 
+        plan_gpus(self)
         return self
 
     def _validate_vllm_gpu_footprint(
@@ -491,3 +495,111 @@ class SubmitConfig(_StrictModel):
                 "allocation.",
                 stacklevel=2,
             )
+
+
+_CUDA_VISIBLE_DEVICES = "CUDA_VISIBLE_DEVICES"
+_GPU_INDEX_LIST_RE = re.compile(r"^\d+(,\d+)*$")
+
+
+def _manual_gpus(service: BaseServiceConfig) -> list[int] | None:
+    value = service.env.get(_CUDA_VISIBLE_DEVICES)
+    if value is None or not _GPU_INDEX_LIST_RE.match(value):
+        return None
+    return [int(index) for index in value.split(",")]
+
+
+def _takes_own_gpus(service: BaseServiceConfig) -> bool:
+    # A CUDA_VISIBLE_DEVICES that is not an index list (e.g. runtime:VAR) names unknown GPUs.
+    if service.share_gpus:
+        return False
+    return _CUDA_VISIBLE_DEVICES not in service.env or _manual_gpus(service) is not None
+
+
+def _gpus_needed_per_node(service: VllmServiceConfig, nodes: int, gpus_per_node: int) -> int | None:
+    """GPUs this service uses on each of its nodes, or None when Ray places it across nodes."""
+    tp_pp = service.tensor_parallel_size * service.pipeline_parallel_size
+    if nodes <= 1:
+        return tp_pp * service.number_of_instances
+    if service.number_of_instances > 1 and not effective_ray_serve(service, nodes, [gpus_per_node]):
+        return tp_pp * (service.number_of_instances // nodes)
+    return None
+
+
+def plan_gpus(config: "SubmitConfig") -> dict[str, dict[str, str]]:
+    """The CUDA_VISIBLE_DEVICES to render, keyed by node pool and then service.
+
+    A pool is planned only when two or more vLLM services on it want their own GPUs. Each
+    takes the lowest free indices in declaration order; a ray service there gets the rest.
+    Every other service keeps seeing every GPU, as it always has.
+    """
+    compute = next(iter(config.compute.values()))
+    pools = {name: pool for name, pool in compute.node_pools.items() if pool.nodes}
+    if not pools:
+        return {}
+    single_node = sum(pool.nodes for pool in pools.values()) == 1
+    policy = config.services.get(config.driver.policy_model or "")
+    # A ray head runs beside the driver, which runs on the policy's first node.
+    driver_pool = policy.node_pool if policy is not None and policy.node_pool else next(iter(pools))
+
+    plan: dict[str, dict[str, str]] = {}
+    for pool_name, pool in pools.items():
+        if pool.gpus_per_node is None:
+            continue
+        on_pool = {
+            name: service
+            for name, service in config.services.items()
+            if single_node
+            or (
+                pool_name in (*service.node_pools, driver_pool)
+                if isinstance(service, RayServiceConfig)
+                else service.node_pool == pool_name
+            )
+        }
+        vllms = {n: s for n, s in on_pool.items() if isinstance(s, VllmServiceConfig) and _takes_own_gpus(s)}
+        if len(vllms) < 2:
+            continue
+        needs = {n: _gpus_needed_per_node(s, pool.nodes, pool.gpus_per_node) for n, s in vllms.items()}
+        if None in needs.values():
+            continue
+        manual = {n: gpus for n, s in vllms.items() if (gpus := _manual_gpus(s)) is not None}
+        needs.update({n: len(gpus) for n, gpus in manual.items()})
+
+        total = sum(needs.values())
+        if total > pool.gpus_per_node:
+            breakdown = ", ".join(f"{n} {k}" for n, k in needs.items())
+            raise ValueError(
+                f"The services sharing node pool '{pool_name}' need {total} GPUs per node ({breakdown}), but it "
+                f"has {pool.gpus_per_node}. Pin a service to its own node_pool, add a node, or set "
+                "share_gpus: true on services that may share GPUs."
+            )
+
+        owner: dict[int, str] = {}
+        for name, gpus in manual.items():
+            for index in gpus:
+                if index >= pool.gpus_per_node:
+                    raise ValueError(
+                        f"Service '{name}' sets CUDA_VISIBLE_DEVICES={','.join(map(str, gpus))}, but node pool "
+                        f"'{pool_name}' has only GPUs 0-{pool.gpus_per_node - 1}."
+                    )
+                if owner.get(index, name) != name:
+                    raise ValueError(
+                        f"Services '{owner[index]}' and '{name}' both set GPU {index} in CUDA_VISIBLE_DEVICES on "
+                        f"node pool '{pool_name}'. Give them disjoint GPUs, or set share_gpus: true on one."
+                    )
+                owner[index] = name
+
+        free = [index for index in range(pool.gpus_per_node) if index not in owner]
+        assigned: dict[str, str] = {}
+        for name in vllms:
+            if name not in manual:
+                mine, free = free[: needs[name]], free[needs[name] :]
+                assigned[name] = ",".join(map(str, mine))
+        for name, service in on_pool.items():
+            if (
+                isinstance(service, RayServiceConfig)
+                and not service.share_gpus
+                and _CUDA_VISIBLE_DEVICES not in service.env
+            ):
+                assigned[name] = ",".join(map(str, free))
+        plan[pool_name] = assigned
+    return plan
