@@ -122,10 +122,10 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             return failure
         if response.result is None:
             raise ValueError("Successful episode response has no result")
-        result = response.result.verification.model_dump(mode="json")
+        result = response.result.model_dump(mode="json")
+        if result.get("ng_agent_observations") is None:
+            result.pop("ng_agent_observations", None)
         result["agent_ref"] = agent_ref
-        if response.result.agent_observations is not None:
-            result["ng_agent_observations"] = response.result.agent_observations.model_dump(mode="json")
         return result
 
 
