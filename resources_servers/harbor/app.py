@@ -122,6 +122,11 @@ class HarborResourcesServerConfig(BaseResourcesServerConfig):
     derive_cpu_env: bool = True
     # Operator environment for every sandbox; a task's own `[environment.env]` wins.
     sandbox_env: dict[str, str] = Field(default_factory=dict)
+    # Shell commands run as root in every new sandbox before the agent sees it, for repairs the
+    # operator owns rather than the task (for example pointing an end-of-life distro at an archive).
+    # A failing command fails the seed with a retryable 503.
+    sandbox_setup_commands: list[str] = Field(default_factory=list)
+    sandbox_setup_timeout_s: float = Field(default=600, gt=0)
     # Extra seconds granted to `test.sh` beyond `[verifier].timeout_sec` before the in-container `timeout` kills it.
     verifier_grace_s: float = Field(default=30, ge=0)
     # Verifier logs are downloaded here, one folder per resources session.
@@ -376,6 +381,15 @@ class HarborResourcesServer(SimpleResourcesServer):
             raise RuntimeError(f"Could not prepare {workdir}: {result.stderr or result.stdout}")
         return workdir
 
+    async def _run_setup_commands(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
+        for command in self.config.sandbox_setup_commands:
+            result = await sandbox.exec(command, cwd="/", timeout_s=self.config.sandbox_setup_timeout_s, user="root")
+            if result.return_code != 0:
+                raise RuntimeError(
+                    f"Sandbox setup command failed for {task.task_id!r} (exit {result.return_code}): "
+                    f"{(result.stderr or result.stdout or '')[-500:]}"
+                )
+
     async def _sandbox_access(self, session: HarborSession) -> SandboxAccess:
         return SandboxAccess(
             connection=DirectSandboxConnection(
@@ -416,6 +430,7 @@ class HarborResourcesServer(SimpleResourcesServer):
                 raise HTTPException(503, f"Could not start sandbox for {task.task_id!r}: {exc}") from exc
             try:
                 workdir = await self._prepare_workdir(sandbox, task, task.workdir)
+                await self._run_setup_commands(sandbox, task)
                 session = HarborSession(
                     task=task,
                     taskset=body.task_id.taskset,
