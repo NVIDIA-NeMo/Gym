@@ -172,7 +172,7 @@ class LeanCatResourcesServer(SimpleResourcesServer):
         )
 
     async def _run_lean(self, code: str, timeout_s: Optional[float] = None) -> SandboxExecResult:
-        """Compile one submission. Kept as a method so tests can stub the sandbox away."""
+        """Compile one submission."""
         return await self._lean.compile(
             code, timeout_s=self.config.compilation_timeout if timeout_s is None else timeout_s
         )

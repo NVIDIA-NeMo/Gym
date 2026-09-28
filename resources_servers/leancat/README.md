@@ -60,32 +60,35 @@ version compiles. `require_statement_preserved: false` disables the rejection wh
 
 ## Requirements
 
-A Lean 4 sandbox on `sandbox_host:sandbox_port` exposing `POST /execute` with
-`{generated_code, language, timeout, max_output_characters}` — the same
-[NeMo-Skills sandbox](https://github.com/NVIDIA-NeMo/NeMo-Skills/blob/main/dockerfiles/Dockerfile.sandbox) that
-`math_formal_lean` uses.
+A Lean 4.19.0 / Mathlib v4.19.0 sandbox image, built by
+[`resources_servers/lean_proof/lean_image`](../lean_proof/lean_image):
 
-**The sandbox must be built on Mathlib v4.19.0.** LeanCat statements are written against that release's
-`CategoryTheory` API. A sandbox on a different Mathlib will fail tasks for reasons that have nothing to do with the
-model, and the failures look like ordinary compile errors.
+```bash
+cd ../lean_proof/lean_image && ./build.sh v4.19.0
+```
 
-This is checked in two places rather than left to the reader:
+Verification runs through `nemo_gym.sandbox`, so any provider works — OpenSandbox, enroot,
+docker — and nothing has to be started out of band.
 
-- **`check_sandbox.py`** compiles `import Mathlib; #eval Lean.versionString` first and prints the version it found,
-  refusing to continue if `import Mathlib` does not compile at all.
-- **The server itself** runs the same probe once, on the first `verify`, and logs an `ERROR` if the sandbox
-  disagrees with the row's `lean_toolchain` (falling back to `expected_lean_version`, default `4.19.0`). It warns
-  rather than raises: a run already in flight should not die on this, and the operator needs the message. Set
-  `check_lean_version: false` to skip the probe.
+**The Mathlib version must be exactly v4.19.0.** LeanCat's statements are written against that release's
+`CategoryTheory` API, and a different Mathlib fails tasks for reasons that have nothing to do with the model: on
+v4.12.0, 36 of the 100 reference statements fail to compile **with their `sorry` still intact**, so they score 0
+whatever the model writes — a silent cap at 64/100, skewed by difficulty (see the table below).
 
-Measured cost of getting this wrong, on the stock NeMo-Skills sandbox (v4.12.0): 36 of the 100 reference statements
-fail to compile **with their `sorry` still intact**, so they score 0 regardless of the model — see the table below.
+Two checks guard it:
+
+- **`check_sandbox.py`** compiles all 100 reference statements and fails unless every one comes back with only a
+  `sorry` warning. Run it before spending anything on inference.
+- **The server** probes `Lean.versionString` once on the first `verify` and logs an `ERROR` on a mismatch with the
+  row's `lean_toolchain` (falling back to `expected_lean_version`). It logs rather than raises, so a run already in
+  flight is not killed; set `check_lean_version: false` to skip it.
 
 ```yaml
-sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
-sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
-compilation_timeout: 300.0   # upstream's per-attempt budget
-check_lean_version: true     # probe the sandbox once on the first verify
+sandbox_provider: sandbox            # any nemo_gym.sandbox provider config
+sandbox_config:
+  image: ${oc.env:GYM_LEAN_IMAGE_V4_19_0,gym-lean:v4.19.0}
+compilation_timeout: 300.0           # upstream's per-attempt budget
+check_lean_version: true
 expected_lean_version: "4.19.0"
 ```
 
@@ -298,42 +301,22 @@ python prepare.py --records local.jsonl
 
 ## Running it
 
-### 1. Get a sandbox on Mathlib v4.19.0
-
-**This is on you, and it is the step that decides whether your number means anything.** There is no published image
-at Mathlib v4.19.0 — `leanprover-community/mathlib` ships only `latest`/`gitpod`/`debian`, and the NeMo-Skills
-sandbox pins **v4.12.0**, which silently costs you 36 of the 100 problems (measured below). The reference runs used
-a NeMo-Skills sandbox image with Mathlib v4.19.0 built into it.
-
-This server ships no installer for that. An `elan`-based user-space install script was written and is in this
-branch's history, but it was never actually used to produce a run — every result here came from a prebuilt image —
-so shipping it would mean shipping an untested recipe. Whatever route you take, step 2 is what tells you it worked.
-
-#### Measured: what a v4.12.0 sandbox actually costs you
-
-Compiling all 100 **reference statements** (unmodified, `sorry` intact) inside NeMo-Skills'
-`nemo-skills-sandbox-latest` — Lean/Mathlib v4.12.0:
-
-| Tier | Compile | Hard error |
-|---|---:|---:|
-| Easy | 16 | 4 |
-| Medium | 29 | 11 |
-| High | 19 | 21 |
-| **Total** | **64** | **36** |
-
-So a v4.12.0 sandbox does not fail outright — it silently caps the score at 64/100 and skews it by difficulty, with
-High hit hardest. Those 36 problems return 0 no matter what the model writes. The failures are genuine Mathlib API
-drift (`invalid field 'carrier' … 'Grp.carrier'`, `invalid field 'IsRepresentable'`, `ambiguous, possible
-interpretations`, `function expected at`) and are indistinguishable at a glance from a model that simply could not
-prove the theorem.
-
-That makes it usable as a plumbing smoke test and useless for a number. `check_sandbox.py` is what tells the two
-apart, which is why it runs before anything else.
-
-### 2. Verify the sandbox before spending anything on inference
+### 1. Build the Lean image
 
 ```bash
-python check_sandbox.py --host <node> --port 6000
+cd ../lean_proof/lean_image
+./build.sh v4.19.0                      # local
+./build.sh v4.19.0 <registry>/gym-lean  # and push, prints the digest to pin
+```
+
+One image per Mathlib version; the pins live in `versions.json`. See that directory's README for what is pinned
+and why the build fails loudly rather than producing a subtly wrong image.
+
+### 2. Gate it before spending anything on inference
+
+```bash
+python check_sandbox.py --image <ref>            # 100/100 required
+python check_sandbox.py --provider enroot --image /path/to/gym-lean-v4.19.0.sqsh
 ```
 
 Compiles all 100 reference statements **unmodified**. Each still contains its `sorry`, so each must come back with a
@@ -346,36 +329,18 @@ gym eval prepare --benchmark leancat
 gym eval run --benchmark leancat
 ```
 
-`benchmarks/leancat/` is registered, so `gym list benchmarks` shows it and `--benchmark leancat` works.
 `num_repeats: 4` is the generalist budget of Table 1, and one of upstream's `recommended_k_values`. For Table 3's
 specialized provers, raise it to 32 with `--num-repeats`.
 
-The sandbox must already be reachable at `NEMO_SKILLS_SANDBOX_HOST:PORT` before either command — nothing in this
-server starts it. On Slurm that means launching it into the same allocation with `srun --overlap`.
-
-**No Slurm submit config ships with this server.** Every run behind the numbers above was driven by `sbatch`
-scripts kept outside the repo, so `gym eval submit` has never been exercised end to end for this benchmark. A
-config for it would be an untested recipe, which is the same reason the second verification backend was dropped
-(below). Writing one is straightforward — `services:` a `type: vllm` entry for the policy model, and set
-`NEMO_SKILLS_SANDBOX_HOST`/`PORT` in `driver.env` — but dry-run it before trusting it.
-
 ## Verification backend
 
-Verification goes through a NeMo-Skills HTTP sandbox at `sandbox_host:sandbox_port`, the same backend
-`math_formal_lean` uses. You start it out of band; on Slurm that is a second `srun --overlap` into the same
-allocation.
+Verification goes through `nemo_gym.sandbox`: one sandbox per server process, created on the first `verify` and
+reused, with each attempt compiled by `lake env lean` — which is what upstream's `verify_lean` does. A sandbox per
+rollout is not viable, since pod allocation costs minutes and a run is thousands of rollouts. There is no server
+shutdown hook, so `sandbox_config.ttl_s` is what reclaims the sandbox if the process dies.
 
-This server deliberately ships **one** backend. An earlier revision also routed verification through
-`nemo_gym.sandbox` (the enroot/apptainer/docker providers that `swebench`, `deepswe` and `litmus_agent` use), so that
-`gym eval submit` could start its own sandbox — `ServiceConfig` is a closed union of `vllm` and `ray`, with no
-generic container service, so that is the only way to make a one-command Slurm run work. It was dropped because it
-was never exercised end to end: every run of this benchmark, including the reproduction of Table 3, used the HTTP
-path, and shipping a second, untested way to compute the score is worse than not offering it. The cost is that the
-sandbox has to be launched separately, as **Running it** describes.
+The Lean file is written in through a heredoc rather than interpolated into the command, so quotes, backslashes and
+unicode in a proof need no escaping.
 
-The Lean file is sent to the sandbox as the `generated_code` field of a JSON body, never interpolated into a shell
-command, so quotes, backslashes and unicode in a proof need no escaping.
-
-`reward` is 1.0 only when the sandbox reports `completed` (a zero `lake env lean` exit) **and** the captured output
-carries neither `error:` nor a `sorry` warning. The output scan is needed because a warning-only build that declared a
-`sorry` still exits zero.
+`reward` is 1.0 only when Lean exits zero **and** the output carries neither `error:` nor a `sorry` warning. The
+output scan is needed because a warning-only build that declared a `sorry` still exits zero.

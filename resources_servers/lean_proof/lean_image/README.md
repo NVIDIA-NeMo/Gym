@@ -32,7 +32,7 @@ sandbox_config:
 
 ## What is pinned, and why it fails loudly
 
-`versions.json` holds, per version, the Lean release tarball's sha256 and the commit its
+`versions.py` holds, per version, the Lean release tarball's sha256 and the commit its
 Mathlib tag resolves to. The build:
 
 - verifies the tarball checksum before unpacking;
@@ -55,7 +55,7 @@ git ls-remote https://github.com/leanprover-community/mathlib4 refs/tags/<tag>
 curl -fsSL https://github.com/leanprover/lean4/releases/download/<tag>/lean-<v>-linux.tar.zst | sha256sum
 ```
 
-Add the pair to `versions.json`. Mathlib releases name the Lean toolchain they require, so
+Add the pair to `versions.py`. Mathlib releases name the Lean toolchain they require, so
 take the Lean version from the Mathlib tag rather than choosing it.
 
 ## Layout the servers expect

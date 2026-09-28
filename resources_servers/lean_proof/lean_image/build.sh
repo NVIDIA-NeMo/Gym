@@ -18,19 +18,18 @@ repository="${2:-gym-lean}"
 if [[ -z "${version}" ]]; then
     echo "usage: $0 <version> [registry/repository]" >&2
     echo "versions:" >&2
-    python3 -c "import json;print('  '+' '.join(json.load(open('${here}/versions.json'))['versions']))" >&2
+    python3 -c "import sys;sys.path.insert(0,'${here}');from versions import VERSIONS;print('  '+' '.join(VERSIONS))" >&2
     exit 2
 fi
 
 read -r lean_version mathlib_commit lean_sha256 < <(
-    python3 - "${here}/versions.json" "${version}" <<'PY'
-import json, sys
+    python3 - "${here}" "${version}" <<'PY'
+import sys
 
-pins = json.load(open(sys.argv[1]))["versions"]
-version = sys.argv[2]
-if version not in pins:
-    sys.exit(f"unknown version {version!r}; known: {' '.join(pins)}")
-pin = pins[version]
+sys.path.insert(0, sys.argv[1])
+from versions import pins
+
+pin = pins(sys.argv[2])
 print(pin["lean_version"], pin["mathlib_commit"], pin["lean_sha256"])
 PY
 )

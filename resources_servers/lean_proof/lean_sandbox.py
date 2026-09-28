@@ -68,12 +68,9 @@ TOOLCHAIN_PROBE = "import Mathlib\n#eval Lean.versionString"
 class LeanSandbox:
     """Lazily-started sandbox that compiles Lean files.
 
-    Args:
-        sandbox_provider: name of a sandbox config block, or an inline ``{provider: {...}}``.
-        sandbox_config: ``image``, ``resources``, ``ttl_s``, ``provider_options``, ... as in
-            the shipped provider configs.
-        project_dir: lake project to compile in.
-        server_name: recorded in sandbox metadata, so a stray sandbox is attributable.
+    ``sandbox_config`` takes ``image``, ``resources``, ``ttl_s``, ``provider_options`` and the
+    rest, as in the shipped provider configs. ``server_name`` lands in sandbox metadata, so a
+    stray sandbox is attributable.
     """
 
     def __init__(
@@ -106,8 +103,8 @@ class LeanSandbox:
             resources = SandboxResources.from_mapping(self._config.get("resources", {}))
             env = dict(self._config.get("env", {}))
             if self._config.get("derive_cpu_env", True):
-                # `lake` sizes its worker pool from the host core count, which on a node
-                # without LXCFS is the node's, not this sandbox's. Explicit keys win.
+                # `lake` sizes its worker pool from the host core count, not this sandbox's
+                # limit, on clusters without LXCFS. Explicit keys win.
                 env = cpu_cap_env(resources.cpu) | env
 
             sandbox = AsyncSandbox(provider)
@@ -132,10 +129,9 @@ class LeanSandbox:
     async def compile(self, code: str, timeout_s: float) -> SandboxExecResult:
         """Compile one Lean file and return the raw exec result.
 
-        The file is written through a heredoc rather than interpolated into the command, so
-        quotes, backslashes and unicode in a proof need no escaping, and is removed afterwards
-        so a long-lived sandbox does not accumulate one file per rollout. Each call uses a
-        unique name because one sandbox serves many concurrent verifies.
+        Written through a heredoc rather than interpolated into the command, so quotes,
+        backslashes and unicode in a proof need no escaping. One sandbox serves many concurrent
+        verifies, hence the unique filename.
         """
         sandbox = await self.start()
         path = f"attempt_{uuid.uuid4().hex}.lean"
@@ -164,9 +160,8 @@ class LeanSandbox:
         """
         from resources_servers.lean_proof.toolchain import normalize_version, parse_lean_version
 
-        # Callers that wrap `compile` (for retries, metrics, or so tests can stub the
-        # sandbox away) pass their wrapper; the probe must go through the same path a
-        # real verify does, or it is not testing the same thing.
+        # The probe must take the same path a real verify does, so callers that wrap
+        # `compile` pass their wrapper.
         run = compile_fn or self.compile
         result = await run(TOOLCHAIN_PROBE, 600)
         found = parse_lean_version({"stdout": result.stdout or "", "stderr": result.stderr or ""})
