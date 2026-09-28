@@ -27,7 +27,7 @@ from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import Any, ClassVar, Dict, List, Mapping, Optional, Set, Tuple, Type
+from typing import Any, ClassVar, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Type
 
 import hydra
 import rich
@@ -278,11 +278,39 @@ OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}
 OmegaConf.register_new_resolver("copy", lambda a: f"${{copy:{a}}}")
 
 
-def rollout_run_label(row: Mapping[str, Any]) -> Optional[str]:
-    """Name what ran a rollout: its agent when the row names one, otherwise its Environment Server.
+def rollout_run_key(row: Mapping[str, Any]) -> Optional[str]:
+    """Identify what ran a rollout, for grouping: its Environment Server.
 
-    Rows routed by agent keep the agent's name, so existing metric labels do not change.
-    Rows without an ``agent_ref``, such as episode rows, use the Environment Server stamp.
+    Records written before rollout collection stamped the Environment Server fall back to their agent.
+    """
+    server = row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+    if server is not None:
+        return server
+    return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+
+
+def rollout_run_labels(rows: Iterable[Mapping[str, Any]]) -> Dict[str, str]:
+    """Label each ``rollout_run_key`` for reports, the same way rollout collection labels aggregate metrics.
+
+    A key is labelled by its agent's name, so a run with one Environment Server per agent keeps its
+    existing labels.
+    When two Environment Servers front the same agent, the second is labelled by its own name.
+    A row without an ``agent_ref`` is labelled by its Environment Server.
+    """
+    labels: Dict[str, str] = {}
+    for row in rows:
+        key = rollout_run_key(row)
+        if key is None or key in labels:
+            continue
+        agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+        labels[key] = agent_name if agent_name is not None and agent_name not in labels.values() else key
+    return labels
+
+
+def rollout_agent_label(row: Mapping[str, Any]) -> Optional[str]:
+    """Name the agent that acted in one rollout, for per-rollout output such as trajectories and debug lines.
+
+    Rows without an ``agent_ref``, such as episode rows, use their Environment Server.
     """
     agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
     if agent_name is not None:

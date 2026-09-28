@@ -45,7 +45,7 @@ from nemo_gym.atif_v1_7 import (
     AtifTrajectoryV1_7,
 )
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, rollout_run_label
+from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, rollout_agent_label
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -901,7 +901,7 @@ def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_versi
         agent_type = agent_ref.get("type") if isinstance(agent_ref, dict) else None
         if agent_type not in (None, "responses_api_agents"):
             raise _path_error(f"{AGENT_REF_KEY_NAME}.type", "expected responses_api_agents when present")
-    agent_name = rollout_run_label(rollout)
+    agent_name = rollout_agent_label(rollout)
     if not isinstance(agent_name, str) or not agent_name.strip():
         raise _path_error(AGENT_REF_KEY_NAME, "expected a non-empty agent_ref.name or environment server stamp")
 
@@ -1004,7 +1004,7 @@ def export_rollouts_to_atif(config: ExportAtifConfig) -> AtifExportResult:
                     if key in keys:
                         raise _path_error(f"line {line_no}", f"duplicate Gym rollout key {key}")
                     keys.add(key)
-                    label = rollout_run_label(row)
+                    label = rollout_agent_label(row)
                     if isinstance(label, str):
                         agent_names.add(label)
                     trajectory = gym_rollout_to_atif(

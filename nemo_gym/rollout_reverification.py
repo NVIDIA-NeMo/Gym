@@ -45,12 +45,15 @@ from nemo_gym.global_config import (
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
-    rollout_run_label,
+    rollout_agent_label,
+    rollout_run_key,
+    rollout_run_labels,
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
     _coverage_report,
     _get_max_rollout_attempts,
@@ -349,7 +352,7 @@ def _rollout_verify_debug_summary(row: Dict[str, Any], resources_server_name: st
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
-        "agent_name": rollout_run_label(row),
+        "agent_name": rollout_agent_label(row),
         "resources_server_name": resources_server_name,
     }
     return {k: v for k, v in summary.items() if v is not None}
@@ -539,16 +542,28 @@ def _yield_inputs_and_rollouts_paired(
             n_yielded += 1
 
 
+def _rollout_response(rollout: Dict[str, Any]) -> Any:
+    """Return the response a rollout's verifier scored, or explain which result type lacks one."""
+    if "response" not in rollout:
+        result_type = rollout.get(NG_RESULT_TYPE_KEY, "unknown")
+        raise ConfigError(
+            f"reverify: rollout (task {rollout.get(TASK_INDEX_KEY_NAME)}, rollout {rollout.get(ROLLOUT_INDEX_KEY_NAME)}) "
+            f"of result type {result_type!r} has no `response`, which reverification needs"
+        )
+    return rollout["response"]
+
+
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
+    response = _rollout_response(pair.rollout)
     task_input = pair.input.get("task_input")
     if not isinstance(task_input, dict):
-        return pair.input | {"response": pair.rollout["response"]}
+        return pair.input | {"response": response}
     # A materialized task: rebuild the verify body its Resources Server accepts from the task input.
     row_keys = {k: v for k, v in pair.input.items() if k not in ("task_id", "task_input")}
     return (
         row_keys
         | (task_input.get("task_data") or {})
-        | {"responses_create_params": task_input.get("responses_create_params"), "response": pair.rollout["response"]}
+        | {"responses_create_params": task_input.get("responses_create_params"), "response": response}
     )
 
 
@@ -779,10 +794,12 @@ async def _call_aggregate_metrics(
     # fallback). Routing aggregation independently by the agent's configured server allowed a
     # remapped row to be verified by one server and aggregated by another.
     agent_results: Dict[Tuple[str, str], List[Dict]] = {}
+    labels = rollout_run_labels(rows)
     for row, result in zip(rows, results):
-        agent_name = rollout_run_label(row)
-        if not agent_name:
+        key = rollout_run_key(row)
+        if not key:
             continue
+        agent_name = labels[key]
         rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
         agent_results.setdefault((agent_name, rs_name), []).append(result)
 
@@ -965,7 +982,8 @@ class RolloutReverificationHelper(BaseModel):
             semaphore = Semaphore(config.num_samples_in_parallel)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
-        counts_left = Counter(rollout_run_label(r) for r in payloads_to_reverify)
+        run_labels = rollout_run_labels(payloads_to_reverify)
+        counts_left = Counter(run_labels.get(rollout_run_key(r)) for r in payloads_to_reverify)
         results_file = output_fpaths.output.open("ab")
         failures_file = output_fpaths.failures.open("ab")
         failure_counts: Counter = Counter()
@@ -1020,7 +1038,7 @@ class RolloutReverificationHelper(BaseModel):
                     results_file.write(serialized + b"\n")
                     results_file.flush()
 
-                label = rollout_run_label(row)
+                label = run_labels.get(rollout_run_key(row))
                 counts_left[label] -= 1
                 if counts_left[label] <= 0:
                     counts_left.pop(label)
