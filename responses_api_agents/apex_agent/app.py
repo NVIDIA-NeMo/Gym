@@ -80,6 +80,9 @@ class ApexAgentConfig(BaseResponsesAPIAgentConfig):
     edgar_user_agent: Optional[str]
     max_turns: int = Field(gt=0, le=200)
     max_output_tokens: int = Field(gt=0)
+    # Policy context window reported to Stirrup, which summarizes at 70% of it. Unset keeps Stirrup using
+    # max_output_tokens as the window.
+    context_window_tokens: Optional[int] = Field(default=None, gt=0)
     supports_vision: bool
     temperature: float = Field(ge=0.0)
     top_p: float = Field(gt=0.0, le=1.0)
@@ -451,6 +454,8 @@ class ApexAgent(SimpleResponsesAPIAgent):
             runner_config["startup_ownership"] = self._prebuilt_worlds[body.world_id]["startup_ownership"]
         if relay is not None:
             runner_config["model_egress_socket"] = f"{_EGRESS_MOUNT}/{relay.socket_name}"
+        if self.config.context_window_tokens is not None:
+            runner_config["context_window_tokens"] = self.config.context_window_tokens
         files = {
             f"{_GUEST_ROOT}/sandbox_entrypoint.py": (
                 load_prebuilt_runner_source() if prebuilt_world else load_runner_source()
