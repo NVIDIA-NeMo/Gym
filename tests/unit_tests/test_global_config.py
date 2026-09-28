@@ -81,6 +81,7 @@ class TestGlobalConfig:
             "python_version": "test python version",
             "skip_venv_if_present": False,
             "dry_run": False,
+            "server_spinup_timeout_seconds": 600,
             "model_endpoint_readiness_timeout_seconds": 600,
             "allow_openai_version_skew": False,
             "uv_cache_dir": str(CACHE_DIR.expanduser().resolve() / "uv"),

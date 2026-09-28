@@ -66,6 +66,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     QUERY_KEY_NAME,
+    SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
@@ -595,6 +596,8 @@ Process `{process_name}` stderr:
         poll_count = 0
         successful_servers = []
         total_servers = len(self._server_instance_display_configs)
+        timeout_seconds = self._server_client.global_config_dict.get(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME, 600)
+        deadline = monotonic() + timeout_seconds if timeout_seconds > 0 else None
 
         # Until we spin up or error out.
         while True:
@@ -608,6 +611,12 @@ Process `{process_name}` stderr:
                     waiting.append(name)
 
             if len(successful_servers) != total_servers:
+                if deadline is not None and monotonic() >= deadline:
+                    self.shutdown()
+                    raise RuntimeError(
+                        f"Timed out after {timeout_seconds}s waiting for Gym servers to become ready: "
+                        f"{', '.join(waiting)}"
+                    )
                 if poll_count % 10 == 0:  # Print every sleep_interval * poll_count = 3 * 10 = 30s
                     print(
                         f"""Checking for HTTP server statuses.

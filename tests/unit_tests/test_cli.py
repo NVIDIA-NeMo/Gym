@@ -376,6 +376,24 @@ class TestRunHelperServerReadiness:
             assert response.status_code == 503
             assert response.json() == {"status": "starting"}
 
+    def test_server_spinup_timeout_names_waiting_servers(self, monkeypatch: MonkeyPatch) -> None:
+        runner = RunHelper()
+        runner._server_client = SimpleNamespace(
+            global_config_dict={nemo_gym.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: 1}
+        )
+        runner._server_instance_display_configs = [SimpleNamespace(process_name="broken")]
+        runner.poll = MagicMock()
+        runner.shutdown = MagicMock()
+        runner.check_http_server_statuses = MagicMock(return_value=[("broken", "connection_error")])
+        monotonic_mock = MagicMock(side_effect=[0.0, 2.0])
+        monkeypatch.setattr(nemo_gym.cli.env, "monotonic", monotonic_mock)
+
+        with raises(RuntimeError, match="Timed out after 1s.*broken"):
+            runner.wait_for_spinup()
+
+        runner.poll.assert_called_once_with()
+        runner.shutdown.assert_called_once_with()
+
 
 class TestRunHelperShutdownReap:
     """RunHelper.shutdown must reap every server subprocess on every exit path."""
