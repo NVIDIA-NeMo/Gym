@@ -1,0 +1,17 @@
+# NeMo UserSim environment composition. Preparation materializes the persona panel; runtime only reads it.
+config_paths:
+  - resources_servers/usersim/configs/usersim.yaml
+
+usersim:
+  resources_servers:
+    usersim:
+      personas_cache_dir: environments/usersim/data/personas
+      datasets:
+        - name: usersim_probe_examples
+          type: benchmark
+          jsonl_fpath: resources_servers/usersim/data/example.jsonl
+          prepare_script: environments/usersim/prepare.py
+          prompt_config: null
+          num_repeats: 1
+          agent: usersim_assistant
+          license: Apache 2.0

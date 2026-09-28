@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare NeMo UserSim persona panels and Gym rows."""
+"""Prepare the persona panels used by the NeMo UserSim environment."""
 
 import hashlib
 import json
@@ -13,11 +13,10 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 
-BENCHMARK_DIR = Path(__file__).parent
-DATA_DIR = BENCHMARK_DIR / "data"
+ENVIRONMENT_DIR = Path(__file__).parent
+DATA_DIR = ENVIRONMENT_DIR / "data"
 PERSONAS_CACHE_DIR = DATA_DIR / "personas"
-OUTPUT_FPATH = DATA_DIR / "usersim.jsonl"
-EXAMPLE_FPATH = BENCHMARK_DIR.parents[1] / "resources_servers/usersim/data/example.jsonl"
+TASKS_FPATH = ENVIRONMENT_DIR.parents[1] / "resources_servers/usersim/data/example.jsonl"
 DEFAULT_PERSONAS_DATASET_VERSION = "0.0.2"
 DEFAULT_PERSONAS_LOCALES = ("en_US",)
 DEFAULT_PERSONAS_PANEL_SIZE = 1_000
@@ -78,7 +77,7 @@ def _prepare_panel(
     if executable is None:
         raise RuntimeError(
             f"{usersim_executable!r} is not on PATH. Install the pinned NeMo UserSim package "
-            "before running `gym eval prepare --benchmark usersim`."
+            "before preparing `environments/usersim/config.yaml`."
         )
     temporary_destination = destination.with_suffix(".parquet.tmp")
     temporary_destination.unlink(missing_ok=True)
@@ -135,7 +134,7 @@ def prepare(
     usersim_executable: str = "usersim",
     usersim_panel_timeout_seconds: float = 3_600,
 ) -> Path:
-    """Materialize UserSim persona panels and the benchmark JSONL."""
+    """Materialize UserSim persona panels and return the environment's example tasks."""
     cache_dir = Path(personas_cache_dir)
     for locale in personas_locales:
         _prepare_panel(
@@ -147,19 +146,10 @@ def prepare(
             timeout_seconds=usersim_panel_timeout_seconds,
         )
 
-    OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)
-    temporary_output = OUTPUT_FPATH.with_suffix(".jsonl.tmp")
-    rows = []
-    for line in EXAMPLE_FPATH.read_text().splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        row["task_id"]["taskset"] = "usersim:benchmark"
-        rows.append(json.dumps(row, separators=(",", ":")))
-    temporary_output.write_text("\n".join(rows) + "\n")
-    os.replace(temporary_output, OUTPUT_FPATH)
-    print(f"Prepared NeMo UserSim benchmark rows at {OUTPUT_FPATH}")
-    return OUTPUT_FPATH.absolute()
+    if not TASKS_FPATH.is_file():
+        raise RuntimeError(f"NeMo UserSim example tasks are missing at {TASKS_FPATH}")
+    print(f"Prepared NeMo UserSim environment panel for tasks at {TASKS_FPATH}")
+    return TASKS_FPATH.absolute()
 
 
 if __name__ == "__main__":

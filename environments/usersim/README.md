@@ -1,36 +1,41 @@
-# NeMo UserSim benchmark preparation
+# NeMo UserSim environment
 
-The benchmark preparation step delegates persona sampling to NeMo UserSim and
-treats the resulting panel Parquet as the immutable prepared artifact. Install
-the pinned NeMo UserSim package so the `usersim` executable is on `PATH`, then
-prepare the benchmark:
+This environment runs population-grounded, multi-turn user simulation with
+NeMo UserSim. It includes one example task for each first-party UserSim probe;
+the examples exercise the environment but do not constitute a separately
+baselined benchmark.
+
+Environment preparation delegates persona sampling to NeMo UserSim and treats
+the resulting panel Parquet as the immutable prepared artifact. Install the
+pinned NeMo UserSim package so the `usersim` executable is on `PATH`, then
+prepare the environment:
 
 ```bash
-gym eval prepare --benchmark usersim
+gym eval prepare --config environments/usersim/config.yaml
 ```
 
 Preparation invokes `usersim panel`, validates the resulting Parquet, and
 writes its checksum manifest under:
 
 ```text
-benchmarks/usersim/data/personas/
+environments/usersim/data/personas/
 └── 0.0.2/
     └── panels/
         ├── en_US.parquet
         └── en_US.manifest.json
 ```
 
-It also materializes `benchmarks/usersim/data/usersim.jsonl`, the lightweight
-Gym task dataset. Its 13 rows provide one example for every first-party UserSim
-probe. The Resources Server validates and loads the prepared panel; it does not
-duplicate UserSim's person-sampling logic.
+The 13 committed tasks in `resources_servers/usersim/data/example.jsonl`
+provide one example for every first-party UserSim probe. The Resources Server
+validates and loads the prepared panel; it does not duplicate UserSim's
+person-sampling logic.
 
 While UserSim is private, the Environment Server installs the pinned source
 revision over Git+SSH from `github.com/NVIDIA-NeMo/UserSim`; the host therefore
 needs GitHub SSH access. This temporary source dependency should become a normal
 published-package dependency when UserSim is open-sourced.
 
-NeMo UserSim behavior is pinned once in the benchmark's typed
+NeMo UserSim behavior is pinned once in the environment's typed
 `UserSimEnvironmentServerConfig.protocol_config`; it is not repeated in task
 rows. The Environment Server separately owns `max_turns`, fixes the Data
 Designer output-column name internally, and supplies each scenario's locale
@@ -60,8 +65,9 @@ After preparation:
 
 ```bash
 gym eval run \
-  --benchmark usersim \
+  --environment usersim \
   --agent usersim_assistant \
+  --split benchmark \
   --output results/usersim.jsonl \
   ++observability_enabled=true \
   ++model_call_capture_dir=/absolute/path/to/model-calls

@@ -366,7 +366,8 @@ class UserSimResourcesServer(SimpleResourcesServer):
         if not panel_path.is_file() or not manifest_path.is_file():
             raise RuntimeError(
                 f"Prepared NeMo UserSim panel for {locale!r} is missing at {panel_path}. "
-                "Run `gym eval prepare --benchmark usersim` before starting the Resources Server."
+                "Run `gym eval prepare --config environments/usersim/config.yaml` before starting the "
+                "Resources Server."
             )
         try:
             manifest = PreparedPersonaDataset.model_validate_json(manifest_path.read_text())

@@ -322,7 +322,7 @@ def test_startup_loads_prepared_panel_and_validates_manifest(tmp_path: Path, mon
 
 
 def test_missing_pinned_dataset_fails_during_initialization(tmp_path: Path) -> None:
-    with pytest.raises(RuntimeError, match="gym eval prepare --benchmark usersim"):
+    with pytest.raises(RuntimeError, match="gym eval prepare --config environments/usersim/config.yaml"):
         _app(tmp_path)
 
 
