@@ -30,6 +30,7 @@ from prompting import MAX_OUTPUT_TOKENS, NUM_CANDIDATES, PROMPTS_DIR, TEMPERATUR
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = SERVER_DIR.parents[1]
 sys.path.insert(0, str(SERVER_DIR / "scripts"))
 import make_example_data  # noqa: E402
 
@@ -71,8 +72,18 @@ class TestShippedConfigAgreesWithClassDefaults:
 
     def test_agent_datasets_declare_a_license(self) -> None:
         agent = yaml.safe_load((SERVER_DIR / "configs" / "nmrarena.yaml").read_text())["nmrarena_simple_agent"]
-        for ds in agent["responses_api_agents"]["simple_agent"]["datasets"]:
-            assert ds["license"] == "MIT"
+        datasets = agent["responses_api_agents"]["simple_agent"]["datasets"]
+        for ds in datasets:
+            assert ds.get("license"), ds["name"]
+        licenses = {ds["name"]: ds["license"] for ds in datasets}
+        # The five example rows are hand-authored here, so MIT is ours to declare.
+        # The 105 upstream rows carry third-party spectra whose rights are not
+        # determined, so they must stay TBD and must agree with the benchmark
+        # split in benchmarks/nmrarena/config.yaml, which is the same 105 rows.
+        assert licenses == {"example": "MIT", "nmrarena_105": "TBD"}
+        benchmark = yaml.safe_load((REPO_ROOT / "benchmarks" / "nmrarena" / "config.yaml").read_text())
+        benchmark_datasets = benchmark["nmrarena_benchmark_agent"]["responses_api_agents"]["simple_agent"]["datasets"]
+        assert [ds["license"] for ds in benchmark_datasets] == ["TBD"]
 
 
 class TestExampleData:

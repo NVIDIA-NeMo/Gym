@@ -22,11 +22,20 @@ nmrarena_simple_agent:
         type: responses_api_models
         name: policy_model
       datasets:
+      # Five hand-authored synthetic rows, not upstream data: MIT is ours to
+      # declare and no third-party spectra are involved.
       - name: example
         type: example
         jsonl_fpath: resources_servers/nmrarena/data/example.jsonl
         license: MIT
+      # Upstream declares the repository MIT, which covers the curated peak
+      # lists, but the spectra behind them come from a third-party spectral
+      # database whose rights this PR does not determine, so the effective
+      # licence of the downloaded corpus is unresolved. TBD is recorded
+      # deliberately rather than asserting a grant we cannot verify; see README
+      # "Licensing". These are the same 105 rows as the benchmark split, which
+      # is already TBD in benchmarks/nmrarena/config.yaml.
       - name: nmrarena_105
         type: validation
         jsonl_fpath: resources_servers/nmrarena/data/nmrarena_105.jsonl
-        license: MIT
+        license: TBD
