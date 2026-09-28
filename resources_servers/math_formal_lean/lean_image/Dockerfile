@@ -65,12 +65,20 @@ COPY --from=lean /opt/mathlib /opt/mathlib
 COPY --from=lean /opt/image-provenance/ /opt/image-provenance/
 ENV PATH=/opt/lean/bin:$PATH
 
-# Compile a Mathlib-importing file exactly as the verifier will: `lake env lean` on a file
-# in the project, under `env -i` (the verifier execs through a non-login shell, which reads no
-# profile). A `--version` check would pass on an image whose Mathlib does not import.
+# Symlink into a default-PATH directory. ENV PATH is image *config*, and config does not
+# survive every delivery path: converting the image to squashfs for enroot keeps the files
+# and drops the config, so a consumer relying on ENV gets "lake: not found". Symlinks are
+# part of the filesystem and survive.
+RUN ln -sf /opt/lean/bin/lake /usr/local/bin/lake && \
+    ln -sf /opt/lean/bin/lean /usr/local/bin/lean
+
+# Compile a Mathlib-importing file exactly as the verifier will: `lake env lean` on a file in
+# the project, under `env -i` with NO PATH set. Passing a PATH here would hide the very
+# failure this is meant to catch; a `--version` check would also pass on an image whose
+# Mathlib does not import.
 RUN printf 'import Mathlib\n#eval Lean.versionString\n' > /tmp/smoke.lean && \
     cd /opt/mathlib && \
-    env -i PATH=/opt/lean/bin:/usr/bin:/bin lake env lean /tmp/smoke.lean && \
+    env -i sh -c 'lake env lean /tmp/smoke.lean' && \
     rm /tmp/smoke.lean
 
 WORKDIR /opt/mathlib

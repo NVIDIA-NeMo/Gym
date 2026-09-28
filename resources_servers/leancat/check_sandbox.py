@@ -77,6 +77,11 @@ def provider_config(args: argparse.Namespace) -> dict:
     self-signed certificates, hence `tls_verify: false` -- the same default the shipped
     provider config carries.
     """
+    if args.provider == "enroot":
+        # bypass_entrypoint passes `--rc /dev/null`, which enroot resolves inside the
+        # container namespace before /dev is mounted -- it fails with "No such file or
+        # directory". The Lean image sets CMD, not ENTRYPOINT, so there is nothing to bypass.
+        return {"enroot": {"create": {"bypass_entrypoint": False}}}
     if args.provider != "opensandbox":
         return {args.provider: {}}
     return {
