@@ -510,7 +510,7 @@ def _manual_gpus(service: BaseServiceConfig) -> list[int] | None:
 
 def _takes_own_gpus(service: BaseServiceConfig) -> bool:
     # A CUDA_VISIBLE_DEVICES that is not an index list (e.g. runtime:VAR) names unknown GPUs.
-    if service.share_gpus:
+    if service.share_gpus or (isinstance(service, RayServiceConfig) and service.num_gpus == 0):
         return False
     return _CUDA_VISIBLE_DEVICES not in service.env or _manual_gpus(service) is not None
 
@@ -528,9 +528,9 @@ def _gpus_needed_per_node(service: VllmServiceConfig, nodes: int, gpus_per_node:
 def plan_gpus(config: "SubmitConfig") -> dict[str, dict[str, str]]:
     """The CUDA_VISIBLE_DEVICES to render, keyed by node pool and then service.
 
-    A pool is planned only when two or more vLLM services on it want their own GPUs. Each
-    takes the lowest free indices in declaration order; a ray service there gets the rest.
-    Every other service keeps seeing every GPU, as it always has.
+    A pool is planned only when a vLLM service on it shares it with another service that wants
+    its own GPUs (a vLLM or a ray service). Each vLLM takes the lowest free indices in declaration
+    order; a ray service there gets the rest. Every other service keeps seeing every GPU.
     """
     compute = next(iter(config.compute.values()))
     pools = {name: pool for name, pool in compute.node_pools.items() if pool.nodes}
@@ -555,13 +555,14 @@ def plan_gpus(config: "SubmitConfig") -> dict[str, dict[str, str]]:
                 else service.node_pool == pool_name
             )
         }
-        vllms = {n: s for n, s in on_pool.items() if isinstance(s, VllmServiceConfig) and _takes_own_gpus(s)}
-        if len(vllms) < 2:
+        claimants = {n: s for n, s in on_pool.items() if _takes_own_gpus(s)}
+        vllms = {n: s for n, s in claimants.items() if isinstance(s, VllmServiceConfig)}
+        if not vllms or len(claimants) < 2:
             continue
         needs = {n: _gpus_needed_per_node(s, pool.nodes, pool.gpus_per_node) for n, s in vllms.items()}
         if None in needs.values():
             continue
-        manual = {n: gpus for n, s in vllms.items() if (gpus := _manual_gpus(s)) is not None}
+        manual = {n: gpus for n, s in claimants.items() if (gpus := _manual_gpus(s)) is not None}
         needs.update({n: len(gpus) for n, gpus in manual.items()})
 
         total = sum(needs.values())
@@ -594,12 +595,9 @@ def plan_gpus(config: "SubmitConfig") -> dict[str, dict[str, str]]:
             if name not in manual:
                 mine, free = free[: needs[name]], free[needs[name] :]
                 assigned[name] = ",".join(map(str, mine))
-        for name, service in on_pool.items():
-            if (
-                isinstance(service, RayServiceConfig)
-                and not service.share_gpus
-                and _CUDA_VISIBLE_DEVICES not in service.env
-            ):
-                assigned[name] = ",".join(map(str, free))
+        for name in claimants.keys() - vllms.keys() - manual.keys():
+            assigned[name] = ",".join(map(str, free))
+        # Manual values are re-rendered too, where Slurm cannot reset them (see slurm_script._with_gpus).
+        assigned.update({name: ",".join(map(str, gpus)) for name, gpus in manual.items()})
         plan[pool_name] = assigned
     return plan

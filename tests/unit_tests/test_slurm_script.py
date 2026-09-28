@@ -1877,7 +1877,12 @@ def _step(script, name):
 
 
 def _gpus(step):
-    match = re.search(r"CUDA_VISIBLE_DEVICES=(\S*)", step)
+    # Slurm resets an `env K=V srun` value, so the plan is exported inside the step's command.
+    match = (
+        re.search(r"export CUDA_VISIBLE_DEVICES=([^\n]*)", shlex.split(step.split("bash -c ", 1)[1])[0])
+        if "bash -c " in step
+        else None
+    )
     return match and match.group(1)
 
 
@@ -1908,12 +1913,31 @@ def test_a_lone_service_renders_no_cuda_visible_devices(tmp_path):
     assert "CUDA_VISIBLE_DEVICES" not in script
 
 
-def test_a_lone_service_next_to_a_ray_service_renders_nothing_new(tmp_path):
+def test_a_lone_vllm_next_to_a_gpu_ray_service_is_packed(tmp_path):
+    # Otherwise Ray advertises the policy's GPUs and schedules work onto them.
     script = _render(
         tmp_path,
         {"policy": _vllm(8000, None, tensor_parallel_size=2), "ray": {"type": "ray", "container": "img"}},
         _ONE_NODE,
     )
+    assert _gpus(_step(script, "policy")) == "0,1"
+    assert _gpus(_step(script, "ray")) == "2,3"
+
+
+def test_a_lone_vllm_next_to_a_cpu_only_ray_service_renders_nothing_new(tmp_path):
+    script = _render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, None, tensor_parallel_size=2),
+            "ray": {"type": "ray", "container": "img", "num_gpus": 0},
+        },
+        _ONE_NODE,
+    )
+    assert "CUDA_VISIBLE_DEVICES" not in script
+
+
+def test_a_lone_ray_service_renders_nothing_new(tmp_path):
+    script = _render(tmp_path, {"ray": {"type": "ray", "container": "img"}}, _ONE_NODE)
     assert "CUDA_VISIBLE_DEVICES" not in script
 
 
@@ -2005,11 +2029,13 @@ def test_a_ray_service_with_its_own_gpus_keeps_them(tmp_path):
         {
             "judge": _vllm(8001, None),
             "policy": _vllm(8000, None, tensor_parallel_size=2),
-            "ray": {"type": "ray", "container": "img", "env": {"CUDA_VISIBLE_DEVICES": "lit:0,1,2,3"}},
+            "ray": {"type": "ray", "container": "img", "env": {"CUDA_VISIBLE_DEVICES": "lit:0"}},
         },
         _ONE_NODE,
     )
-    assert _gpus(_step(script, "ray")) == "0,1,2,3"
+    assert _gpus(_step(script, "ray")) == "0"
+    assert _gpus(_step(script, "judge")) == "1"
+    assert _gpus(_step(script, "policy")) == "2,3"
 
 
 def test_pinned_pools_are_packed_per_pool(tmp_path):
@@ -2022,9 +2048,9 @@ def test_pinned_pools_are_packed_per_pool(tmp_path):
             "ray": {"type": "ray", "container": "img", "node_pools": ["gpu", "aux"]},
         },
     )
-    # The policy is alone on its pool, so it and the ray head beside it are untouched.
-    assert "CUDA_VISIBLE_DEVICES" not in _step(script, "policy")
-    assert "CUDA_VISIBLE_DEVICES" not in _step(script, "ray")
+    # The policy fills its pool, so the ray head beside it sees no GPUs.
+    assert _gpus(_step(script, "policy")) == "0,1,2,3"
+    assert _gpus(_step(script, "ray")) == "''"
     assert _gpus(_step(script, "judge")) == "0"
     assert _gpus(_step(script, "scorer")) == "1,2"
     assert _gpus(_step(script, "ray_aux_workers")) == "3"
@@ -2052,3 +2078,25 @@ def test_a_ray_placed_multi_node_service_leaves_its_pool_as_today(tmp_path):
         pools,
     )
     assert "CUDA_VISIBLE_DEVICES" not in script
+
+
+def test_planned_gpus_are_exported_inside_the_step_not_passed_through_srun(tmp_path):
+    # On a cluster, Slurm reset `env CUDA_VISIBLE_DEVICES=0 srun ...` to the step's four GPUs.
+    script = _render(
+        tmp_path,
+        {
+            "judge": _vllm(8001, None, env={"HF_HOME": "lit:/hf"}),
+            "policy": _vllm(8000, None, tensor_parallel_size=2, env={"CUDA_VISIBLE_DEVICES": "lit:2,3"}),
+        },
+        _ONE_NODE,
+    )
+    for name in ("judge", "policy"):
+        assert "CUDA_VISIBLE_DEVICES" not in _step(script, name).split("srun", 1)[0]
+    assert _step(script, "judge").startswith("env HF_HOME=/hf srun")
+    assert _gpus(_step(script, "policy")) == "2,3"
+
+
+def test_a_lone_services_manual_value_is_rendered_as_before(tmp_path):
+    script = _render(tmp_path, {"policy": _vllm(8000, None, env={"CUDA_VISIBLE_DEVICES": "lit:0"})}, _ONE_NODE)
+    assert _step(script, "policy").startswith("env CUDA_VISIBLE_DEVICES=0 srun")
+    assert "export CUDA_VISIBLE_DEVICES" not in script
