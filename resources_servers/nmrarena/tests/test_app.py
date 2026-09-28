@@ -205,6 +205,9 @@ class TestAggregate:
         for i, t in enumerate(texts):
             r = verify(server, t).model_dump()
             results.append(dict(r, _ng_task_index=i, _ng_rollout_index=0))
+        # A fifth rollout the harness broke: masked, so no quality mean may see it.
+        fault = verify(server, cands(GOLD), None).model_dump()
+        results.append(dict(fault, _ng_task_index=len(texts), _ng_rollout_index=0))
         return server, results
 
     def test_headline_excludes_conditional_tanimoto_and_keeps_its_denominator(self) -> None:
@@ -221,3 +224,17 @@ class TestAggregate:
         assert agent["count/tanimoto_defined"] == 2 and agent["count/rows"] == 4
         assert agent["tanimoto_top1/answered_only"] == pytest.approx((1.0 + 0.4117647058823529) / 2)
         assert agent["mean/tanimoto_top1"] == pytest.approx(agent["tanimoto_top1/answered_only"])
+
+    def test_a_masked_harness_fault_is_reported_as_coverage_not_as_a_quality_mean(self) -> None:
+        server, results = self._rows()
+        metrics = compute_aggregate_metrics(
+            results, compute_metrics_fn=server.compute_metrics, get_key_metrics_fn=server.get_key_metrics
+        )
+        key, agent = metrics.key_metrics, metrics.agent_metrics
+        # Five rollouts ran, one was masked: the means are over the four measured rows.
+        assert key["mean/reward"] == 0.25 and agent["count/rows"] == 4
+        assert agent["coverage/masked_rollouts"] == 1 and agent["coverage/measured_rollouts"] == 4
+        # The masked row never reaches the profiler, so a mean of harness_failure would be
+        # identically 0.0 and must not be published as the fault signal.
+        assert "mean/harness_failure" not in key
+        assert key["coverage/masked_rollouts"] == 1

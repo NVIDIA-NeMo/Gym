@@ -108,8 +108,11 @@ position-1 candidate equals the canonical truth. Additional fields:
 | `truth_canonical`, `compound_id`, `primary_class`, `n_complex` | echoed from the row |
 
 Headline (`key_metrics`): `mean/reward`, `mean/top1`, `mean/top10`,
-`mean/answered`, `mean/response_incomplete`, `mean/harness_failure` and token
-means. The conditional Tanimoto is deliberately not a headline: a model that
+`mean/answered`, `mean/response_incomplete` and token means. A harness fault
+sets `mask_sample`, so the profiler excludes the row from every quality mean and
+reports it as `coverage/masked_rollouts` — that, not a mean of the per-row
+`harness_failure` field, is the harness-fault signal to read. The conditional
+Tanimoto is deliberately not a headline: a model that
 answers only when confident is paid for its silence (upstream's own footnote
 reports 0.89 for a model that answered 9 of 315 times). It stays in
 `agent_metrics` as `mean/tanimoto_top1` and `tanimoto_top1/answered_only`, next

@@ -150,7 +150,12 @@ class NMRArenaResourcesServer(SimpleResourcesServer):
         return out
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
-        """Top-1, Top-10, the answer rate and the harness-fault rate.
+        """Top-1, Top-10 and the answer rate.
+
+        ``mean/harness_failure`` is deliberately not a headline: harness faults set
+        ``mask_sample``, so the profiler drops those rows before averaging and the mean
+        would be identically 0.0. The profiler's own ``coverage/masked_rollouts`` is the
+        harness-fault signal; the per-row ``harness_failure`` field stays in the record.
 
         The conditional Tanimoto is deliberately not a headline: upstream reports it
         "conditional on valid outputs", and a model that answers only when confident is
@@ -163,7 +168,6 @@ class NMRArenaResourcesServer(SimpleResourcesServer):
             "mean/top1",
             "mean/top10",
             "mean/answered",
-            "mean/harness_failure",
             "mean/response_incomplete",
             "mean/input_tokens",
             "mean/output_tokens",
