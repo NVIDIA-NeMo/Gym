@@ -51,8 +51,9 @@ the schemas differ:
 
 The tracked `example.jsonl` carries the **collated** schema (`task_source`); a
 regeneration that stops after stage 1 yields a different file. The benchmark
-split written by `prepare.py` carries the preparer's schema and is collated at
-run time.
+split written by `prepare.py` carries neither routing key — it drops the
+deprecated `agent_ref` the server script emits — and `task_source` is added when
+it is collated at run time.
 
 ## Running
 
