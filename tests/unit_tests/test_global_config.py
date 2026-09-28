@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import importlib.metadata
+import logging
 import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
@@ -49,6 +50,7 @@ from nemo_gym.global_config import (
     USE_ABSOLUTE_IP,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
+    _apply_verbosity,
     _openai_version_matches_nemo_gym_constraint,
     find_open_port,
     get_first_server_config_dict,
@@ -2818,3 +2820,38 @@ def test_partial_head_server_inherits_the_resolved_host(monkeypatch):
 
     assert parsed[HEAD_SERVER_KEY_NAME]["port"] == 63000, "explicit port must survive"
     assert parsed[HEAD_SERVER_KEY_NAME]["host"] == "10.1.2.3", "host must be filled in"
+
+
+@mark.parametrize(
+    ("config", "expected_level"),
+    [
+        ({"log_level": "info"}, logging.INFO),
+        ({"log_level": "WARNING"}, logging.WARNING),
+        ({"verbose": True, "log_level": "INFO"}, logging.DEBUG),
+    ],
+)
+def test_apply_verbosity_sets_root_log_level(config: dict, expected_level: int) -> None:
+    root = logging.getLogger()
+    original_level = root.level
+    try:
+        root.setLevel(logging.CRITICAL)
+        _apply_verbosity(OmegaConf.create(config))
+        assert root.level == expected_level
+    finally:
+        root.setLevel(original_level)
+
+
+def test_apply_verbosity_leaves_level_unset_by_default() -> None:
+    root = logging.getLogger()
+    original_level = root.level
+    try:
+        root.setLevel(logging.CRITICAL)
+        _apply_verbosity(OmegaConf.create({}))
+        assert root.level == logging.CRITICAL
+    finally:
+        root.setLevel(original_level)
+
+
+def test_apply_verbosity_rejects_unknown_log_level() -> None:
+    with raises(ValueError, match="log_level must be a standard logging level name"):
+        _apply_verbosity(OmegaConf.create({"log_level": "chatty"}))
