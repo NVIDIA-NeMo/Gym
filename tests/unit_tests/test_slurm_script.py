@@ -2173,3 +2173,24 @@ def test_a_ray_head_on_node_0_is_probed_locally(tmp_path):
 def test_the_collector_is_probed_beside_a_non_zero_driver_node(tmp_path):
     script = _driver_on_aux(tmp_path, {})
     assert "Waiting for otel_collector at http://${gym_nodes[1]}:13133" in script
+
+
+_RAY_WITH_PROBE = {
+    "type": "ray",
+    "container": "img",
+    "node_pools": ["gpu", "aux"],
+    "health_check": {"port": 8011, "path": "/"},
+}
+
+
+def test_a_pinned_service_on_a_later_pool_is_probed_where_it_runs(tmp_path):
+    # The probe runs on node 0; the aux pool's service answers on node 1.
+    script = _render(tmp_path, {"policy": _vllm(8000, "gpu"), "scorer": _vllm(8001, "aux")})
+    assert "Waiting for scorer at http://${gym_nodes[1]}:8001" in script
+    assert "Waiting for policy at http://localhost:8000" in script
+
+
+def test_services_on_node_0_are_probed_locally(tmp_path):
+    script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": _RAY_WITH_PROBE})
+    assert "Waiting for ray at http://localhost:8011" in script
+    assert "Waiting for policy at http://localhost:8000" in script
