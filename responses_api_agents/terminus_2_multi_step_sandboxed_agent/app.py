@@ -91,7 +91,12 @@ class Terminus2MultiStepAgent(Terminus2Agent):
                     request, params, sandbox, timeout_s=prepared["agent_timeout_s"]
                 )
                 response_model = response.model
-                outputs.extend(response.output)
+                # Echoed-history ids are derived from position and text, so two steps can echo the
+                # same message under the same id; consumers key the combined output by id.
+                outputs.extend(
+                    item.model_copy(update={"id": f"{item.id}_s{step_index}"}) if getattr(item, "id", None) else item
+                    for item in response.output
+                )
                 metrics["step_index"] = step_index
                 metrics["step_name"] = prepared["name"]
                 metrics["usage"] = response.usage

@@ -250,6 +250,30 @@ class TestStepLoop:
         assert result.command_exec_times == [1.0, 1.0] and result.total_model_call_time == 4.0
         harness.sandbox.stop.assert_awaited_once()
 
+    async def test_echoed_item_ids_are_unique_across_steps_in_the_combined_output(self, monkeypatch):
+        harness = Harness(TWO_STEPS)
+
+        async def execute(request, body, sandbox, timeout_s=None):
+            index = len(harness.executions)
+            harness.executions.append(([], timeout_s))
+            response = response_for(index)
+            # The same echoed message at the same position hashes to the same id in every step.
+            response.output[0].id = "msg_0123456789abcdef01234567"
+            response.output.append(
+                NeMoGymResponseOutputMessage(id="", content=[NeMoGymResponseOutputText(annotations=[], text="x")])
+            )
+            return response, step_metrics(index)
+
+        agent = make_agent(harness, monkeypatch)
+        monkeypatch.setattr(agent, "_execute", execute)
+        await agent.run(make_request(), run_body())
+        output = harness.posts[-1][1]["response"]["output"]
+        ids = [item["id"] for item in output if item["id"]]
+        assert len(output) == 4 and len(ids) == 2 and len(set(ids)) == 2
+        assert all(i.startswith("msg_0123456789abcdef01234567") for i in ids)
+        # Unset ids are left alone: the single-step agent's own output shape is unchanged.
+        assert [item["id"] for item in output if not item["id"]] == ["", ""]
+
     async def test_gate_stop_skips_remaining_steps(self, monkeypatch):
         harness = Harness(TWO_STEPS, stop_after={0: True})
         agent = make_agent(harness, monkeypatch)
