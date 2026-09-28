@@ -83,3 +83,12 @@ The paper reports Pass@1/8/16 from 16 samples per problem; it does not state
 the temperature or token budget used, and upstream's shipped config defaults to
 `temperature: 0`, `max_tokens: 2048`, `n: 1`. Report a comparison, not a
 reproduction.
+
+## Measured
+
+Goedel-Prover-V2-32B, 16 rollouts per problem, temperature 1.0, 39,000-token
+budget: **8 / 100** pass@16 here and **9 / 100** on the with-solution split,
+with nothing solved in the `imo` or `math_competitions` families. Every one of
+the 3,200 rollouts was re-scored by upstream's own harness and agreed on.
+Full numbers, caveats and the agreement report are in the
+[server README](../../resources_servers/combibench/README.md#reward-profiling).

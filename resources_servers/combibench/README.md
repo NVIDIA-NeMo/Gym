@@ -215,6 +215,45 @@ live server (`data/harness_validation_example.json`). One of them answers
 `3 / 12` where the gold is `1 / 4`, exercising the `norm_num` path of the
 answer check.
 
+## Reward profiling
+
+Goedel-Prover-V2-32B, an open-weights Lean prover, 16 rollouts per problem,
+temperature 1.0, 39,000-token budget, both settings end to end on this code
+path. A generalist model of comparable size scores at or near zero on this
+benchmark, which cannot tell a working verifier from a broken one; a prover
+that closes goals can.
+
+| Benchmark | pass@16 | pass@1 (avg of 16) | Harness faults |
+| --- | --- | --- | --- |
+| `combibench` | **8 / 100** | 2.12% | 0.125% (2 / 1600) |
+| `combibench_with_solution` | **9 / 100** | 1.94% | 0% |
+
+Per source family, problems solved at least once out of 16 attempts:
+
+| Family | `combibench` | `combibench_with_solution` |
+| --- | --- | --- |
+| `brualdi` (textbook) | 7 / 42 | 8 / 42 |
+| `hackmath` | 1 / 10 | 1 / 10 |
+| `imo` | **0 / 36** | **0 / 36** |
+| `math_competitions` | **0 / 12** | **0 / 12** |
+
+Three things make this a check on the harness rather than a number:
+
+- The two settings solve almost the same problems (`brualdi_ch7_7`,
+  `ch14_33`, `ch3_4`, `ch10_31`, `ch3_18`, `ch6_21`, `ch1_16`, `hackmath_4` in
+  both), which is what a stable verifier looks like across independent runs.
+- Difficulty orders as published: everything solved is textbook or
+  hackmath, and no olympiad problem is solved in 576 attempts.
+- Every rollout was re-scored by upstream's own harness with no disagreement.
+
+Caveats. 3% of rollouts hit the token budget, which accounts for every
+`format_error` — a truncated reply loses its closing fence. The paper does not
+publish decoding parameters or a token budget, so this is a comparison against
+its protocol, not a reproduction of its numbers. `with_solution` scoring no
+higher than `combibench` is consistent across both: substituting the published
+answer lengthens the statement the model must reproduce verbatim, and
+`statement_modified` is correspondingly higher (39.8% against 39.3%).
+
 ## Lean server
 
 Upstream verifies through [Kimina Lean Server](https://github.com/project-numina/kimina-lean-server)
@@ -375,7 +414,30 @@ The re-derivation in `fine_eval.py` is checked against upstream's actual code,
 not only against fixtures. `scripts/upstream_agreement.py` downloads CombiBench
 at the pinned revision, imports `evaluation/verifier/one_stage_verify.py`
 unmodified, and re-scores collected rollouts through the same Lean server,
-reporting per-item agreement rather than a matching headline:
+reporting per-item agreement rather than a matching headline.
+
+Measured on the Goedel-Prover-V2-32B rollouts below
+(`data/upstream_agreement_*.json`):
+
+| Benchmark | Rollouts | This verifier | Upstream | Agreement |
+| --- | --- | --- | --- | --- |
+| `combibench` | 1600 | 34 | 34 | **1600 / 1600** |
+| `combibench_with_solution` | 1600 | 31 | 31 | **1600 / 1600** |
+
+The same rollouts pass under both, not merely the same number of them. Both
+departures below can only produce accepts-here-rejects-there, and neither
+produced one on this run.
+
+**Upstream's harness needs one transport-level fix to run at all**, applied in
+that script and nowhere else. It reads `res["error"]` by subscript; Kimina
+omits that key when there was no error, so the read raises `KeyError`,
+upstream's blanket `except Exception` turns it into "proof invalid", and every
+compiling proof is reported as failed — 0/1600 unpatched. This is not a pin
+that could have been chosen better: upstream pins the `kimina` client at 0.1.1
+(2025-07-24), three months before Lean v4.24.0 was released (2025-10-14), while
+its own statements are now on v4.24.0. No server is both contemporary with that
+client and able to compile the current statements. It is also why this server
+talks to Kimina through its own client, which reads that field with `.get`.
 
 ```bash
 uv pip install loguru strenum   # upstream's imports, which Gym does not ship
