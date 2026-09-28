@@ -4,25 +4,17 @@
 #
 # Lean + Mathlib for the Gym Lean benchmarks, linux/amd64.
 #
-# One image per Mathlib version: compiled oleans do not carry across versions, and the
-# benchmarks disagree (minif2f/proofnet/putnam_bench/mobench v4.12.0, leancat v4.19.0).
-# Build args select the version; see README.md for the per-version values.
-#
-# Pinning follows responses_api_agents/opencode_sandboxed_agent/offline_science_image:
-# the Lean tarball by sha256, Mathlib by commit, and the final `lake build` runs with
-# --network=none so an incomplete cache fails the build instead of the benchmark.
+# One image per Mathlib version; build args select it, and versions.py holds the pins.
+# See README.md.
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS base
 
 ARG DEBIAN_SNAPSHOT=20260916T000000Z
-# The snapshot mirror is fetched over http, not https: debian:bookworm-slim ships no CA
-# bundle (its own default sources are http for the same reason), and ca-certificates is
-# installed by this very command. Integrity still comes from apt's GPG signature check,
-# which is Debian's actual trust model; the transport is not what makes it safe.
+# http, not https: this image ships no CA bundle and ca-certificates is installed below.
+# apt's GPG signature check is what protects integrity.
 #
-# apt drops privileges to the `_apt` user to fetch, which needs a user namespace to switch
-# into. Builders without one (buildah under chroot isolation, which is how this is built on
-# a cluster with no docker) fail with "Could not switch group". Fetching as root is fine in
-# a build container and costs nothing under docker.
+# APT::Sandbox::User=root: apt drops privileges to `_apt` to fetch, which needs a user
+# namespace. Builders without one (buildah under chroot isolation) fail with "Could not
+# switch group".
 RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/00-no-sandbox && \
     rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources && \
     printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/%s/ bookworm main\ndeb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/%s/ bookworm-security main\n' "$DEBIAN_SNAPSHOT" "$DEBIAN_SNAPSHOT" > /etc/apt/sources.list && \
@@ -31,8 +23,8 @@ RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/00-no-sandbox &&
     rm -rf /var/lib/apt/lists/*
 
 FROM base AS lean
-# Defaults are leancat's pin. `LEAN_VERSION` must be the toolchain named by the Mathlib
-# commit's own lean-toolchain file; the build asserts they agree rather than trusting it.
+# LEAN_VERSION must be the toolchain the Mathlib commit's own lean-toolchain names; the
+# build asserts that below rather than trusting it.
 ARG LEAN_VERSION=v4.19.0
 ARG LEAN_SHA256
 ARG MATHLIB_COMMIT
@@ -56,7 +48,7 @@ RUN git init /opt/mathlib && cd /opt/mathlib && \
     cp lean-toolchain lake-manifest.json /opt/image-provenance/ && \
     rm -rf /root/.cache/mathlib
 
-# Offline: proves the cache is complete at build time rather than at rollout time.
+# Offline: an incomplete cache fails here, not mid-rollout.
 RUN --network=none cd /opt/mathlib && lake build Mathlib
 
 FROM base AS runtime
@@ -65,17 +57,13 @@ COPY --from=lean /opt/mathlib /opt/mathlib
 COPY --from=lean /opt/image-provenance/ /opt/image-provenance/
 ENV PATH=/opt/lean/bin:$PATH
 
-# Symlink into a default-PATH directory. ENV PATH is image *config*, and config does not
-# survive every delivery path: converting the image to squashfs for enroot keeps the files
-# and drops the config, so a consumer relying on ENV gets "lake: not found". Symlinks are
-# part of the filesystem and survive.
+# ENV PATH is image config, which does not survive conversion to squashfs for enroot --
+# the files arrive, the config does not. Symlinks are filesystem, so they do.
 RUN ln -sf /opt/lean/bin/lake /usr/local/bin/lake && \
     ln -sf /opt/lean/bin/lean /usr/local/bin/lean
 
-# Compile a Mathlib-importing file exactly as the verifier will: `lake env lean` on a file in
-# the project, under `env -i` with NO PATH set. Passing a PATH here would hide the very
-# failure this is meant to catch; a `--version` check would also pass on an image whose
-# Mathlib does not import.
+# Compile as the verifier will: `lake env lean` in the project, under `env -i` with no PATH.
+# Setting PATH here would hide the failure this exists to catch.
 RUN printf 'import Mathlib\n#eval Lean.versionString\n' > /tmp/smoke.lean && \
     cd /opt/mathlib && \
     env -i sh -c 'lake env lean /tmp/smoke.lean' && \
