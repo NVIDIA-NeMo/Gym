@@ -696,6 +696,27 @@ def _service_nodelist(
     return None
 
 
+def _health_check_host(
+    service: VllmServiceConfig | RayServiceConfig,
+    config: SubmitConfig,
+    compute: SlurmComputeConfig,
+    driver_node: int | None,
+    total_nodes: int,
+) -> str:
+    """Where the batch script, which runs on node 0, reaches a service's health endpoint."""
+    if driver_node is None:
+        return "localhost"
+    if isinstance(service, RayServiceConfig):
+        node = _driver_node(config, compute)
+    elif service.node_pool is not None:
+        node = _pool_offsets(compute)[service.node_pool][0]
+    elif _vllm_spans_multiple_nodes(service, total_nodes):
+        node = 0
+    else:
+        node = driver_node
+    return "localhost" if node == 0 else f"${{gym_nodes[{node}]}}"
+
+
 def _srun_nodes(
     service: VllmServiceConfig | RayServiceConfig, compute: SlurmComputeConfig, total_nodes: int
 ) -> int | None:
@@ -812,7 +833,11 @@ def build_sbatch_script(
         ([_render_collector_health_check(config)] if observed else [])
         + [
             render_health_check(
-                name, service.health_check.port, service.health_check.path, service.health_check.timeout_seconds
+                name,
+                service.health_check.port,
+                service.health_check.path,
+                service.health_check.timeout_seconds,
+                _health_check_host(service, config, compute, driver_node, total_nodes),
             )
             for name, service in config.services.items()
             if service.health_check

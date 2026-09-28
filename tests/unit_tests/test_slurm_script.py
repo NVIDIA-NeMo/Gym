@@ -2276,3 +2276,42 @@ def test_auto_puts_services_with_clashing_manual_gpus_on_different_nodes(tmp_pat
     )
     assert config.services["a"].node_pool == "gpu-0"
     assert config.services["b"].node_pool == "gpu-1"
+
+
+def test_a_service_on_another_node_is_health_checked_on_that_node(tmp_path):
+    # The batch script runs on node 0; localhost there never answers for the aux node's scorer.
+    script = _render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "scorer": _vllm(8001, "aux", tensor_parallel_size=4),
+        },
+    )
+    assert "Waiting for policy at http://localhost:8000" in script
+    assert "Waiting for scorer at http://${gym_nodes[1]}:8001" in script
+
+
+def test_an_unpinned_service_beside_a_later_policy_is_health_checked_there(tmp_path):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "policy": _vllm(8000, "aux", tensor_parallel_size=4),
+                "ray": {"type": "ray", "container": "img"},
+            },
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
+            "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
+    assert "Waiting for policy at http://${gym_nodes[1]}:8000" in script
+
+
+def test_auto_health_checks_a_service_moved_to_a_second_node_there(tmp_path):
+    _, script = _auto_render(
+        tmp_path,
+        {"policy": _vllm(8000, None, tensor_parallel_size=4), "judge": _vllm(8001, None)},
+        policy="policy",
+    )
+    assert "Waiting for policy at http://localhost:8000" in script
+    assert "Waiting for judge at http://${gym_nodes[1]}:8001" in script
