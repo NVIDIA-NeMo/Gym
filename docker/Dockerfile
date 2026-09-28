@@ -222,8 +222,12 @@ RUN uv venv /opt/nemo-gym/cache/seed-venv && \
 # first run. Resolving every hook environment here, while the build has
 # network, keeps the runtime lint hermetic.
 ENV PRE_COMMIT_HOME=/opt/nemo-gym/cache/pre-commit
-RUN pre-commit install-hooks && \
-    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}"
+# Local build contexts exclude .git, but pre-commit requires a repository to
+# resolve the configuration. Use disposable metadata while seeding the cache.
+RUN git init --quiet && \
+    pre-commit install-hooks && \
+    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}" && \
+    rm -rf .git
 RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" \
         "${UV_CACHE_DIR}" \
         /opt/nemo-gym/cache/xdg

@@ -53,15 +53,62 @@ def _sanitize_error(e: Exception) -> str:
 def _normalize_to_response(data: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize a LiteLLM proxy response to the Responses API format.
 
-    LiteLLM proxies have two known quirks when proxying /v1/responses:
+    LiteLLM proxies have known quirks when proxying /v1/responses:
     1. They may return ``reasoning.effort = "none"`` (string) instead of ``null``.
-    2. They may downgrade the call to chat completions internally and return
+    2. In native responses, LiteLLM may return null/missing ``input_tokens_details``
+       and ``output_tokens_details`` in usage, missing ``summary`` on reasoning items,
+       or ``type="output_text"`` instead of ``"reasoning_text"`` in reasoning content.
+    3. They may downgrade the call to chat completions internally and return
        ``object="chat.completion"`` instead of ``"response"``.
     """
     # Fix fields that cause validation errors even in native response format.
     reasoning = data.get("reasoning")
     if isinstance(reasoning, dict) and reasoning.get("effort") == "none":
         reasoning["effort"] = None
+
+    usage = data.get("usage")
+    if isinstance(usage, dict):
+        if "input_tokens" not in usage and "prompt_tokens" in usage:
+            usage["input_tokens"] = usage["prompt_tokens"]
+        if "output_tokens" not in usage and "completion_tokens" in usage:
+            usage["output_tokens"] = usage["completion_tokens"]
+        if "total_tokens" not in usage and ("input_tokens" in usage or "output_tokens" in usage):
+            usage["total_tokens"] = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
+
+        if not isinstance(usage.get("input_tokens_details"), dict):
+            cached_tokens = _usage_detail(
+                usage,
+                "prompt_tokens_details",
+                "cached_tokens",
+                "cached_input_tokens",
+                "cache_read_input_tokens",
+            )
+            usage["input_tokens_details"] = {"cached_tokens": cached_tokens}
+        elif "cached_tokens" not in usage["input_tokens_details"]:
+            usage["input_tokens_details"]["cached_tokens"] = None
+
+        if not isinstance(usage.get("output_tokens_details"), dict):
+            reasoning_tokens = _usage_detail(
+                usage,
+                "completion_tokens_details",
+                "reasoning_tokens",
+                "reasoning_output_tokens",
+            )
+            usage["output_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
+        elif "reasoning_tokens" not in usage["output_tokens_details"]:
+            usage["output_tokens_details"]["reasoning_tokens"] = None
+
+    output = data.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if isinstance(item, dict) and item.get("type") == "reasoning":
+                if item.get("summary") is None:
+                    item["summary"] = []
+                content = item.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "output_text":
+                            part["type"] = "reasoning_text"
 
     if data.get("object") != "chat.completion":
         return data

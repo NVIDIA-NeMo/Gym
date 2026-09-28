@@ -132,6 +132,33 @@ class TestServerUtils:
         assert restored_error.headers.getall("retry-after") == ["10", "20"]
         assert restored_error.headers.getall("SET-COOKIE") == ["session=abc", "preferences=dark"]
 
+    async def test_raise_for_status_accepts_prefetched_content(self) -> None:
+        request_info = RequestInfo(
+            url=URL("http://judge.test/v1/responses"),
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict()),
+            real_url=URL("http://judge.test/v1/responses"),
+        )
+        original_error = ClientResponseError(
+            request_info=request_info,
+            history=(),
+            status=429,
+            message="Too Many Requests",
+            headers=CIMultiDictProxy(CIMultiDict()),
+        )
+        response = MagicMock()
+        response.ok = False
+        response.content.read = AsyncMock(side_effect=AssertionError("body already consumed"))
+        response.request_info = request_info
+        response.raise_for_status.side_effect = original_error
+        content = b'{"error":"rate_limit_exceeded"}'
+
+        with raises(ClientResponseError) as exc_info:
+            await raise_for_status(response, content)
+
+        assert exc_info.value.response_content == content
+        response.content.read.assert_not_awaited()
+
     def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
         assert not nemo_gym.server_utils.is_global_aiohttp_client_request_debug_enabled()

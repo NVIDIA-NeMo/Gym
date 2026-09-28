@@ -54,13 +54,86 @@ class TestFernDocsLinks(unittest.TestCase):
 
                 self.assertIn("The following synthetic record shows the exact persisted field shape.", guide)
 
-    def test_model_call_capture_scopes_agent_observations_to_claude_code(self):
-        for version in ("latest", "v0.5.0", "v0.5.1"):
-            with self.subTest(version=version):
-                guide = read(f"fern/versions/{version}/pages/model-server/model-call-capture.mdx")
+    def test_model_call_capture_routes_agent_observations_to_the_rollout_evidence_guide(self):
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
 
-                self.assertIn("Currently, only `claude_code_agent`", guide)
-                self.assertIn("### Advanced: correlation, compaction, and sandbox evidence", guide)
+        self.assertNotIn("Currently, only `claude_code_agent`", guide)
+        self.assertIn("/main/observability/rollout-evidence", guide)
+
+    def test_observability_index_routes_both_observability_families(self):
+        overview = read("fern/versions/latest/pages/observability/index.mdx")
+
+        self.assertIn("Rollout evidence", overview)
+        self.assertIn("OpenTelemetry", overview)
+        self.assertIn("`observability_enabled`", overview)
+        self.assertIn("`telemetry.enabled`", overview)
+        self.assertIn('href="/main/observability/rollout-evidence"', overview)
+        self.assertIn('href="/main/observability/opentelemetry"', overview)
+
+    def test_rollout_evidence_guide_has_a_complete_joined_example(self):
+        path = REPO_ROOT / "fern/versions/latest/pages/observability/rollout-evidence.mdx"
+        self.assertTrue(path.is_file(), "the task-oriented rollout evidence guide must exist")
+        guide = path.read_text()
+        match = re.search(
+            r"\{/\* joined-rollout-example:start \*/\}\s*```json\s*(.*?)\s*```\s*"
+            r"\{/\* joined-rollout-example:end \*/\}",
+            guide,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match, "the joined rollout example must be marked and valid JSON")
+        example = json.loads(match.group(1))
+
+        self.assertIn("ng_model_call_capture", example)
+        self.assertIn("ng_agent_observations", example)
+        trajectory = example["ng_trajectory"]
+        self.assertEqual("1.0", trajectory["schema_version"])
+        self.assertTrue(trajectory["invocations"])
+        self.assertTrue(trajectory["model_calls"])
+        self.assertTrue(trajectory["tool_calls"])
+        self.assertTrue(trajectory["gaps"])
+        self.assertTrue(trajectory["invocations"][0]["model_calls"])
+        self.assertEqual(1.0, example["ng_perf"]["token_observability_coverage"])
+
+    def test_rollout_evidence_joined_example_preserves_call_and_tool_relationships(self):
+        page = REPO_ROOT / "fern/versions/latest/pages/observability/rollout-evidence.mdx"
+        text = page.read_text(encoding="utf-8")
+        match = re.search(
+            r"\{/\* joined-rollout-example:start \*/\}\s*```json\s*(.*?)\s*```\s*"
+            r"\{/\* joined-rollout-example:end \*/\}",
+            text,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        example = json.loads(match.group(1))
+
+        observations = example["ng_agent_observations"]
+        invocation = next(record for record in observations["records"] if record["kind"] == "agent_invocation")
+        tool = next(record for record in observations["records"] if record["kind"] == "tool_call")
+        self.assertEqual({"source", "records", "gaps"}, set(observations))
+        self.assertIn("invocation_id", invocation)
+        self.assertNotIn("output", tool, "agent-side tool timing does not own model-visible output")
+
+        trajectory = example["ng_trajectory"]
+        self.assertEqual(invocation, trajectory["invocations"][0])
+        self.assertEqual(invocation["model_calls"][0]["model_call_id"], trajectory["model_calls"][0]["model_call_id"])
+        projected_tool = trajectory["tool_calls"][0]
+        self.assertEqual(tool, {key: value for key, value in projected_tool.items() if key != "output"})
+        output = next(item for item in invocation["conversation"] if item["type"] == "function_call_output")
+        self.assertEqual(
+            (tool["invocation_id"], tool["tool_call_id"]), (invocation["invocation_id"], output["call_id"])
+        )
+        self.assertEqual(output["output"], projected_tool["output"])
+        self.assertEqual([], trajectory["turns"])
+        self.assertIn({"code": "turns_unavailable"}, trajectory["gaps"])
+
+    def test_opentelemetry_has_an_explicit_landing_page(self):
+        path = REPO_ROOT / "fern/versions/latest/pages/observability/opentelemetry.mdx"
+        self.assertTrue(path.is_file(), "OpenTelemetry guidance must remain available from an explicit landing page")
+        guide = path.read_text()
+
+        self.assertIn("nemo-lens", guide)
+        self.assertIn("NEMO_GYM_OTEL_EXPORTER", guide)
+        self.assertIn("/main/observability/configuration", guide)
 
     def test_model_server_index_links_model_call_capture(self):
         for version in ("latest", "v0.5.0", "v0.5.1"):

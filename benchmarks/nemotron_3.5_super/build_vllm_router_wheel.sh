@@ -31,7 +31,7 @@ CONTAINER=$CONTAINER
 OUTPUT_DIR=${OUTPUT_DIR:-$(pwd)/results/vllm_router}
 VLLM_ROUTER_GIT_URL=${VLLM_ROUTER_GIT_URL:-https://github.com/bxyu-nvidia/router}
 # See the PR stack at https://github.com/bxyu-nvidia/router/pull/3
-VLLM_ROUTER_COMMIT=${VLLM_ROUTER_COMMIT:-b6a89dcbd97fe97b56ae9c43bd315a7cf7f79240}
+VLLM_ROUTER_COMMIT=${VLLM_ROUTER_COMMIT:-e7dda77989fc75d878da8071031de58e519d2415}
 RUST_TOOLCHAIN=${RUST_TOOLCHAIN:-1.95.0}
 # Load-accounting unit tests from the fix. Compiling the test binary roughly
 # doubles the job, so it is opt-out.
