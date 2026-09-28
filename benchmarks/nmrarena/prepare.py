@@ -23,6 +23,7 @@ unique ids and parseable gold checked before anything is written.
 
 import argparse
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -45,6 +46,14 @@ def prepare(limit: int | None = None) -> Path:
     if limit is not None:
         argv += ["--limit", str(limit)]
     _load_server_prepare().main(argv)
+    # `agent_ref` in a source dataset is deprecated: routing comes from the config
+    # declaration, and `gym dataset collate` strips it and warns. The resources server's
+    # script still emits it, as 21 others do, so it is dropped here rather than shipped
+    # and then stripped.
+    rows = [json.loads(line) for line in OUTPUT_FPATH.read_text(encoding="utf-8").splitlines() if line.strip()]
+    for row in rows:
+        row.pop("agent_ref", None)
+    OUTPUT_FPATH.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
     return OUTPUT_FPATH
 
 
