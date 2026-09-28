@@ -59,7 +59,8 @@ HARNESS_FAULTS = {NMRArenaStatus.BAD_METADATA: "verifier_metadata lacks a parsea
 class NMRArenaResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE = ReverifyMode.STATELESS
 
-    # Upstream ``NUM_CANDIDATES``: candidates kept per prediction and the k of Top-k.
+    # Upstream ``NUM_CANDIDATES``: how many positions of a prediction are read. It does not
+    # move the k of Top-k — ``top10`` is fixed at 10, as upstream reports it.
     num_candidates: int = 10
     # Longest model-controlled string RDKit is allowed to parse; see ``scoring.py``.
     max_smiles_chars: int = DEFAULT_MAX_SMILES_CHARS
