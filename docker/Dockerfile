@@ -90,9 +90,8 @@ apt-get install -y nvidia-container-toolkit
 rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 
 # Replace the CUDA base image's bundled Nsight Systems, which is built
-# against an outdated Go toolchain (CVE-2025-61731, CVE-2025-4674,
-# GO-2025-3849, GO-2025-3563, GO-2026-5026, GO-2026-6089, GO-2026-6090),
-# with a current release from NVIDIA's devtools apt repo.
+# against an outdated Go toolchain flagged by CVE scans, with a current
+# release from NVIDIA's devtools apt repo.
 rm -rf /usr/local/cuda*/NsightSystems-cli-* /opt/nvidia/nsight-systems*
 apt-get remove --purge -y --allow-change-held-packages 'nsight-systems*' || true
 
