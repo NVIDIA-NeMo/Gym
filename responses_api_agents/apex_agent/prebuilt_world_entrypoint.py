@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import signal
 import tarfile
@@ -28,6 +29,29 @@ OUTPUT = ROOT / "output"
 PARTIAL_RESULT_PATH = Path("/sandbox/partial_result.json")
 GATEWAY_URL = "http://127.0.0.1:8000"
 WORLD_BUNDLE_LOG = Path("/app/logs/world_bundle.txt")
+WORLD_START_SCRIPT = Path("/app/tools/start.sh")
+OWNERSHIP_HOOK_MARKER = '    echo "Task files setup complete"'
+
+
+def prepare_world_start_script(entries: list[dict[str, str]], destination: Path) -> Path:
+    """Run ownership repair after task reset and before app startup."""
+    if not entries:
+        return WORLD_START_SCRIPT
+    commands = []
+    for entry in entries:
+        data_dir = Path(entry["path"])
+        if not data_dir.is_dir():
+            raise FileNotFoundError(f"configured startup ownership path is missing: {data_dir}")
+        owner = f"{entry['user']}:{entry['group']}"
+        commands.append(f"    chown -R {shlex.quote(owner)} {shlex.quote(str(data_dir))}")
+    script = WORLD_START_SCRIPT.read_text(encoding="utf-8")
+    if script.count(OWNERSHIP_HOOK_MARKER) != 1:
+        raise RuntimeError(f"could not locate task-setup ownership hook in {WORLD_START_SCRIPT}")
+    destination.write_text(
+        script.replace(OWNERSHIP_HOOK_MARKER, "\n".join(commands) + "\n" + OWNERSHIP_HOOK_MARKER, 1),
+        encoding="utf-8",
+    )
+    return destination
 
 
 def snapshot_tar_to_zip(source: Path, destination: Path) -> list[str]:
@@ -76,8 +100,12 @@ def startup_log_tail(log_path: Path) -> str:
         try:
             with path.open("rb") as stream:
                 stream.seek(0, os.SEEK_END)
-                stream.seek(max(0, stream.tell() - limit))
-                tail = stream.read().decode("utf-8", errors="replace")
+                stream.seek(max(0, stream.tell() - 256 * 1024))
+                excerpt = stream.read().decode("utf-8", errors="replace")
+            # Port listings can pad each line with thousands of spaces. Strip
+            # that padding before applying the host error's character limit.
+            meaningful_lines = (line.rstrip() for line in excerpt.splitlines() if line.strip())
+            tail = "\n".join(meaningful_lines)[-limit:] or "<empty>"
         except OSError as exc:
             tail = f"<unavailable: {exc}>"
         tails.append(f"{label} tail:\n{tail}")
@@ -139,10 +167,12 @@ async def main() -> None:
     if not task_slug:
         raise ValueError("prebuilt-world runner requires task_slug")
     OUTPUT.mkdir(parents=True, exist_ok=True)
+    start_script = prepare_world_start_script(config.get("startup_ownership", []), OUTPUT / "start.sh")
     log_path = OUTPUT / "environment.log"
     log = log_path.open("wb")
     environment = await asyncio.create_subprocess_exec(
-        "/app/tools/start.sh",
+        "/bin/bash",
+        str(start_script),
         task_slug,
         stdout=log,
         stderr=asyncio.subprocess.STDOUT,
