@@ -54,11 +54,14 @@ class MiniSWESession:
     """Execution state shared by /run and responses for one borrowed sandbox."""
 
     sandbox: AsyncSandbox
-    resource_session_id: str
-    harness: MiniSWEHarness
+    seed: SeedSessionResponse
     original_params: NeMoGymResponseCreateParamsNonStreaming
-    budget: float
-    result: tuple[NeMoGymResponse, HarnessOutcome, dict] | None = None
+    rollout_id: str
+    capture_model_calls: bool
+    artifact_directory: Path | None = None
+    setup_deadline: float | None = None
+    setup_started_at: str | None = None
+    result: AgentExecutionResult | None = None
     worker: asyncio.Task | None = None
 
 
@@ -163,15 +166,102 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "No seeded mini-SWE sandbox for this session")
         if body != state.original_params:
             raise HTTPException(409, "Agent session is already bound to another request")
+
+        async def execute_message() -> AgentExecutionResult:
+            params = body.model_copy(deep=True)
+            seed = state.seed
+            rollout_id = state.rollout_id
+            sandbox = state.sandbox
+            response = empty_response(params, self.config.model_server.name)
+            termination = seed.termination or HarnessOutcome(
+                reason="infrastructure_error", detail="Setup did not complete"
+            )
+            extra, timings = {}, {}
+            agent_started = False
+            harness = None
+            with rollout_context(rollout_id if state.capture_model_calls else None):
+                try:
+                    if seed.termination is None:
+                        timings["agent_setup"] = {"started_at": state.setup_started_at or now()}
+                        deadline = state.setup_deadline or monotonic() + self.config.setup_timeout_sec
+                        async with asyncio.timeout_at(deadline):
+                            cwd = await sandbox.exec("pwd", timeout_s=30, user=seed.user)
+                            if cwd.return_code:
+                                raise RuntimeError("Unable to determine the task working directory")
+                            context = HarnessContext(
+                                session_id=seed.session_id,
+                                task_id=seed.task_id,
+                                rollout_id=rollout_id,
+                                instruction=seed.instruction,
+                                user=seed.user,
+                                workdir=cwd.stdout.strip(),
+                                setup_timeout_sec=self.config.setup_timeout_sec,
+                                mcp_servers=seed.mcp_servers,
+                                skills_dir=seed.skills_dir,
+                            )
+                            params.input = [NeMoGymEasyInputMessage(role="user", content=context.instruction)]
+
+                            global_config = getattr(self.server_client, "global_config_dict", None)
+                            harness = MiniSWEHarness(
+                                sandbox=sandbox,
+                                context=context,
+                                config=self.config.harness,
+                                observability_enabled=isinstance(global_config, Mapping)
+                                and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)),
+                                params=params,
+                                model_base_url=self.base_url_for_run(
+                                    base_url=self.config.sandbox_model_base_url
+                                    or get_server_url(self.config.model_server.name),
+                                    body={"_ng_rollout_id": rollout_id},
+                                )
+                                + "/v1",
+                                model_name=self.config.model_server.name,
+                                directory=state.artifact_directory or self.config.artifacts_dir / seed.session_id,
+                            )
+                            await harness.setup()
+                        timings["agent_setup"]["finished_at"] = now()
+                        timings["agent_execution"] = {"started_at": now()}
+                        budget = min(seed.agent_timeout_sec, self.config.agent_max_timeout_sec or float("inf"))
+                        deadline = monotonic() + budget
+                        agent_started = True
+                        response, termination, extra = await harness.execute(max(0, deadline - monotonic()))
+                        if monotonic() >= deadline:
+                            termination.reason = "timeout"
+                except asyncio.CancelledError:
+                    termination = HarnessOutcome(reason="cancelled")
+                except Exception as exc:
+                    termination = HarnessOutcome(
+                        reason="timeout"
+                        if isinstance(exc, TimeoutError) and not agent_started
+                        else "infrastructure_error",
+                        detail=f"{type(exc).__name__}: {exc}",
+                    )
+                finally:
+                    if harness is not None and not agent_started:
+                        try:
+                            await harness.close()
+                        except Exception:
+                            LOGGER.exception("Failed to clean up mini-SWE setup")
+                    for timing in timings.values():
+                        timing.setdefault("finished_at", now())
+            return AgentExecutionResult(
+                responses_create_params=params,
+                response=response,
+                termination=termination,
+                agent_started=agent_started,
+                agent_timings=timings,
+                harness_metadata=extra,
+            )
+
         if state.worker is None:
-            state.worker = asyncio.create_task(state.harness.execute(state.budget))
+            state.worker = asyncio.create_task(execute_message())
         try:
             state.result = await asyncio.shield(state.worker)
         except asyncio.CancelledError:
             state.worker.cancel()
-            # The sandbox runner must finish cleanup before /run can verify.
+            # Join setup/execution cleanup before /run releases the transport and verifies.
             state.result = await state.worker
-        return state.result[0]
+        return state.result.response
 
     async def run(self, request: Request, body: MiniSWERunRequest) -> MiniSWEVerifyResponse:
         if self._closing:
@@ -225,145 +315,63 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         if seed.verified_response is not None:
             return seed.verified_response
         params = MiniSWERunRequest.model_validate(payload).responses_create_params
-        if cancelled:
-            result = AgentExecutionResult(
-                responses_create_params=params,
-                response=empty_response(params, self.config.model_server.name),
-                termination=HarnessOutcome(reason="cancelled"),
+        result = AgentExecutionResult(
+            responses_create_params=params,
+            response=empty_response(params, self.config.model_server.name),
+            termination=seed.termination or HarnessOutcome(reason="cancelled"),
+        )
+        provider = None
+        state = None
+        key = request.session[SESSION_ID_KEY]
+        try:
+            if not cancelled and seed.termination is None:
+                setup_started_at = now()
+                setup_deadline = monotonic() + self.config.setup_timeout_sec
+                result.agent_timings["agent_setup"] = {"started_at": setup_started_at}
+                async with asyncio.timeout_at(setup_deadline):
+                    provider = create_provider(resolve_provider_config(seed.sandbox_provider))
+                    sandbox = await AsyncSandbox.connect(seed.sandbox_descriptor, provider=provider)
+                if key in self._sessions:
+                    raise HTTPException(409, "Agent session already has an active mini-SWE sandbox")
+                state = MiniSWESession(
+                    sandbox=sandbox,
+                    seed=seed,
+                    original_params=params.model_copy(deep=True),
+                    rollout_id=payload.get("_ng_rollout_id") or payload["rollout_id"],
+                    capture_model_calls=capture_model_calls,
+                    artifact_directory=Path(payload["artifact_directory"])
+                    if payload.get("artifact_directory")
+                    else None,
+                    setup_deadline=setup_deadline,
+                    setup_started_at=setup_started_at,
+                )
+                self._sessions[key] = state
+                await self.responses(request, params)
+                result = state.result
+        except asyncio.CancelledError:
+            result.termination = HarnessOutcome(reason="cancelled")
+        except Exception as exc:
+            result.termination = HarnessOutcome(
+                reason="timeout" if isinstance(exc, TimeoutError) else "infrastructure_error",
+                detail=f"{type(exc).__name__}: {exc}",
             )
-        else:
-            result = await self._run_agent(
-                request,
-                seed,
-                params,
-                rollout_id=payload.get("_ng_rollout_id") or payload["rollout_id"],
-                capture_model_calls=capture_model_calls,
-                artifact_directory=Path(payload["artifact_directory"]) if payload.get("artifact_directory") else None,
-            )
+        finally:
+            if state is not None and self._sessions.get(key) is state:
+                self._sessions.pop(key, None)
+            for timing in result.agent_timings.values():
+                timing.setdefault("finished_at", now())
+            if provider is not None:
+                try:
+                    # Resources retains sandbox/Compose ownership; release only our transport.
+                    await provider.aclose()
+                except Exception:
+                    LOGGER.exception("Failed to close the mini-SWE sandbox transport")
         verify_body = SandboxedVerifyRequest(session_id=seed.session_id, **result.model_dump())
         finalizer = asyncio.create_task(self._verify(verify_body, cookies))
         self._finalizers.add(finalizer)
         finalizer.add_done_callback(self._finalizers.discard)
         finalizer.add_done_callback(self._observe_background_task)
         return await asyncio.shield(finalizer)
-
-    async def _run_agent(
-        self,
-        request: Request,
-        seed: SeedSessionResponse,
-        params: NeMoGymResponseCreateParamsNonStreaming,
-        *,
-        rollout_id: str,
-        capture_model_calls: bool,
-        artifact_directory: Path | None = None,
-    ) -> AgentExecutionResult:
-        """Set up session state, invoke responses, and release the borrowed transport."""
-        response = empty_response(params, self.config.model_server.name)
-        termination = seed.termination or HarnessOutcome(
-            reason="infrastructure_error", detail="Setup did not complete"
-        )
-        extra, timings = {}, {}
-        agent_started = False
-        provider = None
-        harness = None
-        state = None
-        key = request.session[SESSION_ID_KEY]
-        original_params = params.model_copy(deep=True)
-        with rollout_context(rollout_id if capture_model_calls else None):
-            try:
-                if seed.termination is None:
-                    timings["agent_setup"] = {"started_at": now()}
-                    async with asyncio.timeout(self.config.setup_timeout_sec):
-                        provider = create_provider(resolve_provider_config(seed.sandbox_provider))
-                        sandbox = await AsyncSandbox.connect(seed.sandbox_descriptor, provider=provider)
-                        cwd = await sandbox.exec("pwd", timeout_s=30, user=seed.user)
-                        if cwd.return_code:
-                            raise RuntimeError("Unable to determine the task working directory")
-                        context = HarnessContext(
-                            session_id=seed.session_id,
-                            task_id=seed.task_id,
-                            rollout_id=rollout_id,
-                            instruction=seed.instruction,
-                            user=seed.user,
-                            workdir=cwd.stdout.strip(),
-                            setup_timeout_sec=self.config.setup_timeout_sec,
-                            mcp_servers=seed.mcp_servers,
-                            skills_dir=seed.skills_dir,
-                        )
-                        params.input = [NeMoGymEasyInputMessage(role="user", content=context.instruction)]
-
-                        global_config = getattr(self.server_client, "global_config_dict", None)
-                        harness = MiniSWEHarness(
-                            sandbox=sandbox,
-                            context=context,
-                            config=self.config.harness,
-                            observability_enabled=isinstance(global_config, Mapping)
-                            and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)),
-                            params=params,
-                            model_base_url=self.base_url_for_run(
-                                base_url=self.config.sandbox_model_base_url
-                                or get_server_url(self.config.model_server.name),
-                                body={"_ng_rollout_id": rollout_id},
-                            )
-                            + "/v1",
-                            model_name=self.config.model_server.name,
-                            directory=artifact_directory or self.config.artifacts_dir / seed.session_id,
-                        )
-                        await harness.setup()
-                    timings["agent_setup"]["finished_at"] = now()
-                    timings["agent_execution"] = {"started_at": now()}
-                    budget = min(seed.agent_timeout_sec, self.config.agent_max_timeout_sec or float("inf"))
-                    deadline = monotonic() + budget
-                    state = MiniSWESession(
-                        sandbox=sandbox,
-                        resource_session_id=seed.session_id,
-                        harness=harness,
-                        original_params=original_params,
-                        budget=max(0, deadline - monotonic()),
-                    )
-                    if key in self._sessions:
-                        raise HTTPException(409, "Agent session already has an active mini-SWE sandbox")
-                    self._sessions[key] = state
-                    agent_started = True
-                    # In full swap, the environment server will replace this call
-                    # with an HTTP request to the agent's /v1/responses endpoint.
-                    response = await self.responses(request, original_params)
-                    _, termination, extra = state.result
-                    if monotonic() >= deadline:
-                        termination.reason = "timeout"
-            except asyncio.CancelledError:
-                termination = HarnessOutcome(reason="cancelled")
-            except Exception as exc:
-                termination = HarnessOutcome(
-                    reason="timeout"
-                    if isinstance(exc, TimeoutError) and not agent_started
-                    else "infrastructure_error",
-                    detail=f"{type(exc).__name__}: {exc}",
-                )
-            finally:
-                if state is not None and self._sessions.get(key) is state:
-                    self._sessions.pop(key, None)
-                if harness is not None and not agent_started:
-                    try:
-                        await harness.close()
-                    except Exception:
-                        LOGGER.exception("Failed to clean up mini-SWE setup")
-                for timing in timings.values():
-                    timing.setdefault("finished_at", now())
-                if provider is not None:
-                    try:
-                        # Drop this process's transport; resources retains sandbox/Compose ownership.
-                        await provider.aclose()
-                    except Exception:
-                        LOGGER.exception("Failed to close the mini-SWE sandbox transport")
-        return AgentExecutionResult(
-            responses_create_params=params,
-            response=response,
-            termination=termination,
-            agent_started=agent_started,
-            agent_timings=timings,
-            harness_metadata=extra,
-        )
 
     async def _verify(self, body: SandboxedVerifyRequest, cookies: dict) -> MiniSWEVerifyResponse:
         response = await self.server_client.post(

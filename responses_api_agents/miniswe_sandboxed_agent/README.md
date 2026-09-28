@@ -9,7 +9,9 @@ Use [the TB4 profile](../../benchmarks/terminal_bench_4/miniswe.yaml) with
 code. `/run` seeds the resources server, connects to its sandbox, stores session
 state, calls `responses()`, and sends the result to resources `/verify` after
 stopping agent processes. Resources owns provisioning, grading, and destruction.
-`/v1/responses` requires a seeded session and neither provisions nor grades.
+`/v1/responses` requires a connected session and owns working-directory discovery,
+config and model routing, harness setup, and execution. It neither provisions nor
+grades. Retried responses share setup and execution for the same message.
 Retried `/run` calls share one execution and forward the seeded resource cookies.
 
 ## Setup and model access

@@ -160,20 +160,27 @@ def test_sandbox_model_url_rejects_non_http_roots(url):
         )
 
 
-async def test_run_agent_borrowed_session_without_resource_calls(fixture):
+async def test_responses_sets_up_borrowed_session_without_resource_calls(fixture):
     f = fixture
     f.seed.pop("task_id")  # Optional for other resources and old seed responses.
-    result = await f.agent._run_agent(
-        f.request,
-        SeedSessionResponse.model_validate(f.seed),
-        f.body.responses_create_params.model_copy(deep=True),
+    state = module.MiniSWESession(
+        sandbox=f.sandbox,
+        seed=SeedSessionResponse.model_validate(f.seed),
+        original_params=f.body.responses_create_params.model_copy(deep=True),
         rollout_id="activation",
         capture_model_calls=False,
     )
-    assert result.termination.reason == "completed" and result.agent_started
+    f.agent._sessions["owner"] = state
+    response = await f.agent.responses(f.request, f.body.responses_create_params)
+    assert state.result.termination.reason == "completed" and state.result.agent_started
+    assert response == state.result.response
     f.agent.server_client.post.assert_not_awaited()
+    module.AsyncSandbox.connect.assert_not_awaited()
+    f.harnesses[0].setup.assert_awaited_once()
     assert f.harnesses[0].context.task_id is None
-    f.provider.aclose.assert_awaited_once()
+    assert f.harnesses[0].params.input[0].content == f.seed["instruction"]
+    assert f.body.responses_create_params.input == []
+    f.provider.aclose.assert_not_awaited()
 
 
 async def test_seed_failure_still_requests_resource_cleanup(fixture):
@@ -221,12 +228,11 @@ async def test_run_invokes_responses_with_session_state_and_releases_it(fixture,
         state = self._sessions[key]
         assert request is f.request
         assert request.session == {SESSION_ID_KEY: "owner"}
-        assert state.resource_session_id == "resource-session"
+        assert state.seed.session_id == "resource-session"
         assert state.sandbox is f.sandbox
-        assert state.harness is f.harnesses[0]
-        assert state.harness.context.instruction == f.seed["instruction"]
+        assert not f.harnesses
+        module.AsyncSandbox.connect.assert_awaited_once()
         assert body.input == []
-        assert state.harness.params.input != body.input
         calls.append(key)
         return await original(self, request, body)
 
@@ -238,11 +244,9 @@ async def test_run_invokes_responses_with_session_state_and_releases_it(fixture,
     assert f.body.responses_create_params.input == []
 
 
-async def test_responses_requires_matching_session_and_replays_one_execution(fixture):
+async def test_responses_requires_matching_session_and_replays_one_execution(fixture, monkeypatch):
     f = fixture
     params = f.body.responses_create_params
-    harness_params = params.model_copy(deep=True)
-    harness_params.input = [module.NeMoGymEasyInputMessage(role="user", content="Seeded instruction")]
     response = module.empty_response(params, "model")
     started, finish = asyncio.Event(), asyncio.Event()
 
@@ -252,12 +256,21 @@ async def test_responses_requires_matching_session_and_replays_one_execution(fix
         return response, HarnessOutcome(reason="completed"), {}
 
     execute = AsyncMock(side_effect=run_harness)
+    setup_started, setup_finish = asyncio.Event(), asyncio.Event()
+
+    async def setup():
+        setup_started.set()
+        await setup_finish.wait()
+
+    harness = SimpleNamespace(setup=AsyncMock(side_effect=setup), execute=execute, close=AsyncMock())
+    constructor = MagicMock(return_value=harness)
+    monkeypatch.setattr(module, "MiniSWEHarness", constructor)
     state = module.MiniSWESession(
         sandbox=f.sandbox,
-        resource_session_id="resource-session",
-        harness=SimpleNamespace(params=harness_params, execute=execute),
+        seed=SeedSessionResponse.model_validate(f.seed),
         original_params=params.model_copy(deep=True),
-        budget=60,
+        rollout_id="rollout",
+        capture_model_calls=False,
     )
     f.agent._sessions["owner"] = state
 
@@ -270,31 +283,38 @@ async def test_responses_requires_matching_session_and_replays_one_execution(fix
     with pytest.raises(HTTPException, match="bound to another"):
         await f.agent.responses(request("owner"), params.model_copy(update={"input": "different"}))
     first_call = asyncio.create_task(f.agent.responses(request("owner"), params))
-    await started.wait()
+    await setup_started.wait()
     replay_call = asyncio.create_task(f.agent.responses(request("owner"), params.model_copy(deep=True)))
     await asyncio.sleep(0)
+    constructor.assert_called_once()
+    harness.setup.assert_awaited_once()
+    execute.assert_not_awaited()
+    setup_finish.set()
+    await started.wait()
     assert execute.await_count == 1
     finish.set()
     first, replay = await asyncio.gather(first_call, replay_call)
     assert first == replay == response
-    execute.assert_awaited_once_with(60)
-    assert state.result[1].reason == "completed"
+    execute.assert_awaited_once()
+    assert 0 < execute.call_args.args[0] <= 60
+    assert state.result.termination.reason == "completed"
     f.agent._sessions.clear()
 
 
-async def test_http_responses_uses_middleware_session_cookie(fixture):
+async def test_http_responses_uses_middleware_session_cookie(fixture, monkeypatch):
     f = fixture
     params = f.body.responses_create_params
-    harness_params = params.model_copy(deep=True)
-    harness_params.input = [module.NeMoGymEasyInputMessage(role="user", content=f.seed["instruction"])]
     response = module.empty_response(params, "model")
     execute = AsyncMock(return_value=(response, HarnessOutcome(reason="completed"), {}))
+    harness = SimpleNamespace(setup=AsyncMock(), execute=execute, close=AsyncMock())
+    constructor = MagicMock(return_value=harness)
+    monkeypatch.setattr(module, "MiniSWEHarness", constructor)
     f.agent._sessions["owner"] = module.MiniSWESession(
         sandbox=f.sandbox,
-        resource_session_id="resource-session",
-        harness=SimpleNamespace(params=harness_params, execute=execute),
+        seed=SeedSessionResponse.model_validate(f.seed),
         original_params=params.model_copy(deep=True),
-        budget=60,
+        rollout_id="rollout",
+        capture_model_calls=False,
     )
     app = FastAPI()
     app.add_middleware(SessionMiddleware, secret_key="test-key")
@@ -316,4 +336,39 @@ async def test_http_responses_uses_middleware_session_cookie(fixture):
         replay = await client.post("/v1/responses", json=params.model_dump(mode="json"))
         assert replay.status_code == 200
         assert replay.json() == result.json()
-    execute.assert_awaited_once_with(60)
+    execute.assert_awaited_once()
+    assert 0 < execute.call_args.args[0] <= 60
+    constructor.assert_called_once()
+    harness.setup.assert_awaited_once()
+    module.AsyncSandbox.connect.assert_not_awaited()
+
+
+@pytest.mark.parametrize("shutdown", [False, True])
+async def test_connection_timeout_or_shutdown_releases_transport_before_verification(fixture, shutdown):
+    f = fixture
+    entered = asyncio.Event()
+
+    async def connect(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    module.AsyncSandbox.connect.side_effect = connect
+    if not shutdown:
+        f.agent.config.setup_timeout_sec = 0.01
+    original_post = f.agent.server_client.post.side_effect
+
+    async def post(**kwargs):
+        if kwargs["url_path"] == "/verify":
+            f.provider.aclose.assert_awaited_once()
+            assert not f.agent._sessions
+        return await original_post(**kwargs)
+
+    f.agent.server_client.post.side_effect = post
+    caller = asyncio.create_task(f.agent.run(f.request, f.body))
+    await entered.wait()
+    if shutdown:
+        await f.agent.shutdown()
+    await asyncio.wait_for(caller, timeout=1)
+    assert f.verification["termination"]["reason"] == ("cancelled" if shutdown else "timeout")
+    assert not f.verification["agent_started"]
+    assert not f.harnesses
