@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SciCode (no tools): 65 problems x 8 repeats. Each problem is split into sub-steps; the model
+# writes the code for each sub-step, and the code is run against the problem's test cases.
+# Reported: subtask accuracy (sub-steps that pass) and problem accuracy (problems whose
+# sub-steps all pass).
+#
+#   nemotron_recipes/marlin/run.sh scicode
+#
+# Needs SciCode's test_data.h5 (~1 GB): the reference values the test cases compare against.
+# Gym does not download it. Get it from the official SciCode Google Drive folder
+# (https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR) and save it as
+# benchmarks/scicode/data/test_data.h5 under the Gym repo root, e.g. from the repo root:
+#
+#   uv run --with gdown gdown --folder \
+#       https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR -O benchmarks/scicode/data
+#   sha256sum benchmarks/scicode/data/test_data.h5
+#   # 48b0272a88b17dbd29777c217e1b4fb2b019b92e11cc2add847409db9541b890
+#
+# Without the file the scoring server stops at startup.
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: e446e4f415b9cde0e95bb813c85e9e3e23f5d893
+# Gym benchmark config this recipe builds on.
+benchmark_config: benchmarks/scicode/config.yaml
+
+# 8 samples per problem (the benchmark default is 3). Set on the dataset entry, where the
+# benchmark sets it: a top-level num_repeats would multiply the default instead. Lists are
+# replaced, not merged, hence the full entry.
+scicode_benchmark_agent:
+  responses_api_agents:
+    scicode_agent:
+      datasets:
+      - name: scicode
+        type: benchmark
+        jsonl_fpath: benchmarks/scicode/data/scicode_benchmark.jsonl
+        prepare_script: benchmarks/scicode/prepare.py
+        prompt_config: null
+        num_repeats: 8
+
+scicode_benchmark_resources_server:
+  resources_servers:
+    scicode:
+      # Each sub-step's code may run for up to 300 s against its test cases (default 30 s).
+      timeout_secs: 300
