@@ -135,6 +135,8 @@ def render_vllm_ray_symmetric_run(inner_cmd: str, total_nodes: int, resource_fla
 
 
 def render_health_check(name: str, port: int, path: str, timeout: int, host: str = "localhost") -> str:
+    """`host` is emitted verbatim so it may be a shell expansion: a service pinned to
+    a node pool answers on that pool's head, not on the node running this script."""
     return _HEALTH_WAIT_MULTI.format(
         name=name,
         name_upper=bash_var(name),

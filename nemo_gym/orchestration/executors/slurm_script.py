@@ -610,9 +610,14 @@ def _render_collector_service(
     )
 
 
-def _render_collector_health_check(config: SubmitConfig) -> str:
+def _render_collector_health_check(config: SubmitConfig, driver_node: int | None = None) -> str:
+    # The collector runs beside the driver (see _render_collector_service).
     return render_health_check(
-        COLLECTOR_SERVICE_NAME, COLLECTOR_HEALTH_PORT, "/", config.otel.health_check_timeout_seconds
+        COLLECTOR_SERVICE_NAME,
+        COLLECTOR_HEALTH_PORT,
+        "/",
+        config.otel.health_check_timeout_seconds,
+        _probe_host(driver_node or 0),
     )
 
 
@@ -696,27 +701,6 @@ def _service_nodelist(
     return None
 
 
-def _health_check_host(
-    service: VllmServiceConfig | RayServiceConfig,
-    config: SubmitConfig,
-    compute: SlurmComputeConfig,
-    driver_node: int | None,
-    total_nodes: int,
-) -> str:
-    """Where the batch script, which runs on node 0, reaches a service's health endpoint."""
-    if driver_node is None:
-        return "localhost"
-    if isinstance(service, RayServiceConfig):
-        node = _driver_node(config, compute)
-    elif service.node_pool is not None:
-        node = _pool_offsets(compute)[service.node_pool][0]
-    elif _vllm_spans_multiple_nodes(service, total_nodes):
-        node = 0
-    else:
-        node = driver_node
-    return "localhost" if node == 0 else f"${{gym_nodes[{node}]}}"
-
-
 def _srun_nodes(
     service: VllmServiceConfig | RayServiceConfig, compute: SlurmComputeConfig, total_nodes: int
 ) -> int | None:
@@ -761,6 +745,28 @@ def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> di
     if run.get(OBSERVABILITY_ENABLED_KEY_NAME) and MODEL_CALL_CAPTURE_DIR_KEY_NAME not in run:
         return {**run, MODEL_CALL_CAPTURE_DIR_KEY_NAME: str(remote_bench_dir / "model-calls")}
     return run
+
+
+def _probe_host(node: int) -> str:
+    """How the batch script, which runs on the allocation's first node, reaches `node`."""
+    return "localhost" if node == 0 else f"${{gym_nodes[{node}]}}"
+
+
+def _health_check_host(
+    service: VllmServiceConfig | RayServiceConfig,
+    config: SubmitConfig,
+    compute: SlurmComputeConfig,
+    driver_node: int | None,
+    total_nodes: int,
+) -> str:
+    """Where this service answers its health probe: the node it runs on, as _service_nodelist places it."""
+    if isinstance(service, RayServiceConfig):
+        return _probe_host(_driver_node(config, compute))
+    if service.node_pool is not None:
+        return _probe_host(_pool_offsets(compute)[service.node_pool][0])
+    if driver_node is not None and not _vllm_spans_multiple_nodes(service, total_nodes):
+        return _probe_host(driver_node)
+    return "localhost"
 
 
 def build_sbatch_script(
@@ -830,7 +836,7 @@ def build_sbatch_script(
     )
 
     health_checks = "\n\n".join(
-        ([_render_collector_health_check(config)] if observed else [])
+        ([_render_collector_health_check(config, driver_node)] if observed else [])
         + [
             render_health_check(
                 name,
