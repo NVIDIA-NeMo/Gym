@@ -181,6 +181,22 @@ class TestTaskDataValidator:
         assert not v.report.clean
         assert v.report.conflicting_keys == {"question": 1}
 
+    def test_materialized_task_validates_its_task_data(self):
+        v = self._validator()
+        task = {"taskset": "t", "task_id": "0"}
+        v.validate_row(
+            0,
+            {
+                "task_id": task,
+                "task_input": {"responses_create_params": {}, "task_data": {"question": "q", "expected_answer": "a"}},
+            },
+        )
+        assert v.report.clean
+        v.validate_row(
+            1, {"task_id": task, "task_input": {"responses_create_params": {}, "task_data": {"question": 1}}}
+        )
+        assert v.report.error_rows == 1
+
     def test_validate_jsonl_rows_wrapper(self):
         from pydantic import TypeAdapter
 
