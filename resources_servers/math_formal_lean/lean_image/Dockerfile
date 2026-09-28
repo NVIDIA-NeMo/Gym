@@ -14,13 +14,18 @@
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS base
 
 ARG DEBIAN_SNAPSHOT=20260916T000000Z
+# The snapshot mirror is fetched over http, not https: debian:bookworm-slim ships no CA
+# bundle (its own default sources are http for the same reason), and ca-certificates is
+# installed by this very command. Integrity still comes from apt's GPG signature check,
+# which is Debian's actual trust model; the transport is not what makes it safe.
+#
 # apt drops privileges to the `_apt` user to fetch, which needs a user namespace to switch
 # into. Builders without one (buildah under chroot isolation, which is how this is built on
 # a cluster with no docker) fail with "Could not switch group". Fetching as root is fine in
 # a build container and costs nothing under docker.
 RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/00-no-sandbox && \
     rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources && \
-    printf 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/%s/ bookworm main\ndeb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/%s/ bookworm-security main\n' "$DEBIAN_SNAPSHOT" "$DEBIAN_SNAPSHOT" > /etc/apt/sources.list && \
+    printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/%s/ bookworm main\ndeb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/%s/ bookworm-security main\n' "$DEBIAN_SNAPSHOT" "$DEBIAN_SNAPSHOT" > /etc/apt/sources.list && \
     apt-get update && apt-get install -y --no-install-recommends \
       bash git curl ca-certificates zstd libgmp-dev && \
     rm -rf /var/lib/apt/lists/*
