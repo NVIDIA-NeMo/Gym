@@ -10,11 +10,32 @@ import pytest
 from responses_api_agents.apex_agent import prebuilt_world_entrypoint as entrypoint
 
 
+def test_startup_ownership_runs_after_task_reset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data_dir = tmp_path / "postgres"
+    data_dir.mkdir()
+    original = tmp_path / "start.sh"
+    original.write_text('reset task files\n    echo "Task files setup complete"\nstart apps\n')
+    monkeypatch.setattr(entrypoint, "WORLD_START_SCRIPT", original)
+
+    patched = entrypoint.prepare_world_start_script(
+        [{"path": str(data_dir), "user": "svc_docuseal", "group": "appsdata_docuseal"}],
+        tmp_path / "patched.sh",
+    )
+
+    lines = patched.read_text().splitlines()
+    assert lines == [
+        "reset task files",
+        f"    chown -R svc_docuseal:appsdata_docuseal {data_dir}",
+        '    echo "Task files setup complete"',
+        "start apps",
+    ]
+
+
 def test_startup_failure_includes_world_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     environment_log = tmp_path / "environment.log"
     environment_log.write_text("start.sh exited\n", encoding="utf-8")
     world_bundle = tmp_path / "world_bundle.txt"
-    world_bundle.write_text("wiki-js did not listen on its port\n", encoding="utf-8")
+    world_bundle.write_text("wiki-js did not listen on its port" + " " * 5000 + "\n", encoding="utf-8")
     monkeypatch.setattr(entrypoint, "WORLD_BUNDLE_LOG", world_bundle)
 
     async def healthy_gateway(_url: str, timeout_seconds: float) -> None:

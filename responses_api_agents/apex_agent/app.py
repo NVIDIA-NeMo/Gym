@@ -17,7 +17,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urlsplit
 
@@ -199,7 +199,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
         self._stirrup_archive = None
         self._prebuilt_worlds = self._load_prebuilt_worlds()
 
-    def _load_prebuilt_worlds(self) -> dict[str, str]:
+    def _load_prebuilt_worlds(self) -> dict[str, dict[str, Any]]:
         if not self.config.prebuilt_world_manifest:
             return {}
         path = Path(self.config.prebuilt_world_manifest).expanduser()
@@ -216,7 +216,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
         if not cache_root.is_absolute():
             raise ValueError(f"prebuilt-world image cache must be absolute: {cache_root}")
         cache_root = cache_root.resolve()
-        resolved: dict[str, str] = {}
+        resolved: dict[str, dict[str, Any]] = {}
         for world_id, entry in worlds.items():
             if not isinstance(world_id, str) or not _WORLD_ID_RE.fullmatch(world_id) or not isinstance(entry, dict):
                 raise ValueError(f"invalid prebuilt-world entry for {world_id}")
@@ -226,15 +226,36 @@ class ApexAgent(SimpleResponsesAPIAgent):
             image = Path(raw_image).expanduser().resolve()
             if image.parent != cache_root or image.name != f"{world_id}.sif":
                 raise ValueError(f"untrusted prebuilt-world image path for {world_id}: {image}")
-            resolved[str(world_id)] = str(image)
+            ownership = entry.get("startup_ownership", [])
+            if not isinstance(ownership, list):
+                raise ValueError(f"invalid startup ownership for {world_id}")
+            for setting in ownership:
+                if not isinstance(setting, dict) or set(setting) != {"path", "user", "group"}:
+                    raise ValueError(f"invalid startup ownership for {world_id}")
+                path, user, group = (setting[key] for key in ("path", "user", "group"))
+                if not all(isinstance(value, str) for value in (path, user, group)):
+                    raise ValueError(f"invalid startup ownership for {world_id}")
+                parts = PurePosixPath(path).parts
+                if (
+                    len(parts) != 7
+                    or parts[:4] != ("/", "app", "tools", "mcp_servers")
+                    or parts[5] != ".state"
+                    or parts[6] in (".", "..")
+                    or not re.fullmatch(r"[a-z][a-z0-9_]*", parts[4])
+                    or user != f"svc_{parts[4]}"
+                    or group != f"appsdata_{parts[4]}"
+                ):
+                    raise ValueError(f"invalid startup ownership for {world_id}: {path}")
+            resolved[str(world_id)] = {"image": str(image), "startup_ownership": ownership}
         return resolved
 
     def _prebuilt_image(self, body: ApexAgentRunRequest) -> str:
         if not body.task_slug:
             raise ValueError(f"prebuilt-world task {body.task_id} is missing task_slug")
-        image = self._prebuilt_worlds.get(body.world_id)
-        if not image:
+        world = self._prebuilt_worlds.get(body.world_id)
+        if not world:
             raise ValueError(f"world {body.world_id} is absent from the trusted prebuilt-world manifest")
+        image = world["image"]
         if not Path(image).is_file():
             raise FileNotFoundError(f"prebuilt-world image is missing: {image}")
         return image
@@ -427,6 +448,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
         }
         if prebuilt_world:
             runner_config["startup_timeout_seconds"] = self.config.prebuilt_startup_timeout_seconds
+            runner_config["startup_ownership"] = self._prebuilt_worlds[body.world_id]["startup_ownership"]
         if relay is not None:
             runner_config["model_egress_socket"] = f"{_EGRESS_MOUNT}/{relay.socket_name}"
         files = {
@@ -623,9 +645,11 @@ class ApexAgent(SimpleResponsesAPIAgent):
                             interpreter_setup = (
                                 f" && ( {stirrup_runtime_bootstrap_script(_STIRRUP_ROOT)} )" if prebuilt_world else ""
                             )
+                            # Root-mapped Apptainer fakeroot can misreport unrelated world directories
+                            # after tar restores thousands of owners or chmod walks the whole runtime.
                             unpack = await sandbox.exec(
                                 f"mkdir -p {shlex.quote(_STIRRUP_ROOT)} && "
-                                f"tar -xzf {shlex.quote(_GUEST_ROOT + '/stirrup-runtime.tar.gz')} "
+                                f"tar --no-same-owner -xzf {shlex.quote(_GUEST_ROOT + '/stirrup-runtime.tar.gz')} "
                                 f"-C {shlex.quote(_STIRRUP_ROOT)}{interpreter_setup} && "
                                 f"{shlex.quote(_STIRRUP_ROOT + '/bin/python')} -c "
                                 f"{shlex.quote(STIRRUP_PREFLIGHT)}",
@@ -636,7 +660,8 @@ class ApexAgent(SimpleResponsesAPIAgent):
                                 detail = (unpack.stderr or unpack.stdout or "")[-4000:]
                                 return self._failure(body, f"could not install sandbox Stirrup runtime: {detail}")
                             protect = await sandbox.exec(
-                                f"chmod -R go-rwx {shlex.quote(_STIRRUP_ROOT)} {shlex.quote(_GUEST_ROOT)} && "
+                                f"chmod 700 {shlex.quote(_STIRRUP_ROOT)} && "
+                                f"chmod -R go-rwx {shlex.quote(_GUEST_ROOT)} && "
                                 f"mkdir -p {shlex.quote(_GUEST_ROOT + '/output')} && "
                                 f"chmod 700 {shlex.quote(_GUEST_ROOT + '/output')}",
                                 user="root",
@@ -661,13 +686,21 @@ class ApexAgent(SimpleResponsesAPIAgent):
                             if process.return_code != 0:
                                 detail = (process.stderr or process.stdout or "")[-4000:]
                                 result = await self._recover_partial_result(sandbox, partial_result_path)
+                                failure_class = (
+                                    "timeout_exceeded" if process.error_type == "timeout" else "sandbox_error"
+                                )
+                                if (
+                                    failure_class == "sandbox_error"
+                                    and isinstance(result, dict)
+                                    and isinstance(result.get("checkpoint_error"), str)
+                                    and result["checkpoint_error"].startswith("ContextOverflowError:")
+                                ):
+                                    failure_class = "context_overflow"
                                 return self._failure(
                                     body,
                                     f"sandbox Stirrup rollout exited: {detail}",
                                     process.return_code,
-                                    failure_class="timeout_exceeded"
-                                    if process.error_type == "timeout"
-                                    else "sandbox_error",
+                                    failure_class=failure_class,
                                     partial_result=result,
                                 )
                             await sandbox.download(f"{_GUEST_ROOT}/output/result.json", result_path)

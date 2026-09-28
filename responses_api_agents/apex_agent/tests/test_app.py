@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from pytest import MonkeyPatch
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -161,7 +162,21 @@ def test_terminal_failure_is_marked_for_sidecar_without_retry() -> None:
     assert payload[NG_FAILURE_TERMINAL_KEY] is True
 
 
-async def test_run_classifies_sandbox_timeout_for_retry(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("error_type", "checkpoint_error", "expected_class"),
+    [
+        ("timeout", None, "timeout_exceeded"),
+        (None, "ContextOverflowError: Context overflow reached the summarized context", "context_overflow"),
+        (None, "RuntimeError: startup failed", "sandbox_error"),
+    ],
+)
+async def test_run_classifies_sandbox_exit(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+    error_type: str | None,
+    checkpoint_error: str | None,
+    expected_class: str,
+) -> None:
     agent = _agent()
     agent._ensure_runtime_setup = AsyncMock(return_value=tmp_path / "stirrup-runtime.tar.gz")
     agent._download_world = AsyncMock()
@@ -179,7 +194,7 @@ async def test_run_classifies_sandbox_timeout_for_retry(monkeypatch: MonkeyPatch
                     return_code=125,
                     stderr="direct apptainer command timed out after 12600s",
                     stdout=None,
-                    error_type="timeout",
+                    error_type=error_type,
                 ),
             ]
 
@@ -203,6 +218,7 @@ async def test_run_classifies_sandbox_timeout_for_retry(monkeypatch: MonkeyPatch
                         "completion_status": "running",
                         "n_input_tokens": 4,
                         "n_output_tokens": 2,
+                        "checkpoint_error": checkpoint_error,
                     }
                 ),
                 encoding="utf-8",
@@ -216,7 +232,7 @@ async def test_run_classifies_sandbox_timeout_for_retry(monkeypatch: MonkeyPatch
     result = await agent.run(MagicMock(cookies={}), _body())
     payload = result.model_dump()
 
-    assert payload[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
+    assert payload[NG_FAILURE_CLASS_KEY] == expected_class
     assert "_ng_failure_terminal" not in payload
     assert "_ng_no_persist" not in payload
     assert payload["apex_trajectory"] == [{"role": "assistant", "content": "partial"}]
@@ -243,19 +259,22 @@ def _prebuilt_body(world_id: str = "world_0123456789abcdef0123456789abcdef") -> 
     return ApexAgentRunRequest.model_validate(payload)
 
 
-def _prebuilt_agent(tmp_path: Path) -> tuple[ApexAgent, Path]:
+def _prebuilt_agent(tmp_path: Path, startup_ownership: list[dict[str, str]] | None = None) -> tuple[ApexAgent, Path]:
     cache_root = tmp_path / "images"
     cache_root.mkdir()
     world_id = "world_0123456789abcdef0123456789abcdef"
     image = cache_root / f"{world_id}.sif"
     image.write_bytes(b"SIF_MAGIC")
     manifest = tmp_path / "manifest.json"
+    world_entry = {"runtime_image": str(image)}
+    if startup_ownership is not None:
+        world_entry["startup_ownership"] = startup_ownership
     manifest.write_text(
         json.dumps(
             {
                 "version": 1,
                 "image_cache_root": str(cache_root),
-                "worlds": {world_id: {"runtime_image": str(image)}},
+                "worlds": {world_id: world_entry},
             }
         ),
         encoding="utf-8",
@@ -276,6 +295,26 @@ def test_prebuilt_world_selects_only_manifest_image(tmp_path: Path) -> None:
     assert runner["startup_timeout_seconds"] == 1800
     assert spec.files["/app/apex-gym/sandbox_entrypoint.py"] == load_prebuilt_runner_source()
     assert "secret rubric" not in json.dumps(runner)
+
+
+def test_prebuilt_world_passes_validated_startup_ownership(tmp_path: Path) -> None:
+    ownership = [
+        {
+            "path": "/app/tools/mcp_servers/docuseal/.state/postgres",
+            "user": "svc_docuseal",
+            "group": "appsdata_docuseal",
+        }
+    ]
+    agent, image = _prebuilt_agent(tmp_path, ownership)
+    spec = agent._sandbox_spec(_prebuilt_body(), "Do the work", image=str(image), prebuilt_world=True)
+    runner = json.loads(spec.files["/app/apex-gym/runner_config.json"])
+    assert runner["startup_ownership"] == ownership
+
+
+def test_prebuilt_world_rejects_unsafe_startup_ownership(tmp_path: Path) -> None:
+    ownership = [{"path": "/etc", "user": "root", "group": "root"}]
+    with pytest.raises(ValueError, match="invalid startup ownership"):
+        _prebuilt_agent(tmp_path, ownership)
 
 
 def test_prebuilt_world_rejects_missing_slug_and_unknown_world(tmp_path: Path) -> None:
