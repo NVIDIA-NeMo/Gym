@@ -38,6 +38,11 @@ import ray
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
+from nemo_gym.adapters.turn_counter_proxy import (
+    TurnConstraintConfig,
+    start_turn_counter_proxy,
+    turn_constraint_metadata,
+)
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
@@ -467,7 +472,29 @@ def run_stirrup_agent_remote(params: dict[str, Any]) -> Any:
     return asyncio.run(_run_stirrup_agent(**params))
 
 
-async def _run_stirrup_agent(
+async def _run_stirrup_agent(*args, turn_constraint=None, **kwargs):
+    if turn_constraint is None:
+        return await _run_stirrup_agent_unconstrained(*args, **kwargs)
+    constraint = TurnConstraintConfig.model_validate(turn_constraint)
+    proxy = await start_turn_counter_proxy(
+        upstream_base_url=kwargs["model_base_url"],
+        api_key=kwargs.get("api_key", "dummy"),
+        max_turns=constraint.limit,
+        position=constraint.reminder.position,
+        trigger=constraint.reminder.trigger,
+        exhaustion_status=400,
+        label=str(kwargs.get("task_id", "stirrup")),
+    )
+    try:
+        kwargs["model_base_url"] = proxy.base_url
+        result = await _run_stirrup_agent_unconstrained(*args, **kwargs)
+        result["turn_constraint"] = turn_constraint_metadata(constraint, proxy, harness_version="stirrup").model_dump()
+        return result
+    finally:
+        await proxy.stop()
+
+
+async def _run_stirrup_agent_unconstrained(
     task_prompt: str,
     system_prompt: str,
     model_base_url: str,
@@ -897,6 +924,7 @@ async def _run_stirrup_agent(
 
 
 class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
+    turn_constraint: Optional[TurnConstraintConfig] = None
     model_server: ModelServerRef
     resources_server: ResourcesServerRef
 
@@ -1220,6 +1248,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "task_prompt": user_prompt,
             "system_prompt": system_prompt,
             "model_base_url": model_base_url,
+            "turn_constraint": self.config.turn_constraint.model_dump() if self.config.turn_constraint else None,
             "model_name": model_name,
             "api_key": "dummy",  # pragma: allowlist secret
             "max_turns": self.config.agent_max_turns,
@@ -1287,6 +1316,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             deliverable_text=deliverable_text,
             elapsed_seconds=result.get("elapsed_seconds", 0),
         )
+
+        if result.get("turn_constraint") is not None:
+            metadata["turn_constraint"] = json.dumps(result["turn_constraint"])
 
         if result.get("model_patch") is not None:
             metadata["model_patch"] = result["model_patch"]
