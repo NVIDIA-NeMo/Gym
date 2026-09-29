@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from nemo_gym.config_types import ConfigInterpolationError
 from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
     EnvironmentValidationError,
@@ -113,7 +114,15 @@ demo_agent:
         name: demo_resources
 {model_server.rstrip()}
       datasets:
-{dataset}{rollout_driver}"""
+{dataset.rstrip()}
+demo_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: demo_agent
+{rollout_driver}"""
 
 
 def _asset(tmp_path: Path, *, kind: str = "environment", profile: str = "custom-gym-verifier") -> Path:
@@ -332,6 +341,13 @@ second_demo_agent:
       - name: duplicate
         type: example
         jsonl_fpath: environments/demo/data/example.jsonl
+second_demo_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: second_demo_agent
 """,
         encoding="utf-8",
     )
@@ -355,6 +371,21 @@ def test_benchmark_uses_root_prompt_without_executing_prepare(tmp_path: Path) ->
 
     assert report.datasets[0].type == "benchmark"
     assert report.datasets[0].prompt_config.endswith("prompts/default.yaml")
+
+
+def test_unresolved_interpolation_is_reported_cleanly_not_as_a_traceback(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path)
+    config_path = manifest_path.with_name("config.yaml")
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "jsonl_fpath: environments/demo/data/example.jsonl",
+            "jsonl_fpath: environments/demo/data/example.jsonl\n      num_repeats: ${undefined_key}",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigInterpolationError, match="undefined_key"):
+        validate_environment(manifest_path)
 
 
 def test_malformed_benchmark_prompt_is_an_actionable_validation_error(tmp_path: Path) -> None:

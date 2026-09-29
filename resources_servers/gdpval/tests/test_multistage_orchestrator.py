@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
@@ -28,6 +29,7 @@ from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
+    SharedRolloutCollectionConfig,
 )
 from resources_servers.gdpval.multistage_orchestrator import (
     MultiStageRunConfig,
@@ -478,9 +480,10 @@ class TestResumeSeam:
         assert base[0] == again[0]
         assert base[1] == again[1]
 
-    async def test_complete_stage_skips_dispatch_and_threads_elo(self) -> None:
+    @pytest.mark.parametrize("incomplete", [False, True])
+    async def test_complete_stage_skips_dispatch_and_threads_elo(self, incomplete) -> None:
         task_ids = [f"t{i}" for i in range(10)]
-        rows = _materialized_rows(task_ids)
+        rows = _materialized_rows(task_ids, repeats=2)
         cfg = _two_stage_cfg()
 
         # First pass with no resume produces stage-0 tagged rows we can cache.
@@ -489,6 +492,8 @@ class TestResumeSeam:
             cfg, REF_ELOS, _distribution(task_ids), rows, full_run
         )
         stage0_rows = [r for r in all_results if r["stage_index"] == 0]
+        if incomplete:
+            stage0_rows.pop()
         stage0_plan = {
             "stage_index": 0,
             "reference_ids": base_summaries[0]["reference_ids"],
@@ -506,7 +511,7 @@ class TestResumeSeam:
             dispatched.append(len(rows_in))
             return await full_run(rows_in)
 
-        _, summaries = await run_multistage_stages(
+        results, summaries = await run_multistage_stages(
             cfg, REF_ELOS, _distribution(task_ids), rows, counting_run, resume=resume
         )
 
@@ -515,7 +520,14 @@ class TestResumeSeam:
         # Stage 0 ELO was re-fit from cached rows and threaded into stage 1's
         # reference selection (same as the original full run).
         assert summaries[0]["cached"] is True
-        assert summaries[1]["reference_ids"] == base_summaries[1]["reference_ids"]
+        if not incomplete:
+            assert summaries[1]["reference_ids"] == base_summaries[1]["reference_ids"]
+        assert summaries[0]["num_rollouts"] == 6
+        if incomplete:
+            results.append(results[0])  # A duplicate cannot replace the missing repeat.
+        config = SharedRolloutCollectionConfig(output_jsonl_fpath="rollouts.jsonl", require_complete=True)
+        with pytest.raises(RuntimeError, match="15/16 samples completed") if incomplete else nullcontext():
+            config.check_completion(expected=sum(s["num_rollouts"] for s in summaries), results=results)
 
     async def test_interrupted_stage_redispatches_only_missing(self) -> None:
         task_ids = [f"t{i}" for i in range(10)]
