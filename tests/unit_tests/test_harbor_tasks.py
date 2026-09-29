@@ -538,11 +538,12 @@ class TestCli:
             write_task(folder / name)
         (folder / "grouped" / "environment" / "docker-compose.yaml").write_text("services: {}\n")
         prepared = prepare_target(str(folder), output_root=tmp_path / "out", exclude=["gpu-*"])
-        assert [task.task_id for task in prepared.tasks] == ["keep"]
+        # Compose tasks run like any other since Compose groups landed.
+        assert [task.task_id for task in prepared.tasks] == ["grouped", "keep"]
+        assert prepared.tasks[0].needs_compose
         out = capsys.readouterr().out
         assert "Skipping gpu-task: excluded by --exclude-tasks 'gpu-*'" in out
-        assert "Skipping grouped: Compose environments are not supported yet" in out
-        assert len((prepared.rows_path).read_text().splitlines()) == 1
+        assert len((prepared.rows_path).read_text().splitlines()) == 2
         with pytest.raises(ValueError, match="No runnable task"):
             prepare_target(str(folder), output_root=tmp_path / "out2", exclude=["*"])
         only = prepare_target(str(folder), output_root=tmp_path / "out3", only=["gpu-*"])

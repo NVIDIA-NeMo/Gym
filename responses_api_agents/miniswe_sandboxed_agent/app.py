@@ -327,7 +327,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             if state is None and len(matches) == 1 and self._sessions[matches[0]].episode is not None:
                 state = self._sessions[matches[0]]
         if state is None:
-            raise HTTPException(404 if not matches else 409, "No seeded mini-SWE sandbox for this session")
+            raise HTTPException(409, "No seeded mini-SWE sandbox for this session")
         if state.original_params is None:
             await self._bind_episode_turn(state, body, rollout_id)
         if body != state.original_params:
