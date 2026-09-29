@@ -17,6 +17,6 @@ hermes_agent:
       sandbox_provider: null
       sandbox_config: {}
       sandbox_install_timeout_seconds: 900
-      sandbox_runner_poll_seconds: 0.25
+      sandbox_runner_timeout_seconds: 21600
       session_close_timeout_seconds: 30
       system_prompt: null

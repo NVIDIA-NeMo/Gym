@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -240,52 +241,20 @@ class TestSanity:
 
         hermes._initialize_agent_session_state.assert_not_awaited()
 
-    async def test_close_during_runner_launch_stops_the_late_runner(self) -> None:
-        class _Runner:
-            def __init__(self) -> None:
-                self.exited = asyncio.Event()
-                self.signals: list[str] = []
-                self.closed = False
+    @staticmethod
+    def _sandbox_session(monkeypatch, sandbox) -> tuple[HermesAgent, SimpleNamespace, AgentSeedSessionRequest]:
+        import nemo_gym.base_responses_api_agent as base_agent
 
-            async def wait_exit(self) -> int:
-                await self.exited.wait()
-                return 0
-
-            async def send_signal(self, signal: str) -> None:
-                self.signals.append(signal)
-                self.exited.set()
-
-            async def close(self) -> None:
-                self.closed = True
-
-        class _Sandbox:
-            def __init__(self) -> None:
-                self.runner = _Runner()
-                self.launch_started = asyncio.Event()
-                self.release_launch = asyncio.Event()
-                self.pty = self
-
-            async def upload(self, *_args) -> None:
-                pass
-
-            async def disconnect(self) -> None:
-                pass
-
-            async def exec(self, *_args, **_kwargs) -> SimpleNamespace:
-                return SimpleNamespace(stdout="running")
-
-            async def create(self, **_kwargs) -> _Runner:
-                self.launch_started.set()
-                await self.release_launch.wait()
-                return self.runner
-
-        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client._build_server_base_url = lambda _cfg: "http://model-server:1"
+        hermes = HermesAgent(config=_config(), server_client=server_client)
         seed = AgentSeedSessionRequest(
             agent_session_id="session",
             episode_id=EpisodeId(rollout_id="rollout"),
             task_id=TaskId(taskset="test", task_id="task"),
         )
-        sandbox = _Sandbox()
         hermes._agent_sessions["session"] = HermesAgentSessionState(
             request=seed, sandbox=sandbox, workdir=None, session_dir="/session"
         )
@@ -293,22 +262,75 @@ class TestSanity:
             session={"agent_session_id": "session"},
             path_params={"rollout_id": seed.episode_id.capture_key},
         )
+        return hermes, request, seed
+
+    async def test_sandbox_activation_calls_the_model_server_directly(self, monkeypatch) -> None:
+        class _Sandbox:
+            def __init__(self) -> None:
+                self.uploaded: dict = {}
+
+            async def upload(self, local_path, remote_path) -> None:
+                self.uploaded[remote_path] = json.loads(Path(local_path).read_text())
+
+            # Mirrors AsyncSandbox.exec so an unsupported argument fails here too.
+            async def exec(
+                self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
+            ) -> SimpleNamespace:
+                return SimpleNamespace(stdout="", stderr="", return_code=0)
+
+            async def download(self, remote_path, local_path) -> None:
+                result = {"messages": [{"role": "assistant", "content": "done"}], "final_response": "done"}
+                output = {"result": result, "runtime": {"hostname": "sandbox", "pid": 1, "python": "python"}}
+                Path(local_path).write_text(json.dumps(output))
+
+        sandbox = _Sandbox()
+        hermes, request, seed = self._sandbox_session(monkeypatch, sandbox)
+
+        response = await hermes.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
+
+        runner_input = sandbox.uploaded["/session/input.json"]
+        assert runner_input["model_base_url"] == f"http://model-server:1/ng-rollout/{seed.episode_id.capture_key}/v1"
+        assert runner_input["user_message"] == "fix bug"
+        assert response.metadata["harness_execution"] == "sandbox"
+
+    async def test_close_during_activation_stops_the_runner(self, monkeypatch) -> None:
+        class _Sandbox:
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+                self.runner_started = asyncio.Event()
+
+            async def upload(self, *_args) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                pass
+
+            # Mirrors AsyncSandbox.exec so an unsupported argument fails here too.
+            async def exec(
+                self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
+            ) -> SimpleNamespace:
+                self.commands.append(command)
+                if "runner.pid" in command and "exec " in command:
+                    self.runner_started.set()
+                    await asyncio.Event().wait()
+                return SimpleNamespace(stdout="", stderr="", return_code=0)
+
+        sandbox = _Sandbox()
+        hermes, request, seed = self._sandbox_session(monkeypatch, sandbox)
 
         activation = asyncio.create_task(
             hermes.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
         )
-        await sandbox.launch_started.wait()
-        close = asyncio.create_task(
+        await asyncio.wait_for(sandbox.runner_started.wait(), timeout=5)
+        await asyncio.wait_for(
             hermes.close_agent_session(
                 request, AgentCloseSessionRequest(agent_session_id="session", episode_id=seed.episode_id)
-            )
+            ),
+            timeout=5,
         )
-        await asyncio.sleep(0.01)
-        sandbox.release_launch.set()
-        await asyncio.wait_for(close, timeout=5)
 
-        assert sandbox.runner.signals == ["SIGTERM"]
-        assert sandbox.runner.closed
+        stop = [command for command in sandbox.commands if "runner.stop" in command and "kill -TERM" in command]
+        assert len(stop) == 1
         assert "session" not in hermes._agent_sessions
         with pytest.raises(asyncio.CancelledError):
             await activation
