@@ -4,6 +4,8 @@ description: "Gym-managed vLLM server deployment"
 position: 6
 ---
 
+# Local vLLM
+
 NeMo Gym can launch and manage the vLLM server for you using LocalVLLMModel (in `responses_api_models/local_vllm_model`).
 LocalVLLMModel is a subclass of VLLMModel that spawns the vLLM engine and auto-configures the model server to use it.
 The Chat Completions to Responses API conversion is inherited from VLLMModel. See [VLLMModel](/model-server/vllm) for details.
@@ -17,7 +19,7 @@ If you want to connect NeMo Gym to a vLLM server you start and manage yourself, 
 
 ## Use LocalVLLMModel
 
-Unlike VLLMModel, LocalVLLMModel does not require a separate vLLM install or a manual model download. vLLM is a transitive dependency of `responses_api_models/local_vllm_model`, and model weights are fetched from the Hugging Face Hub on first run (using `HF_TOKEN` from your environment if present). A single `gym env start` brings up both vLLM and NeMo Gym.
+By default, LocalVLLMModel uses the legacy Ray launcher. `gym env start` selects the package's `legacy` extra, installing vLLM in the model-server environment. Model weights are fetched from the Hugging Face Hub on first run (using `HF_TOKEN` from your environment if present). A single `gym env start` brings up both vLLM and NeMo Gym. For a direct package install of that legacy runtime, select `local-vllm-model[legacy]` (or `uv sync --extra legacy` in its directory).
 
 Several model configs ship with the server under `responses_api_models/local_vllm_model/configs/` — see the `Qwen/`, `openai/`, and `nvidia/` subdirectories for ready-to-use examples. To launch a single-node 8-GPU run with `Qwen3-30B-A3B-Instruct-2507`:
 
@@ -43,6 +45,398 @@ Once the servers are up, call the agent to verify everything works end-to-end:
 python responses_api_agents/simple_agent/client.py
 ```
 
+## Experimental subprocess launcher
+
+The opt-in `subprocess` config launches a separately installed vLLM executable.
+Gym does not import vLLM or install vLLM/FlashInfer in this mode. The executable
+may already be inside the container where Gym runs, or in a separate Python
+environment. This in-process launcher is single-node; the separate experimental
+allocation controller below is the cross-container/multi-node entry point.
+
+```bash
+gym env start \
+    --resources-server example_single_tool_call \
+    --model-type local_vllm_model/subprocess \
+    --model Qwen/Qwen2.5-0.5B-Instruct \
+    ++policy_model.responses_api_models.local_vllm_model.subprocess.executable=/opt/vllm/bin/vllm
+```
+
+<Warning>
+This experimental implementation is limited to POSIX, one node, one Gym API worker,
+PP=1. TP and native DP are configurable, with GPU visibility checks.
+Validate the selected vLLM runtime, model, GPU architecture and topology using
+the [validation guide](/main/contribute/local-vllm-validation).
+CPU lifecycle tests are not proof of model/runtime compatibility. Use independently allocated GPUs and
+preserve the scheduler's `CUDA_VISIBLE_DEVICES`. MP does not allocate GPUs.
+</Warning>
+
+The shipped subprocess config omits `VLLM_RAY_DP_PACK_STRATEGY`. When migrating a
+custom Ray config, remove `VLLM_RAY_*` overrides; incompatible topology options
+are rejected. The legacy launcher remains the default for existing configs.
+Existing virtual environments are not automatically stripped of vLLM. Choose a
+fresh `uv_venv_dir` to verify the lightweight installation without changing an
+experiment's environment.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `launcher` | `ray` | Select `subprocess` explicitly |
+| `subprocess.executable` | `vllm` | Executable resolved using the child environment's PATH; not a shell command |
+| `subprocess.port` | auto | Inner loopback HTTP port, distinct from Gym's API port |
+| `subprocess.startup_timeout_seconds` | 600 | Maximum HTTP readiness wait after process creation |
+| `subprocess.probe_timeout_seconds` | 30 | Timeout for each version/help probe |
+| `subprocess.shutdown_timeout_seconds` | 10 | TERM grace period before killing owned model workers |
+| `subprocess.request_timeout_seconds` | 2 | Per-readiness-request timeout |
+| `subprocess.poll_interval_seconds` | 0.25 | Readiness polling interval |
+| `subprocess.log_dir` | `results/local_vllm` | Parent directory for unique per-launch artifacts |
+
+`vllm_serve_kwargs` keys become CLI flags (underscores become hyphens). Dictionaries
+become JSON; lists become multiple arguments; `null` omits the flag and uses the
+runtime default. Booleans use `--flag` / `--no-flag`; the selected executable's
+`serve --help=all` must advertise the corresponding spelling. Unsupported
+negative flags fail explicitly rather than silently dropping `false`.
+Gym never evaluates shell metacharacters. The selected executable validates its
+own runtime-specific arguments.
+
+Gym manages host, port, API authentication and MP backend arguments. It probes
+`/v1/models` for a successful response containing the expected model. An optional
+`vllm_serve_kwargs.model` specifies the checkpoint when `config.model` is a served
+alias; `served_model_name` must include that alias. For example:
+
+```yaml
+model: my-policy
+vllm_serve_kwargs:
+  model: /models/checkpoint
+  served_model_name: [my-policy]
+  tensor_parallel_size: 1
+  pipeline_parallel_size: 1
+  data_parallel_size: 1
+```
+
+Each launch retains `version.log`, `help.log`, `server.log`, and a redacted
+`manifest.json`. The manifest includes argv, runtime version, endpoint, and GPU
+visibility, but not the API key or a dump of the inherited environment. Runtime
+logs may contain sensitive model/request information; review before sharing.
+
+Shutdown is scoped to this launch. A supervisor observes a lifetime pipe so it
+can finish process-group cleanup even when Gym is killed. Deliberately detached
+workers, supervisor SIGKILL, and machine failure require scheduler/container
+containment. An explicit `base_url` attaches without launch or shutdown ownership;
+it does not run managed readiness checks. Managed endpoints bind to
+loopback, so attached proxies must be on the same host/network namespace.
+
+### Single-node TP and native DP
+
+Override `vllm_serve_kwargs.tensor_parallel_size` and `data_parallel_size`.
+The subprocess launcher explicitly uses MP for both backends. Native DP uses
+one `vllm serve`, `data_parallel_size_local=DP`, and one vLLM API worker; it is
+not implemented as separate dense-model replicas. PP remains 1. Expert parallel
+can be requested with `enable_expert_parallel`, but MoE collective correctness
+requires a separate GPU gate; a dense model test cannot certify it.
+
+For more than one GPU, `CUDA_VISIBLE_DEVICES` must be explicitly set by the
+allocation, contain distinct ordinals/UUIDs, and expose at least `TP × DP`
+devices. Gym will not override inherited visibility or allocate GPUs. The
+manifest maps contiguous local device indices to each DP rank. This is a
+declared visibility check, not proof of physical GPU availability or memory.
+
+Without a router, Gym hashes the episode ID into `X-data-parallel-rank` for
+native DP. The vLLM runtime must honor this header (the target is vLLM 0.28.0).
+Proxies inherit the same routing metadata. With a router, Gym forwards the
+episode as `X-Session-ID` and does **not** independently select a DP rank.
+
+For per-rank acceptance or monitoring, set `show_vllm_engine_stats: true`.
+In the tested vLLM runtime, disabling engine statistics also removes the
+per-engine Prometheus counters; the HTTP `/metrics` route alone does not prove
+those counters are available.
+
+### Non-PD router
+
+`router: null` is the default. A configured router starts after vLLM passes model
+readiness, defaults to `consistent_hash` with native DP-aware routing, and stops before
+the owned vLLM process group. Both bind to loopback. Router failure at startup
+also cleans up vLLM. `/get_inner_vllm_config` publishes the router endpoint and
+routing authority, so attached Gym proxies use the same session contract.
+
+For reproducing existing cache-aware deployments, `router.policy: cache_aware`
+selects the upstream cache/load policy. The router tracks in-flight load through
+transparent response completion or cancellation. It does not guarantee episode affinity.
+
+An experimental `router.policy: session_balanced` option assigns new sessions
+evenly and preserves their worker for subsequent turns. It requires the patched
+binary to advertise that policy. This option is for a single run-owned router
+with a static worker pool, not autoscaling or replicated routers. Its table is
+bounded at 65,536 sessions; it rejects new sessions when full instead of silently
+evicting affinity, and rejects a turn whose pinned worker is unhealthy. Missing
+or oversized `X-Session-ID` values and changed pool membership also fail closed.
+Transient health changes are not registry membership changes: sessions pinned
+to other healthy workers continue without remapping. A failed generation is
+still surfaced once, never retried by the router.
+The default policy is unchanged. Run the real-router CPU tests and a representative
+model workload before selecting this policy for a deployment.
+
+Router liveness probes are separately configurable: `health_check_interval_seconds`
+and `health_check_timeout_seconds` default to 5, `health_failure_threshold` to 3,
+and `health_success_threshold` to 2. They require positive integers. These are
+probe settings, not generation deadlines or retry counts. A single slow probe
+must not evict a working frontend during long-context processing; sustained
+probe failures still mark it unavailable. The pinned upstream registry checks
+workers sequentially, so detection time also depends on pool size and probe
+latency, not only interval times threshold. Use metrics and probe-failure logs
+to inspect actual transitions.
+
+Managed subprocess workers default `VLLM_HTTP_TIMEOUT_KEEP_ALIVE` to `120`
+seconds; the cluster planner also supplies this default to every rank. Explicit
+`vllm_serve_env_vars` (single-node) or `env` (cluster) values override it;
+single-node launches also honor an inherited value. With this pinned router,
+keep the server idle timeout above its 50-second inference and 90-second health
+connection-pool idle lifetimes. vLLM's default is five seconds, which reproduced
+connection resets between sparse agent turns in a real Uvicorn/router CPU test.
+This setting controls **idle HTTP connections**, not running generations, token
+budgets or retries. An externally attached vLLM server is not modified: configure
+its environment yourself and verify the selected runtime supports the setting.
+The launch/node manifest records the effective keep-alive value without dumping
+the rest of the environment.
+
+<Warning>
+Do not assume every build labeled `vllm-router 0.1.15` is interchangeable. This launcher requires a fixed upstream source revision plus the checked-in
+compatibility patch. Follow the
+[router build and validation instructions](/main/contribute/local-vllm-validation).
+Pin the resulting binary digest and repeat validation when upgrading it.
+</Warning>
+
+Example addition to the model config, using a separately built binary:
+
+```yaml
+router:
+  executable: /opt/router/vllm-router
+  executable_type: binary
+  expected_version: "0.1.15"
+  expected_sha256: <sha256-of-your-validated-binary>
+  inference_timeout_seconds: 600
+  log_dir: results/local_vllm_router
+```
+
+Router requests and direct native-DP requests use a finite total HTTP deadline
+and no automatic generation replay, including 429, timeout, connection loss,
+or a partially emitted stream. Router retries are disabled. Its health checks
+and circuit breaker quarantine unavailable replicas; cache affinity may move
+when a replica fails. Native MoE ranks belong to one collective: losing a rank
+does not create an independent healthy replica. Whole-group failure must be
+validated with the actual MoE runtime.
+
+These retry/deadline guarantees apply to the model adapter's outbound serving
+request; upstream agents or callers can still have their own retry policies.
+The router's API key authenticates calls to workers, not callers to the router.
+Use a trusted local network namespace; this launcher is not a public authenticated
+router deployment.
+
+The router is an HTTP transport, not an expansion of Gym's public API. Gym's
+existing model adapter remains non-streaming; router-level SSE cancellation
+tests do not establish streaming support in that adapter. CPU fixtures check
+explicit extended fields, tokenization, headers, status codes, and session/rank
+affinity. The PD candidate also preserves the original JSON for HTTP Chat
+Completions and Completions, avoiding typed-schema defaults and f32 rounding
+of sampling parameters. Re-run request-contract tests on every router upgrade.
+
+### Experimental single-node NIXL PD
+
+Configure a pinned router built with `router_compat.patch` and add `pd: {}` to
+the subprocess model config (or use `local_vllm_model/pd`). The router must
+advertise the patched `--strict-nixl` capability; the older non-PD-only binary
+is rejected. Do not select a binary merely because its version is `0.1.15`.
+
+```yaml
+launcher: subprocess
+pd: {}
+show_vllm_engine_stats: true
+vllm_serve_kwargs:
+  tensor_parallel_size: 1
+  data_parallel_size: 2
+  pipeline_parallel_size: 1
+```
+
+This example needs **four visible GPUs**: two for prefill and two for decode.
+By default P takes the first `TP × DP` inherited device indices and D takes
+the next group. `pd.prefill.gpu_indices` and `pd.decode.gpu_indices` can select
+other disjoint subsets of the allocation; these are local visibility indices,
+not physical GPU identifiers. Neither role can claim a device outside the
+inherited allocation. Current managed PD requires symmetric TP/DP sizes.
+
+The groups have independent HTTP, DP-RPC and NIXL side-channel ports, MP
+backends, `NixlConnector`, and `kv_load_failure_policy: fail`. Both roles must
+pass model readiness before the router starts. A failed/cancelled startup
+reaps both groups; shutdown stops the router before workers. Model, tokenizer,
+revision, dtype, KV layout and speculative decoding configuration are shared.
+Per-role `serve_kwargs` can only override `max_num_batched_tokens`,
+`max_num_seqs`, `gpu_memory_utilization` and `all2all_backend`.
+
+The strict router returns P-side HTTP errors without calling D and rejects
+missing or malformed NIXL handoffs. It uses the configured worker API key,
+does not prepend P's token logprobs to D's full-budget result, and routes
+tokenization as a metadata operation rather than two-stage generation.
+
+<Warning>
+Do not infer successful KV transfer from a successful response: verify NIXL
+transfer counters and deliberately test an invalid handoff. This single-node
+launcher requires separate qualification for cross-node deployments.
+</Warning>
+
+### Experimental allocation-owned multi-node controller
+
+`python -m responses_api_models.local_vllm_model.cluster` is a separate,
+opt-in Slurm/Pyxis controller. It **never submits a job**, attaches to another
+allocation, kills an existing serving fleet, or reads historical URL files.
+Run it inside a dedicated allocation, from a code checkout and output directory
+visible at the same absolute paths on every node and inside the containers.
+The Gym environment need not contain vLLM; each container's stdlib-only node
+agent launches its selected `vllm` executable. Gym still uses Ray independently.
+
+The YAML layout has either `groups.combined` or both `groups.prefill` and
+`groups.decode`. Each group specifies `nodes` and `gpus_per_node`. The default
+`deployment_mode: native_dp` derives DP size and assigns one API endpoint per
+GPU rank. TP1/PP1 is required in that mode.
+Multi-rank groups require native MoE expert parallelism; dense independent
+replicas must not be mislabeled as native MoE DP. Initial PD requires equal
+P/D rank counts. Single-rank P/D groups support small dense-model acceptance.
+
+`deployment_mode: replicas` instead creates independent, node-local TP replicas
+in `groups.combined`, or separately in `groups.prefill` and `groups.decode`.
+`serve_kwargs.tensor_parallel_size` must exactly
+divide `gpus_per_node`; each replica has native DP1 and PP1, receives a disjoint
+slice of scheduler-visible devices, and publishes one router worker URL. For
+example, four nodes with four GPUs per node and TP4 create four independent
+replicas, consuming 16 GPUs total. With two prefill and two decode nodes, the
+same placement gives P2D2 / DP1TP4. Independent P/D replicas use NIXL
+producer/consumer roles and distinct side-channel ranges for replicas sharing
+a node. Role-specific `compilation_config` can select decode-only CUDA graphs.
+No DP collective spans those nodes. This
+mode retains the controller's lease, process ownership, readiness and whole-run
+failure cleanup. It requires separate live hardware/model qualification; the
+results from a different topology do not qualify this deployment.
+
+```yaml
+model: Qwen/Qwen2.5-0.5B-Instruct
+image: /shared/images/vllm-openai_v0.28.0.sqsh
+expected_vllm_version: "0.28.0"
+cpus_per_node: 8
+groups:
+  prefill: {nodes: 1, gpus_per_node: 1}
+  decode: {nodes: 1, gpus_per_node: 1}
+serve_kwargs:
+  max_model_len: 2048
+  enforce_eager: true
+router:
+  executable: /shared/bin/validated-vllm-router
+  expected_sha256: <sha256-of-your-validated-binary>
+```
+
+```bash
+# Pure planning outside an allocation: no probes, processes or GPUs.
+python -m responses_api_models.local_vllm_model.cluster \
+  --config cluster.yaml --output /shared/results/new-plan --dry-run \
+  --node node-a=10.0.0.1 --node node-b=10.0.0.2
+
+# Inside an explicitly allocated two-node job; omit --node for live serving.
+python -m responses_api_models.local_vllm_model.cluster \
+  --config cluster.yaml --output /shared/results/new-run \
+  --override serve_kwargs.max_model_len=4096
+```
+
+Config files support OmegaConf environment interpolation and typed, dotted
+`--override key=value` options. The controller pins the runtime version on
+every node, checks required public CLI flags, uses node IPs for NIXL, and
+requires each node's job/run identity before polling its model endpoint.
+Non-PD and PD routers receive one URL per external rank and own episode
+affinity; Gym must not independently choose a rank.
+
+`gym-connection.private.json` is a mode-0600 fragment for the Gym model config
+(`base_url`, `api_key`, `model`, `routing_authority`). Use it with the lightweight
+`local_vllm_model/subprocess` config on the **controller host**, where the router
+binds to loopback by default. An allocation-owned router can instead set
+`router.host` to an allocated node address so Gym can run on another node.
+The controller must remain running, and `state.json` must
+identify this run as `ready`; a leftover connection file is not a live service.
+The private node specs also contain credentials. Do not publish them or raw
+worker logs. This deployment assumes trusted cluster networking and is not a
+public authenticated gateway.
+
+### Compare the cluster launcher with external serving
+
+`benchmarks/nemotron_3.5_super/sbatch_cluster_vllm.sh` submits a dedicated job
+and uses the cluster controller to run the same independent P/D recipe as
+`sbatch_external_vllm.sh`. It defaults to SWE-bench Verified/OpenCode, P2D2,
+DP1/TP4, 500 tasks with three samples each, and concurrency 1500. Supply the
+same checkpoint and container as the baseline:
+
+```bash
+MODEL=/shared/checkpoint \
+CONTAINER=/shared/vllm.sqsh \
+SBATCH_ACCOUNT=your_account SBATCH_PARTITION=batch SBATCH_QOS=interactive \
+BASELINE_JSONL=/shared/previous/date_run.jsonl \
+bash benchmarks/nemotron_3.5_super/sbatch_cluster_vllm.sh
+```
+
+The script reads the existing `vllm_configs/nemotron_3.5_super.sh` and checks
+that every serving option survives translation before starting workers. It
+keeps Gym on the second node and the router on the first node, as in the
+external script. The benchmark explicitly uses an empty cluster `api_key`,
+disabling worker authentication to match external serving on the trusted
+allocation. Empty keys are rejected with the default strict profile. Results include
+code hashes, startup timestamps, worker placement, timing sidecars, and
+`comparison.json`. Before creating sandboxes, a deterministic four-token
+request must return HTTP 200 and produce nonzero NIXL KV-transfer bytes. This
+probe is excluded from rollout scores and completion timing. No results are
+uploaded to W&B.
+
+This comparison explicitly selects `router.profile: external_benchmark`,
+which uses the image's unpatched router, cache-aware policies, and upstream
+retry/health defaults. It does **not** qualify the patched strict-NIXL router.
+The default `router.profile: strict` retains fail-closed NIXL validation and
+disabled retries for existing managed deployments.
+
+The baseline must have a timing sidecar from
+`++rollout_collection_driver=benchmarks.rollout_timing:run`. The comparison
+reports accuracy on completed samples and on the intersection of scored
+sample IDs. Missing samples are not assigned zero reward. P50/P90 measure
+time to score 50%/90% of the planned samples from rollout dispatch, excluding
+startup. Separate startup timestamps include launcher overhead. Different
+allocations and stochastic samples limit causal claims from a historical
+baseline.
+
+An allocation-scoped `srun` step owns each node agent. Lifetime-pipe supervisors
+own its workers; a renewable run-specific lease bounds orphan lifetime if the
+controller disappears. A node/rank/router failure stops the entire deployment.
+Cleanup failure is reported explicitly; do not reuse the allocation until its
+owned steps are inspected. These guarantees do not cover killing every cleanup
+supervisor or losing the machine; Slurm/container containment is still required.
+
+Cluster listener defaults are API `8000 + local_rank`, DP RPC `7000`, and
+NIXL `5600 + global_rank`. Each node checks its actual kernel ephemeral TCP
+range before starting vLLM, rejects overlapping listener ports, and records
+`network-ports.json`. A port that is initially free can be claimed by vLLM's
+internal sockets during model loading: some clusters use `9000..65000`, rather than
+the commonly assumed `32768..60999`. `VLLM_PORT` overrides are also rejected
+because they redirect vLLM's internal allocator. No kernel network settings
+are changed; choose listener ranges outside the node's ephemeral range.
+
+### Dry-run manifests
+
+Use a resolved Gym YAML (`gym env resolve`) or a complete local model config:
+
+```bash
+python -m responses_api_models.local_vllm_model.plan \
+  --config resolved.yaml --name policy_model \
+  --vllm-port 8000 --router-port 8001
+```
+
+This validates config/visibility, executes bounded version/help probes in the
+external runtimes, and prints paths to redacted manifests. It does not load a
+model, start serving processes, claim GPU resources, or prove readiness. Explicit
+ports in the config take precedence over the CLI planning ports.
+
+See the [validation guide](/main/contribute/local-vllm-validation)
+for the P2D2 reproduction commands and hardware qualification requirements.
+
 ## LocalVLLMModel configuration reference
 
 LocalVLLMModel inherits all fields from VLLMModel (see [VLLMModel configuration reference](/model-server/vllm#vllmmodel-configuration-reference)). It adds the following:
@@ -50,26 +444,26 @@ LocalVLLMModel inherits all fields from VLLMModel (see [VLLMModel configuration 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `vllm_serve_kwargs` | `dict` | — | **Required.** Arguments passed through to `vllm serve`. See `vllm_serve_kwargs` below. |
-| `vllm_serve_env_vars` | `dict` | — | **Required.** Environment variables for the vLLM process. Must include `VLLM_RAY_DP_PACK_STRATEGY`. |
+| `vllm_serve_env_vars` | `dict` | — | **Required.** Environment variables for the vLLM process. The legacy Ray launcher requires `VLLM_RAY_DP_PACK_STRATEGY`. |
 | `hf_home` | `str` | `<cwd>/.cache/huggingface` | Hugging Face cache directory. Set this if you have already downloaded weights elsewhere. |
-| `debug` | `bool` | `false` | Print vLLM server logs to stderr. |
+| `debug` | `bool` | `false` | Legacy Ray debug logging. Subprocess logs are always retained under `subprocess.log_dir`. |
 | `show_vllm_engine_stats` | `bool` | `false` | Periodically log vLLM engine throughput stats. |
 | `ray_worker_py_executable` | `str` | `sys.executable` | Python interpreter Ray uses for worker processes. |
 
-Two inherited fields are auto-populated by LocalVLLMModel after vLLM spawns and should **not** be set in your config:
+The inherited fields have the following local-deployment behavior:
 
-- `base_url`: assigned to the URL of the vLLM process once it binds a port. Defaults to `[]`.
-- `api_key`: defaults to `"dummy"`. vLLM does not authenticate local connections.
+- `base_url`: defaults to `[]` and is populated by managed startup. Setting it explicitly attaches to an externally owned endpoint and skips startup.
+- `api_key`: defaults to `"dummy"`. The subprocess launcher passes it to vLLM through `VLLM_API_KEY` and uses it for HTTP requests; the legacy local Ray deployment does not enable authentication.
 
 ### `vllm_serve_kwargs`
 
-Required keys (asserted at startup):
+For the legacy Ray launcher, required keys (asserted at startup):
 
 - `data_parallel_size`
 - `tensor_parallel_size`
 - `pipeline_parallel_size`
 
-LocalVLLMModel injects the following keys automatically. Do not set them in your config:
+The legacy Ray launcher injects the following keys automatically. Do not set them in your config:
 
 - `distributed_executor_backend: ray`
 - `data_parallel_backend: ray`
@@ -97,7 +491,7 @@ Any flag accepted by `vllm serve` can be set under `vllm_serve_kwargs`. See the 
 
 ### `vllm_serve_env_vars`
 
-Environment variables set in the vLLM process. `VLLM_RAY_DP_PACK_STRATEGY` is mandatory:
+Environment variables set in the vLLM process. `VLLM_RAY_DP_PACK_STRATEGY` is mandatory for the legacy Ray launcher:
 
 ```yaml
 vllm_serve_env_vars:
@@ -108,7 +502,7 @@ See [Multi-node deployments](#multi-node-deployments) for what `strict` and `spa
 
 ## Multi-node deployments
 
-LocalVLLMModel uses Ray to place vLLM workers across nodes. The `VLLM_RAY_DP_PACK_STRATEGY` environment variable controls how worker groups are packed:
+The legacy launcher uses Ray to place vLLM workers across nodes. The experimental subprocess launcher does not yet support these topologies. The `VLLM_RAY_DP_PACK_STRATEGY` environment variable controls how worker groups are packed:
 
 - **`strict`**: each data-parallel replica must fit on a single node (`tensor_parallel_size * pipeline_parallel_size ≤ GPUs per node`). Use for single-node setups or when running multiple replicas, each constrained to one node.
 - **`span`**: a single model instance may span multiple nodes. Use when `tensor_parallel_size * pipeline_parallel_size` exceeds the GPU count of one node. When `span` is set, `data_parallel_size_local` is automatically unset.
@@ -158,5 +552,5 @@ The following capabilities work the same as in VLLMModel. See [VLLMModel configu
 - **`return_token_id_information`**: enable for training workflows that need `prompt_token_ids`, `generation_token_ids`, and `generation_log_probs`.
 
 <Note>
-Multi-endpoint replicas (the `base_url: list[str]` pattern used with VLLMModel) do not apply to LocalVLLMModel: each LocalVLLMModel instance manages exactly one vLLM engine. To run multiple replicas, define each as a separate server instance in your config (chain configs in `config_paths`, or define multiple top-level keys in a single YAML).
+Each managed LocalVLLMModel instance publishes one endpoint. An explicit `base_url: list[str]` uses external-attach mode and does not allocate or manage those replicas. The experimental subprocess launcher does not coordinate GPU placement between separate managed instances.
 </Note>

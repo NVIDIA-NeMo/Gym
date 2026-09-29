@@ -1,0 +1,764 @@
+diff --git a/src/config/types.rs b/src/config/types.rs
+index 413022f..4c23a09 100644
+--- a/src/config/types.rs
++++ b/src/config/types.rs
+@@ -246,6 +246,9 @@ pub enum PolicyConfig {
+
+     #[serde(rename = "rendezvous_hash")]
+     RendezvousHash,
++
++    #[serde(rename = "session_balanced")]
++    SessionBalanced,
+ }
+
+ impl PolicyConfig {
+@@ -257,6 +260,7 @@ impl PolicyConfig {
+             PolicyConfig::PowerOfTwo { .. } => "power_of_two",
+             PolicyConfig::ConsistentHash { .. } => "consistent_hash",
+             PolicyConfig::RendezvousHash => "rendezvous_hash",
++            PolicyConfig::SessionBalanced => "session_balanced",
+         }
+     }
+ }
+diff --git a/src/config/validation.rs b/src/config/validation.rs
+index bf678a5..e6c5313 100644
+--- a/src/config/validation.rs
++++ b/src/config/validation.rs
+@@ -126,7 +126,7 @@ impl ConfigValidator {
+     /// Validate policy configuration
+     fn validate_policy(policy: &PolicyConfig) -> ConfigResult<()> {
+         match policy {
+-            PolicyConfig::Random | PolicyConfig::RoundRobin => {
++            PolicyConfig::Random | PolicyConfig::RoundRobin | PolicyConfig::SessionBalanced => {
+                 // No specific validation needed
+             }
+             PolicyConfig::CacheAware {
+diff --git a/src/core/worker_registry.rs b/src/core/worker_registry.rs
+index ec9e340..949cee2 100644
+--- a/src/core/worker_registry.rs
++++ b/src/core/worker_registry.rs
+@@ -385,7 +385,10 @@ impl WorkerRegistry {
+
+                 // Perform health checks
+                 for worker in &workers {
+-                    let _ = worker.check_health_async().await; // Use async version directly
++                    if let Err(error) = worker.check_health_async().await {
++                        tracing::warn!(worker = worker.url(), healthy = worker.is_healthy(), %error,
++                            "Worker liveness probe failed");
++                    }
+                 }
+
+                 // Reset loads periodically
+diff --git a/src/main.rs b/src/main.rs
+index 27b8479..5ed032c 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -114,13 +114,17 @@ struct CliArgs {
+     worker_urls: Vec<String>,
+
+     /// Load balancing policy to use
+-    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "rendezvous_hash"])]
++    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "rendezvous_hash", "session_balanced"])]
+     policy: String,
+
+     /// Enable vLLM PD (Prefill-Decode) disaggregated mode with vLLM-specific two-stage processing
+     #[arg(long, default_value_t = false)]
+     vllm_pd_disaggregation: bool,
+
++    /// Require fail-closed NIXL PD with static, explicitly configured workers.
++    #[arg(long, default_value_t = false)]
++    strict_nixl: bool,
++
+     /// ZMQ service discovery address for vLLM P2P NCCL coordination (e.g., "0.0.0.0:30001")
+     /// Required for --vllm-pd-disaggregation mode. Workers register their HTTP and ZMQ addresses here.
+     #[arg(long)]
+@@ -131,11 +135,11 @@ struct CliArgs {
+     decode: Vec<String>,
+
+     /// Specific policy for prefill nodes in PD mode
+-    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "rendezvous_hash"])]
++    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "rendezvous_hash", "session_balanced"])]
+     prefill_policy: Option<String>,
+
+     /// Specific policy for decode nodes in PD mode
+-    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "rendezvous_hash"])]
++    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "rendezvous_hash", "session_balanced"])]
+     decode_policy: Option<String>,
+
+     /// Timeout in seconds for worker startup
+@@ -393,6 +397,7 @@ impl CliArgs {
+                 virtual_nodes: 160, // Default value
+             },
+             "rendezvous_hash" => PolicyConfig::RendezvousHash,
++            "session_balanced" => PolicyConfig::SessionBalanced,
+             _ => PolicyConfig::RoundRobin, // Fallback
+         }
+     }
+@@ -651,8 +656,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+     println!("DEBUG: Prefill URLs parsed: {:?}", prefill_urls);
+     // Parse CLI arguments with clap using filtered args
+     println!("DEBUG: Parsing CLI arguments with clap");
+-    println!("DEBUG: Filtered args: {:?}", filtered_args);
+     let cli_args = CliArgs::parse_from(filtered_args);
++    if cli_args.strict_nixl
++        && (!cli_args.vllm_pd_disaggregation
++            || cli_args.vllm_discovery_address.is_some()
++            || !matches!(cli_args.kv_connector, KvConnector::Nixl))
++    {
++        return Err("--strict-nixl requires static --vllm-pd-disaggregation with --kv-connector nixl".into());
++    }
+     println!("DEBUG: CLI args parsed successfully");
+     println!(
+         "DEBUG: vllm_pd_disaggregation: {}",
+diff --git a/src/policies/factory.rs b/src/policies/factory.rs
+index 08ff2d8..a522c8d 100644
+--- a/src/policies/factory.rs
++++ b/src/policies/factory.rs
+@@ -2,7 +2,7 @@
+
+ use super::{
+     CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, LoadBalancingPolicy,
+-    PowerOfTwoPolicy, RandomPolicy, RendezvousHashPolicy, RoundRobinPolicy,
++    PowerOfTwoPolicy, RandomPolicy, RendezvousHashPolicy, RoundRobinPolicy, SessionBalancedPolicy,
+ };
+ use crate::config::PolicyConfig;
+ use std::sync::Arc;
+@@ -39,6 +39,7 @@ impl PolicyFactory {
+                 Arc::new(ConsistentHashPolicy::new())
+             }
+             PolicyConfig::RendezvousHash => Arc::new(RendezvousHashPolicy::new()),
++            PolicyConfig::SessionBalanced => Arc::new(SessionBalancedPolicy::new()),
+         }
+     }
+
+@@ -51,6 +52,7 @@ impl PolicyFactory {
+             "cache_aware" | "cacheaware" => Some(Arc::new(CacheAwarePolicy::new())),
+             "consistent_hash" | "consistenthash" => Some(Arc::new(ConsistentHashPolicy::new())),
+             "rendezvous_hash" | "rendezvoushash" => Some(Arc::new(RendezvousHashPolicy::new())),
++            "session_balanced" => Some(Arc::new(SessionBalancedPolicy::new())),
+             _ => None,
+         }
+     }
+diff --git a/src/policies/mod.rs b/src/policies/mod.rs
+index 5948176..d1ba9e6 100644
+--- a/src/policies/mod.rs
++++ b/src/policies/mod.rs
+@@ -17,6 +17,7 @@ mod random;
+ mod registry;
+ mod rendezvous_hash;
+ mod round_robin;
++mod session_balanced;
+
+ pub use cache_aware::CacheAwarePolicy;
+ pub use consistent_hash::ConsistentHashPolicy;
+@@ -27,6 +28,7 @@ pub use random::RandomPolicy;
+ pub use registry::PolicyRegistry;
+ pub use rendezvous_hash::RendezvousHashPolicy;
+ pub use round_robin::RoundRobinPolicy;
++pub use session_balanced::SessionBalancedPolicy;
+
+ /// HTTP headers passed to policies for routing decisions
+ /// Key is lowercase header name, value is header value
+@@ -110,6 +112,12 @@ pub trait LoadBalancingPolicy: Send + Sync + Debug {
+         false // Default: most policies don't need headers
+     }
+
++    /// Stateful policies distinguish registry membership from transient health.
++    /// Such policies receive the entire pool and perform availability checks.
++    fn requires_full_worker_pool(&self) -> bool {
++        false
++    }
++
+     /// Update worker load information
+     ///
+     /// This is called periodically with current load information for load-aware policies.
+diff --git a/src/policies/registry.rs b/src/policies/registry.rs
+index fb75901..b1d8076 100644
+--- a/src/policies/registry.rs
++++ b/src/policies/registry.rs
+@@ -6,7 +6,7 @@
+ /// When the last worker of a model is removed, the policy mapping is cleaned up.
+ use super::{
+     CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, LoadBalancingPolicy,
+-    PowerOfTwoPolicy, RandomPolicy, RendezvousHashPolicy, RoundRobinPolicy,
++    PowerOfTwoPolicy, RandomPolicy, RendezvousHashPolicy, RoundRobinPolicy, SessionBalancedPolicy,
+ };
+ use crate::config::types::PolicyConfig;
+ use std::collections::HashMap;
+@@ -173,6 +173,7 @@ impl PolicyRegistry {
+             "cache_aware" => Arc::new(CacheAwarePolicy::new()),
+             "power_of_two" => Arc::new(PowerOfTwoPolicy::new()),
+             "rendezvous_hash" => Arc::new(RendezvousHashPolicy::new()),
++            "session_balanced" => Arc::new(SessionBalancedPolicy::new()),
+             _ => {
+                 warn!("Unknown policy type '{}', using default", policy_type);
+                 Arc::clone(&self.default_policy)
+@@ -204,6 +205,7 @@ impl PolicyRegistry {
+             PolicyConfig::PowerOfTwo { .. } => Arc::new(PowerOfTwoPolicy::new()),
+             PolicyConfig::ConsistentHash { .. } => Arc::new(ConsistentHashPolicy::new()),
+             PolicyConfig::RendezvousHash => Arc::new(RendezvousHashPolicy::new()),
++            PolicyConfig::SessionBalanced => Arc::new(SessionBalancedPolicy::new()),
+         }
+     }
+
+diff --git a/src/policies/session_balanced.rs b/src/policies/session_balanced.rs
+new file mode 100644
+index 0000000..fa4cdeb
+--- /dev/null
++++ b/src/policies/session_balanced.rs
+@@ -0,0 +1,117 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++// SPDX-License-Identifier: Apache-2.0
++//! Bounded, lifetime-sticky session assignment for one static worker pool.
++//!
++//! New sessions use the healthy worker with the fewest assigned sessions;
++//! subsequent turns retain their exact worker regardless of request load.
++//! There is deliberately no eviction or health fallback: losing affinity is
++//! not silently presented as a continuation of the same experiment. Restart
++//! the run-owned router to change membership or reclaim the bounded table.
++
++use std::collections::HashMap;
++use std::sync::{Arc, Mutex};
++
++use super::{get_healthy_worker_indices, LoadBalancingPolicy, RequestHeaders};
++use crate::core::Worker;
++use crate::metrics::RouterMetrics;
++
++const MAX_SESSIONS: usize = 65_536;
++const MAX_SESSION_BYTES: usize = 1_024;
++
++#[derive(Debug)]
++struct Pool {
++    urls: Vec<String>,
++    pins: HashMap<String, String>,
++    assigned: HashMap<String, usize>,
++}
++
++#[derive(Debug)]
++pub struct SessionBalancedPolicy {
++    pool: Mutex<Option<Pool>>,
++    capacity: usize,
++}
++
++impl SessionBalancedPolicy {
++    pub fn new() -> Self {
++        Self {
++            pool: Mutex::new(None),
++            capacity: MAX_SESSIONS,
++        }
++    }
++}
++
++impl LoadBalancingPolicy for SessionBalancedPolicy {
++    fn select_worker_with_headers(
++        &self,
++        workers: &[Arc<dyn Worker>],
++        _request_text: Option<&str>,
++        headers: Option<&RequestHeaders>,
++    ) -> Option<usize> {
++        let session = headers?.get("x-session-id")?;
++        if session.trim().is_empty() || session.len() > MAX_SESSION_BYTES {
++            return None;
++        }
++        let healthy = get_healthy_worker_indices(workers);
++        if healthy.is_empty() {
++            tracing::warn!(workers = workers.len(), "Session-balanced pool has no available worker");
++            return None;
++        }
++        let mut urls: Vec<_> = workers.iter().map(|w| w.url().to_owned()).collect();
++        urls.sort();
++        urls.dedup();
++        if urls.len() != workers.len() {
++            return None;
++        }
++        let mut guard = self.pool.lock().ok()?;
++        let pool = guard.get_or_insert_with(|| Pool {
++            assigned: urls.iter().map(|url| (url.clone(), 0)).collect(),
++            urls: urls.clone(),
++            pins: HashMap::new(),
++        });
++        if pool.urls != urls {
++            tracing::warn!(expected = pool.urls.len(), actual = urls.len(), "Session-balanced registry membership changed");
++            return None;
++        }
++        let index = if let Some(pinned) = pool.pins.get(session) {
++            // Do not remap an existing episode when its worker goes unhealthy.
++            match healthy.iter().find(|&&i| workers[i].url() == pinned) {
++                Some(&index) => index,
++                None => {
++                    tracing::warn!(worker = %pinned, "Session-balanced pinned worker unavailable; refusing remap");
++                    return None;
++                }
++            }
++        } else {
++            if pool.pins.len() >= self.capacity {
++                return None;
++            }
++            let index = *healthy
++                .iter()
++                .min_by_key(|&&i| (pool.assigned[workers[i].url()], workers[i].url()))?;
++            let url = workers[index].url();
++            *pool.assigned.get_mut(url)? += 1;
++            pool.pins.insert(session.clone(), url.to_owned());
++            index
++        };
++        let url = workers[index].url();
++        RouterMetrics::record_processed_request(url);
++        RouterMetrics::record_policy_decision(self.name(), url);
++        Some(index)
++    }
++
++    fn name(&self) -> &'static str {
++        "session_balanced"
++    }
++    fn needs_headers(&self) -> bool {
++        true
++    }
++    fn requires_full_worker_pool(&self) -> bool {
++        true
++    }
++    fn as_any(&self) -> &dyn std::any::Any {
++        self
++    }
++    fn reset(&self) {
++        *self.pool.lock().expect("session pool lock poisoned") = None;
++    }
++}
+diff --git a/src/routers/http/router.rs b/src/routers/http/router.rs
+index e8e1259..67c5976 100644
+--- a/src/routers/http/router.rs
++++ b/src/routers/http/router.rs
+@@ -31,6 +31,24 @@ use std::time::{Duration, Instant};
+ use tokio_stream::wrappers::UnboundedReceiverStream;
+ use tracing::{debug, error, info, warn};
+
++/// Keep cache-aware load visible until the response body completes or is dropped.
++struct TransparentWorkerLoad(Arc<dyn Worker>);
++
++impl TransparentWorkerLoad {
++    fn new(worker: Arc<dyn Worker>) -> Self {
++        worker.increment_load();
++        RouterMetrics::set_running_requests(worker.url(), worker.load());
++        Self(worker)
++    }
++}
++
++impl Drop for TransparentWorkerLoad {
++    fn drop(&mut self) {
++        self.0.decrement_load();
++        RouterMetrics::set_running_requests(self.0.url(), self.0.load());
++    }
++}
++
+ /// Regular router that uses injected load balancing policies
+ #[derive(Debug)]
+ pub struct Router {
+@@ -522,21 +540,21 @@ impl Router {
+             None => self.worker_registry.get_all(),
+         };
+
++        // Get the appropriate policy for this model
++        let policy = match model_id {
++            Some(model) => self.policy_registry.get_policy_or_default(model),
++            None => self.policy_registry.get_default_policy(),
++        };
++
+         let available: Vec<Arc<dyn Worker>> = workers
+             .iter()
+-            .filter(|w| w.is_available())
++            .filter(|w| policy.requires_full_worker_pool() || w.is_available())
+             .cloned()
+             .collect();
+         if available.is_empty() {
+             return None;
+         }
+
+-        // Get the appropriate policy for this model
+-        let policy = match model_id {
+-            Some(model) => self.policy_registry.get_policy_or_default(model),
+-            None => self.policy_registry.get_default_policy(),
+-        };
+-
+         // Convert headers for policies that need them (e.g., consistent_hash)
+         let request_headers = Self::headers_to_request_headers(headers);
+
+@@ -1669,9 +1687,10 @@ impl RouterTrait for Router {
+
+         // Select a worker (filter by availability like select_worker_for_model)
+         let all_workers = self.worker_registry.get_all();
++        let policy = self.policy_registry.get_default_policy();
+         let workers: Vec<Arc<dyn Worker>> = all_workers
+             .iter()
+-            .filter(|w| w.is_available())
++            .filter(|w| policy.requires_full_worker_pool() || w.is_available())
+             .cloned()
+             .collect();
+         if workers.is_empty() {
+@@ -1682,7 +1701,6 @@ impl RouterTrait for Router {
+                 .into_response();
+         }
+
+-        let policy = self.policy_registry.get_default_policy();
+         let request_text = serde_json::to_string(&body).ok();
+         let request_headers = Self::headers_to_request_headers(headers);
+         let worker_idx = match policy.select_worker_with_headers(
+@@ -1700,6 +1718,8 @@ impl RouterTrait for Router {
+             }
+         };
+
++        let load_guard = (policy.name() == "cache_aware")
++            .then(|| TransparentWorkerLoad::new(Arc::clone(&workers[worker_idx])));
+         let worker: &dyn Worker = workers[worker_idx].as_ref();
+         let url = worker.endpoint_url(path);
+
+@@ -1730,6 +1750,23 @@ impl RouterTrait for Router {
+             request_builder = request_builder.json(&body);
+         }
+
++        // Transparent routes (including /tokenize) must retain application
++        // headers while the router remains the sole DP-rank authority.
++        if let Some(hdrs) = headers {
++            for (name, value) in header_utils::preserve_response_headers(hdrs).iter() {
++                let name_str = name.as_str();
++                if name_str == "content-length"
++                    || name_str == "content-type"
++                    || (self.api_key.is_some() && name_str == "authorization")
++                    || (worker.dp_rank().is_some() && name_str == "x-data-parallel-rank")
++                    || header_utils::TRACE_HEADER_NAMES.contains(&name_str)
++                {
++                    continue;
++                }
++                request_builder = request_builder.header(name, value);
++            }
++        }
++
+         // Add authorization if configured
+         if let Some(ref key) = self.api_key {
+             request_builder = request_builder.header("Authorization", format!("Bearer {}", key));
+@@ -1752,8 +1789,14 @@ impl RouterTrait for Router {
+                 let status = response.status();
+                 let headers = response.headers().clone();
+
+-                // Stream the response body
+-                let body = Body::from_stream(response.bytes_stream());
++                // Own the load guard in the stream state, including cancellation.
++                let stream = futures_util::stream::unfold(
++                    (response.bytes_stream(), load_guard),
++                    |(mut stream, guard)| async move {
++                        stream.next().await.map(|chunk| (chunk, (stream, guard)))
++                    },
++                );
++                let body = Body::from_stream(stream);
+                 let mut response_builder = Response::builder().status(status.as_u16());
+
+                 for (name, value) in headers.iter() {
+diff --git a/src/routers/http/vllm_pd_router.rs b/src/routers/http/vllm_pd_router.rs
+index 52012c6..18a37a4 100644
+--- a/src/routers/http/vllm_pd_router.rs
++++ b/src/routers/http/vllm_pd_router.rs
+@@ -6,7 +6,7 @@ use super::pd_router::PdRouterBase;
+ use super::pd_types::{error_chain, PDRouterError};
+ use super::vllm_service_discovery::{MoriIOTransferMode, ServiceRegistry, ServiceType};
+ use crate::config::KvConnector;
+-use crate::core::{BasicWorker, Worker, WorkerType};
++use crate::core::{BasicWorker, Worker, WorkerLoadGuard, WorkerType};
+ use crate::metrics::RouterMetrics;
+ use crate::otel_http::{self, ClientRequestOptions};
+ use crate::policies::PolicyRegistry;
+@@ -43,6 +43,8 @@ pub struct VllmPDRouter {
+     service_registry: Arc<ServiceRegistry>,
+     /// HTTP client for making requests to discovered services
+     http_client: reqwest::Client,
++    /// Explicit worker credential; never substitute an unrelated inherited key.
++    api_key: Option<String>,
+     /// Policy registry for load balancing
+     policy_registry: Arc<PolicyRegistry>,
+     /// Whether this router uses service discovery (true) or direct URLs (false)
+@@ -67,6 +69,35 @@ pub struct VllmPDRouter {
+ /// Must match `MoRIIOConstants.TRANSFER_PREFIX` in the vLLM Python connector.
+ const MORIIO_TRANSFER_PREFIX: &str = "tx";
+
++/// A successful prefill must offer a usable handoff, not silently run combined
++/// inference on decode. Preserve the entire object for connector compatibility.
++fn valid_nixl_handoff(params: Option<&Value>) -> bool {
++    let Some(params) = params.filter(|p| p.is_object()) else {
++        return false;
++    };
++    params.get("do_remote_prefill").and_then(Value::as_bool) == Some(true)
++        && ["remote_engine_id", "remote_request_id", "remote_host"]
++            .iter()
++            .all(|key| params.get(key).and_then(Value::as_str).is_some_and(|s| !s.is_empty()))
++        && params.get("remote_port").and_then(Value::as_u64).is_some_and(|p| (1..=65535).contains(&p))
++        && params.get("tp_size").and_then(Value::as_u64).is_some_and(|n| n > 0)
++        && params.get("remote_block_ids").is_some_and(Value::is_array)
++}
++
++fn forward_application_headers(mut request: reqwest::RequestBuilder, headers: Option<&HeaderMap>) -> reqwest::RequestBuilder {
++    if let Some(headers) = headers {
++        for (name, value) in headers {
++            if !matches!(name.as_str(),
++                "host" | "connection" | "keep-alive" | "content-length" | "content-type" |
++                "transfer-encoding" | "te" | "trailer" | "upgrade" | "authorization" |
++                "proxy-authorization" | "proxy-authenticate" | "x-data-parallel-rank" | "x-request-id") {
++                request = request.header(name, value);
++            }
++        }
++    }
++    request
++}
++
+ /// Discovery-backed P/D routing is ready only after both worker types register.
+ /// Without this guard, `PdRouterBase::health` sees the unused static registry and
+ /// reports success before a discovered prefill/decode pair can serve requests.
+@@ -1175,7 +1206,7 @@ impl VllmPDRouter {
+         );
+
+         // Increment prefill load at the start of the prefill phase
+-        prefill_worker.increment_load();
++        let prefill_load = WorkerLoadGuard::new(prefill_worker.as_ref());
+
+         let prefill_zmq_addr =
+             self.get_zmq_address(prefill_worker.base_url(), ServiceType::Prefill);
+@@ -1245,16 +1276,14 @@ impl VllmPDRouter {
+             .header("Content-Type", "application/json")
+             .header(
+                 "Authorization",
+-                format!(
+-                    "Bearer {}",
+-                    std::env::var("OPENAI_API_KEY").unwrap_or_default()
+-                ),
++                format!("Bearer {}", self.api_key.as_deref().unwrap_or_default()),
+             )
+             .header("X-Request-Id", &request_id);
+
+         // Add X-data-parallel-rank header using shared utilities
+         prefill_request_builder =
+             dp_utils::add_dp_rank_header(prefill_request_builder, prefill_dp_rank);
++        prefill_request_builder = forward_application_headers(prefill_request_builder, headers);
+
+         let prefill_response = match otel_http::send_client_request(
+             prefill_request_builder.json(&prefill_request),
+@@ -1270,7 +1299,6 @@ impl VllmPDRouter {
+         {
+             Ok(resp) => resp,
+             Err(e) => {
+-                prefill_worker.decrement_load();
+                 let full_error = error_chain(&e);
+                 let duration = start_time.elapsed();
+                 RouterMetrics::record_pd_prefill_error(&prefill_base_url);
+@@ -1288,11 +1316,26 @@ impl VllmPDRouter {
+             prefill_response.headers()
+         );
+
++        // Failed prefill must never become a successful decode-only request.
++        if !prefill_response.status().is_success() {
++            self.stop_profiling(&prefill_base_url).await;
++            RouterMetrics::record_pd_prefill_error(&prefill_base_url);
++            RouterMetrics::record_pd_request(path);
++            RouterMetrics::record_pd_request_duration(path, start_time.elapsed());
++            let mut response = Response::builder().status(prefill_response.status());
++            for (key, value) in prefill_response.headers() {
++                if key != "transfer-encoding" && key != "content-length" {
++                    response = response.header(key, value);
++                }
++            }
++            return response.body(Body::from_stream(prefill_response.bytes_stream()))
++                .map_err(|e| PDRouterError::NetworkError { message: e.to_string() });
++        }
++
+         // Extract prefill response body to get kv_transfer_params
+         let prefill_bytes = match prefill_response.bytes().await {
+             Ok(bytes) => bytes,
+             Err(e) => {
+-                prefill_worker.decrement_load();
+                 let full_error = error_chain(&e);
+                 let duration = start_time.elapsed();
+                 RouterMetrics::record_pd_prefill_error(&prefill_base_url);
+@@ -1322,7 +1365,6 @@ impl VllmPDRouter {
+         let prefill_response_json: Value = match serde_json::from_slice(&prefill_bytes) {
+             Ok(json) => json,
+             Err(e) => {
+-                prefill_worker.decrement_load();
+                 let duration = start_time.elapsed();
+                 RouterMetrics::record_pd_prefill_error(&prefill_base_url);
+                 RouterMetrics::record_pd_request(path);
+@@ -1336,6 +1378,18 @@ impl VllmPDRouter {
+         // Extract kv_transfer_params from prefill response if present
+         let kv_transfer_params = prefill_response_json.get("kv_transfer_params").cloned();
+
++        if matches!(self.kv_connector, KvConnector::Nixl)
++            && !valid_nixl_handoff(kv_transfer_params.as_ref())
++        {
++            self.stop_profiling(&prefill_base_url).await;
++            RouterMetrics::record_pd_prefill_error(&prefill_base_url);
++            RouterMetrics::record_pd_request(path);
++            RouterMetrics::record_pd_request_duration(path, start_time.elapsed());
++            return Err(PDRouterError::NetworkError {
++                message: "NIXL prefill returned no valid KV handoff; refusing combined fallback".into(),
++            });
++        }
++
+         if let Some(ref params) = kv_transfer_params {
+             debug!(
+                 "Extracted kv_transfer_params from prefill response: {}",
+@@ -1349,8 +1403,8 @@ impl VllmPDRouter {
+         self.stop_profiling(&prefill_base_url).await;
+
+         // Prefill phase complete: decrement prefill load, increment decode load
+-        prefill_worker.decrement_load();
+-        decode_worker.increment_load();
++        drop(prefill_load);
++        let decode_load = WorkerLoadGuard::new(decode_worker.as_ref());
+
+         debug!("✅ vLLM Stage 1 completed, starting Stage 2 - Decode");
+
+@@ -1426,16 +1480,14 @@ impl VllmPDRouter {
+             .header("Content-Type", "application/json")
+             .header(
+                 "Authorization",
+-                format!(
+-                    "Bearer {}",
+-                    std::env::var("OPENAI_API_KEY").unwrap_or_default()
+-                ),
++                format!("Bearer {}", self.api_key.as_deref().unwrap_or_default()),
+             )
+             .header("X-Request-Id", &request_id);
+
+         // Add X-data-parallel-rank header using shared utilities
+         decode_request_builder =
+             dp_utils::add_dp_rank_header(decode_request_builder, decode_dp_rank);
++        decode_request_builder = forward_application_headers(decode_request_builder, headers);
+
+         let decode_response = match otel_http::send_client_request(
+             decode_request_builder.json(&decode_request),
+@@ -1451,7 +1503,6 @@ impl VllmPDRouter {
+         {
+             Ok(resp) => resp,
+             Err(e) => {
+-                decode_worker.decrement_load();
+                 let full_error = error_chain(&e);
+                 let duration = start_time.elapsed();
+                 RouterMetrics::record_pd_decode_error(&decode_base_url);
+@@ -1468,7 +1519,7 @@ impl VllmPDRouter {
+         self.stop_profiling(&decode_base_url).await;
+
+         // Decode phase complete: decrement decode load
+-        decode_worker.decrement_load();
++        drop(decode_load);
+
+         let status = decode_response.status();
+         let headers = decode_response.headers().clone();
+@@ -1499,7 +1550,9 @@ impl VllmPDRouter {
+             .unwrap_or(false);
+
+         // If logprobs requested and non-streaming, merge prefill and decode logprobs
+-        if needs_logprobs && !is_streaming {
++        // NIXL decode receives the original prompt and the full output budget.
++        // Its response is authoritative; merging the P token duplicates logprobs.
++        if needs_logprobs && !is_streaming && !matches!(self.kv_connector, KvConnector::Nixl) {
+             debug!("Logprobs requested and non-streaming - merging prefill and decode logprobs");
+
+             // Read decode response body
+@@ -1611,6 +1664,7 @@ impl VllmPDRouter {
+                 pd_router,
+                 service_registry: Arc::new(service_registry),
+                 http_client,
++                api_key: ctx.router_config.api_key.clone(),
+                 policy_registry: ctx.policy_registry.clone(),
+                 use_discovery: true,
+                 enable_profiling: ctx.router_config.enable_profiling,
+@@ -1700,6 +1754,7 @@ impl VllmPDRouter {
+                 pd_router,
+                 service_registry: Arc::new(service_registry),
+                 http_client,
++                api_key: ctx.router_config.api_key.clone(),
+                 policy_registry: ctx.policy_registry.clone(),
+                 use_discovery: false,
+                 enable_profiling: ctx.router_config.enable_profiling,
+@@ -2263,6 +2318,28 @@ impl RouterTrait for VllmPDRouter {
+         method: &Method,
+         body: serde_json::Value,
+     ) -> Response {
++        // Tokenization is a metadata operation, not a KV-producing inference.
++        // Sending it through two-stage generation would either fail or duplicate it.
++        if !self.use_discovery && matches!(path, "/tokenize" | "/detokenize") && *method == Method::POST {
++            let workers = self.pd_router.worker_registry.get_prefill_workers();
++            let Some(worker) = workers.iter().find(|w| w.is_available()) else {
++                return (StatusCode::SERVICE_UNAVAILABLE, "No available prefill worker").into_response();
++            };
++            let request = self.pd_router.client.post(worker.endpoint_url(path))
++                .bearer_auth(self.api_key.as_deref().unwrap_or_default()).json(&body);
++            let request = dp_utils::add_dp_rank_header(request, worker.dp_rank());
++            return match forward_application_headers(request, headers).send().await {
++                Ok(upstream) => {
++                    let status = upstream.status();
++                    let headers = header_utils::preserve_response_headers(upstream.headers());
++                    let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
++                    *response.status_mut() = status;
++                    *response.headers_mut() = headers;
++                    response
++                }
++                Err(_) => (StatusCode::BAD_GATEWAY, "Tokenization worker request failed").into_response(),
++            };
++        }
+         // Only handle POST requests for inference
+         if *method != Method::POST {
+             return (
+@@ -2284,17 +2361,20 @@ impl RouterTrait for VllmPDRouter {
+             // Discovery mode - use vLLM-specific two-stage processing
+             self.process_vllm_request(request_json, path, headers).await
+         } else {
+-            // Direct URL mode - use worker registry, filtered by availability
++            // Preserve static membership for lifetime-sticky policies. These
++            // policies check availability without remapping existing sessions.
++            let prefill_policy = self.policy_registry.get_prefill_policy();
++            let decode_policy = self.policy_registry.get_decode_policy();
+             let all_prefill = self.pd_router.worker_registry.get_prefill_workers();
+             let prefill_workers: Vec<Arc<dyn Worker>> = all_prefill
+                 .iter()
+-                .filter(|w| w.is_available())
++                .filter(|w| prefill_policy.requires_full_worker_pool() || w.is_available())
+                 .cloned()
+                 .collect();
+             let all_decode = self.pd_router.worker_registry.get_decode_workers();
+             let decode_workers: Vec<Arc<dyn Worker>> = all_decode
+                 .iter()
+-                .filter(|w| w.is_available())
++                .filter(|w| decode_policy.requires_full_worker_pool() || w.is_available())
+                 .cloned()
+                 .collect();
+
+@@ -2325,9 +2405,6 @@ impl RouterTrait for VllmPDRouter {
+                     .collect()
+             });
+
+-            let prefill_policy = self.policy_registry.get_prefill_policy();
+-            let decode_policy = self.policy_registry.get_decode_policy();
+-
+             let prefill_idx = match prefill_policy.select_worker_with_headers(
+                 &prefill_workers,
+                 request_str,
+diff --git a/src/server.rs b/src/server.rs
+index cb2d5f4..0ccb6e9 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -744,11 +744,17 @@ pub fn build_app_with_wasm_middleware(
+ ) -> Router {
+     // Layer order on the request path (outer → inner):
+     //   concurrency_limit → optional WASM OnRequest → handler
++    // HTTP vLLM workers own request validation. The typed router schemas round
++    // sampling values through f32 and insert defaults, changing the model request.
++    let opaque_http = enable_transparent_proxy
++        && matches!(app_state.router.router_type(), "regular" | "vllm_pd");
++    let chat_route = if opaque_http { post(transparent_proxy_handler) } else { post(v1_chat_completions) };
++    let completion_route = if opaque_http { post(transparent_proxy_handler) } else { post(v1_completions) };
+     let mut protected_routes = Router::new()
+         .route("/generate", post(generate))
+         .route("/inference/v1/generate", post(inference_generate))
+-        .route("/v1/chat/completions", post(v1_chat_completions))
+-        .route("/v1/completions", post(v1_completions))
++        .route("/v1/chat/completions", chat_route)
++        .route("/v1/completions", completion_route)
+         .route("/rerank", post(rerank))
+         .route("/v1/rerank", post(v1_rerank))
+         .route("/v1/responses", post(v1_responses))

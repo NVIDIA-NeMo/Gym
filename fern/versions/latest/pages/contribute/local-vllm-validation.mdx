@@ -1,0 +1,163 @@
+---
+title: "Reproduce subprocess vLLM serving"
+description: "Build the pinned router and reproduce a Slurm P2D2 evaluation."
+position: 30
+---
+
+# Reproduce subprocess vLLM serving
+
+The [subprocess launcher](/main/model-server/local-vllm) is opt-in. Existing
+configurations continue to use the Ray launcher. Use this sequence when moving
+to another runtime, model, GPU architecture or cluster topology.
+
+## Prepare separate environments
+
+Install Gym from your checkout using its lockfile:
+
+```bash
+uv sync --frozen --extra dev
+export GYM_CHECKOUT="$(pwd)"
+export PATH="$GYM_CHECKOUT/.venv/bin:$PATH"
+export PYTHONPATH="$GYM_CHECKOUT"
+export NEMO_GYM_EXTRA_ROOTS="$GYM_CHECKOUT"
+export RAY_TMPDIR=/tmp
+export PYTHONDONTWRITEBYTECODE=1
+python -c 'import importlib.util; assert importlib.util.find_spec("vllm") is None'
+```
+
+Install vLLM independently. Record its exact version, image digest and model
+revision, and check `vllm serve --help=all` in that environment. The subprocess
+executable must be available in the launcher's namespace. A shell command such
+as `docker run ...` is not an executable path. Cross-container placement uses
+the Slurm/Pyxis allocation controller and shared source/output mounts.
+
+The default Ray path still needs `local-vllm-model[legacy]`; Gym selects that
+extra for managed Ray configurations. Test that path separately in an environment
+containing its declared vLLM dependencies.
+
+## Build the pinned router
+
+Router modes require upstream revision
+`f962dfcf26094530fbee37289784c37b2ca00ca6` plus
+`responses_api_models/local_vllm_model/router_compat.patch`. An arbitrary binary
+reporting version `0.1.15` is insufficient. The patch adds strict NIXL handling,
+request preservation, session balancing and cache-aware load accounting.
+
+Build with a compatible Rust, CMake and protoc toolchain in a fresh directory:
+
+```bash
+export GYM_ROUTER_SOURCE="$(dirname "$GYM_CHECKOUT")/gym-vllm-router"
+git clone https://github.com/vllm-project/router.git "$GYM_ROUTER_SOURCE"
+git -C "$GYM_ROUTER_SOURCE" checkout --detach f962dfcf26094530fbee37289784c37b2ca00ca6
+git -C "$GYM_ROUTER_SOURCE" apply --check \
+  "$GYM_CHECKOUT/responses_api_models/local_vllm_model/router_compat.patch"
+git -C "$GYM_ROUTER_SOURCE" apply \
+  "$GYM_CHECKOUT/responses_api_models/local_vllm_model/router_compat.patch"
+(cd "$GYM_ROUTER_SOURCE" && cargo build --release --locked --bin vllm-router)
+export GYM_ROUTER_EXECUTABLE="$GYM_ROUTER_SOURCE/target/release/vllm-router"
+export GYM_ROUTER_SHA256="$(sha256sum "$GYM_ROUTER_EXECUTABLE" | cut -d ' ' -f 1)"
+```
+
+Pin the resulting digest in `router.expected_sha256`. A different build or
+architecture can produce a different digest; qualify that binary rather than
+copying a digest from another machine. Preserve the patch's context whitespace.
+
+## Reproduce the P2D2 benchmark
+
+Run from the checkout root. The cluster benchmark requires Slurm with Pyxis,
+four nodes with four GPUs each, a shared checkpoint, and an image containing
+the selected vLLM runtime, vllm-router, `/opt/Gym_venv`, and `/opt/uv_venvs`.
+The checked recipe expects vLLM `0.29.0+precompiled` and router `0.1.15`.
+Configure the benchmark dataset and sandbox connection in your private
+`env.yaml`. Account, partition, QoS, CPU cleanup partition, and shared mounts
+must be available on your cluster; the supplied script uses the repository's
+cluster-specific Slurm options, including `--segment`.
+
+Inspect the entrypoints without submitting a GPU job:
+
+```bash
+bash benchmarks/nemotron_3.5_super/sbatch_cluster_vllm.sh --help
+python benchmarks/nemotron_3.5_super/launcher_comparison.py --help
+```
+
+Submit the same P2D2 / DP1TP4 recipe used by external serving:
+
+```bash
+MODEL=/shared/checkpoint \
+CONTAINER=/shared/vllm.sqsh \
+MOUNTS=/shared:/shared,"$(pwd)":/opt/Gym \
+SBATCH_ACCOUNT=your_account SBATCH_PARTITION=batch SBATCH_QOS=interactive \
+bash benchmarks/nemotron_3.5_super/sbatch_cluster_vllm.sh
+```
+
+The script uses the shared `vllm_configs/nemotron_3.5_super.sh`, checks serving
+option parity, and requires a successful inference response with nonzero NIXL
+transfer bytes before creating evaluation sandboxes. Defaults are 500
+SWE-bench Verified tasks with three samples each, concurrency 1500, and the
+original three-hour agent timeout. Positional Gym configuration arguments can
+replace the default evaluation configuration. This entrypoint selects the
+image's unpatched `external_benchmark` router profile; it does not qualify the
+separately built strict router.
+
+The shared recipe follows the checkout revision. In current `main`, prefill
+`max_num_batched_tokens` is 33920 and NIXL `kv_lease_duration` is 180 seconds;
+the earlier comparison used 135680 prefill tokens and no explicit lease override.
+To reproduce that historical serving recipe, export it and pass the same file
+to both launchers (the path must be mounted in the container):
+
+```bash
+git show 1c826108:benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh \
+  > /shared/baseline-serving-recipe.sh
+export VLLM_CONFIG=/shared/baseline-serving-recipe.sh
+```
+
+Results are saved under
+`results/opencode_swe_verified/cluster-super35-BF16-conc1500-p2d2-dp1tp4/slurm_job_id_<job>`:
+
+- `rollouts.jsonl` and `rollouts_aggregate_metrics.json`: scored results.
+- `rollouts.timings.jsonl`: completion times from rollout collection start.
+- `provenance.json` and `setting-parity.json`: source hashes and serving settings.
+- `controller.log`, `eval.log`, and `cluster/`: process and worker diagnostics.
+
+For a saved baseline, set `BASELINE_JSONL` when submitting, or compare two
+completed runs directly:
+
+```bash
+python benchmarks/nemotron_3.5_super/launcher_comparison.py compare \
+  --baseline /shared/baseline/rollouts.jsonl \
+  --candidate /shared/candidate/rollouts.jsonl \
+  --output /shared/comparison.json
+```
+
+Each input requires its matching `.timings.jsonl` sidecar. Collect baseline
+timing with `++rollout_collection_driver=benchmarks.rollout_timing:run`.
+The report compares scored accuracy, the common sample cohort, and P50/P90
+completion times. Missing samples remain missing. Different allocations and
+stochastic generation limit conclusions from a single comparison.
+
+<Note>
+This entrypoint currently keeps results local and disables W&B upload. It does
+not persist a complete vLLM/router Prometheus history. Worker log statistics
+are partial observations; full TTFT, inter-token latency, and router performance
+comparisons require a separate collector during the run.
+</Note>
+
+## Qualify hardware in increasing scope
+
+Use a dedicated allocation and preserve scheduler-provided GPU visibility.
+The controller operates inside an existing allocation; it does not obtain one.
+
+| Stage | Required evidence |
+| --- | --- |
+| Single-node subprocess | Ready model identity, graded rollout, request parameters, successful shutdown and released owned processes/GPUs |
+| TP/native DP and router | Intended rank/device placement, stable session routing where promised, errors returned once, cancellation and worker failure cleanup |
+| Independent TP replicas | Disjoint node-local GPU groups, DP1 per replica, load balancing, controller loss and whole-deployment cleanup |
+| NIXL PD | Actual transfer counters, invalid-handoff rejection, no combined fallback, matching P/D model and KV settings, both roles cleaned up |
+| Multi-node PD/EP | Rank membership and networking, model/KV capacity, graded workloads, owned-node failure and lease expiry, final allocation/process cleanup |
+
+The P2D2 entrypoint above covers the external-router replica recipe. Other
+topologies require their own hardware qualification. Small-model smoke results
+are distinct from workload throughput and model-quality acceptance. Record
+failures, partial results and cancelled runs; do not present them as complete
+cohort results. Verify listener ranges against each host's actual ephemeral
+port range, and configure shared mounts for your cluster.

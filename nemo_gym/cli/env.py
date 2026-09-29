@@ -21,7 +21,7 @@ import sys
 from glob import glob
 from pathlib import Path
 from shutil import rmtree
-from signal import SIGINT
+from signal import SIGINT, SIGKILL
 from subprocess import Popen, TimeoutExpired
 from tempfile import TemporaryDirectory
 from threading import Thread
@@ -412,6 +412,7 @@ class RunHelper:  # pragma: no cover
         top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
         self._processes: Dict[str, Popen] = dict()
+        self._owned_process_groups: Dict[str, int] = dict()
         self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
 
         start_time = time()
@@ -446,8 +447,21 @@ class RunHelper:  # pragma: no cover
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = run_command(command, dir_path, server_name=top_level_path)
+            managed_subprocess = (
+                first_key == "responses_api_models"
+                and second_key == "local_vllm_model"
+                and server_config_dict.get("launcher") == "subprocess"
+                and not server_config_dict.get("base_url")
+            )
+            process = run_command(
+                command,
+                dir_path,
+                server_name=top_level_path,
+                **({"start_new_session": True} if managed_subprocess else {}),
+            )
             self._processes[top_level_path] = process
+            if managed_subprocess:
+                self._owned_process_groups[top_level_path] = process.pid
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv
             # cache size. For Nemotron's set of environments, parallel installation can produce
@@ -633,8 +647,21 @@ Process `{process_name}` stderr:
         shutdown_telemetry()
 
         print("Sending interrupt signals to servers...")
-        for process in self._processes.values():
-            process.send_signal(SIGINT)
+        owned_groups = getattr(self, "_owned_process_groups", {})
+
+        def signal_owned_group(name, sig):
+            try:
+                os.killpg(owned_groups[name], sig)
+            except ProcessLookupError:
+                pass
+
+        for name, process in self._processes.items():
+            if name in owned_groups:
+                # run_command can include bash and tee. Signal the whole owned shell
+                # group so killing the wrapper cannot leave Gym holding its lifetime pipe.
+                signal_owned_group(name, SIGINT)
+            else:
+                process.send_signal(SIGINT)
 
         print("Waiting for processes to finish...")
         killed_process_names: List[str] = []
@@ -643,13 +670,21 @@ Process `{process_name}` stderr:
             try:
                 process.wait(timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
             except TimeoutExpired:
-                process.kill()
+                if process_name in owned_groups:
+                    signal_owned_group(process_name, SIGKILL)
+                else:
+                    process.kill()
                 killed_process_names.append(process_name)
                 # Reap the child after SIGKILL to avoid leaving a <defunct> entry.
                 try:
                     process.wait(timeout=_FORCE_KILL_REAP_TIMEOUT_SEC)
                 except TimeoutExpired:
                     unreaped_process_names.append(process_name)
+            finally:
+                if process_name in owned_groups:
+                    # A shell may exit before its Gym child. vLLM's separate supervisor
+                    # survives this group kill and finishes model-worker cleanup on EOF.
+                    signal_owned_group(process_name, SIGKILL)
 
         if killed_process_names:
             print(
@@ -666,6 +701,7 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
                 "they may remain as zombies until this process exits."
             )
         self._processes = dict()
+        self._owned_process_groups = dict()
 
         self._head_server.should_exit = True
         self._head_server_thread.join()
