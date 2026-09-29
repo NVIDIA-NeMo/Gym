@@ -253,6 +253,12 @@ that closes goals can.
 | `combibench` | **8 / 100** | 2.12% | 0.125% (2 / 1600) |
 | `combibench_with_solution` | **9 / 100** | 1.94% | 0% |
 
+These were collected before harness faults were masked, so the `combibench`
+row's two `sandbox_error` rollouts are counted as failures in the 1600-rollout
+denominator of its 2.12%. A rerun on the current code would divide by 1598:
+`pass@16` cannot move (a masked rollout scored 0 and so was never what solved a
+problem) and `pass@1` can only move up, by at most 2 / 1600.
+
 Per source family, problems solved at least once out of 16 attempts:
 
 | Family | `combibench` | `combibench_with_solution` |
