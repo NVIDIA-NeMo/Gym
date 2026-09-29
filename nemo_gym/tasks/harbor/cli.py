@@ -71,6 +71,7 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
     },
     # Episode sessions are process-local, so the harness must run as one worker.
     "terminus_2_sandboxed_agent": {"num_workers": 1},
+    "miniswe_sandboxed_agent": {"num_workers": 1},
 }
 
 
