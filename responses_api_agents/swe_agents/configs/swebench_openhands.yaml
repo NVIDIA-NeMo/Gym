@@ -49,3 +49,11 @@ swe_agents:
         - name: example
           type: example
           jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
+
+swe_agents_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swe_agents

@@ -31,3 +31,11 @@ job_bench_hermes_agent:
           jsonl_fpath: benchmarks/job_bench/data/job_bench.jsonl
           prepare_script: benchmarks/job_bench/prepare.py
           num_repeats: 1
+
+job_bench_hermes_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: job_bench_hermes_agent

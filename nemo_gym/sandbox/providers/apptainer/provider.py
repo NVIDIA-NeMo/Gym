@@ -24,6 +24,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping
@@ -555,6 +556,54 @@ class ApptainerProvider:
                 timeout_s=self._exec_config.default_timeout_s,
             )
         shutil.rmtree(inst.staging_dir, ignore_errors=True)
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Share a local instance with another Gym worker on the same host/UID.
+
+        This is a trusted control-plane descriptor, not a portable lease. The
+        receiving worker needs the same staging filesystem and Apptainer config.
+        Either handle can stop the instance; callers must coordinate ownership.
+        """
+        inst = handle.raw
+        return {
+            "provider": self.name,
+            "sandbox_id": inst.name,
+            "hostname": socket.gethostname(),
+            "uid": os.getuid(),
+            "staging_dir": str(inst.staging_dir),
+            "mount_point": inst.mount_point,
+            "image": inst.image,
+            "env": dict(inst.env),
+        }
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        if descriptor.get("provider") != self.name:
+            raise ValueError("Apptainer requires a full serialized descriptor, not a bare sandbox id")
+        if descriptor.get("hostname") != socket.gethostname() or descriptor.get("uid") != os.getuid():
+            raise ValueError("Apptainer reconnect requires the same host and UID as the creator")
+        name = descriptor["sandbox_id"]
+        staging = Path(descriptor["staging_dir"])
+        if not staging.is_absolute() or not staging.is_dir():
+            raise ValueError("Apptainer staging directory is unavailable")
+        mount_point = descriptor["mount_point"]
+        if not isinstance(mount_point, str) or not mount_point.startswith("/"):
+            raise ValueError("Invalid Apptainer mount point")
+        env = dict(descriptor.get("env", {}))
+        _serialize_env_file(env)  # Validate keys and values before accepting the descriptor.
+        handle = SandboxHandle(
+            sandbox_id=name,
+            provider_name=self.name,
+            raw=_ApptainerInstance(
+                name=name,
+                staging_dir=staging,
+                mount_point=mount_point,
+                image=descriptor["image"],
+                env=env,
+            ),
+        )
+        if await self.status(handle) != SandboxStatus.RUNNING:
+            raise RuntimeError(f"Apptainer instance {name} is not running")
+        return handle
 
     async def exec(
         self,

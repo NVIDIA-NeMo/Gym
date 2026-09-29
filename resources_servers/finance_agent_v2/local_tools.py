@@ -12,22 +12,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Upstream SEC tools answered from a local corpus instead of the network.
+"""Upstream SEC and pricing tools answered from local data instead of the network.
 
 Subclasses rather than replacements: the name, description and parameter
 schema the model sees stay whatever upstream declares, so a sample written
 against the live benchmark runs unchanged. Only the fetch is swapped, which
-keeps training throughput off sec-api.io and, for filings the corpus holds,
-off sec.gov.
+keeps training throughput off sec-api.io, Tiingo and, for filings the corpus
+holds, sec.gov.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import re
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
 
-from finance_agent.tools import MAX_END_DATE, EDGARSearch
+from finance_agent.tools import MAX_END_DATE, EDGARSearch, PriceHistory
 
 from resources_servers.finance_agent_v2.cached_tools import CachedParseHtmlPage
 from resources_servers.sec_local_index.cache import ToolCache
@@ -123,3 +127,68 @@ class LocalParseHtmlPage(CachedParseHtmlPage):
                 "SEC filing reads by source: %s",
                 " ".join(f"{name}={count}" for name, count in sorted(self.read_sources.items())),
             )
+
+
+class LocalPriceHistory(PriceHistory):
+    """price_history served from per-ticker files of daily records.
+
+    Reads ``<pricing_dir>/equity/<TICKER>.jsonl``, one record per line with a
+    ``date`` (``YYYY-MM-DD`` or an ISO timestamp) and any of the upstream price
+    columns. A ticker the store lacks yields no rows, which upstream reports as
+    no pricing data. The network is never used.
+    """
+
+    # Roughly 0.5-1.5 KB of memory per record, depending on how many price columns the files carry.
+    MAX_LOADED_RECORDS = 2_000_000
+    # The ticker becomes a file name, so this must never admit "/" or a leading "." (path traversal).
+    # It covers US symbols with share classes (BRK.B, BRK-B) and digits; 15 characters is a loose cap.
+    _SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,14}$")
+
+    def __init__(self, pricing_dir: str | Path):
+        self._equity_dir = Path(pricing_dir) / "equity"
+        if not self._equity_dir.is_dir():
+            raise ValueError(f"local pricing directory {self._equity_dir} does not exist")
+        self._loaded: OrderedDict[Path, list[dict[str, Any]]] = OrderedDict()
+        self._loaded_records = 0
+
+    @property
+    def ticker_count(self) -> int:
+        return sum(1 for _ in self._equity_dir.glob("*.jsonl"))
+
+    def path_for(self, ticker: str) -> Optional[Path]:
+        symbol = ticker.strip().upper()
+        if not self._SYMBOL.match(symbol):
+            return None
+        # Upstream symbology writes share classes with a dash (BRK-B); local files may use a dot (BRK.B).
+        for candidate in dict.fromkeys((symbol, symbol.replace("-", "."), symbol.replace(".", "-"))):
+            path = self._equity_dir / f"{candidate}.jsonl"
+            if path.is_file():
+                return path
+        return None
+
+    @staticmethod
+    def _read(path: Path) -> list[dict[str, Any]]:
+        with path.open() as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+    async def _records(self, path: Path) -> list[dict[str, Any]]:
+        records = self._loaded.get(path)
+        if records is None:
+            records = await asyncio.to_thread(self._read, path)
+            if path not in self._loaded:
+                self._loaded[path] = records
+                self._loaded_records += len(records)
+            while self._loaded_records > self.MAX_LOADED_RECORDS and len(self._loaded) > 1:
+                _, evicted = self._loaded.popitem(last=False)
+                self._loaded_records -= len(evicted)
+        else:
+            self._loaded.move_to_end(path)
+        return records
+
+    async def _fetch(self, endpoint: str, ticker: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
+        if endpoint != "equity":
+            raise ValueError(f"asset_class '{endpoint}' is not available from local pricing data; use equity or etf.")
+        path = self.path_for(ticker)
+        if path is None:
+            return []
+        return [r for r in await self._records(path) if start_date <= str(r.get("date", ""))[:10] <= end_date]

@@ -91,3 +91,19 @@ swe_agents_val:
             version: 0.0.1
             artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
           license: TBD
+
+swe_agents_train_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swe_agents_train
+
+swe_agents_val_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swe_agents_val

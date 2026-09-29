@@ -74,6 +74,7 @@ class GetInnerVLLMConfigResponse(BaseModel):
 
 
 class LocalVLLMModel(VLLMModel):
+    ray_enabled = True
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("GET", "/get_inner_vllm_config")})
     config: LocalVLLMModelConfig
 
