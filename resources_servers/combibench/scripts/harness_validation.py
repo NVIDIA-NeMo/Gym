@@ -228,6 +228,29 @@ async def run_solutions(rows: list[dict], verifier: CombibenchVerifier, solution
     }
 
 
+def render_report(report: dict) -> str:
+    """Serialize the report with the per-row block at one row per line.
+
+    Every row is kept, because recomputing the summary from the rows is the only
+    check on it that does not have to trust this script -- a reviewer did exactly
+    that. But pretty-printing 100 twelve-field records costs ~2,800 lines per
+    report and ~17,000 across the committed set, for six files whose rows are
+    95% identical: the information is in which row differs, not in the
+    indentation. One row per line keeps every byte of data and makes a diff
+    between two runs readable, which the indented form is not.
+    """
+    head = json.dumps({k: v for k, v in report.items() if k != "rows"}, indent=2, ensure_ascii=False)
+    lines = [f"{head[:-2]},"] if head.endswith("\n}") else [head.rstrip()[:-1].rstrip() + ","]
+    lines.append('  "rows": {')
+    rows = list(report["rows"].items())
+    for index, (name, row) in enumerate(rows):
+        comma = "," if index + 1 < len(rows) else ""
+        lines.append(f"    {json.dumps(name, ensure_ascii=False)}: {json.dumps(row, ensure_ascii=False)}{comma}")
+    lines.append("  }")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Model-free CombiBench harness validation")
     parser.add_argument("--input", type=Path, required=True, help="Prepared JSONL (test or test_with_solution)")
@@ -286,7 +309,7 @@ def main() -> None:
     report["answer_check_ascription"] = not args.no_ascription
     report["lean_server_url"] = args.lean_server_url
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    args.output.write_text(render_report(report), encoding="utf-8")
     print(json.dumps(report["summary"], indent=2, ensure_ascii=False))
 
 

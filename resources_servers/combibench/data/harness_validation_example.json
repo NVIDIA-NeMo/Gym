@@ -42,158 +42,6 @@
       }
     }
   },
-  "rows": {
-    "synthetic_pigeonhole_3": {
-      "tag": "imo",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.029621
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "has_sorry"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "synthetic_choose_1": {
-      "tag": "hackmath",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.026762
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.013962
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "synthetic_perm_2": {
-      "tag": "brualdi",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.031338
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.020278
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "synthetic_ratio_5": {
-      "tag": "math_competitions",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.032586
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.022767
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    },
-    "synthetic_gauss_4": {
-      "tag": "brualdi",
-      "statement": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.028141
-      },
-      "gold_answer": {
-        "status": "has_sorry",
-        "error": null,
-        "time": 0.023875
-      },
-      "controls": {
-        "empty": {
-          "reward": 0.0,
-          "status": "empty_generation"
-        },
-        "echo_with_sorry": {
-          "reward": 0.0,
-          "status": "compile_error"
-        },
-        "axiom": {
-          "reward": 0.0,
-          "status": "banned_tokens"
-        },
-        "weakened": {
-          "reward": 0.0,
-          "status": "statement_modified"
-        }
-      }
-    }
-  },
   "solutions": {
     "passed": 5,
     "total": 5,
@@ -239,5 +87,12 @@
     "test"
   ],
   "answer_check_ascription": true,
-  "lean_server_url": "http://localhost:16211"
+  "lean_server_url": "http://localhost:17971",
+  "rows": {
+    "synthetic_pigeonhole_3": {"tag": "imo", "statement": {"status": "has_sorry", "error": null, "time": 0.050215}, "controls": {"empty": {"reward": 0.0, "status": "empty_generation"}, "echo_with_sorry": {"reward": 0.0, "status": "has_sorry"}, "axiom": {"reward": 0.0, "status": "banned_tokens"}, "weakened": {"reward": 0.0, "status": "statement_modified"}}},
+    "synthetic_choose_1": {"tag": "hackmath", "statement": {"status": "has_sorry", "error": null, "time": 0.045848}, "gold_answer": {"status": "has_sorry", "error": null, "time": 0.034917}, "controls": {"empty": {"reward": 0.0, "status": "empty_generation"}, "echo_with_sorry": {"reward": 0.0, "status": "compile_error"}, "axiom": {"reward": 0.0, "status": "banned_tokens"}, "weakened": {"reward": 0.0, "status": "statement_modified"}}},
+    "synthetic_perm_2": {"tag": "brualdi", "statement": {"status": "has_sorry", "error": null, "time": 0.052208}, "gold_answer": {"status": "has_sorry", "error": null, "time": 0.028512}, "controls": {"empty": {"reward": 0.0, "status": "empty_generation"}, "echo_with_sorry": {"reward": 0.0, "status": "compile_error"}, "axiom": {"reward": 0.0, "status": "banned_tokens"}, "weakened": {"reward": 0.0, "status": "statement_modified"}}},
+    "synthetic_gauss_4": {"tag": "brualdi", "statement": {"status": "has_sorry", "error": null, "time": 0.048708}, "gold_answer": {"status": "has_sorry", "error": null, "time": 0.032621}, "controls": {"empty": {"reward": 0.0, "status": "empty_generation"}, "echo_with_sorry": {"reward": 0.0, "status": "compile_error"}, "axiom": {"reward": 0.0, "status": "banned_tokens"}, "weakened": {"reward": 0.0, "status": "statement_modified"}}},
+    "synthetic_ratio_5": {"tag": "math_competitions", "statement": {"status": "has_sorry", "error": null, "time": 0.053603}, "gold_answer": {"status": "has_sorry", "error": null, "time": 0.030478}, "controls": {"empty": {"reward": 0.0, "status": "empty_generation"}, "echo_with_sorry": {"reward": 0.0, "status": "compile_error"}, "axiom": {"reward": 0.0, "status": "banned_tokens"}, "weakened": {"reward": 0.0, "status": "statement_modified"}}}
+  }
 }
