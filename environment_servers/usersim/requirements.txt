@@ -2,4 +2,4 @@
 
 # Temporary source install while UserSim is private. Replace this with the
 # published package once https://github.com/NVIDIA-NeMo/UserSim is public.
-nemo-usersim @ git+ssh://git@github.com/NVIDIA-NeMo/UserSim.git@626bb52bd60afc2f20e6e814dd455428ad44652b
+nemo-usersim @ git+ssh://git@github.com/NVIDIA-NeMo/UserSim.git@44c39daf481a23a87742c3c456852aca910653ce
