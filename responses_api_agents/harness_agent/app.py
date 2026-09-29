@@ -90,6 +90,19 @@ _WORKDIR_KEYS = {
 }
 
 
+def _empty_response() -> dict[str, Any]:
+    return NeMoGymResponse(
+        id=f"resp_{uuid4().hex}",
+        created_at=int(time.time()),
+        model="",
+        object="response",
+        output=[],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    ).model_dump(mode="json")
+
+
 def resolve_agent(name: str) -> tuple[str, str, str]:
     try:
         return _AGENTS[name]
@@ -148,6 +161,9 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
 
     eval_timeout: int = 1800
     rollout_timeout: int = 2400
+    # Score a crashed harness run (sandbox OOM, runner error, context overflow) as an empty
+    # response instead of failing /run, so one pathological prompt cannot end a training run.
+    score_failed_runs: bool = False
 
 
 class HarnessAgentRunRequest(BaseRunRequest):
@@ -281,23 +297,30 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             }
             token = _RUN_CONTEXT.set(run_context)
             try:
-                agent_resp = await self.responses(request, body.responses_create_params)
-                failure_kind = (agent_resp.metadata or {}).get("failure_kind")
-                if failure_kind:
-                    masked = HarnessAgentVerifyResponse.model_validate(
-                        body.model_dump()
-                        | {
-                            "response": agent_resp.model_dump(mode="json"),
-                            "reward": 0.0,
-                            "mask_sample": True,
-                            "failure_kind": failure_kind,
-                            "failure_reason": agent_resp.metadata.get("failure_reason"),
-                            "instance_config": {"mask_sample": True},
-                        }
-                    )
+                try:
+                    agent_resp = await self.responses(request, body.responses_create_params)
+                    failure_kind = (agent_resp.metadata or {}).get("failure_kind")
+                    if failure_kind:
+                        masked = HarnessAgentVerifyResponse.model_validate(
+                            body.model_dump()
+                            | {
+                                "response": agent_resp.model_dump(mode="json"),
+                                "reward": 0.0,
+                                "mask_sample": True,
+                                "failure_kind": failure_kind,
+                                "failure_reason": agent_resp.metadata.get("failure_reason"),
+                                "instance_config": {"mask_sample": True},
+                            }
+                        )
+                        await self._close_run_sandbox(run_context)
+                        return masked
+                    agent_resp_json = agent_resp.model_dump(mode="json")
+                except Exception:
+                    if not self.config.score_failed_runs:
+                        raise
+                    LOG.warning("harness run failed; scoring it as an empty response", exc_info=True)
                     await self._close_run_sandbox(run_context)
-                    return masked
-                agent_resp_json = agent_resp.model_dump(mode="json")
+                    agent_resp_json = _empty_response()
                 verify_resp = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path="/verify",
