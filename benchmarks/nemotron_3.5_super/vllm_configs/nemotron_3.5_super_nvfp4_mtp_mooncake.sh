@@ -35,7 +35,7 @@ VLLM_COMMON_ARGS=(
     --enable-mamba-cache-stochastic-rounding
     --mamba-cache-philox-rounds 5
     --mamba-cache-mode align
-    --prefix-match-unit 16
+    --prefix-match-unit 128
     --enable-mamba-fine-grained-prefix-cache
     --linear-backend torch
     --compilation-config '{"pass_config": {"fuse_attn_quant": true}}'
@@ -48,13 +48,64 @@ VLLM_COMMON_ARGS=(
     --api-server-count 1
 )
 VLLM_PREFILL_ARGS=(
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
+    --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":5,\"num_speculative_tokens_per_batch_size\":[[1,1024,0]]}"
+    --kv-transfer-config '{
+        "kv_connector": "MultiConnector",
+        "kv_role": "kv_producer",
+        "kv_connector_extra_config": {
+            "connectors": [
+                {
+                    "kv_connector": "NixlConnector",
+                    "kv_role": "kv_producer",
+                    "kv_load_failure_policy": "fail",
+                    "kv_connector_extra_config": {
+                        "kv_lease_duration": 180
+                    }
+                },
+                {
+                    "kv_connector": "MooncakeStoreConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "load_async": true,
+                        "lookup_async": true
+                    }
+                }
+            ]
+        }
+    }'
+    --max-cudagraph-capture-size 1200
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
 )
 VLLM_DECODE_ARGS=(
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
+    --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":5}"
+    --kv-transfer-config '{
+        "kv_connector": "MultiConnector",
+        "kv_role": "kv_consumer",
+        "kv_connector_extra_config": {
+            "connectors": [
+                {
+                    "kv_connector": "NixlConnector",
+                    "kv_role": "kv_consumer",
+                    "kv_load_failure_policy": "fail",
+                    "kv_connector_extra_config": {
+                        "kv_lease_duration": 180
+                    }
+                },
+                {
+                    "kv_connector": "MooncakeStoreConnector",
+                    "kv_role": "kv_consumer",
+                    "kv_connector_extra_config": {
+                        "load_async": true,
+                        "lookup_async": true,
+                        "enable_lookup": false
+                    }
+                }
+            ]
+        }
+    }'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    --max-cudagraph-capture-size 1536
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
 )
