@@ -47,6 +47,9 @@ def test_scaffolds_and_validates_every_kind_and_profile(
     for path in tmp_path.rglob("*.py"):
         compile(path.read_text(encoding="utf-8"), str(path), "exec")
 
+    resources_source = tmp_path.joinpath("resources_servers/sample/app.py").read_text(encoding="utf-8")
+    assert "ray_enabled = False" in resources_source
+
     benchmark_files = [asset / "prepare.py", asset / "prompt.yaml", asset / "data/source.jsonl"]
     assert all(path.is_file() for path in benchmark_files) is (kind == EnvironmentKind.BENCHMARK)
 
@@ -60,6 +63,7 @@ def test_scaffolds_and_validates_every_kind_and_profile(
         extensions = ("responses", "run") if profile == IntegrationProfile.EXTERNAL_AGENT_LOOP else ("responses",)
         assert all(f"async def {extension}(" in agent_source for extension in extensions)
         assert all(f"super().{extension}(" in agent_source for extension in extensions)
+        assert "ray_enabled = False" in agent_source
     assert (asset / "rollout_driver.py").is_file() is (profile == IntegrationProfile.EXTERNAL_ROLLOUT_DRIVER)
 
 
@@ -124,6 +128,7 @@ def test_standalone_resources_server_keeps_its_combined_composition(tmp_path: Pa
     }
     config = yaml.safe_load((server / "configs/shared.yaml").read_text(encoding="utf-8"))
     assert config["shared_resources_server"]["resources_servers"]["shared"]["verified"] is False
+    assert "ray_enabled = False" in (server / "app.py").read_text(encoding="utf-8")
     # Datasets are declared on the resources server (dataset-decoupling); the agent block carries none.
     datasets = config["shared_resources_server"]["resources_servers"]["shared"]["datasets"]
     assert [dataset["type"] for dataset in datasets] == ["train", "validation", "example"]

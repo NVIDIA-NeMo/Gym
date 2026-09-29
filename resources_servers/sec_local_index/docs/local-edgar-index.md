@@ -101,7 +101,7 @@ either way; only the source of the metadata changes.
 Build it once per index:
 
 ```bash
-python resources_servers/finance_sec_search/scripts/build_local_edgar_metadata.py \
+python resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py \
   --index /path/to/index.sqlite
 ```
 

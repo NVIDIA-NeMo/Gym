@@ -522,6 +522,8 @@ class OpenCodeAgentVerifyResponse(BaseVerifyResponse):
 class OpenCodeAgent(SimpleResponsesAPIAgent):
     """Runs the CLI (opencode run --format=json)"""
 
+    ray_enabled = False
+
     config: OpenCodeAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)

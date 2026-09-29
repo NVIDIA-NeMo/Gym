@@ -28,11 +28,10 @@ from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, ClassVar, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
-import ray
 import requests
 import uvicorn
 from aiohttp import (
@@ -839,6 +838,13 @@ class UvicornProxyHeadersConfig(BaseModel):
 _NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
 
 
+def _get_ray():
+    """Import Ray only for processes configured to use it."""
+    import ray
+
+    return ray
+
+
 def initialize_ray() -> None:
     """
     Initialize ray cluster in a process.
@@ -847,6 +853,7 @@ def initialize_ray() -> None:
     Note: This function will modify the global config dict - update `ray_head_node_address`
     """
 
+    ray = _get_ray()
     if ray.is_initialized():
         print("Ray already initialized")
         return
@@ -860,12 +867,12 @@ def initialize_ray() -> None:
         ray_init_kwargs["address"] = ray_head_node_address
     else:
         print("NeMo Gym is starting a new Ray cluster...")
-        global _NEMO_GYM_STARTED_RAY_CLUSTER
-        _NEMO_GYM_STARTED_RAY_CLUSTER = True
 
     ray.init(**ray_init_kwargs)
 
     if not ray_head_node_address:
+        global _NEMO_GYM_STARTED_RAY_CLUSTER
+        _NEMO_GYM_STARTED_RAY_CLUSTER = True
         with open_dict(global_config_dict):
             global_config_dict["ray_head_node_address"] = ray.get_runtime_context().gcs_address
         print(f"Started Ray cluster at {global_config_dict['ray_head_node_address']}")
@@ -878,7 +885,9 @@ def maybe_ray_cluster_exit():  # pragma: no cover
         return
 
     print("Shutting down Ray cluster spun up by NeMo Gym...")
-    ray.shutdown()
+    ray = sys.modules.get("ray")
+    if ray is not None:
+        ray.shutdown()
 
     _NEMO_GYM_STARTED_RAY_CLUSTER = False
 
@@ -1003,8 +1012,26 @@ class ClientDisconnectCancellationMiddleware:
             task_group.start_soon(listen_for_disconnect)
 
 
+_WARNED_IMPLICIT_RAY_SERVERS: set[type] = set()
+
+
+def _server_uses_ray(server_class: type) -> bool:
+    ray_enabled = server_class.ray_enabled
+    if ray_enabled is not None:
+        return ray_enabled
+    if server_class not in _WARNED_IMPLICIT_RAY_SERVERS:
+        logger.warning(
+            f"{server_class.__module__}.{server_class.__name__} does not declare ray_enabled; "
+            "Ray remains enabled for backward compatibility. Set ray_enabled explicitly because "
+            "a future release will default it to false."
+        )
+        _WARNED_IMPLICIT_RAY_SERVERS.add(server_class)
+    return True
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
+    ray_enabled: ClassVar[bool | None] = None
 
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
@@ -1188,11 +1215,12 @@ repr(e): {repr(e)}"""
     def run_webserver(cls) -> Optional[FastAPI]:  # pragma: no cover
         global_config_dict = get_global_config_dict()
 
-        initialize_ray()
-
         is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
 
         server_config = cls.load_config_from_global_config()
+        if _server_uses_ray(cls):
+            initialize_ray()
+
         server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
             global_config_dict=global_config_dict,
