@@ -167,11 +167,20 @@ async def run(
                     checks = "".join(answer_check(tag, gold, ty) for tag, gold, ty in zip(tags, answers, types))
                     record["gold_answer"] = await compile_only(client, substituted + checks, timeout)
 
-            controls = {
+            controls: dict[str, str] = {
                 "empty": "",
                 "echo_with_sorry": _fenced(statement),
-                "axiom": _fenced("import Mathlib\n\naxiom cheat : False\n\n" + statement.split("\n\n", 1)[1]),
             }
+            # The axiom control needs the statement's body, i.e. everything past
+            # the header paragraph. A statement with no blank line in it has no
+            # such split, and indexing ``[1]`` there raises IndexError out of
+            # ``one`` and so out of the ``asyncio.gather`` below, ending the
+            # whole validation run over one row. Skipped instead, exactly as
+            # ``weakened`` is skipped when ``weaken`` cannot build it, which
+            # leaves the row named in ``controls_not_constructed``.
+            header_and_body = statement.split("\n\n", 1)
+            if len(header_and_body) == 2:
+                controls["axiom"] = _fenced("import Mathlib\n\naxiom cheat : False\n\n" + header_and_body[1])
             weakened = weaken(statement)
             if weakened is not None:
                 controls["weakened"] = _fenced(weakened)
