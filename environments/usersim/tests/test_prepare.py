@@ -35,7 +35,21 @@ def test_prepare_invokes_usersim_panel_and_records_manifest(tmp_path: Path, monk
     assert len(source_rows) == 13
     assert all(row["task_id"]["taskset"] == "usersim:example" for row in source_rows)
     command, kwargs = calls[0]
-    assert command[:6] == ["/bin/usersim", "panel", "--locale", "en_US", "--num-personas", "1"]
+    assert command[:12] == [
+        "/bin/uv",
+        "run",
+        "--no-config",
+        "--no-project",
+        "--isolated",
+        "--with-requirements",
+        str(prepare_module.PREPARE_REQUIREMENTS_FPATH),
+        "usersim",
+        "panel",
+        "--locale",
+        "en_US",
+        "--num-personas",
+    ]
+    assert command[12] == "1"
     assert "env" not in kwargs
     panel_path = tmp_path / "personas" / "0.0.2" / "panels" / "en_US.parquet"
     manifest = json.loads(panel_path.with_suffix(".manifest.json").read_text())
