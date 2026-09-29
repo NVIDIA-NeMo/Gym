@@ -39,6 +39,25 @@ PERSONAS = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _stub_assistant_quality(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def evaluate_quality(*_args, **_kwargs):
+        scores = {"helpfulness": 1.0, "accuracy": 1.0, "coherence": 1.0}
+        return (
+            {
+                "envelope": {"axes": list(scores)},
+                "axes": {},
+                "scorers": {},
+                "skipped": False,
+                "skipped_reason": None,
+            },
+            scores,
+            1.0,
+        )
+
+    monkeypatch.setattr(UserSimResourcesServer, "_evaluate_assistant_quality", evaluate_quality)
+
+
 def _write_parquet(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist(PERSONAS), path)
@@ -142,7 +161,7 @@ def test_seed_session_resolves_replayable_scenario(tmp_path: Path) -> None:
     assert first.json()["usersim_context"] == second.json()["usersim_context"]
     assert first.json()["usersim_context"]["personas_dataset_version"] == "0.0.2"
     assert len(first.json()["usersim_context"]["personas_panel_sha256"]) == 64
-    assert first.json()["usersim_context"]["usersim_revision"] == "dabc14c970aa5a60b8bbef36016fd6ddbed00bb6"
+    assert first.json()["usersim_context"]["usersim_revision"] == "40915ac615633700c3f1351a198416bcbe275b21"
     scenario = first.json()["scenario"]
     assert scenario["persona"]["first_name"] in {"Morgan", "Avery"}
     assert scenario["probe_type"] == "general_open_ended"
@@ -314,6 +333,39 @@ def test_verify_records_context_and_requires_both_participants(tmp_path: Path) -
     assert verified["verifier_data"]["usersim_context"]["seed"] == 7
     assert incomplete["reward"] == 0.0
     assert incomplete["scenario_completed"] is False
+
+
+def test_verify_uses_usersim_assistant_quality_as_reward(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def evaluate_quality(*_args, **_kwargs):
+        scores = {"helpfulness": 1.0, "accuracy": 0.8, "coherence": 0.6, "safety": 1.0}
+        return (
+            {
+                "envelope": {"axes": list(scores)},
+                "axes": {"helpfulness": {"judge_model": {"score": 5, "reasoning": "Helpful."}}},
+                "scorers": {},
+                "skipped": False,
+                "skipped_reason": None,
+            },
+            scores,
+            0.8,
+        )
+
+    monkeypatch.setattr(UserSimResourcesServer, "_evaluate_assistant_quality", evaluate_quality)
+    _write_personas(tmp_path)
+    with TestClient(_app(tmp_path)) as client:
+        seed = client.post("/seed_session", json=_seed_body(seed=7)).json()
+        verified = client.post("/verify", json=_verify_body(seed)).json()
+
+    assert verified["reward"] == pytest.approx(0.8)
+    assert verified["reward_components"]["assistant_quality"] == pytest.approx(0.8)
+    assert verified["reward_components"]["quality.helpfulness"] == 1.0
+    assert verified["reward_components"]["quality.accuracy"] == 0.8
+    assert verified["reward_components"]["quality.coherence"] == 0.6
+    assert verified["verifier_data"]["assistant_eval"]["skipped"] is False
+    assert verified["verifier_data"]["normalized_axis_scores"]["safety"] == 1.0
 
 
 @pytest.mark.parametrize(

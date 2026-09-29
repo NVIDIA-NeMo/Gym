@@ -82,6 +82,7 @@ SUPPORTED_PROBES = frozenset(
         "tool_calling",
     }
 )
+ASSISTANT_QUALITY_AXES = ("helpfulness", "accuracy", "coherence")
 logger = logging.getLogger(__name__)
 
 
@@ -89,7 +90,7 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     personas_cache_dir: Path = Path("~/.cache/nemo-gym/usersim/personas")
     personas_dataset_version: str = Field("0.0.2", pattern=r"^[A-Za-z0-9._-]+$")
     usersim_revision: str = Field(
-        "dabc14c970aa5a60b8bbef36016fd6ddbed00bb6",
+        "40915ac615633700c3f1351a198416bcbe275b21",
         pattern=r"^[0-9a-f]{40}$",
     )
     personas_locales: list[str] = Field(default_factory=lambda: ["en_US"])
@@ -571,6 +572,58 @@ class UserSimResourcesServer(SimpleResourcesServer):
         passed = scores.get("status_proposal") is True and not scores.get("error")
         return scorer_name, scores, passed
 
+    async def _evaluate_assistant_quality(
+        self,
+        seeded: SeededUserSimEpisode,
+        native_result: UserSimSimulationResult,
+    ) -> tuple[dict[str, Any], dict[str, float], float | None]:
+        from usersim.engine.core.behavioral import get_conversation_language
+        from usersim.engine.evaluator.runtime import TrajectoryEvaluatorRuntime
+        from usersim.taxonomy.eval_cell import normalize_axis_score, score_from_eval_cell
+
+        if self.config.probe_scorer_model is None:
+            return (
+                {
+                    "axes": {},
+                    "scorers": {},
+                    "skipped": True,
+                    "skipped_reason": "missing_probe_scorer_model",
+                },
+                {},
+                None,
+            )
+
+        model = (
+            seeded.runtime.models["judge_model"]
+            if seeded.runtime is not None and "judge_model" in seeded.runtime.models
+            else _ResourcesModelFacade(self, self.config.probe_scorer_model)
+        )
+        evaluator = TrajectoryEvaluatorRuntime(models={"judge_model": model})
+        scenario = seeded.seed.scenario
+        evaluation = await evaluator.evaluate(
+            {
+                **native_result.model_dump(mode="python"),
+                "persona": scenario.persona,
+                "probe_family": scenario.probe_type,
+                "probe_variant": scenario.probe_data.get("probe_variant"),
+                "locale": scenario.locale,
+                "conversation_language": get_conversation_language(scenario.locale),
+            }
+        )
+        normalized_scores: dict[str, float] = {}
+        for axis in evaluation.get("envelope", {}).get("axes", []):
+            score = score_from_eval_cell(evaluation, axis)
+            if score is not None:
+                normalized_scores[axis] = normalize_axis_score(axis, score)
+
+        quality_scores = [normalized_scores.get(axis) for axis in ASSISTANT_QUALITY_AXES]
+        assistant_quality = (
+            sum(score for score in quality_scores if score is not None) / len(ASSISTANT_QUALITY_AXES)
+            if all(score is not None for score in quality_scores)
+            else None
+        )
+        return evaluation, normalized_scores, assistant_quality
+
     async def invoke_probe_tool(
         self,
         request: Request,
@@ -618,15 +671,23 @@ class UserSimResourcesServer(SimpleResourcesServer):
             seeded,
             native_result,
         )
+        assistant_eval, normalized_axis_scores, assistant_quality = await self._evaluate_assistant_quality(
+            seeded,
+            native_result,
+        )
         participants_completed = {"user", "assistant"} <= _conversation_roles(native_result)
         scenario_completed = native_result.conversation_status and participants_completed and native_scorer_pass
+        reward = assistant_quality if scenario_completed and assistant_quality is not None else 0.0
         return UserSimVerification(
-            reward=float(scenario_completed),
+            reward=reward,
             reward_components={
                 "participants_completed": float(participants_completed),
                 "native_conversation_status": float(native_result.conversation_status),
                 "native_scorer_applied": float(native_scorer_name is not None),
                 "native_scorer_pass": float(native_scorer_pass),
+                "trajectory_evaluator_applied": float(not assistant_eval.get("skipped", False)),
+                "assistant_quality": assistant_quality or 0.0,
+                **{f"quality.{axis}": score for axis, score in normalized_axis_scores.items()},
             },
             scenario_completed=scenario_completed,
             native_usersim_result=native_result,
@@ -638,6 +699,8 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 "usersim_result": native_result.model_dump(mode="json"),
                 "native_scorer_name": native_scorer_name,
                 "native_scores": native_scores,
+                "assistant_eval": assistant_eval,
+                "normalized_axis_scores": normalized_axis_scores,
                 "scenario_completed": scenario_completed,
             },
         )
