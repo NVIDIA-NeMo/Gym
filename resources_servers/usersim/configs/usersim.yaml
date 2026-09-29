@@ -5,7 +5,7 @@ environment_server_routes:
 support_model_base_url: ${policy_base_url}
 support_model_api_key: ${policy_api_key}
 support_model_name: ${policy_model_name}
-support_model_uses_reasoning_parser: ${oc.select:policy_uses_reasoning_parser,false}
+support_model_uses_reasoning_parser: false
 
 policy_model:
   responses_api_models:
