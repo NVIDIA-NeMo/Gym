@@ -609,8 +609,14 @@ class TestRepeatMetricEligibility:
         assert not is_repeat_aggregatable_metric("ci_low_95/reward")
         assert not is_repeat_aggregatable_metric("response_tokens/median")
         assert not is_repeat_aggregatable_metric("response_tokens/p5")
+        assert not is_repeat_aggregatable_metric("response_tokens/p25")
+        assert not is_repeat_aggregatable_metric("response_tokens/p75")
         assert not is_repeat_aggregatable_metric("response_tokens/p95")
+        assert not is_repeat_aggregatable_metric("tok/ci_low_95")
+        assert not is_repeat_aggregatable_metric("tok/ci_high_95")
         assert not is_repeat_aggregatable_metric("arena_elo/ci_lower")
+        assert not is_repeat_aggregatable_metric("x_ci_lower")
+        assert not is_repeat_aggregatable_metric("x_ci_upper")
         assert not is_repeat_aggregatable_metric("win_rate_ci95_upper")
         assert not is_repeat_aggregatable_metric("pass@1/accuracy/std_err_across_runs")
         assert not is_repeat_aggregatable_metric(ROLLOUT_INDEX_KEY_NAME)
@@ -625,6 +631,26 @@ class TestRepeatMetricEligibility:
         assert is_repeat_aggregatable_metric("mean/reward")
         assert is_repeat_aggregatable_metric("response_tokens/mean")
         assert is_repeat_aggregatable_metric("max_token_reached_rate")
+
+    def test_statistics_do_not_get_cross_repeat_aggregates(self) -> None:
+        excluded = (
+            "response_tokens/p5",
+            "response_tokens/p25",
+            "response_tokens/p75",
+            "response_tokens/p95",
+            "tok/ci_low_95",
+            "x_ci_upper",
+        )
+        repeats = [
+            {AGENT_REF_KEY_NAME: {"name": "agent"}, "mean/reward": reward, **dict.fromkeys(excluded, reward)}
+            for reward in (0.2, 0.8)
+        ]
+
+        [aggregate] = RewardProfiler()._aggregate_repeat_level_metrics(repeats)
+
+        assert aggregate["mean_across_repeats/mean/reward"] == pytest.approx(0.5)
+        for name in excluded:
+            assert f"mean_across_repeats/{name}" not in aggregate
 
 
 class TestRepeatLevelMetrics:

@@ -255,6 +255,48 @@ class PassMajorityStat(StrEnum):
 
 PASS_MAJORITY_STAT_SUFFIXES: Tuple[str, ...] = tuple(stat.suffix for stat in PassMajorityStat)
 
+
+# Existing statistics, uncertainty estimates, and metadata are not primary metrics.
+METRIC_EXCLUDED_PREFIXES = DISPERSION_PREFIXES
+# Clean up custom suffix forms with https://github.com/NVIDIA-NeMo/Gym/issues/3471.
+METRIC_EXCLUDED_SUFFIXES = (
+    f"/{Stat.MAX}",
+    f"/{Stat.MIN}",
+    f"/{Stat.MEDIAN}",
+    "/p5",
+    f"/{Stat.P25}",
+    f"/{Stat.P75}",
+    "/p95",
+    f"/{Stat.CI_LOW_95}",
+    f"/{Stat.CI_HIGH_95}",
+    "/ci_lower",
+    "/ci_upper",
+    "_ci_lower",
+    "_ci_upper",
+    "_ci95_lower",
+    "_ci95_upper",
+) + PASS_MAJORITY_STAT_SUFFIXES
+METRIC_EXCLUDED_NAMES = (
+    TASK_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    "sample_count",
+    "missing_count",
+    "num_repeats",
+    "token_usage_version",
+)
+
+
+def is_primary_metric(name: object) -> bool:
+    """Whether a metric name is a point estimate suitable for repeat aggregation and comparison."""
+    return (
+        isinstance(name, str)
+        and name not in METRIC_EXCLUDED_NAMES
+        and not name.startswith(METRIC_EXCLUDED_PREFIXES)
+        and not name.endswith(METRIC_EXCLUDED_SUFFIXES)
+        and ACROSS_REPEATS_MARKER not in name
+    )
+
+
 # Per-task keys in `group_level_metrics`.
 ROLLOUT_INFOS_KEY_NAME = "rollout_infos"
 NUM_ROLLOUTS_KEY_NAME = "num_rollouts"

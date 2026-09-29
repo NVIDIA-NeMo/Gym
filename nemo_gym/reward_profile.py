@@ -34,51 +34,14 @@ from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     ACROSS_REPEATS_MARKER,
     AGENT_REF_KEY_NAME,
-    DISPERSION_PREFIXES,
-    PASS_MAJORITY_STAT_SUFFIXES,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     PassMajorityStat,
     Stat,
 )
-
-
-# Metrics with these names are already summaries or uncertainty estimates.
-# We do not compute second-order `*_across_repeats/*` statistics for
-# them.
-REPEAT_AGGREGATION_EXCLUDED_PREFIXES = DISPERSION_PREFIXES
-# These custom suffixes should be cleaned up when working on https://github.com/NVIDIA-NeMo/Gym/issues/3471.
-REPEAT_AGGREGATION_EXCLUDED_SUFFIXES = (
-    f"/{Stat.MAX}",
-    f"/{Stat.MIN}",
-    f"/{Stat.MEDIAN}",
-    "/p5",
-    "/p95",
-    "/ci_lower",
-    "/ci_upper",
-    "_ci95_lower",
-    "_ci95_upper",
-) + PASS_MAJORITY_STAT_SUFFIXES
-
-REPEAT_AGGREGATION_EXCLUDED_NAMES = (
-    TASK_INDEX_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    "sample_count",
-    "missing_count",
-    "num_repeats",
-    "token_usage_version",
+from nemo_gym.global_config import (
+    is_primary_metric as is_repeat_aggregatable_metric,
 )
-
-
-def is_repeat_aggregatable_metric(name: object) -> bool:
-    """Whether a per-repeat field is a point estimate, rather than an existing statistic."""
-    return (
-        isinstance(name, str)
-        and name not in REPEAT_AGGREGATION_EXCLUDED_NAMES
-        and not name.startswith(REPEAT_AGGREGATION_EXCLUDED_PREFIXES)
-        and not name.endswith(REPEAT_AGGREGATION_EXCLUDED_SUFFIXES)
-        and ACROSS_REPEATS_MARKER not in name
-    )
 
 
 class RewardProfileConfig(BaseNeMoGymCLIConfig):

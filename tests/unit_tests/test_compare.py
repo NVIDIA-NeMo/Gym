@@ -26,7 +26,6 @@ from nemo_gym.comparison.diff import (
     build_flip_summary,
     build_metric_rows,
     compare_runs,
-    is_comparison_worthy_metric,
 )
 from nemo_gym.comparison.loading import (
     build_loaded_run,
@@ -436,36 +435,50 @@ class TestAgentSelection:
 
 
 class TestMetricRows:
-    @pytest.mark.parametrize(
-        "name, comparable",
-        [
-            ("mean/reward", True),
-            ("pass@1[avg-of-3]/accuracy", True),
-            ("simple/pass@3/accuracy", True),
-            ("std/reward", False),
-            ("median/reward", False),
-            ("ci_low_95/reward", False),
-            ("mean_across_repeats/mean/reward", False),
-            ("ci_high_95_across_repeats/mean/reward", False),
-            ("num_repeats", False),
-            ("pass@1[avg-of-3]/accuracy/std_err_across_runs", False),
-            ("pass@1[avg-of-3]/accuracy/avg_sample_std_dev", False),
-            ("score/ci_low_95", False),
-            ("score/ci_high_95", False),
-            ("arena_elo/ci_lower", False),
-            ("arena_elo/ci_upper", False),
-            ("win_rate_ci_lower", False),
-            ("win_rate_ci_upper", False),
-            ("win_rate_ci95_lower", False),
-            ("win_rate_ci95_upper", False),
-            ("response_tokens/median", True),
-            ("response_tokens/p95", True),
-            ("sample_count", True),
-            ("missing_count", True),
-        ],
-    )
-    def test_only_real_metrics_get_a_row(self, name, comparable):
-        assert is_comparison_worthy_metric(name) is comparable
+    def test_only_primary_metrics_get_a_row(self, tmp_path):
+        metrics = {
+            name: 0.5
+            for name in (
+                "mean/reward",
+                "pass@1[avg-of-3]/accuracy",
+                "simple/pass@3/accuracy",
+                "response_tokens/mean",
+                "std/reward",
+                "median/reward",
+                "ci_low_95/reward",
+                "mean_across_repeats/mean/reward",
+                "ci_high_95_across_repeats/mean/reward",
+                "num_repeats",
+                "pass@1[avg-of-3]/accuracy/std_err_across_runs",
+                "pass@1[avg-of-3]/accuracy/avg_sample_std_dev",
+                "score/ci_low_95",
+                "score/ci_high_95",
+                "arena_elo/ci_lower",
+                "arena_elo/ci_upper",
+                "win_rate_ci_lower",
+                "win_rate_ci_upper",
+                "win_rate_ci95_lower",
+                "win_rate_ci95_upper",
+                "response_tokens/median",
+                "response_tokens/p5",
+                "response_tokens/p25",
+                "response_tokens/p75",
+                "response_tokens/p95",
+                "tok/ci_low_95",
+                "x_ci_upper",
+                "sample_count",
+                "missing_count",
+                "token_usage_version",
+            )
+        }
+        baseline = _load(tmp_path, "base", [_entry(agent_metrics=metrics, key_metrics={})])
+
+        assert [row.metric for row in build_metric_rows(baseline, [])] == [
+            "mean/reward",
+            "pass@1[avg-of-3]/accuracy",
+            "simple/pass@3/accuracy",
+            "response_tokens/mean",
+        ]
 
     def test_reads_values_ci_and_delta(self, tmp_path):
         baseline = _load(

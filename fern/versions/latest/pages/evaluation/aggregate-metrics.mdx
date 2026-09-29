@@ -101,7 +101,7 @@ To check real coverage, use the numbers that *are* measured against the material
 
 ### Across repeats
 
-Eligible numeric point estimates in `repeat_level_metrics` are summarized across repeats and merged into `agent_metrics`. Each repeat counts as one observation. This includes `mean/{field}` and custom benchmark metrics (for example, `subtask_accuracy`) supplied by `compute_repeat_metrics()`; dispersion and existing uncertainty metrics are excluded.
+Eligible numeric point estimates in `repeat_level_metrics` are summarized across repeats and merged into `agent_metrics`. Each repeat counts as one observation. This includes `mean/{field}` and custom benchmark metrics (for example, `subtask_accuracy`) supplied by `compute_repeat_metrics()`. Existing statistics and uncertainty estimates, including suffixes such as `/p95` and `/ci_low_95`, remain in `repeat_level_metrics` without being aggregated again.
 
 | Key | Description |
 |---|---|
@@ -153,7 +153,7 @@ Receives all verify responses grouped by task. Use this for metrics that need th
 
 ### `compute_repeat_metrics(tasks)`
 
-Receives one repeat grouped by task. Return finite numeric metrics also returned by `compute_metrics()` to include them in cross-repeat aggregates.
+Receives one repeat grouped by task. Return eligible finite numeric point estimates also returned by `compute_metrics()` to include them in cross-repeat aggregates.
 
 ### `get_key_metrics(agent_metrics)`
 

@@ -32,30 +32,15 @@ from nemo_gym.comparison.schema import (
 )
 from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import (
-    ACROSS_REPEATS_MARKER,
-    DISPERSION_PREFIXES,
-    PASS_MAJORITY_STAT_SUFFIXES,
     REWARD_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,
-    STAT_SEPARATOR,
     TASK_INDEX_KEY_NAME,
     PassMajorityStat,
     Stat,
+    is_primary_metric,
 )
 
-
-# Suffix-form companion statistics, likewise not metrics of their own.
-COMPARISON_UNWORTHY_SUFFIXES = (
-    f"{STAT_SEPARATOR}{Stat.CI_LOW_95}",
-    f"{STAT_SEPARATOR}{Stat.CI_HIGH_95}",
-    f"{STAT_SEPARATOR}ci_lower",
-    f"{STAT_SEPARATOR}ci_upper",
-    "_ci_lower",
-    "_ci_upper",
-    "_ci95_lower",
-    "_ci95_upper",
-) + PASS_MAJORITY_STAT_SUFFIXES
 
 # The per-task field flips are computed from. Every verify response carries `reward` at minimum.
 FLIP_FIELD = REWARD_KEY_NAME
@@ -72,17 +57,6 @@ def _is_number(value: Any) -> bool:
 
 def _numeric(value: Any) -> Optional[float]:
     return float(value) if _is_number(value) else None
-
-
-def is_comparison_worthy_metric(name: str) -> bool:
-    """Whether an `agent_metrics` key earns its own row in the all-metrics table."""
-    if name == "num_repeats":
-        return False
-    if name.startswith(DISPERSION_PREFIXES):
-        return False
-    if ACROSS_REPEATS_MARKER in name:
-        return False
-    return not name.endswith(COMPARISON_UNWORTHY_SUFFIXES)
 
 
 def _ordered_metric_names(baseline: Dict[str, Any], candidates: Sequence[Dict[str, Any]]) -> List[str]:
@@ -190,7 +164,7 @@ def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> L
 
     rows: List[MetricRow] = []
     for name in _ordered_metric_names(baseline_metrics, candidate_metrics):
-        if not is_comparison_worthy_metric(name):
+        if not is_primary_metric(name):
             continue
         baseline_value = _metric_value(baseline_metrics, name)
         baseline_point = _comparison_value(baseline_value) if baseline_value else None
