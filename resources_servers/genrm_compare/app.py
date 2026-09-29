@@ -511,7 +511,12 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 raise HTTPException(status_code=503, detail="GenRM server is shutting down")
             self._prune_terminal_cohorts()
             watermark = self._latest_group_attempts.get(body.group_id)
-            if watermark is not None and watermark.prompt_digest != prompt_digest:
+            cohort = self._verify_cohorts.get(prompt_key)
+            # A retained result still owns its prompt after the attempt record is evicted.
+            # Validate before recreating that record so a rejected retry cannot replace its identity.
+            if (watermark is not None and watermark.prompt_digest != prompt_digest) or (
+                cohort is not None and cohort.prompt_digest != prompt_digest
+            ):
                 raise HTTPException(
                     status_code=409,
                     detail=(f"GenRM group {body.group_id!r} received inconsistent prompt or principle content"),
@@ -546,7 +551,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     ),
                 )
 
-            cohort = self._verify_cohorts.get(prompt_key)
             if cohort is None:
                 cohort = _CohortState(
                     prompt_digest=prompt_digest,

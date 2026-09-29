@@ -76,7 +76,8 @@ async def test_finished_attempt_with_missing_result_is_rejected_without_rejudgin
     assert [r.reward for r in await complete(server, "a", attempt=1)] == [3, 3]
 
 
-async def test_count_eviction_keeps_retained_result_replayable(server, clock):
+@pytest.mark.parametrize("conflicting_field", [None, "prompt", "principle"])
+async def test_count_eviction_keeps_retained_result_replayable(server, clock, conflicting_field):
     server.config.max_terminal_cohorts = 2
     server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
     await complete(server, "a")
@@ -90,6 +91,16 @@ async def test_count_eviction_keeps_retained_result_replayable(server, clock):
     # Replaying a refreshed its attempt record only, putting b first in that eviction order.
     assert "b" not in server._latest_group_attempts
     calls = server._run_single_comparison.await_count
+    if conflicting_field is not None:
+        invalid = member(0, group="b", attempt=1)
+        if conflicting_field == "prompt":
+            invalid.responses_create_params.input[0].content = "Different question"
+        else:
+            invalid.principle = "Different judging instructions"
+        with pytest.raises(HTTPException) as error:
+            await server.verify(invalid)
+        assert error.value.status_code == 409
+        assert "inconsistent prompt or principle" in error.value.detail
     replay = await asyncio.wait_for(complete(server, "b", attempt=1), 0.1)
     assert [r.reward for r in replay] == [3, 3]
     assert server._run_single_comparison.await_count == calls
