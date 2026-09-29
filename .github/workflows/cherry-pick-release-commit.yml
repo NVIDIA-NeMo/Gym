@@ -21,7 +21,8 @@ on:
 
 jobs:
   cherry-pick:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cherry_pick.yml@8ebb3aec4c246c944a25adc7b09107cbd6a76976 # v0.63.0
+    # TODO: repin to a released tag once NVIDIA-NeMo/FW-CI-templates#584 merges.
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cherry_pick.yml@ac1461504cff1f19155c387daa9636897b771a0b
     secrets:
       PAT: ${{ secrets.PAT }}
       SLACK_WEBHOOK_ADMIN: ${{ secrets.SLACK_WEBHOOK_ADMIN }}
