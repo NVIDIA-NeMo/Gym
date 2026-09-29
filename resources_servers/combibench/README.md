@@ -234,6 +234,17 @@ the rollout stays in the denominator, and a non-verdict should not.
   `implemented_by`, `unsafe`) are not banned.
 - Extra declarations are allowed anywhere in the code; only the reference
   paragraphs are required.
+- The answer tag is the text between the paragraph's **first** `abbrev` and its
+  **first** `_solution`, which is upstream's rule verbatim. A paragraph holding a
+  helper `abbrev` beside the `_solution` one therefore yields a tag that is not
+  an identifier (`"helper : ℕ := 5\nabbrev a_solution"`), and the
+  appended `example:` is invalid Lean — under upstream as much as here. The
+  `abbrev_types` regex is anchored on the `_solution` declaration, but that only
+  keeps the type ascription from adding a *Gym-only* error on top: upstream has
+  no ascription, so a mis-read type would be damage this server alone does. The
+  tag is left as upstream computes it, because changing it would diverge from
+  the harness this server exists to reproduce. No paragraph in the pinned corpus
+  is shaped that way.
 - A statement paragraph that opens with `open ... in` directly above its
   `theorem` starts with a header prefix, so the whole paragraph — theorem
   included — is skipped by the statement check. Upstream has the identical

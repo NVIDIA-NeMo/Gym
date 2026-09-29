@@ -195,13 +195,19 @@ class TestAnswers:
     def test_a_helper_abbrev_in_the_same_paragraph_does_not_shift_the_type(self) -> None:
         """Keying on the paragraph's first ``abbrev`` would ascribe the helper's type.
 
-        The lazy type would then run to the paragraph's last ``:=``, and the
-        appended answer check would be invalid Lean — a correct proof scored
-        ``compile_error``. No pinned statement is shaped this way; the guard is
-        against one that is.
+        What that guard prevents is a *Gym-only* divergence, not a broken check:
+        ``answer_tags`` is upstream's rule verbatim, and on this paragraph it
+        already yields a tag that is not an identifier, so the appended
+        ``example:`` is invalid Lean under upstream too and the guard cannot
+        rescue it. Ascription is this server's alone, so a type read off the
+        helper would be damage upstream does not do. The tag is deliberately
+        left as upstream computes it; see the README's "Known blind spots".
+        No pinned statement is shaped this way.
         """
         chunk = "abbrev helper : ℕ := 5\nabbrev a_solution : Finset ℕ :="
         assert abbrev_types([chunk]) == ["Finset ℕ"]
+        # Upstream's split, reproduced: first ``abbrev`` to first ``_solution``.
+        assert answer_tags([chunk]) == ["helper : ℕ := 5\nabbrev a_solution"]
 
     def test_a_theorem_below_the_abbrev_does_not_extend_the_type(self) -> None:
         """A type running past the abbrev's own ``:=`` means the match overran it."""

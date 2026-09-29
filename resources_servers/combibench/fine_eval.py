@@ -179,9 +179,16 @@ def answer_tags(chunks: list[str]) -> list[str]:
 # line rather than of the paragraph: a paragraph holding a helper ``abbrev`` or a
 # ``theorem`` alongside the ``_solution`` one would otherwise be read from its
 # first declaration, and the lazy type would run to the paragraph's last ``:=``.
-# No paragraph in the pinned corpus is shaped that way, so this is hardening: the
-# appended answer check would be invalid Lean and turn a correct proof into a
-# ``compile_error``.
+#
+# What this buys is narrower than it looks, and deliberately so. On such a
+# paragraph ``answer_tags`` — which is upstream's rule verbatim, splitting on the
+# first ``abbrev`` and the first ``_solution`` — already yields a tag that is not
+# an identifier, so the appended ``example:`` is invalid Lean under upstream too.
+# The anchor does not rescue that; it prevents a *Gym-only* divergence. Upstream
+# has no ascription at all, so a type read off the wrong declaration would be a
+# broken check this server alone emits, on top of the broken tag both emit. No
+# paragraph in the pinned corpus is shaped this way. The tag itself is left
+# exactly as upstream computes it; see the README's "Known blind spots".
 _ABBREV_TYPE_RE = re.compile(
     r"^(?:noncomputable\s+)?abbrev\s+\S*_solution"
     r"(?P<binders>(?:\s*(?:\{[^}]*\}|\([^)]*\)|\[[^\]]*\]))*)"
