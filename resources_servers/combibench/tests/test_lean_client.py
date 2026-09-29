@@ -25,6 +25,7 @@ from resources_servers.combibench.fine_eval import classify_lean_result
 from resources_servers.combibench.lean_client import (
     HTTP_TIMEOUT_MARGIN_SECONDS,
     MAX_SATURATION_ATTEMPTS,
+    MAX_VERSION_PROBES,
     SATURATION_BACKOFF_SECONDS,
     SATURATION_STATUSES,
     KiminaLeanClient,
@@ -215,9 +216,30 @@ class TestToolchainProbe:
         assert len(calls) == 1
         assert "Lean.versionString" in calls[0]["json"]["codes"][0]["proof"]
 
-    async def test_a_dead_server_is_probed_once(self, monkeypatch) -> None:
+    async def test_a_dead_server_is_probed_a_bounded_number_of_times(self, monkeypatch) -> None:
+        """Not once per rollout, but not once per run either: a failure is not an answer."""
         calls = _patch_request(monkeypatch, exc=ConnectionError("refused"))
         client = KiminaLeanClient("http://lean:8000")
+        for _ in range(10):
+            assert await client.toolchain_version() is None
+        assert len(calls) == MAX_VERSION_PROBES
+
+    async def test_a_transient_failure_does_not_disable_the_guard(self, monkeypatch) -> None:
+        """Caching the first miss would switch the mismatch guard off for the whole run."""
+        replies: list[Any] = [ConnectionError("refused"), self._info('"4.24.0"')]
+        calls: list[dict] = []
+
+        async def fake_request(method, url, **kwargs):
+            calls.append(kwargs)
+            reply = replies[len(calls) - 1]
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        monkeypatch.setattr(lean_client, "request", fake_request)
+        client = KiminaLeanClient("http://lean:8000")
         assert await client.toolchain_version() is None
-        assert await client.toolchain_version() is None
-        assert len(calls) == 1
+        assert await client.toolchain_version() == "4.24.0"
+        # ... and the hit is cached, so the cold import is not paid again.
+        assert await client.toolchain_version() == "4.24.0"
+        assert len(calls) == 2

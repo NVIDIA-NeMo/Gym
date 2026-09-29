@@ -58,6 +58,12 @@ SATURATION_STATUSES = (429, 503)
 MAX_SATURATION_ATTEMPTS = 3
 SATURATION_BACKOFF_SECONDS = 1.0  # doubled each attempt: 1s, then 2s
 
+# How many times the toolchain probe may be re-attempted across a run before the
+# mismatch guard is given up on. Bounded because the probe pays a cold
+# ``import Mathlib``; more than one because caching a transient failure as an
+# answer would silently switch the guard off for the whole run.
+MAX_VERSION_PROBES = 3
+
 # Kimina exposes no version endpoint, so the toolchain is read by compiling a
 # one-line program through the same path a submission takes. ``TOOLCHAIN_PROBE``
 # is the shared one, so every Lean benchmark asks the question the same way; its
@@ -71,7 +77,7 @@ class KiminaLeanClient:
         self.api_key = api_key
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._version: Optional[str] = None
-        self._version_probed = False
+        self._version_probes = 0
         self._version_lock = asyncio.Lock()
 
     def _headers(self) -> dict[str, str]:
@@ -142,19 +148,27 @@ class KiminaLeanClient:
         return parse_verify_response(body)
 
     async def toolchain_version(self, timeout_seconds: int = 120) -> Optional[str]:
-        """Lean version the server actually runs, probed once and cached.
+        """Lean version the server actually runs, probed until it answers and then cached.
 
         A server built for another Lean version scores every row
-        ``proof_failed`` and nothing in the rollouts says why. The probe pays
-        one cold ``import`` on the first call. ``None`` means the probe itself
-        did not return a version; it is cached like a hit, so an unreachable
-        server is not re-probed once per rollout.
+        ``proof_failed`` and nothing in the rollouts says why, which is what the
+        version in every response exists to make visible. The probe pays one cold
+        ``import`` on its first call.
+
+        A probe that returns no version is *not* cached as an answer: caching it
+        would let one transient failure — a server still starting, a single
+        dropped connection — disable the mismatch guard for the whole run while
+        the README still advertises it. It is retried on the next call instead,
+        bounded at ``MAX_VERSION_PROBES`` so an unreachable server costs a few
+        probes rather than one per rollout. After the last failed attempt the
+        guard really is off for the run, and that is logged at ERROR.
         """
-        if self._version_probed:
+        if self._version is not None or self._version_probes >= MAX_VERSION_PROBES:
             return self._version
         async with self._version_lock:
-            if self._version_probed:
+            if self._version is not None or self._version_probes >= MAX_VERSION_PROBES:
                 return self._version
+            self._version_probes += 1
             result = await self.verify(TOOLCHAIN_PROBE, timeout_seconds)
             # parse_lean_version reads a sandbox's stdout/stderr; the REPL answers in
             # structured messages instead, so they are joined into the shape it expects
@@ -162,12 +176,20 @@ class KiminaLeanClient:
             self._version = parse_lean_version(
                 {"stdout": "\n".join(str(message.get("data", "")) for message in result.messages)}
             )
-            self._version_probed = True
             if self._version is not None:
                 LOG.info("Lean server at %s reports Lean %s", self.base_url, self._version)
-            else:
+            elif self._version_probes < MAX_VERSION_PROBES:
                 LOG.warning(
-                    "Lean version probe returned no version (error=%r): the toolchain behind %s is unknown",
+                    "Lean version probe %s/%s returned no version (error=%r); will retry",
+                    self._version_probes,
+                    MAX_VERSION_PROBES,
+                    result.error,
+                )
+            else:
+                LOG.error(
+                    "Lean version probe failed %s times (error=%r): the toolchain behind %s stays unknown "
+                    "for the rest of this run, so a toolchain mismatch will not be reported",
+                    self._version_probes,
                     result.error,
                     self.base_url,
                 )

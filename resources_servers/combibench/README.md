@@ -133,10 +133,13 @@ does not terminate is the model's output, and excusing it would make hanging
 reward-neutral.
 
 Every response carries `lean_version`, the Lean version the server reports for
-`#eval Lean.versionString`. It is probed once per process, before the first
-compile (which also warms the REPL). A server built for another toolchain
+`#eval Lean.versionString`. It is probed before the first compile (which also
+warms the REPL) and cached once it answers. A server built for another toolchain
 otherwise scores every row `compile_error` with nothing in the rollouts saying
-why.
+why. A probe that returns no version is not cached as an answer — one dropped
+connection would otherwise switch the guard off for the whole run — it is
+retried on the next call, up to three probes per process, after which the
+failure is logged at ERROR and `lean_version` stays null for the run.
 
 `compute_metrics` emits the pooled `pass@k` / `pass@1[avg-of-k]` keys — the
 figures the tables below report — and adds `hackmath/`, `brualdi/`, `imo/` and
