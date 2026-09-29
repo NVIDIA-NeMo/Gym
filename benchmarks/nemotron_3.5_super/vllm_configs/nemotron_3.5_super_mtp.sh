@@ -2,15 +2,6 @@
 
 NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
 
-# Optional Nsight Systems capture on PD prefill nodes (requires nsys in the container).
-# Launch with PROFILE_PREFILL=1 to capture automatically 300 seconds after /health is ready.
-# Adjust PREFILL_PROFILE_DELAY_SECONDS for workload warmup, or set it to manual to use /start_profile yourself.
-# Capture stops automatically after PREFILL_PROFILE_STEPS worker steps; serving continues.
-# Reports go to ${SLURM_SUBMIT_DIR}/results/nsys, or set PREFILL_PROFILE_DIR to a mounted directory.
-PROFILE_PREFILL="${PROFILE_PREFILL:-0}"
-PREFILL_PROFILE_STEPS="${PREFILL_PROFILE_STEPS:-20}"
-PREFILL_PROFILE_DELAY_SECONDS="${PREFILL_PROFILE_DELAY_SECONDS:-300}"
-
 GYM_MODEL_PARAMS=(
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
