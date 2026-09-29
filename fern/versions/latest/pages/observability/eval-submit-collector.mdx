@@ -66,7 +66,8 @@ driver's return code.
 Every batch carries resource attributes the dashboards filter on: `user`, `run_id` (the gym job id),
 `slurm_job_id`, `benchmark`, `cluster` and `model`, plus `service.name` set to the routing identity
 and `service.name.override` to the producer's display name: each Gym server keeps its own name
-(`nemo-gym/<server>`) and the scraped engine carries `component`.
+(`nemo-gym/<server>`), a scraped model service carries `<component>/<service>` (`gym-vllm/policy` with the
+defaults), and the node scrapes carry `dcgm` and `node`.
 
 Everything exported is also written to `<job dir>/otel/{metrics,traces,logs}.jsonl`, so a run can be
 inspected without backend access. The rendered collector configuration is at

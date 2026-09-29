@@ -212,6 +212,14 @@ def test_collector_scrapes_every_model_service_on_localhost():
     assert by_job["gym-vllm/policy"]["scrape_interval"] == "15s"
 
 
+def test_scraped_engine_display_name_is_component_slash_service():
+    """The scrape job name becomes the engine's `service.name.override`; the docs promise this shape."""
+    jobs = {s["job_name"] for s in _rendered()["receivers"]["prometheus"]["config"]["scrape_configs"]}
+    assert "gym-vllm/policy" in jobs
+    custom = _rendered(_config(otel={"component": "engine"}))
+    assert "engine/policy" in {s["job_name"] for s in custom["receivers"]["prometheus"]["config"]["scrape_configs"]}
+
+
 def test_collector_keeps_each_producers_own_name_as_display_identity():
     doc = _rendered()
     identity = doc["processors"]["transform/identity"]
