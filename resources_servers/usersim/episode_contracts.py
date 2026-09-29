@@ -128,7 +128,7 @@ class UserSimSimulationResult(BaseModel):
 
 
 class UserSimInvocation(BaseModel):
-    """One ordered UserSim Agent activation."""
+    """One ordered UserSim participant-Agent or support-model activation."""
 
     model_config = ConfigDict(extra="forbid")
 
