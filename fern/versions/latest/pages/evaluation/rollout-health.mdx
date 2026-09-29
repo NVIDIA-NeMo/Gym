@@ -100,7 +100,7 @@ Check IDs identify both the evidence being evaluated and the condition detected.
 | `rollout_token_count_mismatch` | Rollout | Both top-level rollout token totals and a complete set of bound policy-model-call token counts are available, but the prompt-token total or completion-token total differs from the corresponding call-level sum. |
 | `agent_turn_hollow` | Agent turn | An observable `TrajectoryTurn` does not contain any of the following: (1) non-empty answer content, (2) non-empty reasoning content, or (3) a tool call. |
 | `trajectory_capture_mismatch` | Trajectory and model calls | An explicit turn- or invocation-to-model-call reference resolves to zero or multiple model calls, or `ng_trajectory.gaps` records an unmatched, ambiguous, or conflicting reference. |
-| `model_call_failed` | Policy-model call | An exactly bound policy-model call has an HTTP error status, an error category, or response status `failed`, `error`, or `cancelled`. |
+| `model_call_last_failed` | Policy-model call | The final model call of a finished top-level agent invocation has an HTTP error status, an error category, or response status `failed`, `error`, or `cancelled`. Earlier calls and subagent calls do not trigger this check. |
 | `model_call_missing_token_counts` | Policy-model call | On an exactly bound policy-model call, `token_stats.prompt_tokens` or `token_stats.completion_tokens` is omitted or set to `null`. A value of zero counts as present. |
 | `model_call_runaway_generation` | Policy-model call | An exactly bound policy-model call ended with `finish_reason: length` and its saved response contains no answer or reasoning content. |
 | `model_call_zero_completion_tokens` | Policy-model call | An exactly bound policy-model call reports zero completion tokens. |
@@ -131,7 +131,7 @@ It does not match calls by list position, timestamp, model name, or payload simi
 becomes a bound policy-model call. When the same call is referenced by both a turn and its containing invocation, the call is
 evaluated once. Unreferenced model calls are not assigned to the policy model because they can belong to an auxiliary model.
 
-The per-call checks are `model_call_failed`, `model_call_missing_token_counts`, `model_call_runaway_generation`,
+The independent per-call checks are `model_call_missing_token_counts`, `model_call_runaway_generation`,
 `model_call_zero_completion_tokens`, and `trajectory_capture_mismatch`. Invocation ownership is sufficient for these checks
 because each evaluates one call or one explicit reference independently. `rollout_token_count_mismatch` and
 `task_no_successful_model_calls` use only turn-owned calls. These aggregate checks require per-turn placement: an invocation can
@@ -142,13 +142,47 @@ The producer gap `turn_model_call_scope_incomplete` means that turn references d
 scope needed for aggregate checks. For example, invocation usage may include summarization calls outside the recorded
 task turns, or a failed attempt may lack an exact turn reference. This gap makes `rollout_token_count_mismatch` and
 `task_no_successful_model_calls` unobserved. Checks on recorded turn content and individually owned model calls still
-evaluate; the gap does not suppress evidence of failed calls or hollow turns.
+evaluate; the gap does not suppress evidence of hollow turns. `model_call_last_failed` separately requires complete bindings for the root invocation, including its invocation-owned calls.
 
 <Note>
   The conservative binding rule avoids attributing a judge or user-simulator failure to the evaluated model. Its trade-off is
   coverage: when a trajectory producer does not write explicit turn or invocation references, binding-dependent checks are
   unobserved even if the trajectory contains an unowned list of model calls.
 </Note>
+
+### Final Top-Level Model Call
+
+`model_call_last_failed` checks only invocations with no `parent_invocation_id` and an explicit terminal status
+(`completed` or `failed`). It binds their own turn and invocation references; a later subagent or auxiliary call cannot
+hide a top-level failure. Earlier failed calls remain in error statistics but do not trigger this check.
+
+For multiple calls, every owned call needs valid `started_at` and `completed_at` timestamps. The final call must start
+after every other call started and at or after every other call completed. Capture append order and reference order
+are not evidence of which request was last. A single exactly bound call needs no ordering comparison.
+
+Missing root ownership, unfinished or unknown invocation status, incomplete capture, unresolved or conflicting
+references, missing timestamps, and overlapping final calls make the check unobserved. When multiple top-level
+invocations exist, each is checked independently: a known final failure still produces a finding even if another root
+is unobserved. A failed subagent alone does not trigger this check.
+
+This check establishes that the last model call failed, not that the task answer was wrong. Other health checks still
+apply, and a harness can finish through tools or another fallback after its last model call.
+
+Reports now emit `model_call_last_failed` instead of `model_call_failed`. Existing ignore configurations using
+`model_call_failed` are accepted as an alias for the new check; historical reports are not rewritten. Trajectories
+without explicit finished root invocations now report this check as unobserved.
+
+### Explicit Context-Overflow Rejections
+
+The missing-token, zero-completion-token, and runaway-generation checks skip calls that explicitly record
+`upstream_attempted: true`, `upstream_status_code: 400`, and `context_length_exceeded` in either
+`error_category` or `local_response_reason`. The vLLM adapter records this category both when forwarding the 400
+and when replacing it with an HTTP 200. These requests were rejected; missing generation output is expected.
+
+The error still contributes to diagnostic counts and, when it is the root's final call, to `model_call_last_failed`.
+A generic timeout, another HTTP 400, an empty response, or `finish_reason: length` alone does not establish this
+exemption. Successful generations retain their existing quality checks. Rollout token reconciliation remains
+unobserved if any bound call lacks token counts; the exemption does not invent token totals.
 
 ### Length-Limited Responses
 
@@ -222,7 +256,7 @@ This abridged example omits the other check-coverage entries and zero-valued iss
     },
     "issues": {
       "agent_turn_hollow": 2,
-      "model_call_failed": 1
+      "model_call_last_failed": 1
     },
     "stats": {
       "model_call_errors": {
@@ -275,12 +309,11 @@ The per-rollout report contains one row for every non-empty input line and is so
   "verdict": "unhealthy",
   "findings": [
     {
-      "check": "model_call_failed",
-      "locator": {"call_id": "call-7"},
+      "check": "model_call_last_failed",
+      "locator": {"call_id": "call-7", "invocation_id": "root"},
       "detail": {
         "status": 408,
-        "error_category": "timeout",
-        "terminal": true
+        "error_category": "timeout"
       }
     }
   ],

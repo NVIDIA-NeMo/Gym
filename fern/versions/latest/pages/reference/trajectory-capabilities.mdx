@@ -171,9 +171,10 @@ main decisions. Missing or reused response IDs produce gaps instead of guessed a
 reported only when no actual decision response could be represented.
 
 Observed turns enable `rollout_missing_agent_turns` and `agent_turn_hollow`. Invocation ownership enables
-`model_call_failed`, `model_call_missing_token_counts`, `model_call_zero_completion_tokens`,
+`model_call_missing_token_counts`, `model_call_zero_completion_tokens`,
 `model_call_runaway_generation`, and `trajectory_capture_mismatch` under their documented capture and payload
-requirements. See [Rollout health checks](/evaluation/rollout-health).
+requirements. `model_call_last_failed` additionally requires explicit finished top-level invocations, complete ownership,
+and an unambiguous final call. See [Rollout health checks](/evaluation/rollout-health).
 
 The underlying HTTP transport can retry after server admission without notifying the adapter. Complete turn-call
 accounting therefore remains unavailable: `transport_retry_visibility_unavailable` and

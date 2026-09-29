@@ -30,8 +30,11 @@ from nemo_gym.health.checks import (
     CHECK_REGISTRY,
     _bind_policy_call_views,
     _canonical_trajectory,
+    _is_context_overflow_rejection,
     _is_failed,
     _is_successful,
+    _last_root_model_calls,
+    _model_call_last_failed,
     _normalized_trajectory_calls,
     _replay_identity,
     _subject,
@@ -183,12 +186,20 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             unobserved.append(spec.id)
             continue
         if spec.id == "model_call_runaway_generation" and any(
-            call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS and call.get("response") is None
+            not _is_context_overflow_rejection(call)
+            and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+            and call.get("response") is None
             for call in bindings.matched_calls
         ):
             unobserved.append(spec.id)
             continue
         try:
+            if spec.id == "model_call_last_failed":
+                last_calls, last_call_unobserved = _last_root_model_calls(trajectory, calls)
+                findings.extend(_model_call_last_failed(last_calls, subject))
+                if last_call_unobserved:
+                    unobserved.append(spec.id)
+                continue
             findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))
         except Exception as exc:
             unobserved.append(spec.id)

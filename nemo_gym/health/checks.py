@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Sequence
+from math import isfinite
 from typing import Any
 
 from nemo_gym.health.types import (
@@ -73,7 +74,7 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
-        id="model_call_failed",
+        id="model_call_last_failed",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
         reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
@@ -113,7 +114,14 @@ def normalize_ignored_checks(checks: Sequence[str] | str | None) -> tuple[str, .
     if checks is None:
         return ()
     raw_checks = checks.split(",") if isinstance(checks, str) else checks
-    normalized = tuple(dict.fromkeys(check.strip() for check in raw_checks if check.strip()))
+    # Preserve existing ignore configurations while emitting only the new check ID.
+    normalized = tuple(
+        dict.fromkeys(
+            "model_call_last_failed" if check.strip() == "model_call_failed" else check.strip()
+            for check in raw_checks
+            if check.strip()
+        )
+    )
     known_checks = {spec.id for spec in CHECK_REGISTRY}
     unknown_checks = sorted(set(normalized) - known_checks)
     if unknown_checks:
@@ -261,6 +269,8 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
         calls.append(
             {
                 "call_index": position,
+                "started_at": raw.get("started_at"),
+                "completed_at": raw.get("completed_at"),
                 "model_call_id": raw.get("model_call_id"),
                 "response_id": metadata.get("response_id"),
                 "model_ref": metadata.get("model_ref"),
@@ -268,6 +278,9 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
                 "response_status": metadata.get("response_status"),
                 "finish_reason": metadata.get("finish_reason"),
                 "error_category": metadata.get("error_category"),
+                "upstream_attempted": metadata.get("upstream_attempted"),
+                "upstream_status_code": metadata.get("upstream_status_code"),
+                "local_response_reason": metadata.get("local_response_reason"),
                 "tokens_in": tokens.get("prompt_tokens"),
                 "tokens_out": tokens.get("completion_tokens"),
                 "request": raw.get("request"),
@@ -290,6 +303,18 @@ def _is_failed(call: dict[str, Any]) -> bool:
 def _is_successful(call: dict[str, Any]) -> bool:
     status = call.get("status_code")
     return not _is_failed(call) and (status is None or (isinstance(status, int) and 200 <= status < 400))
+
+
+def _is_context_overflow_rejection(call: dict[str, Any]) -> bool:
+    """Exclude only explicit upstream context rejections, never inferred empty generations."""
+    return (
+        call.get("upstream_attempted") is True
+        and call.get("upstream_status_code") == 400
+        and (
+            call.get("local_response_reason") == "context_length_exceeded"
+            or call.get("error_category") == "context_length_exceeded"
+        )
+    )
 
 
 def _call_identity(call: dict[str, Any]) -> str | None:
@@ -488,7 +513,7 @@ def _model_call_zero_completion_tokens(bindings: _CallBindings, subject: dict[st
             detail={"completion_tokens": 0},
         )
         for position, call in enumerate(bindings.matched_calls)
-        if call.get("tokens_out") == 0
+        if not _is_context_overflow_rejection(call) and call.get("tokens_out") == 0
     ]
 
 
@@ -507,7 +532,8 @@ def _model_call_missing_token_counts(bindings: _CallBindings, subject: dict[str,
             },
         )
         for position, call in enumerate(bindings.matched_calls)
-        if call.get("tokens_in") is None or call.get("tokens_out") is None
+        if not _is_context_overflow_rejection(call)
+        and (call.get("tokens_in") is None or call.get("tokens_out") is None)
     ]
 
 
@@ -567,27 +593,81 @@ def _trajectory_capture_mismatch(
     return findings
 
 
-def _model_call_failed(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
-    terminal_call_index = max(
-        (call["call_index"] for call in bindings.matched_calls if type(call.get("call_index")) is int),
-        default=None,
-    )
+def _last_root_model_calls(
+    trajectory: dict[str, Any], calls: list[dict[str, Any]]
+) -> tuple[list[tuple[str, dict[str, Any]]], bool]:
+    """Find final calls of finished top-level invocations; return uncertainty separately.
+
+    Capture append order and reference order are not causal order. Multiple calls require a
+    uniquely last, non-overlapping request interval. Missing evidence never certifies recovery.
+    """
+    invocations = trajectory.get("invocations") or []
+    roots = [invocation for invocation in invocations if invocation.get("parent_invocation_id") is None]
+    if not roots or _trajectory_has_any_gap(trajectory, _INCOMPLETE_MODEL_CALL_GAPS):
+        return [], True
+    last_calls = []
+    unobserved = False
+    for root in roots:
+        invocation_id = root["invocation_id"]
+        gaps = [gap for gap in trajectory.get("gaps") or [] if gap.get("invocation_id") in (None, invocation_id)]
+        if root.get("status") not in {"completed", "failed"} or any(
+            gap.get("code") in {*_REFERENCE_CONTRADICTION_GAPS, "model_call_ownership_unavailable"} for gap in gaps
+        ):
+            unobserved = True
+            continue
+        own = {
+            "invocations": [root],
+            "turns": [turn for turn in trajectory.get("turns") or [] if turn["invocation_id"] == invocation_id],
+        }
+        _, bindings = _bind_policy_call_views(own, calls)
+        if not bindings.complete or not bindings.matched_calls:
+            unobserved = True
+            continue
+        other = {
+            "invocations": [item for item in invocations if item["invocation_id"] != invocation_id],
+            "turns": [turn for turn in trajectory.get("turns") or [] if turn["invocation_id"] != invocation_id],
+        }
+        _, other_bindings = _bind_policy_call_views(other, calls)
+        other_positions = {call["call_index"] for call in other_bindings.matched_calls}
+        if any(call["call_index"] in other_positions for call in bindings.matched_calls):
+            unobserved = True
+            continue
+        owned = bindings.matched_calls
+        if len(owned) == 1:
+            last_calls.append((invocation_id, owned[0]))
+            continue
+        if any(
+            not all(
+                type(call.get(key)) in (int, float) and isfinite(call[key]) for key in ("started_at", "completed_at")
+            )
+            or call["completed_at"] < call["started_at"]
+            for call in owned
+        ):
+            unobserved = True
+            continue
+        last = max(owned, key=lambda call: call["started_at"])
+        if any(
+            call is not last
+            and (call["started_at"] >= last["started_at"] or call["completed_at"] > last["started_at"])
+            for call in owned
+        ):
+            unobserved = True
+            continue
+        last_calls.append((invocation_id, last))
+    return last_calls, unobserved
+
+
+def _model_call_last_failed(
+    last_calls: list[tuple[str, dict[str, Any]]], subject: dict[str, int | str]
+) -> list[Finding]:
     return [
         Finding(
-            check="model_call_failed",
+            check="model_call_last_failed",
             subject=subject,
-            locator=_call_locator(call, position),
-            detail={
-                "status": call.get("status_code"),
-                "error_category": call.get("error_category"),
-                "terminal": (
-                    bindings.complete
-                    and terminal_call_index is not None
-                    and call.get("call_index") == terminal_call_index
-                ),
-            },
+            locator={**_call_locator(call, position), "invocation_id": invocation_id},
+            detail={"status": call.get("status_code"), "error_category": call.get("error_category")},
         )
-        for position, call in enumerate(bindings.matched_calls)
+        for position, (invocation_id, call) in enumerate(last_calls)
         if _is_failed(call)
     ]
 
@@ -625,7 +705,8 @@ def _model_call_runaway_generation(bindings: _CallBindings, subject: dict[str, i
             detail={"finish_reason": call.get("finish_reason")},
         )
         for position, call in enumerate(bindings.matched_calls)
-        if call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+        if not _is_context_overflow_rejection(call)
+        and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
         and not _response_has_content(call.get("response"))
     ]
 
@@ -653,7 +734,6 @@ _ROLLOUT_CHECKS: dict[
     "trajectory_capture_mismatch": lambda record, trajectory, bindings, subject: (
         _trajectory_capture_mismatch(trajectory, bindings, subject)
     ),
-    "model_call_failed": lambda record, trajectory, bindings, subject: _model_call_failed(bindings, subject),
     "rollout_token_count_mismatch": lambda record, trajectory, bindings, subject: (
         _rollout_token_count_mismatch(record, bindings, subject)
     ),
