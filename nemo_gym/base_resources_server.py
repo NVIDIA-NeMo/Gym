@@ -16,8 +16,9 @@ from abc import abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
 
-from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
+from fastapi import FastAPI, Request
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
+from starlette.middleware import Middleware
 
 
 if TYPE_CHECKING:
@@ -25,6 +26,14 @@ if TYPE_CHECKING:
     # module) and would pull the mcp SDK into agent/model processes that never need it.
     from nemo_gym.mcp_auto_exposure import MCPTool
 
+from nemo_gym._checkpoint.control import install_participant
+from nemo_gym._checkpoint.resources import (
+    ResourcesCheckpointMiddleware,
+    ResourcesCheckpointMode,
+    ResourcesParticipant,
+)
+from nemo_gym._checkpoint.settings import checkpoint_settings
+from nemo_gym._checkpoint.steps import StepMode
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import validate_failure_kind
@@ -34,9 +43,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_correlation import RolloutContextMiddleware
+from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_episode_id
 from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
 
@@ -234,12 +243,21 @@ class ResourcesCloseSessionResponse(BaseModel):
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
+    # How this server's sessions take part in partial-rollout checkpoints. "exported" servers implement
+    # the ResourcesSessionHooks methods. The default fails closed: live sessions block a checkpoint
+    # until their rollouts are retired and restarted.
+    checkpoint_mode: ClassVar[ResourcesCheckpointMode] = "restart_only"
+    # "replay" declares that /verify is safe to run again after a crash and does not change checkpointed
+    # session state, so a checkpoint need not wait for it. Callers learn it from the /seed_session reply.
+    checkpoint_verify: ClassVar[StepMode] = "wait"
+    _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
         app.add_middleware(RolloutContextMiddleware)
+        self.setup_resources_checkpoint(app)
 
         app.post("/seed_session")(self.seed_session)
         app.post("/close_session")(self.close_resources_session)
@@ -254,6 +272,55 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.get("/reverify_mode")(self.get_reverify_mode)
 
         return app
+
+    def setup_resources_checkpoint(self, app: FastAPI) -> None:
+        settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
+        if settings is None:
+            return
+        if (self.config.num_workers or 1) != 1:
+            raise ValueError("resources checkpointing requires num_workers=1: sessions live in one process")
+        participant = ResourcesParticipant(self, self.checkpoint_mode, verify_mode=self.checkpoint_verify)
+        self._checkpoint = participant
+        install_participant(
+            app,
+            participant,
+            auth_token=settings.control_auth_token,
+            lease_grace_seconds=settings.lease_grace_seconds,
+            instance_name=self.config.name,
+        )
+        # Innermost, so the session middleware has already resolved the cookie session ID.
+        app.user_middleware.append(Middleware(ResourcesCheckpointMiddleware, participant=participant))
+
+    def checkpoint_session_started(self, request: Request) -> None:
+        """Report that the request's session began an episode; standard ``/seed_session`` does this itself.
+
+        Call it from a protocol route that starts a session under another name, such as ``/reset``.
+        """
+        if self._checkpoint is None:
+            return
+        episode_id = current_episode_id()
+        session_id = request.session.get(SESSION_ID_KEY)
+        if episode_id is not None and session_id is not None:
+            self._checkpoint.seeded(session_id, episode_id)
+
+    def checkpoint_session_ended(self, request: Request) -> None:
+        """Report that the request's session ended; standard ``/close_session`` and ``/verify`` do this.
+
+        Call it from a protocol route that ends a session under another name, such as a terminal step.
+        """
+        session_id = request.session.get(SESSION_ID_KEY)
+        if self._checkpoint is not None and session_id is not None:
+            self._checkpoint.ended(session_id)
+
+    def export_session_state(self, session_id: str) -> JsonValue:
+        """Return a session's state for a checkpoint; raise ``KeyError`` if this server no longer holds it."""
+        raise NotImplementedError
+
+    def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        raise NotImplementedError
+
+    def retire_session_state(self, session_id: str) -> None:
+        raise NotImplementedError
 
     def normalize_tool_name(self, name: str) -> str:
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""
