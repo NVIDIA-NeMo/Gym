@@ -6,7 +6,7 @@
 Preparation writes, under ``results/harbor/<taskset>/``:
 
 - ``tasks.jsonl``: one materialized row per task;
-- ``run_config.yaml``: the resources server, agent and environment server blocks.
+- ``run_config_<agent>.yaml``: the resources server, agent and environment server blocks.
 
 Then the ordinary end-to-end rollout collection runs with that config plus the
 selected agent, environment server and model configs.
@@ -203,7 +203,8 @@ def build_run(
         agent_impl=agent.impl_name,
         agent_overrides=AGENT_OVERRIDES.get(agent.impl_name),
     )
-    config_path = prepared.output_dir / "run_config.yaml"
+    # One file per agent, so a validate and an eval run on the same taskset do not overwrite each other.
+    config_path = prepared.output_dir / f"run_config_{agent.instance_name}.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
 
     config_paths = [
