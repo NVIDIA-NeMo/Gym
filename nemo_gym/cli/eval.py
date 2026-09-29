@@ -436,6 +436,12 @@ def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, ou
     )
 
 
+def _data_processor_mode_for_split(split: str) -> str:
+    """Select collation behavior for an end-to-end rollout split."""
+
+    return "example_validation" if split == "example" else "train_preparation"
+
+
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
     from nemo_gym.rollout_collection import (
@@ -454,7 +460,7 @@ def e2e_rollout_collection():  # pragma: no cover
     data_processor_config_dict = deepcopy(global_config_dict)
     with open_dict(data_processor_config_dict):
         data_processor_config_dict["should_download"] = True
-        data_processor_config_dict["mode"] = "train_preparation"
+        data_processor_config_dict["mode"] = _data_processor_mode_for_split(e2e_rollout_collection_config.split)
 
         output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
         data_process_output_dir = output_fpath.with_suffix("") / "preprocessed_datasets"
