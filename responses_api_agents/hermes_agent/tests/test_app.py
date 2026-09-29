@@ -131,8 +131,48 @@ class TestSanity:
         assert state.sandbox is sandbox
         assert state.workdir == "/app"
         assert state.session_dir.endswith("/session")
+        # Hermes already imports, so the seed uploads only the runner files and installs nothing.
         assert sandbox.exec.await_count == 2
-        assert sandbox.upload.await_count == 3
+        assert sandbox.upload.await_count == 2
+
+    async def test_seed_installs_hermes_when_it_does_not_import(self, monkeypatch) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        sandbox = AsyncMock()
+        import_results = iter([1, 0])
+
+        async def exec_(command, **_kwargs):
+            if "import run_agent" in command:
+                return MagicMock(return_code=next(import_results), stdout="", stderr="")
+            return MagicMock(return_code=0, stdout="", stderr="")
+
+        sandbox.exec.side_effect = exec_
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.get_global_config_dict", lambda: {"runtime": {}})
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", MagicMock())
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: AsyncMock())
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.AsyncSandbox.connect", AsyncMock(return_value=sandbox)
+        )
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.shutil.which", lambda _name: "/usr/bin/uv")
+
+        await hermes._initialize_agent_session_state(
+            "session",
+            AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="test", task_id="task"),
+                sandbox_access=SandboxAccess(
+                    connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
+                    workdir="/app",
+                ),
+            ),
+        )
+
+        commands = [call.args[0] for call in sandbox.exec.await_args_list]
+        install = [command for command in commands if "pip install" in command]
+        assert len(install) == 1 and "rm -rf" in install[0]
+        # The import is checked before installing and again after.
+        assert sum("import run_agent" in command for command in commands) == 2
+        assert sandbox.upload.await_args_list[0].args[0] == "/usr/bin/uv"
 
     async def test_missing_sandbox_access_uses_configured_fallback(self, monkeypatch) -> None:
         hermes = HermesAgent(
