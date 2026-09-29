@@ -69,7 +69,7 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxPtyError, SandboxPtySession, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
@@ -156,9 +156,6 @@ class HermesAgentSessionState:
     workdir: str | None
     session_dir: str
     owns_sandbox: bool = False
-    runner_launch: asyncio.Future[SandboxPtySession] | None = None
-    runner_session: SandboxPtySession | None = None
-    runner_exit_task: asyncio.Task[int] | None = None
     activation: asyncio.Task[AgentEpisode] | None = None
     closing: bool = False
     observations: AgentObservationBundle | None = None
@@ -229,7 +226,8 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = 900.0
-    sandbox_runner_poll_seconds: float = 0.25
+    # Bounds one sandbox activation; the Environment Server's episode deadline still applies.
+    sandbox_runner_timeout_seconds: float = 21600.0
     session_close_timeout_seconds: float = 30.0
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
@@ -484,55 +482,28 @@ class HermesAgent(SimpleResponsesAPIAgent):
             owns_sandbox=owns_sandbox,
         )
 
-    async def _terminate_sandbox_runner(self, state: HermesAgentSessionState) -> None:
-        launch, state.runner_launch = state.runner_launch, None
-        if launch is not None and state.runner_session is None:
-            # A cancelled activation can leave the runner starting; wait for its handle so it can be stopped.
-            try:
-                state.runner_session = await asyncio.wait_for(
-                    asyncio.shield(launch),
-                    timeout=self.config.session_close_timeout_seconds,
-                )
-                state.runner_exit_task = asyncio.create_task(state.runner_session.wait_exit())
-            except TimeoutError:
-                LOG.warning("Hermes sandbox runner launch did not finish; the sandbox teardown must stop it")
-                return
-            except Exception:
-                # A failed launch started no runner, and the activation already reports its error.
-                return
-        runner_session = state.runner_session
-        runner_exit_task = state.runner_exit_task
-        if runner_session is None:
-            return
+    async def _stop_sandbox_runner(self, state: HermesAgentSessionState) -> None:
+        """Stop the runner of an interrupted activation; tearing down the sandbox is the backstop."""
+        pid_path = quote(f"{state.session_dir}/runner.pid")
+        grace = int(self.config.session_close_timeout_seconds)
+        script = (
+            # The stop marker keeps a launch that has not started yet from running.
+            f"touch {quote(f'{state.session_dir}/runner.stop')}; "
+            # A launch that passed the marker check records its PID immediately.
+            f"for _ in 1 2 3 4 5; do [ -s {pid_path} ] && break; sleep 1; done; "
+            f'[ -s {pid_path} ] || exit 0; pid=$(cat {pid_path}); kill -TERM "$pid" 2>/dev/null; '
+            f'for _ in $(seq 1 {grace}); do kill -0 "$pid" 2>/dev/null || exit 0; sleep 1; done; '
+            'kill -KILL "$pid" 2>/dev/null; true'
+        )
         try:
-            if runner_exit_task is not None and not runner_exit_task.done():
-                await runner_session.send_signal("SIGTERM")
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(runner_exit_task),
-                        timeout=self.config.session_close_timeout_seconds,
-                    )
-                except TimeoutError:
-                    await runner_session.send_signal("SIGKILL")
-                    await asyncio.wait_for(
-                        asyncio.shield(runner_exit_task),
-                        timeout=self.config.session_close_timeout_seconds,
-                    )
-            elif runner_exit_task is not None:
-                runner_exit_task.exception()
-        except SandboxPtyError:
-            if runner_exit_task is not None and not runner_exit_task.done():
-                raise
-        finally:
-            await runner_session.close()
-            state.runner_session = None
-            state.runner_exit_task = None
+            await state.sandbox.exec(script, cwd=state.workdir, timeout_s=grace + 30)
+        except Exception:
+            LOG.warning("Could not stop the Hermes sandbox runner; the sandbox teardown must stop it", exc_info=True)
 
     async def _close_agent_session_state(
         self,
         state: HermesAgentSessionState,
     ) -> AgentObservationBundle:
-        await self._terminate_sandbox_runner(state)
         await state.sandbox.exec(
             f"rm -rf {quote(state.session_dir)}",
             cwd=state.workdir,
@@ -572,12 +543,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
     def _sandbox_observations(
         self,
         result: dict[str, Any],
-        model_calls: list[ModelCallRef],
         raw_observations: Any,
     ) -> AgentObservationBundle:
         if isinstance(raw_observations, dict):
             try:
-                model_calls_by_id = {call.response_id: call for call in model_calls if call.response_id}
                 records: list[AgentInvocation | ToolCallObservation | ContextCompactionObservation] = []
                 for raw_invocation in raw_observations.get("invocations") or []:
                     response_ids = raw_invocation.get("model_response_ids") or []
@@ -587,10 +556,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
                             invocation_id=invocation_id,
                             parent_invocation_id=raw_invocation.get("parent_invocation_id"),
                             status=raw_invocation.get("status", "unknown"),
+                            # Every call goes to the configured Model Server, so a response ID identifies the call.
                             model_calls=[
-                                model_calls_by_id[response_id]
+                                ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
                                 for response_id in response_ids
-                                if response_id in model_calls_by_id
+                                if isinstance(response_id, str) and response_id
                             ],
                             conversation=normalize_hermes_messages(
                                 raw_invocation.get("messages") or [],
@@ -632,7 +602,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             AgentInvocation(
                 invocation_id="root",
                 status=invocation_status,
-                model_calls=model_calls,
                 conversation=normalize_hermes_messages(messages),
             )
         ]
@@ -657,7 +626,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
     async def _run_sandbox_episode(
         self,
         *,
-        request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming,
         agent_session_id: str,
         state: HermesAgentSessionState,
@@ -667,6 +635,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         output_path = f"{state.session_dir}/output.json"
         stdout_path = f"{state.session_dir}/stdout.log"
         stderr_path = f"{state.session_dir}/stderr.log"
+        pid_path = f"{state.session_dir}/runner.pid"
+        stop_path = f"{state.session_dir}/runner.stop"
         payload = {
             "agent_session_id": agent_session_id,
             "chat_template_kwargs_enabled": self.config.chat_template_kwargs_enabled,
@@ -677,130 +647,64 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "max_tokens": self.config.max_tokens,
             "max_turns": self.config.max_turns,
             "model": self._model_name(),
+            # The sandbox reaches the Model Server directly; the rollout prefix keeps its calls correlated.
+            "model_base_url": self.resolve_model_base_url(
+                self.config.model_server.name, state.request.episode_id.capture_key
+            ),
             "system_message": self.config.system_prompt or input_system,
             "temperature": self.config.temperature,
             "terminal_timeout": self.config.terminal_timeout,
             "user_message": user_message,
         }
         await self._upload_json(state.sandbox, input_path, payload)
-        # Keep the launch so termination can still stop a runner whose activation was cancelled mid-launch.
-        state.runner_launch = asyncio.ensure_future(
-            state.sandbox.pty.create(
-                command=(
-                    f"{quote(_SANDBOX_PYTHON)} {quote(_SANDBOX_RUNNER)} "
-                    f"{quote(input_path)} {quote(output_path)} "
-                    f">{quote(stdout_path)} 2>{quote(stderr_path)}"
-                ),
-                cwd=state.workdir,
-                pty=False,
-            )
+        # The shell records its PID and then becomes the runner, so an interrupted activation can stop it.
+        command = (
+            f"[ -e {quote(stop_path)} ] && exit 0; echo $$ > {quote(pid_path)} && "
+            f"exec {quote(_SANDBOX_PYTHON)} {quote(_SANDBOX_RUNNER)} {quote(input_path)} {quote(output_path)} "
+            f">{quote(stdout_path)} 2>{quote(stderr_path)}"
         )
-
-        model_cookies: Any = None
-        model_calls: list[ModelCallRef] = []
-        request_index = 0
         try:
-            try:
-                state.runner_session = await asyncio.shield(state.runner_launch)
-            except NotImplementedError as error:
-                raise ValueError("Hermes requires a sandbox provider with PTY process sessions") from error
-            state.runner_launch = None
-            state.runner_exit_task = asyncio.create_task(state.runner_session.wait_exit())
-            while True:
-                request_path = f"{state.session_dir}/model-request-{request_index}.json"
-                status = await state.sandbox.exec(
-                    (
-                        f"if [ -f {quote(output_path)} ]; then echo output; "
-                        f"elif [ -f {quote(request_path)} ]; then echo request; "
-                        "else echo running; fi"
-                    ),
-                    cwd=state.workdir,
-                    timeout_s=30,
-                )
-                state_name = (status.stdout or "").strip()
-                if state_name == "running" and state.runner_exit_task is not None and state.runner_exit_task.done():
-                    state_name = "exited"
-                if state_name == "request":
-                    # The runner relays the request body the OpenAI SDK built, so it is sent as is.
-                    model_request = await self._download_json(state.sandbox, request_path)
-                    try:
-                        model_response = await self.server_client.post(
-                            server_name=self.config.model_server.name,
-                            url_path=self.url_path_for_request("/v1/chat/completions", request),
-                            json=model_request,
-                            cookies=model_cookies,
-                        )
-                        await raise_for_status(model_response)
-                        model_cookies = model_response.cookies
-                        response_payload = await get_response_json(model_response)
-                        response_id = response_payload.get("id") if isinstance(response_payload, dict) else None
-                        if isinstance(response_id, str) and response_id:
-                            model_calls.append(
-                                ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
-                            )
-                        relay_payload = {"response": response_payload}
-                    except Exception as error:
-                        # Keep the Model Server's status and body so Hermes handles the error as it would over HTTP.
-                        content = getattr(error, "response_content", None)
-                        relay_payload = {
-                            "error": content.decode(errors="replace") if isinstance(content, bytes) else str(error)
-                        }
-                        if isinstance(getattr(error, "status", None), int):
-                            relay_payload["status"] = error.status
-                    await self._upload_json(
-                        state.sandbox,
-                        f"{state.session_dir}/model-response-{request_index}.json",
-                        relay_payload,
-                    )
-                    await state.sandbox.exec(
-                        f"rm -f {quote(request_path)}",
-                        cwd=state.workdir,
-                        timeout_s=30,
-                    )
-                    request_index += 1
-                    continue
-                if state_name == "output":
-                    output = await self._download_json(state.sandbox, output_path)
-                    if output.get("error") is not None:
-                        raise RuntimeError(
-                            f"Hermes sandbox runner failed: {output['error']}\n{output.get('traceback', '')}"
-                        )
-                    result = output.get("result")
-                    runtime = output.get("runtime")
-                    if not isinstance(result, dict) or not isinstance(runtime, dict):
-                        raise RuntimeError("Hermes sandbox runner returned an invalid output")
-                    response = self._response_from_result(
-                        body=body,
-                        result=result,
-                        model_name=self._model_name(),
-                        fail_on_error=True,
-                        n_input=len(history) + 1,
-                    )
-                    response.metadata = {
-                        **(response.metadata or {}),
-                        "harness_execution": "sandbox",
-                        "harness_hostname": str(runtime.get("hostname") or ""),
-                        "harness_pid": str(runtime.get("pid") or ""),
-                        "harness_python": str(runtime.get("python") or ""),
-                    }
-                    return AgentEpisode(
-                        response=response,
-                        observations=self._sandbox_observations(
-                            result,
-                            model_calls,
-                            output.get("observations"),
-                        ),
-                    )
-                if state_name == "exited":
-                    logs = await state.sandbox.exec(
-                        f"cat {quote(stderr_path)} 2>/dev/null || true",
-                        cwd=state.workdir,
-                        timeout_s=30,
-                    )
-                    raise RuntimeError(f"Hermes sandbox runner exited without output: {logs.stdout or ''}")
-                await asyncio.sleep(self.config.sandbox_runner_poll_seconds)
-        finally:
-            await self._terminate_sandbox_runner(state)
+            await state.sandbox.exec(
+                command,
+                cwd=state.workdir,
+                timeout_s=self.config.sandbox_runner_timeout_seconds,
+            )
+        except BaseException:
+            await self._stop_sandbox_runner(state)
+            raise
+        try:
+            output = await self._download_json(state.sandbox, output_path)
+        except Exception as error:
+            logs = await state.sandbox.exec(
+                f"cat {quote(stderr_path)} 2>/dev/null || true",
+                cwd=state.workdir,
+                timeout_s=30,
+            )
+            raise RuntimeError(f"Hermes sandbox runner exited without output: {logs.stdout or ''}") from error
+        if output.get("error") is not None:
+            raise RuntimeError(f"Hermes sandbox runner failed: {output['error']}\n{output.get('traceback', '')}")
+        result = output.get("result")
+        runtime = output.get("runtime")
+        if not isinstance(result, dict) or not isinstance(runtime, dict):
+            raise RuntimeError("Hermes sandbox runner returned an invalid output")
+        response = self._response_from_result(
+            body=body,
+            result=result,
+            model_name=self._model_name(),
+            fail_on_error=True,
+            n_input=len(history) + 1,
+        )
+        response.metadata = {
+            **(response.metadata or {}),
+            "harness_execution": "sandbox",
+            "harness_hostname": str(runtime.get("hostname") or ""),
+            "harness_pid": str(runtime.get("pid") or ""),
+            "harness_python": str(runtime.get("python") or ""),
+        }
+        return AgentEpisode(
+            response=response,
+            observations=self._sandbox_observations(result, output.get("observations")),
+        )
 
     def _response_from_result(
         self,
@@ -1022,7 +926,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             # Close cancels this task and waits for it, so it must not start a runner after close begins.
             state.activation = asyncio.create_task(
                 self._run_sandbox_episode(
-                    request=request,
                     body=body,
                     agent_session_id=agent_session_id,
                     state=state,
