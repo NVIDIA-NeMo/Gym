@@ -23,6 +23,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
@@ -50,16 +51,13 @@ PROOF_ONLY_STATEMENT = "import Mathlib\n\ntheorem t (p : Prop) (hp : p) : p := b
 class FakeLeanClient:
     """Scripted Lean server: records what it was asked to compile."""
 
-    def __init__(self, result: Optional[LeanResult] = None, raise_exc: bool = False, version: str = "4.24.0"):
+    def __init__(self, result: Optional[LeanResult] = None, version: str = "4.24.0"):
         self.result = result or LeanResult()
-        self.raise_exc = raise_exc
         self.version = version
         self.calls: list[str] = []
 
     async def verify(self, code: str, timeout_seconds: int) -> LeanResult:
         self.calls.append(code)
-        if self.raise_exc:
-            raise RuntimeError("client must not raise")
         return self.result
 
     async def toolchain_version(self) -> Optional[str]:
@@ -204,6 +202,8 @@ class TestVerify:
         assert result.status == CombibenchStatus.TIMEOUT.value
         assert result.harness_failure == 0.0
         assert result.failure_reason is None
+        assert result.mask_sample is False
+        assert result.failure_kind is None
 
     async def test_header_timeout_is_a_harness_fault(self) -> None:
         """A cold REPL failing to load ``import Mathlib`` is not something the model did."""
@@ -213,6 +213,9 @@ class TestVerify:
         assert result.status == CombibenchStatus.HEADER_TIMEOUT.value
         assert result.harness_failure == 1.0
         assert "import header" in result.failure_reason
+        # Masked: averaging a cold REPL into the score would read as a model failure.
+        assert result.mask_sample is True
+        assert result.failure_kind == PROVIDER_UNAVAILABLE
 
     async def test_lean_version_is_echoed(self) -> None:
         result = await _make_server(FakeLeanClient(version="4.24.0")).verify(_request(_fenced(SOLUTION)))
@@ -225,6 +228,9 @@ class TestVerify:
         assert result.status == CombibenchStatus.LEAN_SERVER_ERROR.value
         assert result.harness_failure == 1.0
         assert "refused" in result.failure_reason
+        # An outage is the infrastructure failing, not the model: it must not be averaged in.
+        assert result.mask_sample is True
+        assert result.failure_kind == PROVIDER_UNAVAILABLE
 
     async def test_malformed_task_is_a_status_not_an_exception(self) -> None:
         client = FakeLeanClient()
@@ -233,6 +239,9 @@ class TestVerify:
         )
         assert result.status == CombibenchStatus.BAD_TASK.value
         assert result.harness_failure == 1.0
+        # Namespaced: the shared vocabulary has no name for an unscorable task row.
+        assert result.mask_sample is True
+        assert result.failure_kind == "combibench:bad_task"
         assert client.calls == []
 
     async def test_wrongly_typed_answers_are_a_bad_task(self) -> None:
@@ -310,12 +319,27 @@ class TestMetrics:
         assert response["dataset_revision"] == "c67e4213597b1477351d9ef5ca37fb622084cc78"  # pragma: allowlist secret
 
     def test_pooled_reward_stays_the_headline(self) -> None:
-        """Upstream reports one pooled figure, so pooling is the right headline here."""
+        """Upstream reports one pooled figure, so pooling is the right headline here.
+
+        The harness fault is masked, so it is not one of the two measured rollouts.
+        """
         key_metrics = self._aggregate().key_metrics
-        assert key_metrics["mean/reward"] == pytest.approx(1 / 3)
+        assert key_metrics["mean/reward"] == pytest.approx(1 / 2)
+
+    def test_pooled_pass_at_k_is_reported(self) -> None:
+        """The tables report pass@k pooled over all 100 problems, so it has to be emitted."""
+        agent_metrics = self._aggregate().agent_metrics
+        # compute_subset_metrics reports percentages, and so does compute_pass_majority_metrics.
+        assert agent_metrics["pass@1/accuracy"] == pytest.approx(50.0)
+        assert agent_metrics["pass@1[avg-of-1]/accuracy"] == pytest.approx(50.0)
 
     def test_harness_failure_rate_is_a_metric_line(self) -> None:
-        assert self._aggregate().key_metrics["mean/harness_failure"] == pytest.approx(1 / 3)
+        """The rate is carried per response, and the masked rollout is reported as coverage."""
+        responses = self._responses()
+        assert [r["harness_failure"] for r in responses] == [0.0, 0.0, 1.0]
+        assert [r["mask_sample"] for r in responses] == [False, False, True]
+        coverage = self._aggregate().key_metrics
+        assert coverage["coverage/masked_rollouts"] == 1
 
     def test_per_family_rates_are_supplementary(self) -> None:
         aggregate = self._aggregate()

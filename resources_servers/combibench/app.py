@@ -30,7 +30,8 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_subset_metrics
+from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE
+from nemo_gym.reward_profile import compute_pass_majority_metrics, compute_subset_metrics
 from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.combibench.fine_eval import (
     LeanResult,
@@ -97,6 +98,16 @@ HARNESS_FAULTS = {
     CombibenchStatus.LEAN_SERVER_ERROR,
     CombibenchStatus.HEADER_TIMEOUT,
     CombibenchStatus.BAD_TASK,
+}
+
+# The shared vocabulary in ``nemo_gym.failure_kinds`` has no name for "the task row itself
+# is malformed", so that one is namespaced rather than borrowed from a name that means
+# something else. The two Lean-server faults are both "the provider we depend on did not
+# answer", which is exactly ``provider_unavailable``.
+FAILURE_KINDS: dict[CombibenchStatus, str] = {
+    CombibenchStatus.LEAN_SERVER_ERROR: PROVIDER_UNAVAILABLE,
+    CombibenchStatus.HEADER_TIMEOUT: PROVIDER_UNAVAILABLE,
+    CombibenchStatus.BAD_TASK: "combibench:bad_task",
 }
 
 
@@ -275,9 +286,15 @@ class CombibenchVerifier:
         failure_reason: Optional[str] = None,
         lean_version: Optional[str] = None,
     ) -> CombibenchVerifyResponse:
+        harness_fault = status in HARNESS_FAULTS
         extra = {
             "status": status.value,
-            "harness_failure": 1.0 if status in HARNESS_FAULTS else 0.0,
+            "harness_failure": 1.0 if harness_fault else 0.0,
+            # The model did not fail here, the harness did, so the 0.0 reward is not a
+            # measurement of the model: masking keeps a Lean-server outage or an unscorable
+            # row out of mean/reward and pass@k instead of averaging it in as a failure.
+            "mask_sample": harness_fault,
+            "failure_kind": FAILURE_KINDS.get(status),
             "answer_tags": tags or [],
             "lean_code": code,
             "lean_error": result.error if result else None,
@@ -308,14 +325,19 @@ class CombibenchResourcesServer(SimpleResourcesServer):
         return await self._verifier.verify(body)
 
     def compute_metrics(self, tasks: list[list[dict]]) -> dict:
-        """Add per-source-family pass rates next to the pooled headline.
+        """Pooled pass@k, plus per-source-family pass rates next to it.
 
-        Upstream reports one pooled figure ("solved out of 100"), so the
+        Upstream reports one pooled figure ("solved out of 100"), so the pooled
+        ``pass@k`` keys are what a reported number is read off, and the
         inherited ``mean/reward`` headline is kept. The ``hackmath/``,
         ``brualdi/``, ``imo/`` and ``math_competitions/`` keys are supplementary
         and are not promoted to ``key_metrics``.
         """
-        return compute_subset_metrics(tasks, "tag")
+        if not tasks:
+            return {}
+        metrics = compute_pass_majority_metrics(tasks)[0]
+        metrics.update(compute_subset_metrics(tasks, "tag"))
+        return metrics
 
 
 class _StubLeanClient:

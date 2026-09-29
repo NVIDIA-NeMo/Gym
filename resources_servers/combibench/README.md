@@ -105,16 +105,25 @@ Fine-Eval distinguishes outcomes a whole-file benchmark has no equivalent for.
    `is_error` fails the submission on it too.
 
 `harness_failure` is 1.0 for the three outcomes the model cannot cause, and
-`failure_reason` is set only then:
+`failure_reason` is set only then. All three also set `mask_sample: true`, so
+the 0.0 reward is excluded from `mean/reward` and pass@k rather than averaged in
+as a model failure — a Lean-server outage would otherwise lower the score of
+whatever was being evaluated. The masked rollouts stay in the rollout file and
+are reported under `coverage/`:
 
-| Status | Cause |
-| --- | --- |
-| `sandbox_error` | the Lean server is unreachable or replied malformed |
-| `header_timeout` | a cold REPL could not finish `import Mathlib` inside the timeout — Kimina reports this as `Lean REPL header command timed out`, distinct from the submission timing out |
-| `bad_task` | the row cannot be scored (no `formal_statement`, malformed `answers`) |
+| Status | `failure_kind` | Cause |
+| --- | --- | --- |
+| `sandbox_error` | `provider_unavailable` | the Lean server is unreachable or replied malformed |
+| `header_timeout` | `provider_unavailable` | a cold REPL could not finish `import Mathlib` inside the timeout — Kimina reports this as `Lean REPL header command timed out`, distinct from the submission timing out |
+| `bad_task` | `combibench:bad_task` | the row cannot be scored (no `formal_statement`, malformed `answers`) |
 
-A submission `timeout` is charged to the model: a proof that does not terminate
-is the model's output, and excusing it would make hanging reward-neutral.
+`bad_task` is namespaced because `nemo_gym/failure_kinds.py` has no shared name
+for a malformed task row; the two Lean-server faults are the registered
+`provider_unavailable`.
+
+A submission `timeout` is charged to the model and left unmasked: a proof that
+does not terminate is the model's output, and excusing it would make hanging
+reward-neutral.
 
 Every response carries `lean_version`, the Lean version the server reports for
 `#eval Lean.versionString`. It is probed once per process, before the first
@@ -122,10 +131,11 @@ compile (which also warms the REPL). A server built for another toolchain
 otherwise scores every row `compile_error` with nothing in the rollouts saying
 why.
 
-`compute_metrics` adds `hackmath/`, `brualdi/`, `imo/` and
+`compute_metrics` emits the pooled `pass@k` / `pass@1[avg-of-k]` keys — the
+figures the tables below report — and adds `hackmath/`, `brualdi/`, `imo/` and
 `math_competitions/` pass rates keyed on `tag`. Upstream reports one pooled
-figure, so the inherited `mean/reward` stays the headline and the per-family
-keys are supplementary.
+figure, so the pooled keys and the inherited `mean/reward` are the headline and
+the per-family keys are supplementary; they are not promoted to `key_metrics`.
 
 ### Two deliberate departures from upstream
 
