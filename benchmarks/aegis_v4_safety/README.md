@@ -14,9 +14,7 @@ that already contain model responses.
 The built-in smoke benchmark allows up to 131,072 output tokens per target-model
 request so reasoning-capable models have room for reasoning and a final answer.
 This is a ceiling, not a required generation length. The resources server's
-separate five-row example dataset and its committed example rollouts still use
-a 1,024-token smoke limit; changing this benchmark does not change those inputs
-or make their recorded rollouts stale.
+separate five-row example dataset uses the same 131,072-token ceiling.
 
 ## Internal reference target
 
