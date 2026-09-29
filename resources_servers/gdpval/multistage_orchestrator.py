@@ -412,6 +412,7 @@ async def run_multistage_stages(
                 all_results,
                 stage_summaries,
                 _emit,
+                rows_by_task=rows_by_task,
             )
             continue
 
@@ -557,6 +558,8 @@ def _resume_complete_stage(
     all_results: List[Dict[str, Any]],
     stage_summaries: List[Dict[str, Any]],
     emit: Callable[..., None],
+    *,
+    rows_by_task: Mapping[str, List[Dict[str, Any]]],
 ) -> Optional[float]:
     """Reuse a completed stage's cached rows without dispatch; return threaded ELO.
 
@@ -565,9 +568,9 @@ def _resume_complete_stage(
     threaded to later stages is always consistent with the persisted rows.
     """
     cached_rows = list(resume.rows_by_stage.get(index, []))
-    plan = resume.plans.get(index, {})
+    plan = resume.plans[index]
     reference_ids = list(plan.get("reference_ids", []))
-    task_ids = list(plan.get("task_ids", []))
+    task_ids = list(plan["task_ids"])
 
     for row in cached_rows:
         tid = row_task_id(row)
@@ -591,7 +594,8 @@ def _resume_complete_stage(
         {
             "stage_index": index,
             "num_tasks": len(task_ids),
-            "num_rollouts": len(cached_rows),
+            # Cached results can be incomplete even when the stage was marked complete.
+            "num_rollouts": sum(len(rows_by_task[task_id]) for task_id in task_ids),
             "num_reused": 0,
             "reference_ids": reference_ids,
             "eval_elo": stage_elo,
@@ -893,6 +897,9 @@ async def run_e2e_multistage(
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}
 Stages: {orjson.dumps(stage_summaries, option=orjson.OPT_INDENT_2).decode()}"""
+    )
+    rollout_collection_config.check_completion(
+        expected=sum(stage["num_rollouts"] for stage in stage_summaries), results=all_results
     )
     return aggregate_metrics_fpath
 
