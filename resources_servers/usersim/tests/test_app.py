@@ -21,6 +21,8 @@ from resources_servers.usersim.app import (
 )
 
 
+_ORIGINAL_EVALUATE_ASSISTANT_QUALITY = UserSimResourcesServer._evaluate_assistant_quality
+
 PERSONAS = [
     {
         "first_name": "Morgan",
@@ -85,6 +87,7 @@ def _app(
     cache_dir: Path,
     *,
     educational_only: bool = False,
+    with_probe_scorer_model: bool = False,
 ) -> FastAPI:
     config = UserSimResourcesServerConfig(
         host="127.0.0.1",
@@ -92,6 +95,9 @@ def _app(
         entrypoint="app.py",
         name="usersim",
         personas_cache_dir=cache_dir,
+        probe_scorer_model=(
+            {"type": "responses_api_models", "name": "support_model"} if with_probe_scorer_model else None
+        ),
         probe_mix=(
             {"general_open_ended": 0.0, "general_educational": 1.0}
             if educational_only
@@ -339,23 +345,26 @@ def test_verify_uses_usersim_assistant_quality_as_reward(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def evaluate_quality(*_args, **_kwargs):
-        scores = {"helpfulness": 1.0, "accuracy": 0.8, "coherence": 0.6, "safety": 1.0}
-        return (
-            {
-                "envelope": {"axes": list(scores)},
-                "axes": {"helpfulness": {"judge_model": {"score": 5, "reasoning": "Helpful."}}},
-                "scorers": {},
-                "skipped": False,
-                "skipped_reason": None,
-            },
-            scores,
-            0.8,
-        )
+    evaluator = pytest.importorskip("usersim.engine.evaluator.runtime")
 
-    monkeypatch.setattr(UserSimResourcesServer, "_evaluate_assistant_quality", evaluate_quality)
+    async def evaluate_quality(*_args, **_kwargs):
+        return {
+            "envelope": {"axes": ["helpfulness", "accuracy", "coherence", "safety"]},
+            "axes": {
+                "helpfulness": {"judge_model": {"score": 5, "reasoning": "Helpful."}},
+                "accuracy": {"judge_model": {"score": 4, "reasoning": "Accurate."}},
+                "coherence": {"judge_model": {"score": 3, "reasoning": "Coherent."}},
+                "safety": {"judge_model": {"score": 5, "reasoning": "Safe."}},
+            },
+            "scorers": {},
+            "skipped": False,
+            "skipped_reason": None,
+        }
+
+    monkeypatch.setattr(UserSimResourcesServer, "_evaluate_assistant_quality", _ORIGINAL_EVALUATE_ASSISTANT_QUALITY)
+    monkeypatch.setattr(evaluator.TrajectoryEvaluatorRuntime, "evaluate", evaluate_quality)
     _write_personas(tmp_path)
-    with TestClient(_app(tmp_path)) as client:
+    with TestClient(_app(tmp_path, with_probe_scorer_model=True)) as client:
         seed = client.post("/seed_session", json=_seed_body(seed=7)).json()
         verified = client.post("/verify", json=_verify_body(seed)).json()
 
