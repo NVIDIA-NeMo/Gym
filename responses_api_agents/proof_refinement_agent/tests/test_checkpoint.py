@@ -29,7 +29,6 @@ from nemo_gym._checkpoint import (
     AGENT_COMPLETION_RECEIPT_HEADER,
     AGENT_EXECUTION_GENERATION_HEADER,
     RESOURCE_REQUEST_ID_HEADER,
-    RESOURCE_STATE_REVISION_HEADER,
     AgentBoundaryKind,
     commit_agent_state,
     decode_agent_completion_receipt,
@@ -82,6 +81,13 @@ def _model_response(turn):
         "parallel_tool_calls": False,
         "tool_choice": "auto",
         "tools": [],
+        "usage": {
+            "input_tokens": 10,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": turn + 1,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 11 + turn,
+        },
     }
 
 
@@ -147,7 +153,7 @@ class _Run:
         )
         self.calls.append(call)
         if url_path == "/seed_session":
-            return _response({}, cookies={"session": "seeded"}, headers={RESOURCE_STATE_REVISION_HEADER: "1"})
+            return _response({}, cookies={"session": "seeded"})
         if server_name == "proof-agent":
             text = json["input"][0]["content"]
             turn = int(text.rsplit("-", 1)[1])
@@ -179,7 +185,6 @@ class _Run:
                 "correction_prompt": f"prompt-{turn + 1}" if self.correction and not success else None,
             },
             cookies={"verified": f"turn-{turn}"},
-            headers={RESOURCE_STATE_REVISION_HEADER: str(turn + 2)},
         )
 
     async def run(self, attempt=0):
@@ -304,11 +309,11 @@ async def test_disk_restore_matches_uninterrupted_proof(tmp_path, stop, index, t
     boundary = await original.save(tmp_path)
     assert (boundary.boundary_index, boundary.turn_index, boundary.boundary_kind) == (index, turn, kind)
     assert boundary.agent_state["cookies"]["session"] == "seeded"
-    assert boundary.resource_state_revisions == {"lean": (4 if index == 6 else turn + 1)}
+    assert boundary.resource_state_revisions == {"lean": 0}
     assert len(boundary.agent_state["all_attempts"]) == (3 if index == 6 else turn)
     if kind == AgentBoundaryKind.PENDING_MODEL:
         assert boundary.pending_model.response == _model_response(0)
-        assert boundary.pending_model.model_server_cookies["model"] == "turn-0"
+        assert boundary.agent_state["cookies"]["model"] == "turn-0"
         pending_verify = next(call for call in original.calls if call["path"] == "/verify")
         assert boundary.pending_model.resource_request_id == pending_verify["headers"][RESOURCE_REQUEST_ID_HEADER]
 

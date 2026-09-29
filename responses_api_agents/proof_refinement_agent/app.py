@@ -36,7 +36,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym._checkpoint import (
     RESOURCE_REQUEST_ID_HEADER,
-    RESOURCE_STATE_REVISION_HEADER,
     AgentBoundaryKind,
     AgentBoundaryRecord,
     PendingModelPayload,
@@ -75,13 +74,6 @@ def _cookie_values(cookies: Any) -> dict[str, str]:
     return {
         name: str(getattr(value, "value", value)) for name, value in (cookies.items() if cookies is not None else ())
     }
-
-
-def _resource_revision(response: Any, previous: int) -> int:
-    headers = getattr(response, "headers", None)
-    if isinstance(headers, Mapping) and RESOURCE_STATE_REVISION_HEADER in headers:
-        return int(headers[RESOURCE_STATE_REVISION_HEADER])
-    return previous
 
 
 class _ProofContinuation(BaseModel):
@@ -211,11 +203,6 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
         pending_model = continuation.pending_model if continuation is not None else None
         model_call_id = continuation.last_committed_model_call_id if continuation is not None else None
         model_capture_key = continuation.last_committed_model_capture_key if continuation is not None else None
-        resource_revision = (
-            continuation.resource_state_revisions.get(self.config.resources_server.name, 0)
-            if continuation is not None
-            else 0
-        )
 
         async def commit_boundary() -> None:
             if execution is None:
@@ -236,7 +223,8 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
                     output_items=[],
                     last_committed_model_capture_key=model_capture_key,
                     last_committed_model_call_id=model_call_id,
-                    resource_state_revisions={self.config.resources_server.name: resource_revision},
+                    # Keep the dependency visible to the controller; Lean has no mutable resource state.
+                    resource_state_revisions={self.config.resources_server.name: 0},
                     agent_state=state.model_dump(mode="json"),
                 ),
             )
@@ -255,7 +243,6 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
             )
             await raise_for_status(seed_response)
             state.cookies.update(_cookie_values(seed_response.cookies))
-            resource_revision = _resource_revision(seed_response, resource_revision)
             await commit_boundary()
         # The shared participant already installs a restored boundary for this
         # attempt, including before its first model or verification wait.
@@ -318,8 +305,6 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
                     pending_model = PendingModelPayload(
                         model_call_id=model_call_id,
                         response=model_response_json,
-                        model_server_cookies=dict(state.cookies),
-                        usage=model_response_json.get("usage"),
                         pending_action_cursor=0,
                         resource_request_id=verify_request_id,
                     )
@@ -331,7 +316,7 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
             verify_request_data["response"] = model_response_json
             verify_request_data["turn_index"] = turn_index
 
-            async def verify() -> tuple[dict[str, Any], dict[str, str], int]:
+            async def verify() -> tuple[dict[str, Any], dict[str, str]]:
                 verify_response = await self.retry_checkpoint_refusal(
                     lambda: self.server_client.post(
                         server_name=self.config.resources_server.name,
@@ -350,7 +335,6 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
                 return (
                     await get_response_json(verify_response),
                     _cookie_values(verify_response.cookies),
-                    _resource_revision(verify_response, resource_revision),
                 )
 
             verification = (
@@ -358,7 +342,7 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
                 if self.config.checkpoint_replayable_verify
                 else await verify()
             )
-            verify_result, verify_cookies, resource_revision = verification
+            verify_result, verify_cookies = verification
             state.cookies.update(verify_cookies)
 
             # Record this attempt with full details
