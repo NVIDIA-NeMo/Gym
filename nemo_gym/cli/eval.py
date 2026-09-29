@@ -258,7 +258,7 @@ def prepare_benchmark() -> None:
         dataset = datasets[0]
 
         try:
-            agent_name = resolve_dataset_agent(global_config_dict, str(server_instance_name), pin=dataset.agent)
+            agent_name = resolve_dataset_agent(global_config_dict, str(server_instance_name))
         except ConfigError as e:
             raise ConfigError(f"Benchmark dataset {dataset.name!r}: {e}") from e
 
