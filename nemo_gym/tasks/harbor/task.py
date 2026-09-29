@@ -4,6 +4,7 @@
 """Load one task folder, or a folder of task folders, from disk."""
 
 import logging
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,24 @@ def is_task_folder(path: Path) -> bool:
     return (Path(path) / TASK_FILE).is_file()
 
 
+_CANARY_LINE = re.compile(r"^(<!--.*canary.*-->|#.*canary.*)$", re.IGNORECASE)
+
+
+def read_instruction(path: Path) -> str:
+    """``instruction.md`` as the agent sees it: leading canary marker lines and blank lines dropped.
+
+    Harbor tasks open with an HTML comment or heading carrying a canary GUID for contamination
+    tracking. It is not part of the task, so it is removed the way Gym's Terminal Bench servers
+    always did; everything after it is kept byte for byte.
+    """
+    lines = path.read_text().split("\n")
+    while lines and _CANARY_LINE.match(lines[0].strip()):
+        lines.pop(0)
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return "\n".join(lines)
+
+
 def load_task(path: Path) -> HarborTask:
     """Read ``path`` as one task. Raises :class:`HarborTaskError` when it is not one."""
     path = Path(path).resolve()
@@ -84,7 +103,7 @@ def load_task(path: Path) -> HarborTask:
     if not (path / "tests").is_dir():
         raise HarborTaskError(f"{path} has no tests/ folder")
     try:
-        instruction = instruction_path.read_text().strip()
+        instruction = read_instruction(instruction_path)
     except UnicodeDecodeError as exc:
         raise HarborTaskError(f"{instruction_path}: {exc}") from exc
 

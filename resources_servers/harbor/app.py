@@ -128,6 +128,8 @@ class HarborResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_resources_override: dict[str, Any] | None = None
     # Export CPU-count env vars (OMP_NUM_THREADS and friends) matching the sandbox CPU limit.
     derive_cpu_env: bool = True
+    # Environment for one task's sandbox only, keyed by task id; a task's own `[environment.env]` wins.
+    sandbox_env_by_task: dict[str, dict[str, str]] = Field(default_factory=dict)
     # Operator environment for every sandbox; a task's own `[environment.env]` wins.
     sandbox_env: dict[str, str] = Field(default_factory=dict)
     # Shell commands run as root in every new sandbox before the agent sees it, for repairs the
@@ -374,7 +376,11 @@ class HarborResourcesServer(SimpleResourcesServer):
         resources = _sandbox_resources(environment, request_gpu_type=self.config.request_gpu_type) | (
             self.config.sandbox_resources_override or {}
         )
-        env = dict(self.config.sandbox_env) | dict(task_env)
+        env = (
+            dict(self.config.sandbox_env)
+            | self.config.sandbox_env_by_task.get(task.task_id, {})
+            | dict(task_env)
+        )
         if self.config.derive_cpu_env:
             env = cpu_cap_env(resources.get("cpu")) | env
         return SandboxSpec(
@@ -519,7 +525,11 @@ class HarborResourcesServer(SimpleResourcesServer):
             if result.return_code != 0 or not (result.stdout or "").strip():
                 raise RuntimeError(f"Could not resolve the image working directory: {result.stderr or result.stdout}")
             workdir = (result.stdout or "").strip().splitlines()[-1]
-        commands = [f"mkdir -p {shlex.quote(workdir)}"]
+        # Harbor mounts /logs into the agent's container; tasks may write to /logs/artifacts during the episode.
+        commands = [
+            f"mkdir -p {shlex.quote(workdir)} {AGENT_LOGS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR}",
+            f"chmod 777 {AGENT_LOGS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR}",
+        ]
         if task.user:
             commands.append(f"chown {shlex.quote(task.user)} {shlex.quote(workdir)}")
         result = await _exec_as_root_user(sandbox, " && ".join(commands), configured_user=task.user)
