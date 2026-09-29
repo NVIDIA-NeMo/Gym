@@ -1,0 +1,15 @@
+# Per-replica shard of the 50% split for the low-concurrency recipe.
+# swe full shard 0 of 2
+# 124 tasks x 3 repeats = 372 rollouts on this replica.
+config_paths:
+- benchmarks/swebench/verified/opencode.yaml
+
+swebench_verified_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets:
+        - name: swe_split50_r0
+          type: benchmark
+          jsonl_fpath: benchmarks/nemotron_3.5_super/split50/data/shards/swe_r0.jsonl
+          prepare_script: benchmarks/swebench/verified/prepare.py
+          num_repeats: 3

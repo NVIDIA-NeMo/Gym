@@ -1,0 +1,18 @@
+# Terminal Bench 2.1 on the stratified 50% split (45 of 89 tasks).
+# Identical to benchmarks/terminal_bench_2_1/terminus_2.yaml except for the dataset file:
+# same agent, same resources server, same num_repeats.
+config_paths:
+- benchmarks/terminal_bench_2_1/terminus_2.yaml
+
+terminal_bench_2_1_terminus_2_sandboxed_agent:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      datasets:
+        # prepare_script is required by the config schema but never runs here: the launcher
+        # passes +use_cached_prepared_benchmarks=true and jsonl_fpath already exists, so
+        # preparation is skipped. Were it to run it would assert on the full 89 tasks.
+        - name: terminal_bench_2_1_split50
+          type: benchmark
+          jsonl_fpath: benchmarks/nemotron_3.5_super/split50/data/full/terminal_bench_2_1_split50.jsonl
+          prepare_script: benchmarks/terminal_bench_2_1/prepare.py
+          num_repeats: 8

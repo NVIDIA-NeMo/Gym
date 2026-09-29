@@ -1,0 +1,15 @@
+# Per-replica shard of the 50% split for the low-concurrency recipe.
+# tb full shard 1 of 2
+# 23 tasks x 8 repeats = 184 rollouts on this replica.
+config_paths:
+- benchmarks/terminal_bench_2_1/terminus_2.yaml
+
+terminal_bench_2_1_terminus_2_sandboxed_agent:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      datasets:
+        - name: tb_split50_r1
+          type: benchmark
+          jsonl_fpath: benchmarks/nemotron_3.5_super/split50/data/shards/tb_r1.jsonl
+          prepare_script: benchmarks/terminal_bench_2_1/prepare.py
+          num_repeats: 8
