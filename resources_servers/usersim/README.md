@@ -86,8 +86,10 @@ At `/seed_session`, the server:
    invocation.
 
 The Environment Server gives the scenario to NeMo UserSim's conversation
-generator, routes its User, Assistant, Judge, and Summary calls through Agent Servers, and submits the completed
-episode to `/verify`. It then closes the Resources session on every outcome.
+generator, routes User and Assistant calls through Agent Servers, routes Judge
+and Summary calls directly to the support Model Server, and submits the
+completed episode to `/verify`. It then closes the Resources session on every
+outcome.
 
 `UserSimEnvironmentServer` directly owns this protocol; there is no generic
 multi-agent engine. Its native `UserSimEpisodeResponse` contains exactly one
