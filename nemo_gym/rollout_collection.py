@@ -1781,8 +1781,8 @@ class RolloutCollectionHelper(BaseModel):
                         agent_sample_pct = 100 * agent_name_to_counts[agent_name] / agent_total_samples
                         avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
                         print_str += f"""Found {agent_name_to_counts[agent_name]} / {agent_total_samples} ({agent_sample_pct:.2f}%) rollouts for `{agent_name}`.
-        {json.dumps(avg_metrics, indent=4)}
-        """
+{json.dumps(avg_metrics, indent=4)}
+"""
                     # Use tqdm.write here so we can print properly with tqdm being used.
                     tqdm.write(print_str)
 
@@ -2261,6 +2261,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
         that ends every rollout still in flight. It defaults off because those rollouts then leave
         the score.
+
+        ``max_resident_tasks`` limits admitted tasks and therefore concurrent requests,
+        even when ``semaphore`` allows more. Admission starts when the first returned
+        awaitable is awaited. None schedules all examples up front, as with
+        ``asyncio.as_completed``. Stopping iteration early leaves up to
+        ``max_resident_tasks`` tasks running because this mapped iterator has no ``aclose()``.
 
         Every future resolves to exactly the ``(row, result)`` pair Gym's own `/run` endpoint
         returned — no Gym-private fields are ever added to ``result``.

@@ -1095,7 +1095,35 @@ class TestRolloutCollection:
         second.cancel()
         with pytest.raises(asyncio.CancelledError):
             await second
-        await completions.aclose()
+        await asyncio.wait_for(completions.aclose(), timeout=1)
+
+    async def test_bounded_aclose_with_concurrent_consumer_blocked_does_not_deadlock(self) -> None:
+        fail = asyncio.Event()
+
+        async def failing_rollout():
+            await fail.wait()
+            raise RuntimeError("rollout failed")
+
+        async def blocked_rollout():
+            await asyncio.Event().wait()
+
+        completions = nemo_gym.rollout_collection._BoundedCompletionIterator(
+            iter([failing_rollout(), blocked_rollout()]),
+            max_resident_tasks=2,
+            total=2,
+        )
+        first = asyncio.create_task(next(completions))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(next(completions))
+        await asyncio.sleep(0)
+
+        fail.set()
+        with pytest.raises(RuntimeError, match="rollout failed"):
+            await asyncio.wait_for(first, timeout=1)
+
+        await asyncio.wait_for(completions.aclose(), timeout=1)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(second, timeout=1)
 
     async def test_bounded_admission_aclose_cancels_only_resident_tasks(self, monkeypatch: pytest.MonkeyPatch) -> None:
         num_rows = 32
@@ -1142,7 +1170,7 @@ class TestRolloutCollection:
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first
-        await completions.aclose()
+        await asyncio.wait_for(completions.aclose(), timeout=1)
 
         assert len(started) == max_resident_tasks
         assert cancelled == started
@@ -2434,9 +2462,9 @@ class TestRolloutCollection:
         releaser = asyncio.create_task(release_after_window_is_resident())
         try:
             with pytest.raises(TypeError):
-                await Helper().run_from_config(config)
+                await asyncio.wait_for(Helper().run_from_config(config), timeout=5)
         finally:
-            await releaser
+            releaser.cancel()
 
         assert 0 in started
         assert len(started) <= window + 1
