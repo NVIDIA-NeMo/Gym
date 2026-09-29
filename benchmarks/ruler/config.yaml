@@ -44,3 +44,10 @@ policy_model:
       uses_reasoning_parser: false
       chat_template_kwargs:
         enable_thinking: false
+
+ruler_benchmark_environment_server:
+  _inherit_from: ruler_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: ruler_benchmark_simple_agent

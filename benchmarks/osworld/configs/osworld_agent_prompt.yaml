@@ -9,3 +9,11 @@ osworld_simple_agent:
       # The unqualified prompt_agent runner mirrors OSWorld PromptAgent's
       # defaults: screenshot_a11y_tree observations with computer_13 actions.
       runner_name: prompt_agent
+
+osworld_simple_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: osworld_simple_agent

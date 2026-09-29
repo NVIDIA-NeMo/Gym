@@ -36,3 +36,11 @@ image_tools_simple_agent:
       force_final_after_duplicate: true
       terminate_on_invalid_tool_call: true
       duplicate_iou_threshold: 0.5
+
+image_tools_simple_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: image_tools_simple_agent
