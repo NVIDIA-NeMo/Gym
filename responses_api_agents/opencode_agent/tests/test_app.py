@@ -33,6 +33,7 @@ from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ContextCompactionObservation,
     ToolCallObservation,
+    TrajectoryRecord,
 )
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.opencode_agent.app import (
@@ -291,6 +292,7 @@ class TestParseOpencodeSession:
         assert compaction.summary == "condensed context"
         assert compaction.first_kept_item_id == "p5"
         assert "compaction_model_call_boundary_unavailable" in {gap.code for gap in bundle.gaps}
+        assert "model_call_ownership_unavailable" not in {gap.code for gap in bundle.gaps}
 
     def test_reports_unaddressable_compaction_boundary(self, tmp_path) -> None:
         db = _session_db(
@@ -432,14 +434,22 @@ class TestRolloutObservability:
             NeMoGymEasyInputMessage(role="user", content="configured system\n\nrequest system\n\nsolve")
         ]
         assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
+        assert "model_call_ownership_unavailable" in {gap.code for gap in episode.observations.gaps}
 
     def test_run_attaches_artifact_observations_when_enabled(self, tmp_path: Path) -> None:
-        db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "done"}])])
+        db = _session_db(
+            tmp_path,
+            [("assistant", [{"type": "step-start"}, {"type": "text", "text": "done"}, {"type": "step-finish"}])],
+        )
         items, usage = parse_opencode_session(db)
-        observations = _parse_opencode_session(db, "1-2")
         agent = _make_agent()
         agent.server_client.global_config_dict = {"observability_enabled": True}
-        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", observations))
+
+        async def run_opencode(*args, trajectory, **kwargs):
+            observations = _parse_opencode_session(db, "1-2", trajectory)
+            return items, usage, "model", observations
+
+        agent._run_opencode = AsyncMock(side_effect=run_opencode)
 
         class Response:
             ok = True
@@ -475,6 +485,10 @@ class TestRolloutObservability:
         assert agent.server_client.post.await_args_list[1].kwargs["url_path"] == "/ng-rollout/1-2/v1/responses"
         verify_json = agent.server_client.post.await_args_list[2].kwargs["json"]
         assert "_ng_agent_observations" not in verify_json["response"]
+        assert "_ng_trajectory" not in verify_json["response"]
+        [turn] = TrajectoryRecord.model_validate(result.ng_trajectory).turns
+        assert (turn.task_id, turn.rollout_id, turn.answer[0]["content"][0]["text"]) == ("1", "1-2", "done")
+        assert not turn.model_calls
 
 
 class TestRepoDir:
@@ -492,12 +506,13 @@ class TestRepoDir:
         process.communicate = AsyncMock(return_value=(b"", b""))
         agent = _make_agent(repo_dir=str(repo_dir))
         scored = [NeMoGymResponseOutputMessage(id="scored", content=[])]
+        create_process = AsyncMock(return_value=process)
 
         with (
             patch.object(agent, "_workspace_root", return_value=workspace),
             patch(
                 "responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec",
-                AsyncMock(return_value=process),
+                create_process,
             ),
             patch(
                 "responses_api_agents.opencode_agent.app.parse_opencode_session",
@@ -509,12 +524,18 @@ class TestRepoDir:
             ),
         ):
             output, usage, _, observations = await agent._run_opencode(
-                "fix the issue", None, collect_observations=True
+                "fix the issue",
+                None,
+                collect_observations=True,
+                trajectory=(trajectory := TrajectoryRecord(task_id="task", rollout_id="rollout")),
             )
 
         assert output == scored
         assert usage == {"input_tokens": 1, "output_tokens": 2}
+        command = create_process.await_args.args
+        assert "--title" not in command
         assert "agent_artifact_unavailable" in {gap.code for gap in observations.gaps}
+        assert "turns_unavailable" in {gap.code for gap in trajectory.gaps}
         assert repo_dir.is_dir()
         assert not workspace.exists()
 

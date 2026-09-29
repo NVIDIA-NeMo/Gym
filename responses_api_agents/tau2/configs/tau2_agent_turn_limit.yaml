@@ -19,7 +19,7 @@ tau2_agent_turn_limit:
       # Each valid generated assistant message uses one agent step, whether it
       # contains text or one or more tool calls. Tau2's fixed initial greeting,
       # user messages, and environment tool results do not count. Leave this
-      # unset/null for unlimited steps and no reminders, as in tau2_agent.yaml.
+      # unset/null for unlimited steps and no reminders, as in tau2.yaml.
       max_agent_steps: 10
       # With a limit set, append "ENVIRONMENT REMINDER: You have N turns left to
       # complete the task." to every Nth non-tool user message sent to the agent.

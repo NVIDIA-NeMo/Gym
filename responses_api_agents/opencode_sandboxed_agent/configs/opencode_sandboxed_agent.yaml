@@ -5,7 +5,7 @@ opencode_sandboxed_agent:
       num_workers: 4
       resources_server:
         type: resources_servers
-        name: swebench_resources_server
+        name: ???
       model_server:
         type: responses_api_models
         name: policy_model
@@ -16,6 +16,8 @@ opencode_sandboxed_agent:
       opencode_version: 1.17.11
       # @bxyu-nvidia: This needs to be set appropriately for every model!
       opencode_max_context_window: 262144
+
+      opencode_model_call_timeout: 3600000  # In milliseconds e.g. 600000 is 10min. Leave null for no timeout. Default to 1hr
 
       remote_opencode_install_script_path: null
       remote_opencode_binary_path: null
@@ -147,6 +149,10 @@ opencode_sandboxed_agent:
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200
+        env:
+          # execd holds each finished command's response open for this long (default 1s);
+          # a short grace keeps every command and the readiness probe from paying that tail.
+          EXECD_API_GRACE_SHUTDOWN: "50ms"
         resources:
           cpu: 0.25
           memory_mib: 512

@@ -52,7 +52,11 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
         return None
 
     def field(key: str) -> Any:
-        return body.get(key) if isinstance(body, Mapping) else getattr(body, key, None)
+        if isinstance(body, Mapping):
+            return body.get(key)
+        if key == ROLLOUT_ID_KEY_NAME and hasattr(body, "capture_rollout_id"):
+            return body.capture_rollout_id
+        return getattr(body, key, None)
 
     explicit = field(ROLLOUT_ID_KEY_NAME)
     if explicit is not None:

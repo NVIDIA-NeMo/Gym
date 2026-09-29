@@ -24,6 +24,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping
@@ -111,6 +112,7 @@ class ApptainerExecConfig:
     """Settings for running commands inside an Apptainer sandbox."""
 
     default_timeout_s: float | None = 180
+    timeout_grace_s: float = 15
     fakeroot_for_root: bool = True
     default_binds: list[str] = field(default_factory=list)
     extra_exec_args: list[str] = field(default_factory=list)
@@ -119,6 +121,8 @@ class ApptainerExecConfig:
     def __post_init__(self) -> None:
         if self.default_timeout_s is not None and self.default_timeout_s <= 0:
             raise ValueError("exec.default_timeout_s must be > 0")
+        if self.timeout_grace_s < 0:
+            raise ValueError("exec.timeout_grace_s must be >= 0")
         if self.concurrency < 1:
             raise ValueError("exec.concurrency must be >= 1")
 
@@ -335,10 +339,18 @@ class ApptainerProvider:
                     timeout=timeout_s,
                 )
             except asyncio.TimeoutError as e:
+                # Graceful timeout: SIGTERM the process group first and give it a short grace period
+                # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
+                # handler), THEN SIGKILL if it hasn't exited.
                 with contextlib.suppress(ProcessLookupError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                with contextlib.suppress(asyncio.TimeoutError, Exception):
+                    await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
+                if proc.returncode is None:  # still alive after grace -> hard kill
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    with contextlib.suppress(Exception):
+                        await proc.wait()
                 raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
 
             return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
@@ -363,10 +375,18 @@ class ApptainerProvider:
             try:
                 await asyncio.wait_for(proc.wait(), timeout=timeout_s)
             except asyncio.TimeoutError as e:
+                # Graceful timeout: SIGTERM the process group first and give it a short grace period
+                # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
+                # handler), THEN SIGKILL if it hasn't exited.
                 with contextlib.suppress(ProcessLookupError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                with contextlib.suppress(asyncio.TimeoutError, Exception):
+                    await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
+                if proc.returncode is None:  # still alive after grace -> hard kill
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    with contextlib.suppress(Exception):
+                        await proc.wait()
                 raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
 
             out_f.seek(0)
@@ -536,6 +556,54 @@ class ApptainerProvider:
                 timeout_s=self._exec_config.default_timeout_s,
             )
         shutil.rmtree(inst.staging_dir, ignore_errors=True)
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Share a local instance with another Gym worker on the same host/UID.
+
+        This is a trusted control-plane descriptor, not a portable lease. The
+        receiving worker needs the same staging filesystem and Apptainer config.
+        Either handle can stop the instance; callers must coordinate ownership.
+        """
+        inst = handle.raw
+        return {
+            "provider": self.name,
+            "sandbox_id": inst.name,
+            "hostname": socket.gethostname(),
+            "uid": os.getuid(),
+            "staging_dir": str(inst.staging_dir),
+            "mount_point": inst.mount_point,
+            "image": inst.image,
+            "env": dict(inst.env),
+        }
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        if descriptor.get("provider") != self.name:
+            raise ValueError("Apptainer requires a full serialized descriptor, not a bare sandbox id")
+        if descriptor.get("hostname") != socket.gethostname() or descriptor.get("uid") != os.getuid():
+            raise ValueError("Apptainer reconnect requires the same host and UID as the creator")
+        name = descriptor["sandbox_id"]
+        staging = Path(descriptor["staging_dir"])
+        if not staging.is_absolute() or not staging.is_dir():
+            raise ValueError("Apptainer staging directory is unavailable")
+        mount_point = descriptor["mount_point"]
+        if not isinstance(mount_point, str) or not mount_point.startswith("/"):
+            raise ValueError("Invalid Apptainer mount point")
+        env = dict(descriptor.get("env", {}))
+        _serialize_env_file(env)  # Validate keys and values before accepting the descriptor.
+        handle = SandboxHandle(
+            sandbox_id=name,
+            provider_name=self.name,
+            raw=_ApptainerInstance(
+                name=name,
+                staging_dir=staging,
+                mount_point=mount_point,
+                image=descriptor["image"],
+                env=env,
+            ),
+        )
+        if await self.status(handle) != SandboxStatus.RUNNING:
+            raise RuntimeError(f"Apptainer instance {name} is not running")
+        return handle
 
     async def exec(
         self,

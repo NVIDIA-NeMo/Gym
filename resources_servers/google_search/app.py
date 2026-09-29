@@ -88,6 +88,7 @@ def _extract_last_assistant_text(body: GoogleSearchVerifyRequest) -> str:
 
 
 class GoogleSearchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: GoogleSearchResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

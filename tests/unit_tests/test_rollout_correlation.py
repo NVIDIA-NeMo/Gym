@@ -38,7 +38,9 @@ from nemo_gym.base_responses_api_model import (
     merge_model_call_capture_into_record,
 )
 from nemo_gym.config_types import BaseServerConfig
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    maybe_rollout_id_from_run_body,
+)
 from nemo_gym.server_utils import ServerClient, get_response_json
 
 
@@ -234,3 +236,14 @@ def test_rollout_id_does_not_serialize_run_body() -> None:
     )
 
     assert maybe_rollout_id_from_run_body(body) == "4-2"
+
+
+def test_explicit_rollout_alias_stays_request_scoped() -> None:
+    body = BaseRunRequest.model_validate(
+        {
+            "_ng_rollout_id": "rollout-explicit",
+            "responses_create_params": {"input": "solve"},
+        }
+    )
+    assert maybe_rollout_id_from_run_body(body) == "rollout-explicit"
+    assert "_ng_rollout_id" not in body.model_dump(by_alias=True)

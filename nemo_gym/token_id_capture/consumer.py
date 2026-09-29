@@ -99,13 +99,16 @@ def _assemble(
     *,
     verified_response: dict | None = None,
     explicit_terminal_call_id: str | None = None,
+    declared_response_id: str | None = None,
 ) -> dict:
     # Attribute the verified terminal before building.
     # ``verified_response`` is the scored response from the /run result.
     # Attribution anchors chain selection; its absence falls back to the
     # strict single-chain policy. It must never fail a build.
     try:
-        attribution = resolve_terminal(entries, verified_response, explicit_terminal_call_id)
+        attribution = resolve_terminal(
+            entries, verified_response, explicit_terminal_call_id, declared_response_id=declared_response_id
+        )
     except Exception:
         logger.warning("Terminal attribution failed for rollout %s.", rollout_id, exc_info=True)
         attribution = TerminalAttribution(None, reason="attribution_error")
@@ -252,8 +255,12 @@ async def trajectories_from_source(
     model: str = "",
     verified_response: dict | None = None,
     explicit_terminal_call_id: str | None = None,
+    declared_response_id: str | None = None,
 ) -> dict | None:
     """Build trajectories from a frozen ``TokenSource`` snapshot.
+
+    ``declared_response_id`` is the served response id the harness reports;
+    a declared id that matches no entry masks the rollout.
 
     Missing records are unsafe and return a masked result.
     An incomplete snapshot is unsafe and returns a masked result.
@@ -275,6 +282,7 @@ async def trajectories_from_source(
                 model,
                 verified_response=verified_response,
                 explicit_terminal_call_id=explicit_terminal_call_id,
+                declared_response_id=declared_response_id,
             )
         )
     if snapshot.incomplete:

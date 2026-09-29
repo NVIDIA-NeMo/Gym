@@ -127,6 +127,7 @@ def extract_code_strict(completion: str, language: str = "python") -> str:
 # Server
 # ----------------------------
 class EvalPlusResourcesServer(SimpleResourcesServer):
+    ray_enabled = True
     config: EvalPlusResourcesServerConfig
 
     def model_post_init(self, context):

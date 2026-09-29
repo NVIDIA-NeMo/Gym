@@ -54,6 +54,7 @@ def _completion(
     content=None,
     tool_calls=None,
     reasoning=None,
+    refusal=None,
     finish_reason="stop",
     usage=None,
     choices=None,
@@ -62,6 +63,8 @@ def _completion(
         message = {"role": "assistant", "content": content}
         if reasoning:
             message["reasoning_content"] = reasoning
+        if refusal is not None:
+            message["refusal"] = refusal
         if tool_calls:
             message["tool_calls"] = tool_calls
         choices = [{"index": 0, "finish_reason": finish_reason, "message": message}]
@@ -174,6 +177,33 @@ class TestSynthesizeChatSSE:
         assert rebuilt["choices"][0]["message"]["reasoning_content"] == "let me think"
         assert rebuilt["choices"][0]["message"]["content"] == "answer"
 
+    @pytest.mark.parametrize("content", [None, "Additional information."])
+    def test_refusal_delta_roundtrips(self, content) -> None:
+        refusal = "I cannot help with that."
+        completion = _completion(content=content, refusal=refusal).model_dump(mode="json")
+        text = "".join(synthesize_chat_completion_sse(completion))
+        events = _events(text)
+        assert any(event["choices"][0]["delta"] == {"refusal": refusal} for event in events)
+        assert events[-1]["choices"][0]["finish_reason"] == "stop"
+        assert text.endswith("data: [DONE]\n\n")
+        rebuilt = _reconstruct_chat_sse(_parse_sse_events(text.encode()))
+        assert rebuilt["choices"][0]["message"]["refusal"] == refusal
+        assert rebuilt["choices"][0]["message"]["content"] == content
+
+    def test_reconstructor_joins_refusal_fragments(self) -> None:
+        events = [
+            {"choices": [{"delta": {"role": "assistant"}}]},
+            {"choices": [{"delta": {"refusal": "I cannot "}}]},
+            {"choices": [{"delta": {"refusal": "help with that."}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ]
+        rebuilt = _reconstruct_chat_sse(events)
+        assert rebuilt["choices"][0]["message"] == {
+            "role": "assistant",
+            "content": None,
+            "refusal": "I cannot help with that.",
+        }
+
     def test_tool_calls_roundtrip(self) -> None:
         completion = _completion(content=None, tool_calls=[_TOOL_CALL], finish_reason="tool_calls").model_dump(
             mode="json"
@@ -279,6 +309,33 @@ class TestChatDispatchRoute:
         resp = client.post("/v1/chat/completions", json={"model": "x"})  # missing required messages
         assert resp.status_code == 422
         assert resp.json()["detail"][0]["loc"][0] == "body"
+
+    def test_non_streaming_request_does_not_forward_outer_tool_call_name(self) -> None:
+        client, server = _client(_EchoChatModel)
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "name": "get_weather",
+                                "function": {"name": "get_weather", "arguments": "{}"},
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        assert resp.status_code == 200
+        forwarded = server.last_params.model_dump(exclude_unset=True)["messages"][0]["tool_calls"][0]
+        assert "name" not in forwarded
+        assert forwarded["function"]["name"] == "get_weather"
 
     def test_streaming_request_returns_synthesized_sse(self) -> None:
         client, server = _client(_EchoChatModel)

@@ -126,7 +126,12 @@ class AgentServerRef(BaseModel):
     name: str
 
 
-ServerRef = Union[ModelServerRef, ResourcesServerRef, AgentServerRef]
+class EnvironmentServerRef(BaseModel):
+    type: Literal["environment_servers"]
+    name: str
+
+
+ServerRef = ModelServerRef | ResourcesServerRef | AgentServerRef | EnvironmentServerRef
 ServerRefTypeAdapter = TypeAdapter(ServerRef)
 
 
@@ -186,6 +191,10 @@ class AgentCompositionError(ConfigError, ValueError):
 
 class UnsupportedAgentPairingError(ConfigError, ValueError):
     """The selected agent is not one the environment's resources server declares support for."""
+
+
+class UnsupportedModelPairingError(ConfigError, ValueError):
+    """The selected model server is not one the environment's resources server declares support for."""
 
 
 class UnsupportedAgentOverrideError(ConfigError, ValueError):
@@ -621,6 +630,7 @@ class BaseServerTypeConfig(BaseModel):
             Literal["responses_api_models"],
             Literal["resources_servers"],
             Literal["responses_api_agents"],
+            Literal["environment_servers"],
         ]
     ]
 
@@ -649,10 +659,19 @@ class ResponsesAPIAgentServerTypeConfig(BaseServerTypeConfig):
     responses_api_agents: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
 
 
+class EnvironmentServerTypeConfig(BaseServerTypeConfig):
+    SERVER_TYPE: ClassVar[Literal["environment_servers"]] = "environment_servers"
+
+    model_config = ConfigDict(extra="allow")
+
+    environment_servers: dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
+
+
 ServerTypeConfig = Union[
     ResponsesAPIModelServerTypeConfig,
     ResourcesServerTypeConfig,
     ResponsesAPIAgentServerTypeConfig,
+    EnvironmentServerTypeConfig,
 ]
 
 
@@ -700,10 +719,15 @@ class ResponsesAPIAgentServerInstanceConfig(ResponsesAPIAgentServerTypeConfig, B
     pass
 
 
+class EnvironmentServerInstanceConfig(EnvironmentServerTypeConfig, BaseServerInstanceConfig):
+    pass
+
+
 ServerInstanceConfig = Union[
     ResponsesAPIModelServerInstanceConfig,
     ResourcesServerInstanceConfig,
     ResponsesAPIAgentServerInstanceConfig,
+    EnvironmentServerInstanceConfig,
 ]
 ServerInstanceConfigTypeAdapter = TypeAdapter(ServerInstanceConfig)
 
@@ -735,7 +759,12 @@ def is_almost_server(server_type_config_dict: Any) -> bool:
         return False
 
     # Check for server type.
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    server_type_keys = [
+        "responses_api_models",
+        "resources_servers",
+        "responses_api_agents",
+        "environment_servers",
+    ]
     has_server_type = any(key in server_type_config_dict for key in server_type_keys)
 
     if not has_server_type:

@@ -37,6 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
@@ -434,6 +435,26 @@ def test_responses_to_chat_completion_assistant_invalid_content_raises(converter
             {"role": "assistant", "content": 42},
             ResponsesConverterState(return_token_id_information=False),
         )
+
+
+def test_responses_to_chat_completion_preserves_assistant_refusal(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymResponseOutputMessage(
+                    id="msg_refusal",
+                    role="assistant",
+                    status="completed",
+                    content=[NeMoGymResponseOutputRefusal(refusal="I cannot answer.")],
+                ),
+                NeMoGymEasyInputMessage(role="user", content="Why?"),
+            ]
+        )
+    )
+
+    assert params.messages[0]["role"] == "assistant"
+    assert params.messages[0]["content"] is None
+    assert params.messages[0]["refusal"] == "I cannot answer."
 
 
 def test_responses_to_chat_completion_function_call_and_output(converter: ResponsesConverter):
@@ -1133,6 +1154,30 @@ def test_postprocess_empty_output_emits_empty_message(converter: ResponsesConver
     assert output[0].content[0].text == ""
 
 
+def test_postprocess_refusal_preserves_provider_signal(converter: ResponsesConverter):
+    output = converter.postprocess_assistant_message_dict(
+        {"role": "assistant", "content": None, "refusal": "Policy refusal."}
+    )
+
+    assert len(output) == 1
+    assert isinstance(output[0], NeMoGymResponseOutputMessage)
+    assert output[0].content == [NeMoGymResponseOutputRefusal(refusal="Policy refusal.")]
+
+
+def test_postprocess_preserves_text_alongside_provider_refusal(converter: ResponsesConverter):
+    output = converter.postprocess_assistant_message_dict(
+        {"role": "assistant", "content": "Partial answer.", "refusal": "Policy refusal."}
+    )
+
+    assert len(output) == 1
+    assert isinstance(output[0], NeMoGymResponseOutputMessage)
+    assert [item.type for item in output[0].content] == ["output_text", "refusal"]
+    assert isinstance(output[0].content[0], NeMoGymResponseOutputText)
+    assert isinstance(output[0].content[1], NeMoGymResponseOutputRefusal)
+    assert output[0].content[0].text == "Partial answer."
+    assert output[0].content[1].refusal == "Policy refusal."
+
+
 def test_postprocess_tool_calls(converter: ResponsesConverter):
     output = converter.postprocess_assistant_message_dict(
         {
@@ -1311,6 +1356,42 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter, finis
     assert expected_response == actual_response
 
 
+@pytest.mark.parametrize(
+    ("chat_completion_id", "preserve_envelope_id", "expected_id"),
+    [
+        # Default path mints a Gym-owned resp_* id regardless of the backend's id.
+        ("chatcmpl-777", False, "resp_123"),
+        # Capture path reuses the served envelope id: it is the terminal-attribution join key.
+        ("chatcmpl-777", True, "chatcmpl-777"),
+        # A backend that omits its id still gets a minted one (the capture
+        # record site fails closed on the missing id independently).
+        ("", True, "resp_123"),
+    ],
+)
+def test_chat_completion_to_response_envelope_id(
+    converter: ResponsesConverter, chat_completion_id, preserve_envelope_id, expected_id
+):
+    response = converter.chat_completion_to_response(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(model="", input="hello"),
+        chat_completion=NeMoGymChatCompletion(
+            id=chat_completion_id,
+            created=0,
+            model="",
+            object="chat.completion",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="hi", tool_calls=[]),
+                )
+            ],
+        ),
+        preserve_envelope_id=preserve_envelope_id,
+    )
+
+    assert response.id == expected_id
+
+
 def test_chat_completion_to_response_preserves_unknown_usage_details(converter: ResponsesConverter):
     response = converter.chat_completion_to_response(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(model="", input="hello"),
@@ -1334,6 +1415,28 @@ def test_chat_completion_to_response_preserves_unknown_usage_details(converter: 
     assert response.usage.input_tokens_details.cached_tokens is None
     assert response.usage.output_tokens_details.reasoning_tokens is None
     assert _cache_signal(response.usage.model_dump()) == (None, None)
+
+
+def test_chat_completion_to_response_preserves_native_finish_reason(converter: ResponsesConverter):
+    response = converter.chat_completion_to_response(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(model="", input="hello"),
+        chat_completion=NeMoGymChatCompletion(
+            id="",
+            created=0,
+            model="",
+            object="chat.completion",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    native_finish_reason="refusal",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content=None),
+                )
+            ],
+        ),
+    )
+
+    assert response.native_finish_reason == "refusal"
 
 
 # ===========================================================================

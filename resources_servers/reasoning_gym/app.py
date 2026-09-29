@@ -44,6 +44,7 @@ class ReasoningGymVerifyResponse(BaseVerifyResponse):
 
 
 class ReasoningGymResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: ReasoningGymResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

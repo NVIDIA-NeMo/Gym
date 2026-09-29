@@ -53,6 +53,8 @@ _REDUNDANT_CAPTURE_KEY = "_redundant_capture"
 # A gate seal or an agent-declared terminal id uses this key.
 # It joins with the response-id and content witnesses for terminal attribution.
 TERMINAL_CALL_KEY = "_ng_terminal_model_call_id"
+# Served response id the harness reports for the completion it kept.
+TERMINAL_RESPONSE_ID_KEY = "terminal_response_id"
 
 
 def rollout_carries_token_ids(result: dict) -> bool:
@@ -150,6 +152,7 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
 
     response = result.get("response") if isinstance(result.get("response"), dict) else {}
     explicit_terminal = result.get(TERMINAL_CALL_KEY)
+    declared_terminal = result.get(TERMINAL_RESPONSE_ID_KEY)
     try:
         # The result's response is what the verifier scored.
         # Terminal attribution joins it to one captured call.
@@ -159,6 +162,7 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
             model=str(response.get("model") or ""),
             verified_response=response or None,
             explicit_terminal_call_id=str(explicit_terminal) if explicit_terminal else None,
+            declared_response_id=str(declared_terminal) if declared_terminal else None,
         )
     except Exception as error:
         # A transport failure may be unrelated to this rollout.

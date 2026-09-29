@@ -10,6 +10,11 @@ INPUT_CONTAINER=$INPUT_CONTAINER
 OUTPUT_CONTAINER=$OUTPUT_CONTAINER
 MOUNTS=$MOUNTS
 GYM_CONFIG=$GYM_CONFIG
+# Benchmark data preparation only applies to configs that declare a `benchmark` dataset.
+# Set to 1 for train-split configs (e.g. reward-profiling sweeps), where `gym eval prepare`
+# would abort with "No benchmark config found".
+SKIP_PREPARE=${SKIP_PREPARE:-0}
+VLLM_ROUTER_WHEEL=$VLLM_ROUTER_WHEEL
 NEMO_GYM_GIT_URL=${NEMO_GYM_GIT_URL:-https://github.com/NVIDIA-NeMo/Gym}
 NEMO_GYM_GIT_REF=${NEMO_GYM_GIT_REF:-main}
 TAU_2_MOUNT_BASE_GYM_DIR=${TAU_2_MOUNT_BASE_GYM_DIR:-""}
@@ -19,18 +24,32 @@ if [[ -n "$TAU_2_MOUNT_BASE_GYM_DIR" ]]; then
     MOUNTS="$MOUNTS,$TAU_2_MOUNT_BASE_GYM_DIR:$TAU_2_MOUNT_BASE_GYM_DIR"
 fi
 
+VLLM_ROUTER_WHEEL=$(readlink -f "$VLLM_ROUTER_WHEEL")
+MOUNTS="$MOUNTS,$(dirname "$VLLM_ROUTER_WHEEL"):$(dirname "$VLLM_ROUTER_WHEEL")"
+
+# pyxis --container-save exports the image when the step tears down, whatever the
+# inner script exited with, and it overwrites whatever already sits at the target.
+# So stage the build and publish only on success; otherwise a failed build silently
+# replaces a good container with a broken one.
+staged_container="$OUTPUT_CONTAINER.partial"
+rm -f "$staged_container"
+save_status=0
+
 srun --nodes=1 --ntasks=1 \
     --container-image=$INPUT_CONTAINER \
     --container-mounts=$MOUNTS \
     --no-container-mount-home \
-    --container-save=$OUTPUT_CONTAINER \
-    bash -s <<INNER_BUILD
+    --container-save="$staged_container" \
+    bash -s <<INNER_BUILD || save_status=$?
 set -xeuo pipefail
 
 # Hardlink, not clone to save space
 export UV_LINK_MODE=hardlink
 
-uv pip install --system vllm-router
+uv pip install --system --reinstall-package vllm-router "$VLLM_ROUTER_WHEEL"
+uv pip show --system vllm-router
+
+uv pip install --system fastokens==0.3.1
 
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -72,7 +91,11 @@ fi
 # END Benchmark specific preparation
 ########################################
 
-gym eval prepare +num_prepare_benchmark_processes=4 --config $GYM_CONFIG
+if [[ "$SKIP_PREPARE" == "0" ]]; then
+    gym eval prepare +num_prepare_benchmark_processes=4 --config $GYM_CONFIG
+else
+    echo ">>> SKIP_PREPARE=1: skipping benchmark data preparation."
+fi
 
 gym env start \
     --config $GYM_CONFIG \
@@ -81,3 +104,11 @@ gym env start \
 
 echo ">>> Inner build complete. Container will now be packed into sqsh."
 INNER_BUILD
+
+if (( save_status != 0 )); then
+    rm -f "$staged_container"
+    echo "Build failed (exit $save_status). $OUTPUT_CONTAINER left untouched." >&2
+    exit "$save_status"
+fi
+mv -f "$staged_container" "$OUTPUT_CONTAINER"
+echo ">>> Published $OUTPUT_CONTAINER"
