@@ -13,6 +13,7 @@ selected agent, environment server and model configs.
 """
 
 import argparse
+import fnmatch
 import json
 import logging
 import sys
@@ -80,20 +81,49 @@ def prepare_target(
     *,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
     refresh_registry: bool = False,
+    exclude: list[str] | None = None,
 ) -> PreparedTaskset:
-    """Fetch (for hub references) and load the tasks, then write the rows file."""
+    """Fetch (for hub references) and load the tasks, then write the rows file.
+
+    Tasks matching an ``exclude`` glob, and Compose tasks (which the harbor server cannot
+    run yet), are left out of the rows and listed on stdout.
+    """
     if is_hub_ref(target):
         folder = fetch_ref(target, refresh_registry=refresh_registry)
         print(f"Fetched {target} into {folder}")
     else:
         folder = Path(target).expanduser().resolve()
     taskset = folder.name
-    tasks = discover_tasks(folder)
+    tasks, skipped = select_tasks(discover_tasks(folder), exclude or [])
+    for task_id, reason in skipped:
+        print(f"Skipping {task_id}: {reason}")
+    if not tasks:
+        raise ValueError(f"No runnable task left in {folder}")
     output_dir = Path(output_root) / taskset
     rows_path = output_dir / "tasks.jsonl"
     write_rows(tasks, taskset, rows_path)
     print(f"Materialized {len(tasks)} task(s) from {folder} into {rows_path}")
     return PreparedTaskset(taskset=taskset, folder=folder, tasks=tasks, rows_path=rows_path, output_dir=output_dir)
+
+
+def select_tasks(tasks: list[HarborTask], exclude: list[str]) -> tuple[list[HarborTask], list[tuple[str, str]]]:
+    """Split tasks into the ones to run and ``(task_id, reason)`` pairs left out."""
+    kept: list[HarborTask] = []
+    skipped: list[tuple[str, str]] = []
+    for task in tasks:
+        pattern = next((p for p in exclude if fnmatch.fnmatchcase(task.task_id, p)), None)
+        if pattern is not None:
+            skipped.append((task.task_id, f"excluded by --exclude-tasks {pattern!r}"))
+        elif task.needs_compose:
+            skipped.append((task.task_id, "Compose environments are not supported yet"))
+        else:
+            kept.append(task)
+    return kept, skipped
+
+
+def _excluded(args: argparse.Namespace) -> list[str]:
+    raw = getattr(args, "exclude_tasks", None) or ""
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def resolve_agent(agent: str) -> AgentSelection:
@@ -202,7 +232,7 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
     agent_name = getattr(args, "agent", None)
     if not agent_name:
         raise ValueError("A Harbor target needs `--agent <harness>` (for example `--agent hermes_agent`)")
-    prepared = prepare_target(args.target)
+    prepared = prepare_target(args.target, exclude=_excluded(args))
     agent = resolve_agent(agent_name)
     config_path, tokens = build_run(prepared, agent, sandbox=getattr(args, "sandbox", None), overrides=overrides)
     print(f"Run config written to {config_path} (datasets folder: {datasets_dir()})")
@@ -213,7 +243,7 @@ def validate_target(args: argparse.Namespace, overrides: list[str]) -> None:
     """Entry point for ``gym dataset validate <target>``: run every task's reference solution and score it."""
     from nemo_gym.cli.main import _merge_config_paths, dispatch
 
-    prepared = prepare_target(args.target)
+    prepared = prepare_target(args.target, exclude=_excluded(args))
     agent = resolve_agent(ORACLE_AGENT)
     unvalidated = [task.task_id for task in prepared.tasks if not task.has_solution]
     if len(unvalidated) == len(prepared.tasks):
