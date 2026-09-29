@@ -47,8 +47,11 @@ async def upload_dir(sandbox: AsyncSandbox, source: Path, target: str, *, timeou
         await sandbox.upload(archive, remote)
     result = await _exec_as_root(
         sandbox,
-        f"mkdir -p {shlex.quote(target)} && tar -xzf {remote} --no-same-owner -C {shlex.quote(target)} "
-        f"&& chmod -R a+rX {shlex.quote(target)}; status=$?; rm -f {remote}; exit $status",
+        # --no-overwrite-dir keeps the target folder's own ownership and mode: it may be a root-owned
+        # world-writable folder the extracting user cannot chmod. The readability fix-up is best effort
+        # for the same reason.
+        f"mkdir -p {shlex.quote(target)} && tar -xzf {remote} --no-same-owner --no-overwrite-dir -C {shlex.quote(target)}; "
+        f"status=$?; chmod -R a+rX {shlex.quote(target)} 2>/dev/null || true; rm -f {remote}; exit $status",
         timeout_s=timeout_s,
     )
     if result.return_code:
