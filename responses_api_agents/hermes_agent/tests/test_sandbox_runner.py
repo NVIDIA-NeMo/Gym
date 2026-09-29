@@ -3,13 +3,25 @@
 
 import asyncio
 import json
+import socket
 import threading
+import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import MagicMock
 
 import openai
 import pytest
+import uvicorn
 from run_agent import AIAgent
+from tools.mcp_tool import shutdown_mcp_servers
 
+from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
+from nemo_gym.server_utils import ServerClient
+from resources_servers.example_mcp_weather.app import (
+    ExampleMCPWeatherResourcesServer,
+    ExampleMCPWeatherResourcesServerConfig,
+)
 from responses_api_agents.hermes_agent.sandbox_runner import _run, _use_model_server
 
 
@@ -59,12 +71,145 @@ class _ModelServer:
         self._server.server_close()
 
 
+class _ResourcesServer:
+    """Serve a Resources Server app, with its tools exposed over MCP, on a local port."""
+
+    def __init__(self, app) -> None:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        self.base_url = f"http://127.0.0.1:{port}"
+        self._server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+
+    def __enter__(self) -> "_ResourcesServer":
+        self._thread.start()
+        deadline = time.monotonic() + 10
+        while not self._server.started:
+            if time.monotonic() > deadline:
+                raise TimeoutError("Resources Server did not start")
+            time.sleep(0.01)
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._server.should_exit = True
+        self._thread.join(timeout=10)
+
+
 @pytest.fixture
-def restore_process_globals(monkeypatch: pytest.MonkeyPatch) -> None:
+def restore_process_globals(monkeypatch: pytest.MonkeyPatch):
     """The runner changes process-wide state; restore it so other tests see the originals."""
     monkeypatch.setattr(AIAgent, "__init__", AIAgent.__init__)
     for name in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "HERMES_HOME", "TERMINAL_ENV", "TERMINAL_TIMEOUT"):
         monkeypatch.delenv(name, raising=False)
+    yield
+    shutdown_mcp_servers()
+
+
+def _payload(model_base_url: str, **overrides) -> dict:
+    return {
+        "agent_session_id": "session",
+        "chat_template_kwargs_enabled": False,
+        "config_yaml": "model: policy_model\nprovider: auto\n",
+        "disabled_toolsets": None,
+        "enabled_toolsets": ["terminal"],
+        "history": [],
+        "max_tokens": 128,
+        "max_turns": 1,
+        "mcp_servers": [],
+        "model": "policy_model",
+        "model_base_url": model_base_url,
+        "required_mcp_servers": [],
+        "system_message": None,
+        "temperature": 0.0,
+        "terminal_timeout": 30,
+        "user_message": "fix bug",
+        **overrides,
+    }
+
+
+def test_granted_mcp_tools_reach_the_seeded_resources_session(tmp_path, restore_process_globals) -> None:
+    resources = ExampleMCPWeatherResourcesServer(
+        config=ExampleMCPWeatherResourcesServerConfig(
+            host="127.0.0.1", port=0, entrypoint="app.py", name="example_mcp_weather", expose_tools_over_mcp=True
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    app = resources.setup_webserver()
+    maybe_auto_expose(resources, app)
+    tool_call = {
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "mcp_example_mcp_weather_get_weather",
+                    "arguments": json.dumps({"city": "Paris"}),
+                },
+            }
+        ],
+    }
+    answers = [_completion(tool_call), _completion({"content": "The weather in Paris is sunny and 72 F."})]
+
+    with _ResourcesServer(app) as resources_server, _ModelServer(answers) as model_server:
+        seed_request = urllib.request.Request(
+            f"{resources_server.base_url}/seed_session",
+            data=json.dumps({"verifier_metadata": {"expected_city": "Paris"}}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(seed_request) as seed_response:
+            token = json.loads(seed_response.read())["mcp"]["headers"][TOKEN_HEADER]
+        config_yaml = (
+            "model: policy_model\nprovider: auto\nmcp_servers:\n"
+            "  example_mcp_weather:\n"
+            f"    url: {resources_server.base_url}/mcp\n"
+            f"    headers: {{{TOKEN_HEADER}: {token}}}\n"
+            "    tools: {resources: false, prompts: false}\n"
+        )
+        output = _run(
+            _payload(
+                model_server.base_url,
+                config_yaml=config_yaml,
+                enabled_toolsets=["example_mcp_weather"],
+                max_turns=2,
+                mcp_servers=["example_mcp_weather"],
+                required_mcp_servers=["example_mcp_weather"],
+            ),
+            tmp_path,
+        )
+
+    offered = [tool["function"]["name"] for tool in model_server.requests[0]["tools"]]
+    assert offered == ["mcp_example_mcp_weather_get_weather"]
+    assert output["result"]["final_response"] == "The weather in Paris is sunny and 72 F."
+    # The call carried the seed's token, so it landed in the session the seed created.
+    assert [state["weather_calls"] for state in resources.session_id_to_state.values()] == [
+        [{"city": "Paris", "weather": "The weather in Paris is sunny and 72 F."}]
+    ]
+
+
+def test_required_mcp_server_that_does_not_connect_fails_before_the_model(tmp_path, restore_process_globals) -> None:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        unused_port = probe.getsockname()[1]
+    config_yaml = (
+        "model: policy_model\nprovider: auto\nmcp_servers:\n"
+        f"  weather:\n    url: http://127.0.0.1:{unused_port}/mcp\n    connect_timeout: 1\n"
+    )
+
+    with _ModelServer([_completion({"content": "done"})]) as model_server:
+        with pytest.raises(RuntimeError, match="Required MCP servers did not connect: weather"):
+            _run(
+                _payload(
+                    model_server.base_url,
+                    config_yaml=config_yaml,
+                    mcp_servers=["weather"],
+                    required_mcp_servers=["weather"],
+                ),
+                tmp_path,
+            )
+
+    assert model_server.requests == []
 
 
 def test_iteration_limit_summary_reaches_the_model_server(tmp_path, restore_process_globals) -> None:
@@ -82,22 +227,7 @@ def test_iteration_limit_summary_reaches_the_model_server(tmp_path, restore_proc
 
     with _ModelServer(answers) as model_server:
         output = _run(
-            {
-                "agent_session_id": "session",
-                "chat_template_kwargs_enabled": False,
-                "config_yaml": "model: policy_model\nprovider: auto\n",
-                "disabled_toolsets": None,
-                "enabled_toolsets": ["terminal"],
-                "history": [],
-                "max_tokens": 128,
-                "max_turns": 1,
-                "model": "policy_model",
-                "model_base_url": model_server.base_url,
-                "system_message": None,
-                "temperature": 0.0,
-                "terminal_timeout": 30,
-                "user_message": "fix bug",
-            },
+            _payload(model_server.base_url),
             tmp_path,
         )
 

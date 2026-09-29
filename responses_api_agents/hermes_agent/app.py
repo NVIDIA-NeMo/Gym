@@ -33,6 +33,7 @@ from uuid import uuid4
 import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed  # pyright: ignore[reportMissingImports]
 from fastapi import Request
 from pydantic import ConfigDict, Field
+from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -75,6 +76,7 @@ from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
 
 
@@ -141,22 +143,36 @@ LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
+def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
+    """Rename Hermes' ``mcp_<server>_<tool>`` to Gym's ``mcp__<server>__<tool>``, which Gym strips before verify.
+
+    Hermes replaces "-" and "." with "_" in both parts. The server part is matched against the granted names,
+    longest first so one name that extends another cannot capture its tools; a tool name that contained "-" or
+    "." keeps Hermes' replacement.
+    """
+    for server in sorted(server_names, key=len, reverse=True):
+        prefix = "mcp_" + server.replace("-", "_").replace(".", "_") + "_"
+        if name.startswith(prefix):
+            return f"mcp__{server}__{name[len(prefix) :]}"
+    return name
+
+
 def _sandbox_hermes_install() -> tuple[str, str]:
     """Return the requirement the sandbox installs and the key that names its runtime directory.
 
     Both come from the Hermes installed with this server, so ``requirements.txt`` is the only version pin and
     the sandbox runs the same Hermes as the host. A git install is fetched as a GitHub archive, so the sandbox
-    does not need git.
+    does not need git. The ``mcp`` extra carries Hermes' MCP client, which episode tool grants use.
     """
     distribution = importlib.metadata.distribution("hermes-agent")
     direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
     commit = (direct_url.get("vcs_info") or {}).get("commit_id")
     if commit is None:
-        return f"hermes-agent=={distribution.version}", distribution.version
+        return f"hermes-agent[mcp]=={distribution.version}", distribution.version
     url = str(direct_url.get("url") or "").removesuffix(".git")
     if not url.startswith("https://github.com/"):
         raise RuntimeError(f"Cannot build a sandbox install URL for hermes-agent installed from {url!r}")
-    return f"hermes-agent @ {url}/archive/{commit}.tar.gz", commit[:12]
+    return f"hermes-agent[mcp] @ {url}/archive/{commit}.tar.gz", commit[:12]
 
 
 _HERMES_REQUIREMENT, _HERMES_RUNTIME_KEY = _sandbox_hermes_install()
@@ -291,11 +307,21 @@ class HermesAgent(SimpleResponsesAPIAgent):
         # The legacy /run path keeps no session and still supports several workers.
         if self.config.num_workers not in (None, 1):
             raise ValueError("Hermes Agent sessions require num_workers=1")
-        required_tools = [access.name for access in body.tool_accesses if access.required]
-        if required_tools:
+        tool_accesses = self.effective_tool_accesses(body)
+        unsupported = [
+            access.name for access in tool_accesses if access.required and not isinstance(access, MCPToolAccess)
+        ]
+        if unsupported:
             raise ValueError(
-                "Hermes Agent does not support required episode tool grants: " + ", ".join(sorted(required_tools))
+                "Hermes Agent supports only MCP tool grants; required grants it cannot use: "
+                + ", ".join(sorted(unsupported))
             )
+        # Hermes exposes each MCP server as a toolset of the same name, so a name must not shadow a built-in one.
+        colliding = [
+            access.name for access in tool_accesses if isinstance(access, MCPToolAccess) and access.name in TOOLSETS
+        ]
+        if colliding:
+            raise ValueError("MCP tool grants collide with Hermes toolsets: " + ", ".join(sorted(colliding)))
         agent_session_id = body.agent_session_id
         request.session[_AGENT_SESSION_ID_KEY] = agent_session_id
         lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
@@ -378,7 +404,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         except (NotImplementedError, OSError):
             pass  # not supported on this platform (e.g. Windows, non-main thread)
 
-    def _build_config(self) -> str:
+    def _build_config(self, mcp_accesses: list[MCPToolAccess] | None = None) -> str:
         import yaml
 
         config: dict[str, Any] = {
@@ -405,6 +431,16 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 "enabled": self.config.checkpoints_enabled,
             },
         }
+        if mcp_accesses:
+            # A grant is for tools, so Hermes' resource and prompt helper tools stay off.
+            config["mcp_servers"] = {
+                access.name: {
+                    "url": str(access.connection.url),
+                    "headers": access.connection.headers,
+                    "tools": {"resources": False, "prompts": False},
+                }
+                for access in mcp_accesses
+            }
         return yaml.dump(config, default_flow_style=False)
 
     def model_post_init(self, __context: Any) -> None:
@@ -489,13 +525,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     async def _sandbox_hermes_installed(sandbox: AsyncSandbox, workdir: str | None) -> bool:
-        """Whether the pinned Hermes imports from its runtime path.
+        """Whether the pinned Hermes and its MCP client import from its runtime path.
 
         The path is keyed by the pinned commit, so a runtime baked into the image or left by an earlier
         session in this sandbox is reused.
         """
         check = await sandbox.exec(
-            f"{quote(_SANDBOX_PYTHON)} -c 'import run_agent'",
+            f"{quote(_SANDBOX_PYTHON)} -c 'import run_agent, mcp'",
             cwd=workdir,
             timeout_s=120,
         )
@@ -673,12 +709,21 @@ class HermesAgent(SimpleResponsesAPIAgent):
         stderr_path = f"{state.session_dir}/stderr.log"
         pid_path = f"{state.session_dir}/runner.pid"
         stop_path = f"{state.session_dir}/runner.stop"
+        mcp_accesses = [
+            access for access in self.effective_tool_accesses(state.request) if isinstance(access, MCPToolAccess)
+        ]
+        enabled_toolsets = self.config.enabled_toolsets
+        if enabled_toolsets is not None:
+            # A restricted tool list would otherwise hide the tools this episode was granted.
+            enabled_toolsets = [*enabled_toolsets, *(access.name for access in mcp_accesses)]
         payload = {
             "agent_session_id": agent_session_id,
             "chat_template_kwargs_enabled": self.config.chat_template_kwargs_enabled,
-            "config_yaml": self._build_config(),
+            "config_yaml": self._build_config(mcp_accesses),
             "disabled_toolsets": self.config.disabled_toolsets,
-            "enabled_toolsets": self.config.enabled_toolsets,
+            "enabled_toolsets": enabled_toolsets,
+            "mcp_servers": [access.name for access in mcp_accesses],
+            "required_mcp_servers": [access.name for access in mcp_accesses if access.required],
             "history": history,
             "max_tokens": self.config.max_tokens,
             "max_turns": self.config.max_turns,
@@ -737,6 +782,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
             fail_on_error=True,
             n_input=len(history) + 1,
         )
+        # Verifiers see Gym's MCP naming; the model's own names stay in the captured model calls.
+        server_names = [access.name for access in mcp_accesses]
+        for item in response.output:
+            if getattr(item, "type", None) == "function_call":
+                item.name = _gym_mcp_tool_name(item.name, server_names)
         response.metadata = {
             **(response.metadata or {}),
             "harness_execution": "sandbox",
