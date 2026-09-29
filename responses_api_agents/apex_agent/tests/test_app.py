@@ -55,7 +55,7 @@ def _agent(
         image_build={
             "enabled": auto_build,
             "source_repo": "https://github.com/Mercor-Intelligence/archipelago.git",
-            "source_revision": "0cb5c476c219a9df637e0bd37fb86b2361f4ab89",
+            "source_revision": "0cb5c476c219a9df637e0bd37fb86b2361f4ab89",  # pragma: allowlist secret
             "source_root": None,
             "source_github_token": None,
             "dockerfile": "environment/Dockerfile",
@@ -238,6 +238,15 @@ def test_sandbox_config_never_contains_verifier_secrets() -> None:
     assert "CODE_EXEC_RUN_AS_USER" not in spec.env
     assert "/app/apex-gym/stirrup_runtime.py" in spec.files
     assert "FOUNDRY_LOCAL_ROOT" not in spec.env
+
+
+def test_sandbox_config_passes_the_policy_context_window_when_set() -> None:
+    agent = _agent()
+    agent.config.context_window_tokens = 262_144
+    runner = json.loads(agent._sandbox_spec(_body(), "Do the work").files["/app/apex-gym/runner_config.json"])
+
+    assert runner["context_window_tokens"] == 262_144
+    assert runner["max_output_tokens"] == 32_768
 
 
 def test_sandbox_config_propagates_text_only_model_capability() -> None:
