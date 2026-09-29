@@ -14,7 +14,7 @@ from environment_servers.usersim.app import (
     _is_retryable_dependency_error,
 )
 from nemo_gym.base_environment_server import BaseEnvironmentServer
-from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
+from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
 from resources_servers.usersim.episode_contracts import UserSimEpisodeRequest, UserSimTaskInput
@@ -108,23 +108,12 @@ def _environment_server(*, token_capture: bool = False) -> tuple[UserSimEnvironm
                 }
             }
         },
-        "judge": {
-            "responses_api_agents": {
-                "judge": {
-                    "host": "judge",
+        "support": {
+            "responses_api_models": {
+                "vllm_model": {
+                    "host": "support",
                     "port": 8003,
                     "entrypoint": "app.py",
-                    "token_id_capture": token_capture,
-                }
-            }
-        },
-        "summary": {
-            "responses_api_agents": {
-                "summary": {
-                    "host": "summary",
-                    "port": 8004,
-                    "entrypoint": "app.py",
-                    "token_id_capture": token_capture,
                 }
             }
         },
@@ -145,8 +134,8 @@ def _environment_server(*, token_capture: bool = False) -> tuple[UserSimEnvironm
         resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
         user_agent=AgentServerRef(type="responses_api_agents", name="user"),
         assistant_agent=AgentServerRef(type="responses_api_agents", name="assistant"),
-        judge_agent=AgentServerRef(type="responses_api_agents", name="judge"),
-        summary_agent=AgentServerRef(type="responses_api_agents", name="summary"),
+        judge_model=ModelServerRef(type="responses_api_models", name="support"),
+        summary_model=ModelServerRef(type="responses_api_models", name="support"),
         resources_tool_transports=["direct_http"],
         max_turns=2,
     )
@@ -196,24 +185,10 @@ def _queue_success_responses(client: _Client) -> None:
             ),
             _Response({"agent_session_id": "user-session"}, cookie="user-cookie"),
             _Response({"agent_session_id": "assistant-session"}, cookie="assistant-cookie"),
-            _Response({"agent_session_id": "judge-session"}, cookie="judge-cookie"),
-            _Response({"agent_session_id": "summary-session"}, cookie="summary-cookie"),
             _Response(_model_response("user-response", "I need dinner advice.")),
             _Response(_model_response("assistant-response", "Try a lentil curry.")),
             _Response(_model_response("judge-response", "<rating>pass</rating>")),
             _Response(_model_response("summary-response", "The assistant recommended lentil curry.")),
-            _Response(
-                {
-                    "agent_session_id": "summary-session",
-                    "resources_cookies": {},
-                }
-            ),
-            _Response(
-                {
-                    "agent_session_id": "judge-session",
-                    "resources_cookies": {},
-                }
-            ),
             _Response(
                 {
                     "agent_session_id": "assistant-session",
@@ -317,14 +292,10 @@ async def test_usersim_environment_server_runs_native_episode(monkeypatch) -> No
         "/seed_session",
         "/v1/agent_sessions",
         "/v1/agent_sessions",
-        "/v1/agent_sessions",
-        "/v1/agent_sessions",
         "/ng-rollout/rollout-a2/v1/responses",
         "/ng-rollout/rollout-a2/v1/responses",
-        "/ng-rollout/rollout-a2/v1/responses",
-        "/ng-rollout/rollout-a2/v1/responses",
-        "/v1/agent_sessions/close",
-        "/v1/agent_sessions/close",
+        "/v1/responses",
+        "/v1/responses",
         "/v1/agent_sessions/close",
         "/v1/agent_sessions/close",
         "/verify",
@@ -334,11 +305,13 @@ async def test_usersim_environment_server_runs_native_episode(monkeypatch) -> No
     [tool_access] = client.calls[2][2]["json"]["tool_accesses"]
     assert tool_access["name"] == "resources.direct_http"
     assert tool_access["cookies"] == {"session": "resources-cookie"}
-    assert client.calls[5][2]["cookies"] == {"session": "user-cookie"}
-    assert client.calls[6][2]["cookies"] == {"session": "assistant-cookie"}
-    assert client.calls[7][2]["cookies"] == {"session": "judge-cookie"}
-    assert client.calls[8][2]["cookies"] == {"session": "summary-cookie"}
-    verify_body = client.calls[13][2]["json"]
+    assert client.calls[3][2]["cookies"] == {"session": "user-cookie"}
+    assert client.calls[4][2]["cookies"] == {"session": "assistant-cookie"}
+    assert client.calls[5][0] == "support"
+    assert client.calls[6][0] == "support"
+    assert "cookies" not in client.calls[5][2]
+    assert "cookies" not in client.calls[6][2]
+    verify_body = client.calls[9][2]["json"]
     assert verify_body.task_id == TaskId(taskset="usersim:example", task_id="task")
     assert [invocation.role for invocation in verify_body.verification_input.invocations] == [
         "user",
@@ -384,8 +357,10 @@ async def test_token_capture_uses_environment_episode_identity(monkeypatch) -> N
     monkeypatch.setattr(environment_server, "_run_usersim", fake_run)
     await environment_server.run_request(_request())
 
-    for call_index in range(5, 9):
+    for call_index in (3, 4):
         assert client.calls[call_index][1] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
+    for call_index in (5, 6):
+        assert client.calls[call_index][1] == "/v1/responses"
 
 
 def test_dependency_retry_requires_transient_error() -> None:
