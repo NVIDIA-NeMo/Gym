@@ -74,9 +74,20 @@ The container compiles untrusted model output and `native_decide` is allowed
 (upstream allows it), so that output can run compiled code in here: the
 container boundary is the only isolation. `--network=none` is not an option —
 the container exists to answer HTTP — so the port is published to loopback
-only. The image still runs as root and has not been validated `--read-only`;
-see the security note in the [server README](../README.md#lean-server) for what
-that costs and how to go further.
+only.
+
+The image does **not** run as root: it creates `lean` (uid 1000) and switches to
+it before the last two build steps, so the REPL probe — `lake env repl`, loading
+Mathlib and reporting the version — and the server's import check both run as
+that user during the build. A successful build is therefore the validation that
+the server's own work does not need root. `/opt/mathlib`, `/opt/repl` and
+`/opt/kimina` are owned by `lean` because Lake writes under `.lake`; `/opt/lean`
+and `/opt/venv` are read-and-execute only. If you mount anything else the REPL
+writes to, give `lean` write access to it or the REPL will fail to start.
+
+The image has still not been validated `--read-only`; see the security note in
+the [server README](../README.md#lean-server) for what that costs and how to go
+further.
 
 `LEAN_SERVER_MAX_REPL_MEM` defaults to **12G** here, not 8G. It is applied as `RLIMIT_AS`
 on each REPL, and a REPL holding Mathlib exceeds 8G; upstream Kimina raised its own default

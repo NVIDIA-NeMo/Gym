@@ -366,10 +366,12 @@ allocate the host to death. What is *not* there, and why:
   Lake writes there. If you need it, add `--read-only --tmpfs /tmp` plus a
   writable mount over `/opt/mathlib/.lake` and confirm a real `/verify` still
   succeeds before trusting a score from it.
-- **A non-root user** is not documented because the image does not build one;
-  `--user` against it has not been validated. Adding a `USER` line to
-  [`kimina_image/Dockerfile`](kimina_image/Dockerfile) is the right fix and is
-  tracked as a known gap, not a claim already met.
+- **A non-root user** is built into the image rather than left to `--user`:
+  [`kimina_image/Dockerfile`](kimina_image/Dockerfile) creates `lean` (uid 1000),
+  gives it the three trees Lake writes into (`/opt/mathlib`, `/opt/repl`,
+  `/opt/kimina`) and switches to it before the build's own REPL probe, so a
+  build that succeeds has already started a REPL and loaded Mathlib as that
+  user. Nothing in the `docker run` line above needs to change.
 
 Lean itself is not a sandbox — `native_decide` is allowed by design here, which
 means model output can run compiled code inside this container — so the

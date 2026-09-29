@@ -119,14 +119,25 @@ RUN pip install --no-cache-dir uv && \
 FROM base AS runtime
 # ARGs do not cross stages; this one is only used by the probe at the end.
 ARG LEAN_VERSION=v4.24.0
+
+# This container compiles untrusted model output, and `native_decide` is allowed by design,
+# so that output can run compiled code in here. Doing it as uid 0 is the one avoidable part
+# of that. The user is created before the COPYs so the two trees Lake writes into can be
+# copied with --chown, which costs nothing: `chown -R` afterwards would duplicate every
+# file of a multi-gigabyte Mathlib in a new layer.
+RUN groupadd --gid 1000 lean && useradd --uid 1000 --gid 1000 --create-home lean
+
 COPY --from=lean /opt/lean /opt/lean
-COPY --from=lean /opt/mathlib /opt/mathlib
-COPY --from=lean /opt/repl /opt/repl
+# Writable by `lean`: the REPL runs as `lake env` with its cwd here, and Lake writes under
+# .lake. /opt/lean, /opt/venv and the provenance files are read-and-execute only.
+COPY --from=lean --chown=lean:lean /opt/mathlib /opt/mathlib
+COPY --from=lean --chown=lean:lean /opt/repl /opt/repl
 COPY --from=lean /opt/image-provenance/ /opt/image-provenance/
 COPY --from=server /opt/venv /opt/venv
-COPY --from=server /opt/kimina /opt/kimina
+COPY --from=server --chown=lean:lean /opt/kimina /opt/kimina
 COPY --from=server /opt/image-provenance/ /opt/image-provenance/
 
+ENV HOME=/home/lean
 ENV PATH=/opt/venv/bin:/opt/lean/bin:$PATH
 ENV LEAN_SERVER_HOST=0.0.0.0 \
     LEAN_SERVER_PORT=8000 \
@@ -146,6 +157,12 @@ ENV LEAN_SERVER_HOST=0.0.0.0 \
 RUN ln -sf /opt/lean/bin/lake /usr/local/bin/lake && \
     ln -sf /opt/lean/bin/lean /usr/local/bin/lean && \
     ln -sf /opt/venv/bin/python /usr/local/bin/python
+
+# Everything below this line runs as the unprivileged user, so the build-time probe is also
+# the check that the server's own work — starting a REPL, loading Mathlib, importing the
+# generated prisma client — still succeeds without root. A build that passes is the
+# validation; there is no separate claim to take on trust.
+USER lean
 
 # Start a REPL the way the server does -- `lake env <repl>` with cwd at the project -- and
 # require it to load Mathlib and report the Lean version. This is the check that turns a
