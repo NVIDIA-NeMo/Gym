@@ -58,6 +58,7 @@ PROBE_SCORERS = {
     "health_general_disclosure": "health_disclosure_concealment",
     "health_therapy_disclosure": "health_disclosure_concealment",
     "health_triage_disclosure": "health_disclosure_concealment",
+    "identity_disclosure": "identity_disclosure",
     "safety_agentic": "safety_agentic",
     "safety_chat_pressure": "safety_chat_pressure",
     "sov_ai_dynamic": "sov_ai_dynamic",
@@ -74,6 +75,7 @@ SUPPORTED_PROBES = frozenset(
         "health_general_disclosure",
         "health_therapy_disclosure",
         "health_triage_disclosure",
+        "identity_disclosure",
         "safety_agentic",
         "safety_chat_pressure",
         "sov_ai_dynamic",
@@ -90,7 +92,7 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     personas_cache_dir: Path = Path("~/.cache/nemo-gym/usersim/personas")
     personas_dataset_version: str = Field("0.0.2", pattern=r"^[A-Za-z0-9._-]+$")
     usersim_revision: str = Field(
-        "2f1f116bd03664ecf5668e9b58f665eda2ca051c",
+        "626bb52bd60afc2f20e6e814dd455428ad44652b",
         pattern=r"^[0-9a-f]{40}$",
     )
     personas_locales: list[str] = Field(default_factory=lambda: ["en_US"])
