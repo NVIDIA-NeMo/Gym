@@ -301,6 +301,32 @@ def _model_endpoint_timeout_seconds(global_config_dict: DictConfig) -> float:
         ) from None
 
 
+_DEFAULT_SERVER_SPINUP_TIMEOUT_SEC: float = 600.0
+
+# Longest single readiness probe of a Gym server. A probe is capped further by the time left before the deadline.
+_SERVER_PROBE_TIMEOUT_SEC: float = 5.0
+
+
+def _server_spinup_timeout_seconds(global_config_dict: DictConfig) -> float:
+    """How long to wait for Gym servers to become ready, from config. 0 or a negative value waits forever.
+
+    An unset or null key falls back to the same default the config parser applies.
+    Environment interpolation yields a string, so numeric strings are accepted.
+    Anything else is reported as a `ConfigError` rather than a `TypeError` traceback mid-startup.
+    """
+    value = global_config_dict.get(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME)
+    if value is None:
+        return _DEFAULT_SERVER_SPINUP_TIMEOUT_SEC
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"`{SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}` must be a number of seconds, got {value!r}. "
+            "Set it to 0 to wait for Gym servers without a limit."
+        ) from None
+
+
 def _resolve_server_dir(rel_path: Path) -> Path:
     """Resolve a relative server dir (e.g. ``resources_servers/<name>``) to an absolute path.
 
@@ -403,6 +429,7 @@ class RunHelper:  # pragma: no cover
         # Fail fast before starting Ray if nothing is configured to run (covers env run and the
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
+        self._server_spinup_timeout_seconds = _server_spinup_timeout_seconds(global_config_dict)
 
         # Translate the `telemetry:` block into NEMO_GYM_OTEL_* env vars *before* anything is
         # spawned. run_command copies os.environ into every server process, and that copy is
@@ -610,13 +637,13 @@ Process `{process_name}` stderr:
         poll_count = 0
         successful_servers = []
         total_servers = len(self._server_instance_display_configs)
-        timeout_seconds = self._server_client.global_config_dict.get(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME, 600)
+        timeout_seconds = self._server_spinup_timeout_seconds
         deadline = monotonic() + timeout_seconds if timeout_seconds > 0 else None
 
         # Until we spin up or error out.
         while True:
             self.poll()
-            statuses = self.check_http_server_statuses(successful_servers)
+            statuses = self.check_http_server_statuses(successful_servers, deadline=deadline)
             successful_servers.extend(s for s, status in statuses if status == "success")
 
             waiting = []
@@ -627,8 +654,12 @@ Process `{process_name}` stderr:
             if len(successful_servers) != total_servers:
                 if deadline is not None and monotonic() >= deadline:
                     raise RuntimeError(
-                        f"Timed out after {timeout_seconds}s waiting for Gym servers to become ready: "
-                        f"{', '.join(waiting)}"
+                        f"Timed out after {timeout_seconds:g}s waiting for Gym servers to become ready: "
+                        f"{', '.join(waiting)}\n"
+                        "This wait covers dependency installation and any local model download or loading "
+                        "that a server does before it opens its port.\n"
+                        f"Raise the limit with `++{SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}=<seconds>`, "
+                        "or set it to 0 to wait without a limit."
                     )
                 if poll_count % 10 == 0:  # Print every sleep_interval * poll_count = 3 * 10 = 30s
                     print(
@@ -641,7 +672,10 @@ Process `{process_name}` stderr:
                 self.display_server_instance_info()
                 return
 
-            sleep(sleep_interval)
+            if deadline is None:
+                sleep(sleep_interval)
+            else:
+                sleep(max(0.0, min(sleep_interval, deadline - monotonic())))
 
     def shutdown(self) -> None:
         memory_profiler = getattr(self, "_memory_profiler", None)
@@ -745,7 +779,14 @@ in your config does not match where it is listening.
   - Raise `{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}` to wait longer, or set it to 0 to skip this check."""
         )
 
-    def check_http_server_statuses(self, successful_servers: List[str]) -> List[Tuple[str, ServerStatus]]:
+    def check_http_server_statuses(
+        self, successful_servers: List[str], *, deadline: Optional[float] = None
+    ) -> List[Tuple[str, ServerStatus]]:
+        """Probe every server not yet ready.
+
+        With a `deadline` from `monotonic()`, each probe is capped at the time left before it.
+        Servers still unprobed once it passes are reported as `timeout` without a request.
+        """
         statuses = []
         for server_instance_display_config in self._server_instance_display_configs:
             name = server_instance_display_config.config_path
@@ -754,7 +795,15 @@ in your config does not match where it is listening.
             if name in successful_servers:
                 continue
 
-            status = self._server_client.poll_for_status(name)
+            probe_timeout_seconds = _SERVER_PROBE_TIMEOUT_SEC
+            if deadline is not None:
+                remaining_seconds = deadline - monotonic()
+                if remaining_seconds <= 0:
+                    statuses.append((name, "timeout"))
+                    continue
+                probe_timeout_seconds = min(probe_timeout_seconds, remaining_seconds)
+
+            status = self._server_client.poll_for_status(name, timeout_seconds=probe_timeout_seconds)
             statuses.append((name, status))
 
         return statuses
