@@ -330,9 +330,14 @@ def _build_gdpval_user_prompt(task_prompt: str, input_files_dir: Optional[str] =
     """Build the full GDPVal user prompt from our template.
 
     Replaces the former ``gdpval_mode`` fork feature by constructing the prompt
-    externally before passing to Stirrup.  File paths are listed relative
-    to the parent of *input_files_dir* (e.g. ``gdpval_ref_files_xxx/file.pdf``)
-    to match the fork's ``state.uploaded_file_paths`` format.
+    externally before passing to Stirrup.
+
+    Paths are listed relative to *input_files_dir* itself (e.g. ``file.pdf``),
+    because Stirrup copies the *contents* of that directory into the sandbox
+    working directory. Listing them relative to its parent instead advertised a
+    ``gdpval_ref_files_<random>/`` prefix that does not exist inside the
+    sandbox, so every reference-bearing task burned ~3 turns on failed
+    ``ls``/``cd`` before recovering via ``pwd && ls -la``.
     """
     global _GDPVAL_PROMPT_TEMPLATE
     if _GDPVAL_PROMPT_TEMPLATE is None:
@@ -343,12 +348,11 @@ def _build_gdpval_user_prompt(task_prompt: str, input_files_dir: Optional[str] =
         import os
 
         ref_dir = input_files_dir.rstrip("/")
-        parent = os.path.dirname(ref_dir)
         files_section = ""
         for root, _dirs, fnames in os.walk(ref_dir):
             for fname in sorted(fnames):
                 fpath = os.path.join(root, fname)
-                rel = os.path.relpath(fpath, parent)
+                rel = os.path.relpath(fpath, ref_dir)
                 files_section += f"- {rel}\n"
         if not files_section:
             files_section = "None"
