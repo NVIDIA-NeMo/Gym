@@ -324,60 +324,15 @@ answer check.
 
 ## Reward profiling
 
-Goedel-Prover-V2-32B, an open-weights Lean prover, 16 rollouts per problem,
-temperature 1.0, 39,000-token budget, both settings end to end on this code
-path. A generalist model of comparable size scores at or near zero on this
-benchmark, which cannot tell a working verifier from a broken one; a prover
-that closes goals can.
+A score is a property of a model, its prompt, its sampling configuration and the
+date, so it goes stale in a README without anyone noticing; this repository's
+README guide asks for model scores to live with the run that produced them
+instead. The open-weights baseline for this benchmark — which model, the pass@16
+and pass@1 figures for both settings, the per-family breakdown and the token-budget
+caveat — is in the pull request that added it.
 
-| Benchmark | pass@16 | pass@1 (avg of 16) | Harness faults |
-| --- | --- | --- | --- |
-| `combibench` | **8 / 100** | 2.12% | 0.125% (2 / 1600) |
-| `combibench_with_solution` | **9 / 100** | 1.94% | 0% |
-
-These were collected before harness faults were masked, so the `combibench`
-row's two `sandbox_error` rollouts are counted as failures in the 1600-rollout
-denominator of its 2.12%. A rerun on the current code would divide by 1598, so
-`pass@1` can only move up, by at most 2 / 1600. The **count** of solved problems
-cannot move — a masked rollout scored 0, so it was never what solved anything —
-but the reported `pass@16/accuracy` can: `compute_pass_majority_metrics` skips
-any task with fewer than k rollouts, so a task that loses one rollout to masking
-leaves the pass@16 denominator altogether. So 8 / 100 becomes 8 / 99 or 7 / 99
-if both faults fall on the same problem (7 if that problem was one of the eight
-solved), and 8 / 98, 7 / 98 or 6 / 98 if they fall on two. The committed
-agreement report counts the two faults but does not name their problems, so
-which of those it is cannot be read off the evidence here.
-
-Per source family, problems solved at least once out of 16 attempts:
-
-| Family | `combibench` | `combibench_with_solution` |
-| --- | --- | --- |
-| `brualdi` (textbook) | 7 / 42 | 8 / 42 |
-| `hackmath` | 1 / 10 | 1 / 10 |
-| `imo` | **0 / 36** | **0 / 36** |
-| `math_competitions` | **0 / 12** | **0 / 12** |
-
-Three things make this a check on the harness rather than a number:
-
-- The two settings solve almost the same problems (`brualdi_ch7_7`,
-  `ch14_33`, `ch3_4`, `ch10_31`, `ch3_18`, `ch6_21`, `ch1_16`, `hackmath_4` in
-  both), which is what a stable verifier looks like across independent runs.
-- Difficulty orders as published: everything solved is textbook or
-  hackmath, and no olympiad problem is solved in 576 attempts.
-- Every rollout this verifier reached a verdict on was re-scored by upstream's
-  own harness with no disagreement — see the caveats in "Agreement with
-  upstream's harness" for what that does and does not establish.
-
-Caveats. 3% of rollouts hit the token budget, which accounts for every
-`format_error` — a truncated reply loses its closing fence. That figure, like
-the trailing-whitespace counts above and unlike everything else in this README,
-is not traceable to a committed artifact: it was counted ad hoc from the
-rollout files of the two runs, which are not committed. The paper does not
-publish decoding parameters or a token budget, so this is a comparison against
-its protocol, not a reproduction of its numbers. `with_solution` scoring no
-higher than `combibench` is consistent across both: substituting the published
-answer lengthens the statement the model must reproduce verbatim, and
-`statement_modified` is correspondingly higher (39.8% against 39.3%).
+What stays here is the harness self-validation below, which involves no model: it
+is a test result, not a measurement of anyone's model.
 
 ## Lean server
 
@@ -510,10 +465,12 @@ at the pinned revision, imports `evaluation/verifier/one_stage_verify.py`
 unmodified, and re-scores collected rollouts through the same Lean server,
 reporting per-item agreement rather than a matching headline.
 
-Measured on the Goedel-Prover-V2-32B rollouts above; the reports are not
-committed, so the numbers are stated here and reproduced by the
-`upstream_agreement.py` command at the end of this section, which needs both the
-rollouts and a Lean server:
+This is harness self-validation, not a model result: it measures whether two
+verifiers agree on the same outputs, and the outputs' own score is irrelevant to
+it. Measured over the 3,200 rollouts of the open-weights baseline recorded in the
+pull request. The reports are not committed, so the numbers are stated here and
+reproduced by the `upstream_agreement.py` command at the end of this section,
+which needs both those rollouts and a Lean server:
 
 | Benchmark | Rollouts | Scored by both | This verifier | Upstream | Agreement |
 | --- | --- | --- | --- | --- | --- |

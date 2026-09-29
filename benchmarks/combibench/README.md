@@ -86,11 +86,7 @@ reproduction.
 
 ## Measured
 
-Goedel-Prover-V2-32B, 16 rollouts per problem, temperature 1.0, 39,000-token
-budget: **8 / 100** pass@16 here and **9 / 100** on the with-solution split,
-with nothing solved in the `imo` or `math_competitions` families. Every rollout
-this verifier reached a verdict on — 3,198 of the 3,200, the other two being
-`sandbox_error` non-verdicts — was re-scored by upstream's own harness and
-agreed on.
-Full numbers, caveats and the agreement report are in the
-[server README](../../resources_servers/combibench/README.md#reward-profiling).
+Model scores live with the run that produced them, not here — see the pull request
+that added this benchmark for the open-weights baseline, and the
+[server README](../../resources_servers/combibench/README.md#harness-validation)
+for the model-free harness validation.
