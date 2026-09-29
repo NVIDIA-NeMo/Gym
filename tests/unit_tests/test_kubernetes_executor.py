@@ -25,7 +25,7 @@ from nemo_gym.orchestration.executors.kubernetes_script import _dns_label, _scal
 from nemo_gym.orchestration.jobs import SubmissionRecord
 
 
-def _submit_config(tmp_path, benchmarks, services=None):
+def _submit_config(tmp_path, benchmarks, services=None, compute_overrides=None):
     return SubmitConfig.model_validate(
         {
             "services": services or {},
@@ -34,6 +34,7 @@ def _submit_config(tmp_path, benchmarks, services=None):
                     "type": "kubernetes",
                     "namespace": "eng-test",
                     "pvc_name": "workspace",
+                    **(compute_overrides or {}),
                 }
             },
             "driver": {"container": "gym:latest", "benchmarks": {name: {} for name in benchmarks}},
@@ -118,6 +119,40 @@ def test_gpu_sidecar_gets_a_memory_request_scaled_by_gpu_count(tmp_path):
     assert sidecar["resources"]["requests"]["memory"] == "64Gi"
     driver = job["spec"]["template"]["spec"]["containers"][0]
     assert driver["resources"]["requests"]["memory"]
+
+
+def test_gpu_sidecar_has_a_startup_probe_that_gates_the_driver(tmp_path):
+    # readinessProbe alone does not delay when kubelet starts the next (driver) container for a
+    # native sidecar -- only startupProbe does. Missing this meant the driver ran before vLLM was
+    # actually serving, observed for real against the cluster.
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    services = {
+        "vllm_model": {
+            "type": "vllm",
+            "container": "vllm/vllm-openai:latest",
+            "model": "org/model",
+        }
+    }
+    config = _submit_config(tmp_path, ["bench_a"], services=services)
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    sidecar = job["spec"]["template"]["spec"]["initContainers"][0]
+    assert "startupProbe" in sidecar
+    assert sidecar["startupProbe"]["httpGet"]["path"] == "/health"
 
 
 def test_run_returns_a_record_naming_every_benchmark(tmp_path, monkeypatch):
@@ -212,3 +247,236 @@ def test_ray_serve_service_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="use_ray_serve"):
         KubernetesExecutor().run(config, dry_run=True)
+
+
+# ---------------------------------------------------------------------------
+# multi-node data-parallel deployment
+# ---------------------------------------------------------------------------
+
+_MULTI_NODE_SERVICES = {
+    "vllm_model": {
+        "type": "vllm",
+        "container": "vllm/vllm-openai:latest",
+        "model": "org/model",
+        "tensor_parallel_size": 2,
+        "number_of_instances": 4,
+        "extra_args": "--api-server-count 4",
+    }
+}
+
+
+def _multi_node_job(tmp_path):
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    config = _submit_config(
+        tmp_path, ["bench_a"], services=_MULTI_NODE_SERVICES, compute_overrides={"nodes": 2, "gpus_per_node": 4}
+    )
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+    return build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+
+def test_number_of_instances_greater_than_one_rejected_on_single_node_job(tmp_path):
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    services = {
+        "vllm_model": {
+            "type": "vllm",
+            "container": "vllm/vllm-openai:latest",
+            "model": "org/model",
+            "number_of_instances": 2,
+        }
+    }
+    config = _submit_config(tmp_path, ["bench_a"], services=services)
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+
+    with pytest.raises(ValueError, match="compute.nodes > 1"):
+        build_job_manifest(
+            config,
+            "bench_a",
+            benchmark,
+            compute,
+            tmp_path / "run",
+            name="gym-test-bench-a",
+            gym_job_id="gym-job-test",
+            resolved_config="",
+            manifest="",
+        )
+
+
+def test_multi_node_job_uses_indexed_completion_mode(tmp_path):
+    job = _multi_node_job(tmp_path)
+    assert job["spec"]["completionMode"] == "Indexed"
+    assert job["spec"]["parallelism"] == 2
+    assert job["spec"]["completions"] == 2
+
+
+def test_single_node_job_has_no_indexed_completion_fields(tmp_path):
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    services = {"vllm_model": {"type": "vllm", "container": "vllm/vllm-openai:latest", "model": "org/model"}}
+    config = _submit_config(tmp_path, ["bench_a"], services=services)
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    assert "completionMode" not in job["spec"]
+    assert "parallelism" not in job["spec"]
+    assert "completions" not in job["spec"]
+
+
+def test_multi_node_vllm_sidecar_branches_on_job_completion_index(tmp_path):
+    job = _multi_node_job(tmp_path)
+    sidecar = job["spec"]["template"]["spec"]["initContainers"][0]
+    assert sidecar["command"][:2] == ["bash", "-lc"]
+    script = sidecar["command"][2]
+    assert "JOB_COMPLETION_INDEX" in script
+    assert "--data-parallel-size 4" in script
+    assert "--data-parallel-size-local 2" in script
+    assert "--headless" in script
+    assert "--data-parallel-start-rank $(( JOB_COMPLETION_INDEX * 2 ))" in script
+    assert "gym-test-bench-a-head.eng-test.svc.cluster.local" in script
+
+
+def test_multi_node_worker_strips_api_server_count(tmp_path):
+    job = _multi_node_job(tmp_path)
+    script = job["spec"]["template"]["spec"]["initContainers"][0]["command"][2]
+    head_branch, _, worker_branch = script.partition("else")
+    assert "--api-server-count" in head_branch
+    assert "--api-server-count" not in worker_branch
+
+
+def test_multi_node_sidecar_uses_exec_probe_not_httpget(tmp_path):
+    job = _multi_node_job(tmp_path)
+    sidecar = job["spec"]["template"]["spec"]["initContainers"][0]
+    assert "httpGet" not in sidecar["startupProbe"]
+    assert "exec" in sidecar["startupProbe"]
+    assert "JOB_COMPLETION_INDEX" in sidecar["startupProbe"]["exec"]["command"][2]
+    assert "exec" in sidecar["readinessProbe"]
+
+
+def test_multi_node_driver_placeholders_non_zero_index(tmp_path):
+    job = _multi_node_job(tmp_path)
+    driver_script = job["spec"]["template"]["spec"]["containers"][0]["command"][2]
+    assert "sleep infinity" in driver_script
+
+
+def test_multi_node_driver_command_includes_self_delete_trap(tmp_path):
+    job = _multi_node_job(tmp_path)
+    driver_script = job["spec"]["template"]["spec"]["containers"][0]["command"][2]
+    assert "trap _gym_k8s_cleanup EXIT" in driver_script
+    assert "gym-test-bench-a" in driver_script
+    assert "gym-test-bench-a-head" in driver_script
+
+
+def test_single_node_driver_command_has_no_self_delete_trap(tmp_path):
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    services = {"vllm_model": {"type": "vllm", "container": "vllm/vllm-openai:latest", "model": "org/model"}}
+    config = _submit_config(tmp_path, ["bench_a"], services=services)
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    driver_script = job["spec"]["template"]["spec"]["containers"][0]["command"][2]
+    assert "_gym_k8s_cleanup" not in driver_script
+
+
+def test_head_service_manifest_selects_completion_index_zero():
+    from nemo_gym.orchestration.executors.kubernetes_script import build_head_service_manifest
+
+    compute = SubmitConfig.model_validate(
+        {
+            "services": _MULTI_NODE_SERVICES,
+            "compute": {"cluster": {"type": "kubernetes", "namespace": "eng-test", "nodes": 2, "gpus_per_node": 4}},
+            "driver": {"container": "gym:latest", "benchmarks": {"bench_a": {}}},
+            "job": {"output_path": "/tmp/jobs"},
+            "otel": {"enabled": False},
+        }
+    ).compute["cluster"]
+    labels = {"gym-job-id": "gym-job-test", "gym-benchmark": "bench-a"}
+
+    service = build_head_service_manifest(compute, "gym-test-bench-a", labels, vllm_port=8000)
+
+    assert service["kind"] == "Service"
+    assert service["metadata"]["name"] == "gym-test-bench-a-head"
+    assert service["spec"]["selector"]["batch.kubernetes.io/job-completion-index"] == "0"
+    ports = {p["port"] for p in service["spec"]["ports"]}
+    assert ports == {8000, 13345}
+
+
+def test_build_manifests_includes_service_doc_only_when_multi_node(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    from datetime import datetime, timezone
+
+    config = _submit_config(tmp_path, ["bench_a"])
+    compute = next(iter(config.compute.values()))
+    docs = KubernetesExecutor()._build_manifests(
+        config, compute, "gym-job-test", datetime.now(timezone.utc), tmp_path / "jobs" / "gym-job-test", ["bench_a"]
+    )
+    assert len(docs[0][1]) == 1
+
+    multi_config = _submit_config(
+        tmp_path, ["bench_a"], services=_MULTI_NODE_SERVICES, compute_overrides={"nodes": 2, "gpus_per_node": 4}
+    )
+    multi_compute = next(iter(multi_config.compute.values()))
+    multi_docs = KubernetesExecutor()._build_manifests(
+        multi_config,
+        multi_compute,
+        "gym-job-test",
+        datetime.now(timezone.utc),
+        tmp_path / "jobs" / "gym-job-test",
+        ["bench_a"],
+    )
+    assert len(multi_docs[0][1]) == 2
+    assert multi_docs[0][1][1]["kind"] == "Service"
+
+
+def test_run_applies_combined_multi_document_manifest_for_multi_node_job(tmp_path, monkeypatch):
+    fake = _FakeKubectl([(0, "job.batch/x created", "")])
+    _install(monkeypatch, fake)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    config = _submit_config(
+        tmp_path, ["bench_a"], services=_MULTI_NODE_SERVICES, compute_overrides={"nodes": 2, "gpus_per_node": 4}
+    )
+
+    record = KubernetesExecutor().run(config)
+
+    assert record is not None
+    _, rendered_input = fake.calls[0]
+    assert rendered_input.count("kind: Job") == 1
+    assert "kind: Service" in rendered_input

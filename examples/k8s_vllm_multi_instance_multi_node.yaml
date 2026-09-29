@@ -1,0 +1,69 @@
+compute:
+  cluster:
+    type: kubernetes
+    # `tsh kube login <cluster>` (or however your cluster's kubeconfig gets set up) names the
+    # context after the identity provider/proxy, not always the bare cluster name -- check the
+    # real name with `kubectl config get-contexts`. Omit `context` to use whatever is current.
+    context: mycluster
+    namespace: mynamespace
+    gpus_per_node: 8
+    # Total pods this Job spans. Each pod hosts an equal share of the vllm service's
+    # number_of_instances data-parallel replicas -- see number_of_instances below.
+    nodes: 2
+    pvc_name: mypvc  # pre-existing PVC, mounted at job.output_path in every container
+    # Memory *request* per GPU a service asks for (a plain Kubernetes quantity, e.g. "64Gi").
+    # Without this, a GPU container has no memory request at all and gets QoS class BestEffort,
+    # which the kubelet kills first under node memory pressure -- often mid-startup, with no
+    # error of its own to explain it. Default shown; raise it for a model that needs more.
+    memory_per_gpu: "32Gi"
+    # PREREQUISITE (not managed by this repo): service_account below must be bound, by a cluster
+    # admin, to a Role in `namespace` granting:
+    #   - apiGroups: ["batch"], resources: ["jobs"],    verbs: ["delete"]
+    #   - apiGroups: [""],      resources: ["services"], verbs: ["delete"]
+    # The driver container (pod index 0) deletes this Job and its head Service itself once
+    # `gym eval run` finishes, success or failure -- the multi-node equivalent of a Slurm
+    # allocation being released when the sbatch script exits. Without this RBAC grant the Job
+    # and its Service are left running (and must be deleted by hand) even after the run itself
+    # completes.
+    service_account: gym-runner
+
+services:
+  vllm_model:
+    container: vllm/vllm-openai:v0.9.0
+    type: vllm
+    model: Qwen/Qwen2.5-7B-Instruct
+    trust_remote_code: true
+    # Per-node share: tensor_parallel_size=2 x (number_of_instances=8 / nodes=2) = 8 GPUs/node,
+    # exactly fills gpus_per_node=8.
+    tensor_parallel_size: 2
+    number_of_instances: 8       # 8 data-parallel replicas total, split 4-per-node across nodes.
+    port: 8000
+    health_check:
+      timeout_seconds: 1200
+    # env values are resolved with one of three prefixes (a bare value is an implicit `lit:`):
+    #   lit:VALUE - literal value, used as-is.
+    #   host:VAR  - read from VAR in the shell running `gym eval submit` (this machine).
+    # `runtime:VAR` (resolved from the job's own environment) is not supported by the
+    # kubernetes executor yet -- there's no shell to resolve it against.
+    env:
+      HF_TOKEN: host:HF_TOKEN
+
+driver:
+  policy_model: vllm_model
+  container: python:3.12
+  gym_install:
+    ref: main
+  env:
+    HF_TOKEN: host:HF_TOKEN
+  benchmarks:
+    gpqa:
+      run:
+        split: benchmark
+        config_paths:
+          - benchmarks/gpqa/config.yaml
+
+job:
+  output_path: /mnt/gym-output
+
+otel:
+  enabled: false  # the kubernetes executor does not wire up a collector yet

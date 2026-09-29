@@ -30,9 +30,13 @@ from pathlib import Path
 import yaml
 
 from nemo_gym import __version__
-from nemo_gym.orchestration.api import KubernetesComputeConfig, SubmitConfig
+from nemo_gym.orchestration.api import KubernetesComputeConfig, SubmitConfig, VllmServiceConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
-from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest, job_name
+from nemo_gym.orchestration.executors.kubernetes_script import (
+    build_head_service_manifest,
+    build_job_manifest,
+    job_name,
+)
 from nemo_gym.orchestration.executors.otel import otel_active
 from nemo_gym.orchestration.jobs import (
     BenchmarkJob,
@@ -94,8 +98,9 @@ class KubernetesExecutor(BaseExecutor):
             raise RuntimeError("kubectl is not on PATH; install it and run `tsh kube login <cluster>` first.")
 
         benchmarks = []
-        for name, job in manifests:
-            rendered = yaml.safe_dump(job, sort_keys=False)
+        for name, docs in manifests:
+            job = docs[0]
+            rendered = yaml.safe_dump_all(docs, sort_keys=False)
             result = _kubectl(compute, "apply", "-f", "-", input=rendered)
             if result.returncode == 0:
                 benchmarks.append(
@@ -135,7 +140,7 @@ class KubernetesExecutor(BaseExecutor):
         now: datetime,
         base_run_dir: Path,
         benchmark_names: list[str],
-    ) -> list[tuple[str, dict]]:
+    ) -> list[tuple[str, list[dict]]]:
         resolved_config_yaml = yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False)
         manifests = []
         for name in benchmark_names:
@@ -166,13 +171,27 @@ class KubernetesExecutor(BaseExecutor):
                 resolved_config=resolved_config_yaml,
                 manifest=record_stub.dumps(),
             )
-            manifests.append((name, job))
+            docs = [job]
+            if compute.nodes > 1:
+                labels = job["spec"]["template"]["metadata"]["labels"]
+                vllm_port = self._sole_vllm_port(config)
+                docs.append(build_head_service_manifest(compute, name_in_cluster, labels, vllm_port=vllm_port))
+            manifests.append((name, docs))
         return manifests
 
-    def _dry_run(self, manifests: list[tuple[str, dict]], gym_job_id: str) -> None:
+    @staticmethod
+    def _sole_vllm_port(config: SubmitConfig) -> int:
+        # A multi-node compute resource is restricted to exactly one vllm service (see
+        # SubmitConfig._resolve_and_validate_placements), so this is unambiguous by the time
+        # build_head_service_manifest needs a port.
+        vllm_services = [s for s in config.services.values() if isinstance(s, VllmServiceConfig)]
+        assert len(vllm_services) == 1
+        return vllm_services[0].port
+
+    def _dry_run(self, manifests: list[tuple[str, list[dict]]], gym_job_id: str) -> None:
         staging = Path(tempfile.mkdtemp(prefix=f"gym-dry-run-{gym_job_id}-"))
-        for name, job in manifests:
-            rendered = yaml.safe_dump(job, sort_keys=False)
+        for name, docs in manifests:
+            rendered = yaml.safe_dump_all(docs, sort_keys=False)
             (staging / f"{name}.job.yaml").write_text(rendered)
             print(f"\n{'=' * 60}")
             print(f"[dry-run] kubernetes Job for benchmark: {name}")
