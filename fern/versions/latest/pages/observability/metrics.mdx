@@ -107,3 +107,66 @@ telemetry:
 Metrics export on a timer. The default interval is 10 seconds and is configurable with the
 standard `OTEL_METRIC_EXPORT_INTERVAL` environment variable, in milliseconds. A process
 that lives for less than one interval may exit before exporting anything.
+
+
+## Inference Metrics During Evaluation
+
+The standard `gym eval run` rollout collector can scrape vLLM Prometheus endpoints
+while rollouts are in flight and publish samples to the configured W&B or MLflow
+exporter. It is disabled by default and independent of the OpenTelemetry switch.
+Add this block to a YAML file loaded through `--config` alongside your normal eval
+and exporter settings:
+
+```yaml
+inference_metrics:
+  enabled: true
+  endpoints:
+    replica0: http://localhost:8000/metrics
+    # replica1: http://other-host:8000/metrics
+  interval_s: 5.0
+  timeout_s: 2.0
+```
+
+These are the default interval and timeout. All `vllm:` gauges and counters are
+exported by default; optionally set `metrics` to a list of exact sample names to
+restrict collection. Supply complete metrics URLs reachable from the eval process,
+preferably one per backend replica. Replica names may contain letters, numbers,
+underscores, and hyphens.
+
+Samples appear under `vllm/<replica>/<metric>`. The `engine` and `model_name`
+labels are removed; remaining labels become sorted `/label/value` path segments
+(with special characters URL-escaped). Series that differ only in removed labels
+are summed, except `kv_cache_usage_perc`, which is averaged. Counter resets are
+tracked per original series. Counters also produce `*_per_second` metrics after
+two samples; a counter decrease resets the baseline. Histograms are not included.
+
+Every exported gauge, counter, and derived rate also gets `vllm/total/<metric>`
+and `vllm/mean/<metric>` across replicas, preserving remaining label paths.
+Mean is the arithmetic mean, including idle replicas. Aggregates are emitted
+only when the matching metric and label path is present on every replica in the
+current scrape cycle. Missing series or failed scrapes are not treated as zero.
+For usage fractions, the mean is usually useful; summing fractions does not
+represent overall utilization. Means are not weighted by replica capacity.
+
+The derived `prefix_cache_hit_rate` is an interval cache hit percentage:
+`100 * prefix_cache_hits_per_second / prefix_cache_queries_per_second`.
+It preserves remaining labels and is omitted when no queries occurred or either
+rate is unavailable. Total cache hit rate uses combined hit and query rates;
+mean cache hit rate is the arithmetic mean of replica percentages, only when
+all are defined. Rates require two samples and are omitted during counter resets.
+
+Locally computed prompt throughput is already available as
+`prompt_tokens_by_source_per_second/source/local_compute`, with total/mean
+aggregates. Other source values distinguish local cache hits and external KV
+transfer when exposed by vLLM.
+
+Select W&B's **Relative Time (Wall)** X axis to view inference metrics over time.
+Progress charts use `progress/completion_pct`. When enabled,
+both streams use automatic W&B history steps so periodic samples cannot overtake
+percentage-based steps. Existing behavior is preserved when disabled.
+
+Sampling stops when collection ends, including failure or cancellation. An in-flight
+scrape can take up to `timeout_s` to finish during shutdown. Scrape failures warn
+once per outage and do not fail the evaluation. Without an active exporter, the
+collector warns and skips scraping. Only standard rollout collection is covered;
+custom benchmark drivers must explicitly integrate the collector.
