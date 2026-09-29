@@ -2,13 +2,12 @@
 
 This environment runs population-grounded, multi-turn user simulation with
 NeMo UserSim. It includes one example task for each first-party UserSim probe;
-the examples exercise the environment but do not constitute a separately
-baselined benchmark.
+the examples exercise the environment's supported interaction shapes.
 
 Environment preparation delegates persona sampling to NeMo UserSim and treats
-the resulting panel Parquet as the immutable prepared artifact. Install the
-pinned NeMo UserSim package so the `usersim` executable is on `PATH`, then
-prepare the environment:
+the resulting panel Parquet as the immutable prepared artifact. Preparation
+runs the pinned UserSim package in its own isolated dependency environment, so
+it does not alter the Gym or Resources Server environments:
 
 ```bash
 gym eval prepare --config environments/usersim/config.yaml

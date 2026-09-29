@@ -17,6 +17,7 @@ ENVIRONMENT_DIR = Path(__file__).parent
 DATA_DIR = ENVIRONMENT_DIR / "data"
 PERSONAS_CACHE_DIR = DATA_DIR / "personas"
 TASKS_FPATH = ENVIRONMENT_DIR.parents[1] / "resources_servers/usersim/data/example.jsonl"
+PREPARE_REQUIREMENTS_FPATH = ENVIRONMENT_DIR / "requirements.txt"
 DEFAULT_PERSONAS_DATASET_VERSION = "0.0.2"
 DEFAULT_PERSONAS_LOCALES = ("en_US",)
 DEFAULT_PERSONAS_PANEL_SIZE = 1_000
@@ -50,7 +51,8 @@ def _prepare_panel(
     version: str,
     locale: str,
     panel_size: int,
-    usersim_executable: str,
+    usersim_executable: str | None,
+    uv_executable: str,
     timeout_seconds: float,
 ) -> Path:
     destination = _panel_path(cache_dir, version, locale)
@@ -73,24 +75,39 @@ def _prepare_panel(
             print(f"Reusing prepared NeMo UserSim panel: {destination}")
             return destination
 
-    executable = shutil.which(usersim_executable)
-    if executable is None:
-        raise RuntimeError(
-            f"{usersim_executable!r} is not on PATH. Install the pinned NeMo UserSim package "
-            "before preparing `environments/usersim/config.yaml`."
-        )
+    if usersim_executable is None:
+        executable = shutil.which(uv_executable)
+        if executable is None:
+            raise RuntimeError(f"{uv_executable!r} is not on PATH; it is required to prepare the UserSim panel.")
+        command = [
+            executable,
+            "run",
+            "--no-config",
+            "--no-project",
+            "--isolated",
+            "--with-requirements",
+            str(PREPARE_REQUIREMENTS_FPATH),
+            "usersim",
+        ]
+    else:
+        executable = shutil.which(usersim_executable)
+        if executable is None:
+            raise RuntimeError(f"{usersim_executable!r} is not on PATH.")
+        command = [executable]
+
     temporary_destination = destination.with_suffix(".parquet.tmp")
     temporary_destination.unlink(missing_ok=True)
-    command = [
-        executable,
-        "panel",
-        "--locale",
-        locale,
-        "--num-personas",
-        str(panel_size),
-        "--out",
-        str(temporary_destination),
-    ]
+    command.extend(
+        [
+            "panel",
+            "--locale",
+            locale,
+            "--num-personas",
+            str(panel_size),
+            "--out",
+            str(temporary_destination),
+        ]
+    )
     try:
         subprocess.run(
             command,
@@ -131,7 +148,8 @@ def prepare(
     personas_dataset_version: str = DEFAULT_PERSONAS_DATASET_VERSION,
     personas_locales: list[str] | tuple[str, ...] = DEFAULT_PERSONAS_LOCALES,
     personas_panel_size: int = DEFAULT_PERSONAS_PANEL_SIZE,
-    usersim_executable: str = "usersim",
+    usersim_executable: str | None = None,
+    uv_executable: str = "uv",
     usersim_panel_timeout_seconds: float = 3_600,
 ) -> Path:
     """Materialize UserSim persona panels and return the environment's example tasks."""
@@ -143,6 +161,7 @@ def prepare(
             locale=locale,
             panel_size=personas_panel_size,
             usersim_executable=usersim_executable,
+            uv_executable=uv_executable,
             timeout_seconds=usersim_panel_timeout_seconds,
         )
 
