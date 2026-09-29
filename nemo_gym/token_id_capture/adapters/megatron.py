@@ -8,11 +8,22 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from nemo_gym.token_id_capture.staging.media import (
+    COMPACT_TOKEN_IDS_DELTA_FIELD,
+    build_compact_token_ids_delta,
+)
+
 
 PREFIX_IDS_FIELD = "required_prefix_token_ids"
 PROMPT_IDS_FIELD = "prompt_token_ids"
 GENERATED_IDS_FIELD = "generated_token_ids"
 GENERATED_LOGPROBS_FIELD = "generated_log_probs"
+# Compact-space material for VLM calls. Megatron Inference's OffloadedRequestPayload
+# carries the compact prompt (one token per image or video); the framework worker
+# attaches ``compact_prev_len`` (the compact length of the parent chain it spliced in)
+# before handing the payload to the capture core.
+COMPACT_PROMPT_IDS_FIELD = "compact_prompt_token_ids"
+COMPACT_PREV_LEN_FIELD = "compact_prev_len"
 
 
 def _field(payload: Any, name: str) -> Any:
@@ -80,7 +91,26 @@ class MegatronCaptureAdapter:
         return token_ids, log_probs
 
     def extract_extras(self, response_payload: Any) -> dict[str, Any] | None:
-        # Megatron Inference routed-experts rows are total_tokens - 1 long while the staging
-        # contract is delta-token aligned. Until that shift has a first-class
-        # representation the adapter stages no extras.
-        return None
+        """Stage the compact-space delta for a call whose engine expanded media tokens.
+
+        Megatron Inference routed-experts rows are total_tokens - 1 long while the
+        staging contract is delta-token aligned. Until that shift has a first-class
+        representation the adapter stages no routing extras. Media tensors do not
+        travel in extras: the framework passes them to
+        ``complete_call_from_response`` as ``attachments``.
+        """
+        compact_prompt = _field(response_payload, COMPACT_PROMPT_IDS_FIELD)
+        if compact_prompt is None:
+            return None
+        compact_prev_len = _field(response_payload, COMPACT_PREV_LEN_FIELD)
+        if compact_prev_len is None:
+            compact_prev_len = 0
+        if type(compact_prev_len) is not int:
+            raise ValueError("Megatron offloaded payload compact_prev_len must be an int")
+        return {
+            COMPACT_TOKEN_IDS_DELTA_FIELD: build_compact_token_ids_delta(
+                _token_ids(response_payload, COMPACT_PROMPT_IDS_FIELD),
+                _token_ids(response_payload, GENERATED_IDS_FIELD),
+                compact_prev_len=compact_prev_len,
+            )
+        }

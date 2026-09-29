@@ -639,6 +639,47 @@ def test_megatron_adapter_reads_mapping_payloads_and_casts_scalars() -> None:
     assert adapter.extract_extras(payload) is None
 
 
+def test_megatron_adapter_stages_compact_delta_without_media_summary() -> None:
+    payload = _minf_payload(
+        prompt_token_ids=[80, 99, 99, 99, 81],
+        generated_token_ids=[12, 2],
+        generated_log_probs=[-0.1, -0.2],
+        compact_prompt_token_ids=[80, 99, 81],
+        compact_prev_len=0,
+    )
+    assert MegatronCaptureAdapter().extract_extras(payload) == {"compact_token_ids_delta": [80, 99, 81, 12, 2]}
+
+
+def test_megatron_adapter_stages_child_compact_suffix() -> None:
+    # The worker spliced a 3-token compact parent chain; only the suffix plus the generation is new.
+    payload = _minf_payload(compact_prompt_token_ids=[10, 99, 11, 30], compact_prev_len=3)
+    assert MegatronCaptureAdapter().extract_extras(payload) == {"compact_token_ids_delta": [30, 12, 13]}
+
+
+def test_megatron_adapter_stages_no_extras_for_text_calls() -> None:
+    payload = _minf_payload(
+        prompt_token_ids=[80, 81],
+        generated_token_ids=[12, 2],
+        generated_log_probs=[-0.1, -0.2],
+        compact_prompt_token_ids=None,
+    )
+    assert MegatronCaptureAdapter().extract_extras(payload) is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"compact_prompt_token_ids": [10, 99], "compact_prev_len": 9}, "outside the compact prompt length"),
+        ({"compact_prompt_token_ids": [10, 99], "compact_prev_len": "1"}, "compact_prev_len must be an int"),
+        ({"compact_prompt_token_ids": [80, 1.5, 81]}, "compact_prompt_token_ids must contain only integer token ids"),
+        ({"compact_prompt_token_ids": [80, True, 81]}, "compact_prompt_token_ids must contain only integer token ids"),
+    ],
+)
+def test_megatron_adapter_rejects_inconsistent_compact_prefix(overrides: dict[str, Any], error: str) -> None:
+    with pytest.raises(ValueError, match=error):
+        MegatronCaptureAdapter().extract_extras(_minf_payload(**overrides))
+
+
 @pytest.mark.parametrize("missing", ["prompt_token_ids", "generated_token_ids", "generated_log_probs"])
 def test_megatron_adapter_missing_field_poisons_capture(missing: str) -> None:
     capture, sink = _capture(adapter=MegatronCaptureAdapter())
