@@ -85,6 +85,7 @@ _cohort_jit_buffers: Dict[str, Tuple[List[ComparisonResult], List[Tuple[int, int
     lambda: ([], [])
 )
 
+
 class GenRMCompareConfig(BaseResourcesServerConfig):
     """Configuration for the GenRM compare server.
 
@@ -254,11 +255,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         cfg = self.config
         principle = body.principle
         expected_rubric_ids = body.expected_rubric_ids
-        response_obj = (
-            body.response.model_dump()
-            if hasattr(body.response, "model_dump")
-            else body.response
-        )
+        response_obj = body.response.model_dump() if hasattr(body.response, "model_dump") else body.response
         reasoning_text, answer_text = extract_from_response_obj(response_obj)
         if cfg.score_source == "rubric_mean" and not expected_rubric_ids:
             raise ValueError("score_source=rubric_mean requires expected_rubric_ids")
@@ -441,9 +438,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             "genrm_api_error_rate_per_group": sum(result[-1] for result in raw_results) / total,
         }
         token_usage = [
-            result[6:9]
-            for result in raw_results
-            if len(result) >= 12 and result[6] >= 0 and result[7] >= 0
+            result[6:9] for result in raw_results if len(result) >= 12 and result[6] >= 0 and result[7] >= 0
         ]
         if token_usage:
             input_tokens = [usage[0] for usage in token_usage]
@@ -745,12 +740,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
                 # Include retry attempts because each one consumes GenRM capacity.
                 usage = raw_response.get("usage") or {}
-                attempt_input_tokens = usage.get(
-                    "input_tokens", usage.get("prompt_tokens")
-                )
-                attempt_output_tokens = usage.get(
-                    "output_tokens", usage.get("completion_tokens")
-                )
+                attempt_input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
+                attempt_output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
                 if (
                     isinstance(attempt_input_tokens, (int, float))
                     and not isinstance(attempt_input_tokens, bool)
@@ -798,9 +789,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     selected_failed = overall_failed
 
                 token_metrics = (
-                    (input_tokens, output_tokens, max_output_tokens_hit)
-                    if usage_available
-                    else (-1.0, -1.0, -1.0)
+                    (input_tokens, output_tokens, max_output_tokens_hit) if usage_available else (-1.0, -1.0, -1.0)
                 )
                 if not selected_failed:
                     return (*selected, *overall, *token_metrics, overall_failed, rubric_failed, 0.0)
@@ -819,9 +808,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             logger.error(f"[GenRM] Error in comparison for pair {pair_idx}: {e}")
             neutral = (cfg.default_score, cfg.default_score, cfg.default_ranking)
             token_metrics = (
-                (input_tokens, output_tokens, max_output_tokens_hit)
-                if usage_available
-                else (-1.0, -1.0, -1.0)
+                (input_tokens, output_tokens, max_output_tokens_hit) if usage_available else (-1.0, -1.0, -1.0)
             )
             return (*neutral, *neutral, *token_metrics, 0.0, 0.0, 1.0)
 

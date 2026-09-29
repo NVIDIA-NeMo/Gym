@@ -599,9 +599,7 @@ class TestRunSingleComparison:
             )
         )
 
-        assert result == approx(
-            (4.0, 3.0, 3.0, 2.0, 5.0, 6.0, -1.0, -1.0, -1.0, 0.0, 0.0, 0.0)
-        )
+        assert result == approx((4.0, 3.0, 3.0, 2.0, 5.0, 6.0, -1.0, -1.0, -1.0, 0.0, 0.0, 0.0))
 
     def test_rubric_parse_failure_keeps_valid_overall_diagnostic(self):
         server, _ = self._make_server()
@@ -617,9 +615,7 @@ class TestRunSingleComparison:
             )
         )
 
-        assert result == approx(
-            (3.0, 3.0, 3.5, 4.0, 2.0, 2.0, -1.0, -1.0, -1.0, 0.0, 1.0, 0.0)
-        )
+        assert result == approx((3.0, 3.0, 3.5, 4.0, 2.0, 2.0, -1.0, -1.0, -1.0, 0.0, 1.0, 0.0))
 
     def test_usage_and_max_output_tokens_are_recorded(self):
         server, mock_client = self._make_server()
@@ -631,9 +627,7 @@ class TestRunSingleComparison:
         )
 
         result = asyncio.run(
-            server._run_single_comparison(
-                [], self._make_response_obj("one"), self._make_response_obj("two")
-            )
+            server._run_single_comparison([], self._make_response_obj("one"), self._make_response_obj("two"))
         )
 
         assert result[6:9] == approx((100.0, 25.0, 1.0))
@@ -644,7 +638,5 @@ class TestRunSingleComparison:
 
         with pytest.raises(ValueError, match="requires expected_rubric_ids"):
             asyncio.run(
-                server._run_single_comparison(
-                    [], self._make_response_obj("one"), self._make_response_obj("two")
-                )
+                server._run_single_comparison([], self._make_response_obj("one"), self._make_response_obj("two"))
             )
