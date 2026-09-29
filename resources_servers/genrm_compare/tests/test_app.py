@@ -262,9 +262,10 @@ class TestGenRMCompareResourcesServer:
         # Patch `_run_single_comparison`
         async def run_single_comparison_mock(*args, **kwargs):
             i, j = kwargs["pair_idx"]
-            # Random deterministic return
+            # Make each pair deterministic and distinguishable.
             scores = (5 * (i + 1 / 16), 5 * (j + 1 / 16), 2 if i % 2 else 5)
-            return (*scores, *scores, 0.0, 0.0, 0.0)
+            # Selected scores, overall scores, unavailable token metrics, and failure flags.
+            return (*scores, *scores, -1.0, -1.0, -1.0, 0.0, 0.0, 0.0)
 
         monkeypatch.setattr(server, "_run_single_comparison", run_single_comparison_mock)
 
@@ -362,7 +363,7 @@ class TestGenRMCompareResourcesServer:
                 0,
             ),
         )
-        # Call 1 since the second call is our tested call
+        # The first aggregation computes golden_rewards; the second is the JIT path under test.
         actual_metadata = aggregate_scores_mock.call_args_list[1].kwargs["comparison_metadata"]
         assert expected_metadata == tuple(actual_metadata)
 
@@ -468,7 +469,8 @@ class TestGenRMCompareResourcesServer:
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
 
         async def failed(*_args, **_kwargs):
-            return 3.0, 3.0, 3.5, 4.0, 2.0, 2.0, 0.0, 1.0, 0.0
+            # Overall parsing succeeded, rubric parsing failed, and no API error occurred.
+            return 3.0, 3.0, 3.5, 4.0, 2.0, 2.0, -1.0, -1.0, -1.0, 0.0, 1.0, 0.0
 
         monkeypatch.setattr(server, "_run_single_comparison", failed)
         response_objs = [{"output": [{"type": "message", "content": [{"type": "output_text", "text": "rollout"}]}]}]

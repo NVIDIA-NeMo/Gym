@@ -63,6 +63,9 @@ from resources_servers.genrm_compare.utils import (
 
 logger = logging.getLogger(__name__)
 
+# Tuple layout: selected (score_1, score_2, ranking), overall (score_1, score_2, ranking),
+# token metrics (input_tokens, output_tokens, max_output_tokens_hit), and failure flags
+# (overall_parse_failed, rubric_parse_failed, api_error).
 ComparisonResult = Tuple[
     float,
     float,

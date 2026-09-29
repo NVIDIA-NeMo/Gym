@@ -741,7 +741,7 @@ def aggregate_scores(
     group_reasoning_length_penalty_coeff: float,
     group_answer_length_penalty_coeff: float,
     group_style_penalty_coeff: float = 0.0,
-    # Score the fixed baseline, but exclude it from group-relative length and style adjustments.
+    # Only this leading prefix receives group-relative length and style adjustments.
     adjustment_count: Optional[int] = None,
 ) -> Tuple[List[float], Dict[str, float], List[float], List[float]]:
     """Aggregate pairwise comparison results into per-response rewards.
@@ -765,6 +765,7 @@ def aggregate_scores(
         group_style_penalty_coeff: Coefficient for style density penalty.
             Penalizes responses with higher density of formatting elements
             (headers, lists, bold, emojis) relative to text length.
+        adjustment_count: Number of leading responses eligible for adjustments. Defaults to all responses.
 
     Returns:
         Tuple of:
@@ -818,6 +819,7 @@ def aggregate_scores(
     # Store base scores before length/style adjustments
     base_scores = list(final_scores)
     bonuses = [0.0] * num_responses
+    # Fixed-baseline mode appends the baseline, so only the leading trainable prefix is adjusted.
     adjustment_count = num_responses if adjustment_count is None else adjustment_count
     adjusted_scores = final_scores[:adjustment_count]
     adjusted_objs = response_objs[:adjustment_count]
