@@ -94,6 +94,12 @@ class CombibenchStatus(str, Enum):
     BAD_TASK = "bad_task"
 
 
+# Prefix of the block ``nemo_gym.reward_profile._coverage_metrics`` publishes:
+# ``coverage/measured_rollouts``, ``coverage/masked_rollouts``,
+# ``coverage/measured_tasks``, ``coverage/fully_masked_tasks``. Kept as a literal
+# because that module exports no constant for it.
+COVERAGE_PREFIX = "coverage/"
+
 HARNESS_FAULTS = {
     CombibenchStatus.LEAN_SERVER_ERROR,
     CombibenchStatus.HEADER_TIMEOUT,
@@ -376,6 +382,22 @@ class CombibenchResourcesServer(SimpleResourcesServer):
         metrics = compute_pass_majority_metrics(tasks)[0]
         metrics.update(compute_subset_metrics(tasks, "tag"))
         return metrics
+
+    def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
+        """The default ``mean/*`` headline, plus how much of the run was measured at all.
+
+        Every harness fault here masks its rollout, so a Lean-server outage does
+        not lower `mean/reward` — it shrinks the corpus the score was computed
+        from, and a run whose denominator collapsed otherwise looks like a
+        healthy one with a slightly different number. The ``coverage/`` block
+        (``nemo_gym/reward_profile.py``) is the signal for that, so it is named
+        in the headline rather than left to be found in the full metrics dump.
+        It is empty unless something was masked, so a clean run publishes exactly
+        the keys it published before.
+        """
+        key_metrics = super().get_key_metrics(agent_metrics)
+        key_metrics.update({k: v for k, v in agent_metrics.items() if k.startswith(COVERAGE_PREFIX)})
+        return key_metrics
 
 
 class _StubLeanClient:

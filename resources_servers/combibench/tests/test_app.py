@@ -446,6 +446,37 @@ class TestMetrics:
         assert aggregate.key_metrics["coverage/masked_rollouts"] == 1
         assert aggregate.agent_metrics.get("mean/harness_failure") == 0.0
 
+    def test_coverage_is_promoted_by_get_key_metrics_itself(self) -> None:
+        """A collapsed denominator must be visible in the headline, not only in the dump.
+
+        Every harness fault masks its rollout, so a Lean-server outage shrinks
+        the measured corpus instead of moving any mean. ``get_key_metrics`` is
+        asked directly here rather than through ``compute_aggregate_metrics``,
+        which appends the same block itself: this server must not depend on that
+        to report a run that measured almost nothing.
+        """
+        server = _make_server()
+        agent_metrics = {
+            "mean/reward": 0.0,
+            "pass@1/accuracy": 0.0,
+            "hackmath/pass@1/accuracy": 0.0,
+            "coverage/measured_rollouts": 3,
+            "coverage/masked_rollouts": 1597,
+            "coverage/measured_tasks": 2,
+            "coverage/fully_masked_tasks": 98,
+        }
+        key_metrics = server.get_key_metrics(agent_metrics)
+        assert key_metrics["coverage/masked_rollouts"] == 1597
+        assert key_metrics["coverage/measured_rollouts"] == 3
+        assert key_metrics["coverage/fully_masked_tasks"] == 98
+        assert key_metrics["mean/reward"] == 0.0
+        # Supplementary keys are still not promoted.
+        assert "hackmath/pass@1/accuracy" not in key_metrics
+
+    def test_a_clean_run_publishes_no_coverage_keys(self) -> None:
+        """Coverage is empty unless something was masked, so nothing new appears."""
+        assert _make_server().get_key_metrics({"mean/reward": 1.0}) == {"mean/reward": 1.0}
+
     def test_per_family_rates_are_supplementary(self) -> None:
         aggregate = self._aggregate()
         # compute_subset_metrics reports percentages.

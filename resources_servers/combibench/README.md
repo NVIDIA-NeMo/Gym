@@ -155,6 +155,16 @@ figures the tables below report — and adds `hackmath/`, `brualdi/`, `imo/` and
 figure, so the pooled keys and the inherited `mean/reward` are the headline and
 the per-family keys are supplementary; they are not promoted to `key_metrics`.
 
+`get_key_metrics` promotes the `coverage/` block alongside `mean/*`. Because
+every harness fault masks its rollout, a Lean-server outage does not lower
+`mean/reward` — it shrinks the corpus the score was computed from, and a run
+that measured 3 rollouts out of 1600 would otherwise read like a healthy one
+with a slightly different number. `coverage/measured_rollouts`,
+`coverage/masked_rollouts`, `coverage/measured_tasks` and
+`coverage/fully_masked_tasks` are therefore in the headline set. They are empty
+unless something was masked, so a clean run publishes exactly the keys it did
+before.
+
 ### Four deliberate departures from upstream
 
 Two of them can only make this server accept where upstream rejects; the other
