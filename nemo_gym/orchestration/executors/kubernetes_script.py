@@ -1,0 +1,255 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Renders the Kubernetes Job manifest for one benchmark.
+
+v1 scope: single node, one Job per benchmark, one pod. Model/ray services become native sidecar
+containers (`initContainers` with `restartPolicy: Always`, k8s >= 1.29) so kubelet enforces
+start-before-driver ordering and readiness via probes, instead of the hand-rolled bash health-check
+loop `slurm_script.py` needs on Slurm. The driver is the pod's single regular container.
+"""
+
+import re
+import shlex
+from pathlib import Path
+from typing import Any
+
+from nemo_gym.orchestration.api import (
+    BenchmarkRunConfig,
+    KubernetesComputeConfig,
+    RayServiceConfig,
+    SubmitConfig,
+    VllmServiceConfig,
+)
+from nemo_gym.orchestration.executors.script_templates import (
+    render_driver_entrypoint,
+    render_gym_cmd,
+    render_write_file_from_base64,
+)
+from nemo_gym.orchestration.executors.utils import flatten_run_args
+
+
+GPU_RESOURCE_KEY = "nvidia.com/gpu"
+LOGS_DIRNAME = "logs"
+ARTIFACTS_DIRNAME = "artifacts"
+OUTPUT_VOLUME_NAME = "gym-output"
+
+
+def _dns_label(value: str) -> str:
+    """Kubernetes object/container names are RFC 1123 labels: lowercase alnum and '-' only, <=63
+    chars, must start/end alphanumeric. Gym service and benchmark names allow '.', '_' (e.g.
+    `vllm_model`, `tau2.airline`), which are valid there but rejected by the k8s API server, so
+    every name that becomes a k8s name goes through this first."""
+    return re.sub(r"[^a-z0-9-]", "-", value.lower()).strip("-")[:63]
+
+
+def job_name(gym_job_id: str, benchmark_name: str) -> str:
+    return f"gym-{_dns_label(gym_job_id)}-{_dns_label(benchmark_name)}"[:63].rstrip("-")
+
+
+def _env_list(env: dict[str, str]) -> list[dict[str, str]]:
+    # `env` is already resolved (lit:/host:/runtime:) by `resolve_env_dict` at validation time;
+    # `runtime:VAR` values are left as `runtime:VAR` there for an executor to turn into a live
+    # reference. Kubernetes has no shell to expand `runtime:` against, so it isn't supported here.
+    resolved = []
+    for key, value in env.items():
+        if value.startswith("runtime:"):
+            raise ValueError(
+                f"env[{key!r}] uses {value!r}, which the kubernetes executor does not support "
+                "(no shell to resolve it against). Use 'lit:' or 'host:' instead."
+            )
+        resolved.append({"name": key, "value": value})
+    return resolved
+
+
+def _reject_unsupported_mounts(mounts: list[str]) -> None:
+    # Pyxis-style "src", "src:dst", "src:dst:flags" mounts don't have a Kubernetes analog without
+    # a matching PVC/hostPath per entry, which v1 doesn't model. The one mount every container
+    # that needs it gets -- the job's own output directory -- is added by the caller directly.
+    if mounts:
+        raise ValueError(
+            f"service/driver `mounts` ({mounts}) are not supported by the kubernetes executor yet; "
+            "only the PVC at `compute.pvc_name`, mounted at `job.output_path`, is available."
+        )
+
+
+def _output_volume_mount(output_path: str) -> dict[str, Any]:
+    # Mounted at the SAME fixed path (`job.output_path`) for every job sharing this PVC, not at
+    # the job's own `run_dir`: a volume mount re-roots the PVC at whatever `mountPath` is given,
+    # so mounting it per-job-run-dir would make every job's `run_dir/logs` etc. land at the same
+    # PVC-relative `logs/` and collide. `run_dir` is a subdirectory *under* this fixed mount.
+    return {"name": OUTPUT_VOLUME_NAME, "mountPath": output_path}
+
+
+def _gpu_resources(gpu_count: int) -> dict[str, Any]:
+    if gpu_count <= 0:
+        return {}
+    return {"limits": {GPU_RESOURCE_KEY: gpu_count}}
+
+
+def _vllm_command(service: VllmServiceConfig, port: int) -> list[str]:
+    cmd = ["vllm", "serve", service.model, "--port", str(port)]
+    if service.served_model_name:
+        cmd += ["--served-model-name", service.served_model_name]
+    if service.tensor_parallel_size > 1:
+        cmd += ["--tensor-parallel-size", str(service.tensor_parallel_size)]
+    if service.pipeline_parallel_size > 1:
+        cmd += ["--pipeline-parallel-size", str(service.pipeline_parallel_size)]
+    if service.trust_remote_code:
+        cmd.append("--trust-remote-code")
+    if service.extra_args:
+        cmd += shlex.split(service.extra_args)
+    return cmd
+
+
+def _probe(path: str, port: int, timeout_seconds: int) -> dict[str, Any]:
+    period = 5
+    return {
+        "httpGet": {"path": path, "port": port},
+        "periodSeconds": period,
+        "failureThreshold": max(1, timeout_seconds // period),
+    }
+
+
+def _sidecar_containers(config: SubmitConfig) -> list[dict[str, Any]]:
+    containers = []
+    for name, service in config.services.items():
+        if isinstance(service, RayServiceConfig):
+            raise ValueError(f"Service '{name}': ray services are not supported by the kubernetes executor yet.")
+        if service.use_ray_serve:
+            raise ValueError(f"Service '{name}': use_ray_serve is not supported by the kubernetes executor yet.")
+        if service.number_of_instances > 1:
+            raise ValueError(
+                f"Service '{name}': number_of_instances={service.number_of_instances} is not supported by the "
+                "kubernetes executor yet (v1 is single-instance-per-pod)."
+            )
+        _reject_unsupported_mounts(service.mounts)
+        gpu_count = service.tensor_parallel_size * service.pipeline_parallel_size
+        container: dict[str, Any] = {
+            "name": _dns_label(name),
+            "image": service.container,
+            "restartPolicy": "Always",  # Native sidecar (k8s >= 1.29): starts before, and is torn
+            # down after, the pod's regular (driver) container -- kubelet handles the ordering.
+            "command": _vllm_command(service, service.port),
+            "ports": [{"containerPort": service.port}],
+            "resources": _gpu_resources(gpu_count),
+        }
+        if service.env:
+            container["env"] = _env_list(service.env)
+        if service.health_check:
+            container["readinessProbe"] = _probe(
+                service.health_check.path,
+                service.health_check.port or service.port,
+                service.health_check.timeout_seconds,
+            )
+        containers.append(container)
+    return containers
+
+
+def _driver_command(
+    config: SubmitConfig,
+    benchmark_name: str,
+    benchmark: BenchmarkRunConfig,
+    run_dir: str,
+    manifest_writes: list[str],
+) -> list[str]:
+    gi = config.driver.gym_install
+    prepare_cmd = None
+    if benchmark.prepare:
+        prepare_cmd = "gym eval prepare " + " ".join(flatten_run_args(benchmark.prepare))
+
+    output_path = f"+output_jsonl_fpath={run_dir}/{ARTIFACTS_DIRNAME}/rollouts.jsonl"
+    policy_type = config.driver.policy_model_type
+    extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
+    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
+    entrypoint = render_driver_entrypoint(
+        repo=gi.repo if gi else None, ref=gi.ref if gi else None, prepare_cmd=prepare_cmd
+    )
+
+    script_lines = [
+        "set -euo pipefail",
+        f"mkdir -p {shlex.quote(run_dir)}/{LOGS_DIRNAME} {shlex.quote(run_dir)}/{ARTIFACTS_DIRNAME}",
+        *manifest_writes,
+        gym_cmd,
+        entrypoint,
+    ]
+    return ["bash", "-c", "\n".join(script_lines)]
+
+
+def _manifest_write_commands(resolved_config: str, manifest: str, run_dir: str) -> list[str]:
+    """Preamble lines that write the resolved config / job manifest onto the mounted PVC.
+
+    Stands in for `Connection.write_text` (Slurm) / a ConfigMap (rejected -- see kubernetes.py):
+    the k8s Job name is chosen before submission, so both files' content is fully known up front
+    and can be embedded directly in the driver container's own startup command.
+    """
+    return [
+        render_write_file_from_base64(resolved_config, f"{run_dir}/resolved-config.yaml"),
+        render_write_file_from_base64(manifest, f"{run_dir}/gym-job.json"),
+    ]
+
+
+def build_job_manifest(
+    config: SubmitConfig,
+    benchmark_name: str,
+    benchmark: BenchmarkRunConfig,
+    compute: KubernetesComputeConfig,
+    run_dir: Path,
+    *,
+    name: str,
+    resolved_config: str,
+    manifest: str,
+) -> dict[str, Any]:
+    run_dir_str = str(run_dir)
+    manifest_writes = _manifest_write_commands(resolved_config, manifest, run_dir_str)
+    _reject_unsupported_mounts(config.driver.mounts)
+
+    volumes = []
+    if compute.pvc_name:
+        volumes.append({"name": OUTPUT_VOLUME_NAME, "persistentVolumeClaim": {"claimName": compute.pvc_name}})
+
+    driver_container: dict[str, Any] = {
+        "name": "driver",
+        "image": config.driver.container,
+        "command": _driver_command(config, benchmark_name, benchmark, run_dir_str, manifest_writes),
+        "volumeMounts": [_output_volume_mount(config.job.output_path)],
+    }
+    if config.driver.env:
+        driver_container["env"] = _env_list(config.driver.env)
+
+    pod_spec: dict[str, Any] = {
+        "restartPolicy": "Never",
+        "initContainers": _sidecar_containers(config),
+        "containers": [driver_container],
+        "volumes": volumes,
+    }
+    if compute.node_selector:
+        pod_spec["nodeSelector"] = compute.node_selector
+    if compute.service_account:
+        pod_spec["serviceAccountName"] = compute.service_account
+
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": name,
+            "namespace": compute.namespace,
+            "labels": {"app.kubernetes.io/managed-by": "nemo-gym", "gym-benchmark": benchmark_name},
+        },
+        "spec": {
+            "backoffLimit": 0,
+            "template": {"spec": pod_spec},
+        },
+    }

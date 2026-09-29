@@ -1,0 +1,171 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import json
+import subprocess
+
+import pytest
+
+from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.executors import kubernetes as kubernetes_module
+from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
+from nemo_gym.orchestration.executors.kubernetes_script import _dns_label, job_name
+from nemo_gym.orchestration.jobs import SubmissionRecord
+
+
+def _submit_config(tmp_path, benchmarks, services=None):
+    return SubmitConfig.model_validate(
+        {
+            "services": services or {},
+            "compute": {
+                "cluster": {
+                    "type": "kubernetes",
+                    "namespace": "eng-test",
+                    "pvc_name": "workspace",
+                }
+            },
+            "driver": {"container": "gym:latest", "benchmarks": {name: {} for name in benchmarks}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+            "otel": {"enabled": False},
+        }
+    )
+
+
+class _FakeKubectl:
+    """Answers `_kubectl(...)` calls in the order they are made, without touching a cluster.
+
+    Patches `kubernetes_module._kubectl` directly rather than `subprocess.run`: the latter is the
+    same module object every caller shares (including `jobs.installed_gym_commit`'s own `git`
+    subprocess calls), so replacing it globally breaks unrelated code the executor also calls.
+    """
+
+    def __init__(self, replies):
+        self._replies = list(replies)
+        self.calls = []
+
+    def __call__(self, compute, *args, input=None):
+        self.calls.append((args, input))
+        returncode, stdout, stderr = self._replies.pop(0)
+        return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr=stderr)
+
+
+def _install(monkeypatch, fake_kubectl):
+    monkeypatch.setattr(kubernetes_module, "_kubectl", fake_kubectl)
+    monkeypatch.setattr(kubernetes_module.shutil, "which", lambda name: "/usr/bin/kubectl")
+
+
+def test_dns_label_sanitizes_gym_names_for_kubernetes():
+    assert _dns_label("vllm_model") == "vllm-model"
+    assert _dns_label("tau2.airline") == "tau2-airline"
+    assert _dns_label("GPQA") == "gpqa"
+
+
+def test_job_name_is_a_valid_dns_label():
+    name = job_name("gym-job-20260101T000000Z-abcdef", "gpqa_diamond")
+    assert name == "gym-gym-job-20260101t000000z-abcdef-gpqa-diamond"
+
+
+def test_run_returns_a_record_naming_every_benchmark(tmp_path, monkeypatch):
+    fake = _FakeKubectl([(0, "job.batch/x created", ""), (0, "job.batch/y created", "")])
+    _install(monkeypatch, fake)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = KubernetesExecutor().run(_submit_config(tmp_path, ["bench_a", "bench_b"]))
+
+    assert record is not None
+    assert [b.benchmark for b in record.benchmarks] == ["bench_a", "bench_b"]
+    assert all(b.job_id is not None for b in record.benchmarks)
+    assert record.cluster == "cluster"
+    assert record.executor == "kubernetes"
+    assert record.hostname is None
+    assert record.executor_metadata["namespace"] == "eng-test"
+    assert record.run_dir.endswith(record.gym_job_id)
+
+
+def test_run_records_a_failed_benchmark_without_disturbing_others(tmp_path, monkeypatch):
+    fake = _FakeKubectl(
+        [
+            (0, "job.batch/x created", ""),
+            (1, "", "Error from server (Forbidden): jobs.batch is forbidden"),
+        ]
+    )
+    _install(monkeypatch, fake)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = KubernetesExecutor().run(_submit_config(tmp_path, ["bench_a", "bench_b"]))
+
+    by_name = {b.benchmark: b for b in record.benchmarks}
+    assert by_name["bench_a"].job_id is not None
+    assert by_name["bench_a"].error is None
+    assert by_name["bench_b"].job_id is None
+    assert "Forbidden" in by_name["bench_b"].error
+
+
+def test_run_writes_the_local_index(tmp_path, monkeypatch):
+    fake = _FakeKubectl([(0, "job.batch/x created", "")])
+    _install(monkeypatch, fake)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = KubernetesExecutor().run(_submit_config(tmp_path, ["bench_a"]))
+
+    index = tmp_path / "cache" / "nemo-gym" / "jobs" / f"{record.gym_job_id}.json"
+    assert SubmissionRecord.load(json.loads(index.read_text())) == record
+
+
+def test_dry_run_returns_none_and_never_calls_kubectl(tmp_path, monkeypatch):
+    def _boom(*args, **kwargs):
+        raise AssertionError("kubectl should not be invoked on a dry run")
+
+    monkeypatch.setattr(kubernetes_module, "_kubectl", _boom)
+
+    result = KubernetesExecutor().run(_submit_config(tmp_path, ["bench_a"]), dry_run=True)
+
+    assert result is None
+
+
+def test_otel_enabled_by_default_is_rejected(tmp_path):
+    services = {
+        "vllm_model": {
+            "type": "vllm",
+            "container": "vllm/vllm-openai:latest",
+            "model": "Qwen/Qwen2.5-1.5B-Instruct",
+        }
+    }
+    config = SubmitConfig.model_validate(
+        {
+            "services": services,
+            "compute": {"cluster": {"type": "kubernetes", "namespace": "eng-test"}},
+            "driver": {"container": "gym:latest", "benchmarks": {"bench_a": {}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+    with pytest.raises(ValueError, match="otel"):
+        KubernetesExecutor().run(config, dry_run=True)
+
+
+def test_ray_serve_service_is_rejected(tmp_path):
+    services = {
+        "vllm_model": {
+            "type": "vllm",
+            "container": "vllm/vllm-openai:latest",
+            "model": "Qwen/Qwen2.5-1.5B-Instruct",
+            "use_ray_serve": True,
+        }
+    }
+    config = _submit_config(tmp_path, ["bench_a"], services=services)
+
+    with pytest.raises(ValueError, match="use_ray_serve"):
+        KubernetesExecutor().run(config, dry_run=True)

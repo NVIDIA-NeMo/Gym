@@ -218,8 +218,21 @@ class SlurmComputeConfig(BaseComputeConfig):
     extra_args: dict[str, str] = {}  # Job-level #SBATCH directives (e.g. --comment, --mail-user).
 
 
+class KubernetesComputeConfig(BaseComputeConfig):
+    type: Literal["kubernetes"]
+    context: str | None = None  # kubeconfig context; None means whatever is already current.
+    namespace: str = "default"
+    # v1 is single-node only: one implicit pool, sized by this rather than named node_pools.
+    gpus_per_node: int | None = None
+    node_selector: dict[str, str] = {}
+    service_account: str | None = None
+    # A pre-existing PVC, mounted at job.output_path in every container.
+    pvc_name: str | None = None
+    extra_args: dict[str, str] = {}  # Forwarded verbatim as pod labels/annotations.
+
+
 ComputeConfig = Annotated[
-    Annotated[SlurmComputeConfig, Tag("slurm")],
+    Annotated[SlurmComputeConfig, Tag("slurm")] | Annotated[KubernetesComputeConfig, Tag("kubernetes")],
     Discriminator("type"),
 ]
 
@@ -335,11 +348,13 @@ class SubmitConfig(_StrictModel):
 
         sole_compute = next(iter(compute_names))
         compute = self.compute[sole_compute]
-        total_nodes = (
-            sum(p.nodes for p in compute.node_pools.values()) if isinstance(compute, SlurmComputeConfig) else 1
-        )
-
-        pool_names = set(compute.node_pools) if isinstance(compute, SlurmComputeConfig) else set()
+        if isinstance(compute, SlurmComputeConfig):
+            total_nodes = sum(p.nodes for p in compute.node_pools.values())
+            pool_names = set(compute.node_pools)
+        else:
+            # Kubernetes v1: always exactly one implicit node/pool, sized by gpus_per_node.
+            total_nodes = 1
+            pool_names = set()
 
         for service_name, service in self.services.items():
             if service.placement is None:
@@ -367,16 +382,22 @@ class SubmitConfig(_StrictModel):
             if not isinstance(service, VllmServiceConfig):
                 continue
 
-            # A pinned service is sized against its own pool, not the whole job: one node of a
-            # ten-node allocation is a single-node deployment with that pool's GPUs, and judging
-            # it by the allocation total both mis-builds the command and mis-reports idle GPUs.
-            service_pools = (
-                {service.node_pool: compute.node_pools[service.node_pool]}
-                if service.node_pool is not None and isinstance(compute, SlurmComputeConfig)
-                else (compute.node_pools if isinstance(compute, SlurmComputeConfig) else {})
-            )
-            service_nodes = sum(p.nodes for p in service_pools.values()) or total_nodes
-            service_gpus = [p.gpus_per_node for p in service_pools.values() if p.gpus_per_node is not None]
+            if isinstance(compute, SlurmComputeConfig):
+                # A pinned service is sized against its own pool, not the whole job: one node of a
+                # ten-node allocation is a single-node deployment with that pool's GPUs, and judging
+                # it by the allocation total both mis-builds the command and mis-reports idle GPUs.
+                service_pools = (
+                    {service.node_pool: compute.node_pools[service.node_pool]}
+                    if service.node_pool is not None
+                    else compute.node_pools
+                )
+                service_nodes = sum(p.nodes for p in service_pools.values()) or total_nodes
+                service_gpus = [p.gpus_per_node for p in service_pools.values() if p.gpus_per_node is not None]
+            else:
+                # Kubernetes v1: no named pools (enforced above), one implicit node/pool.
+                service_pools = {}
+                service_nodes = total_nodes
+                service_gpus = [compute.gpus_per_node] if compute.gpus_per_node is not None else []
 
             is_ray_serve = effective_ray_serve(service, service_nodes, service_gpus)
 
