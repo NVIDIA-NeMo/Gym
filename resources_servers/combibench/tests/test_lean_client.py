@@ -263,3 +263,42 @@ class TestToolchainProbe:
         # ... and the hit is cached, so the cold import is not paid again.
         assert await client.toolchain_version() == "4.24.0"
         assert len(calls) == 2
+
+    async def test_start_version_probe_returns_without_waiting_for_the_server(self, monkeypatch) -> None:
+        """Nothing scored may wait on the probe, so starting it must not block."""
+        never_answers = asyncio.Event()
+
+        async def fake_request(method, url, **kwargs):
+            await never_answers.wait()
+
+        monkeypatch.setattr(lean_client, "request", fake_request)
+        client = KiminaLeanClient("http://lean:8000")
+        client.start_version_probe()
+        assert client.lean_version is None
+        # A second call does not stack a second probe on the hung first one.
+        client.start_version_probe()
+        await asyncio.sleep(0)
+        assert client._version_probes == 1
+        never_answers.set()
+
+    async def test_the_probe_is_retried_and_cached_through_start(self, monkeypatch) -> None:
+        """``start_version_probe`` keeps probe-once/cache/re-probe-a-failure."""
+        replies: list[Any] = [ConnectionError("refused"), self._info('"4.24.0"')]
+        calls: list[dict] = []
+
+        async def fake_request(method, url, **kwargs):
+            calls.append(kwargs)
+            reply = replies[min(len(calls), len(replies)) - 1]
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        monkeypatch.setattr(lean_client, "request", fake_request)
+        client = KiminaLeanClient("http://lean:8000")
+        for _ in range(5):
+            client.start_version_probe()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        assert client.lean_version == "4.24.0"
+        # One failure, then one success that is cached: no probe per call.
+        assert len(calls) == 2

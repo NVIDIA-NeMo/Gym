@@ -55,17 +55,18 @@ PROOF_ONLY_STATEMENT = "import Mathlib\n\ntheorem t (p : Prop) (hp : p) : p := b
 class FakeLeanClient:
     """Scripted Lean server: records what it was asked to compile."""
 
-    def __init__(self, result: Optional[LeanResult] = None, version: str = "4.24.0"):
+    def __init__(self, result: Optional[LeanResult] = None, version: Optional[str] = "4.24.0"):
         self.result = result or LeanResult()
-        self.version = version
+        self.lean_version = version
+        self.probes = 0
         self.calls: list[str] = []
 
     async def verify(self, code: str, timeout_seconds: int) -> LeanResult:
         self.calls.append(code)
         return self.result
 
-    async def toolchain_version(self) -> Optional[str]:
-        return self.version
+    def start_version_probe(self) -> None:
+        self.probes += 1
 
 
 def _make_server(lean_client: Optional[FakeLeanClient] = None, **config_overrides) -> CombibenchResourcesServer:
@@ -222,8 +223,37 @@ class TestVerify:
         assert result.failure_kind == PROVIDER_UNAVAILABLE
 
     async def test_lean_version_is_echoed(self) -> None:
-        result = await _make_server(FakeLeanClient(version="4.24.0")).verify(_request(_fenced(SOLUTION)))
+        client = FakeLeanClient(version="4.24.0")
+        result = await _make_server(client).verify(_request(_fenced(SOLUTION)))
         assert result.lean_version == "4.24.0"
+        assert client.probes == 1  # started, not awaited
+
+    async def test_a_hanging_toolchain_probe_does_not_delay_the_verdict(self, monkeypatch) -> None:
+        """Scoring must not queue behind the probe, end to end through the real client.
+
+        Against a server that accepts connections and never answers, awaiting the
+        probe before each compile put minutes of Lean timeout in front of the
+        first rollouts, so the run died of agent and eval timeouts instead of
+        producing the verdict — or the masked ``sandbox_error`` — the design
+        intends. The probe runs as a background task now: the verdict arrives
+        with ``lean_version`` null, which is that field's documented "not known".
+        """
+        never_answers = asyncio.Event()
+
+        async def fake_request(method, url, **kwargs):
+            if "Lean.versionString" in kwargs["json"]["codes"][0]["proof"]:
+                await never_answers.wait()  # a connection accepted and then left open
+            return TestErrorPayloadIsNeverRewarded._Reply(
+                {"results": [{"custom_id": "x", "response": {"messages": [], "time": 0.1}}]}
+            )
+
+        monkeypatch.setattr(lean_client, "request", fake_request)
+        server = _make_server()
+        server._verifier.lean_client = KiminaLeanClient("http://lean:8000")
+        result = await asyncio.wait_for(server.verify(_request(_fenced(SOLUTION))), timeout=5)
+        assert result.reward == 1.0
+        assert result.lean_version is None
+        never_answers.set()  # let the background probe unwind before the loop closes
 
     async def test_unreachable_lean_server_is_a_harness_fault(self) -> None:
         client = FakeLeanClient(LeanResult(error="ClientConnectorError: refused", transport_failure=True))

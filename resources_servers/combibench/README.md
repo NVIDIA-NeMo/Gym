@@ -133,13 +133,21 @@ does not terminate is the model's output, and excusing it would make hanging
 reward-neutral.
 
 Every response carries `lean_version`, the Lean version the server reports for
-`#eval Lean.versionString`. It is probed before the first compile (which also
-warms the REPL) and cached once it answers. A server built for another toolchain
-otherwise scores every row `compile_error` with nothing in the rollouts saying
-why. A probe that returns no version is not cached as an answer — one dropped
-connection would otherwise switch the guard off for the whole run — it is
-retried on the next call, up to three probes per process, after which the
-failure is logged at ERROR and `lean_version` stays null for the run.
+`#eval Lean.versionString`. A server built for another toolchain otherwise
+scores every row `compile_error` with nothing in the rollouts saying why. The
+probe is started as a **background task** on the first compile and never
+awaited: it goes through the same code path a submission does, so waiting for it
+would put its whole Lean timeout in front of the first rollouts whenever the
+server accepts connections without answering — the run would die of agent and
+eval timeouts rather than produce the masked `sandbox_error` that case is meant
+to produce. `lean_version` is null until the probe comes back, which is that
+field's documented meaning of "not known". A probe that returns no version is
+not cached as an answer — one dropped connection would otherwise switch the
+guard off for the whole run — it is started again by the next compile, up to
+three probes per process, after which the failure is logged at ERROR and
+`lean_version` stays null for the run. The probe's own Lean timeout is 30 s
+rather than the submission's 60 s: nothing waits on it, so it should not hold
+one of the `max_concurrent_lean_requests` slots any longer than it must.
 
 `compute_metrics` emits the pooled `pass@k` / `pass@1[avg-of-k]` keys — the
 figures the tables below report — and adds `hackmath/`, `brualdi/`, `imo/` and

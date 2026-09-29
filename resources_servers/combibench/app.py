@@ -261,8 +261,11 @@ class CombibenchVerifier:
 
         types = abbrev_types(chunks) if self.config.answer_check_ascription else None
         submission = build_submission(code, tags, body.answers, types)
-        # Probed once per process and cached; the first call also warms the REPL.
-        lean_version = await self.lean_client.toolchain_version()
+        # Kicked off in the background and never awaited: the version is a
+        # diagnostic, so a verdict must not queue behind a probe that a hung Lean
+        # server would hold for its whole timeout. ``lean_version`` stays null
+        # until the probe answers, which is its documented meaning.
+        self.lean_client.start_version_probe()
         result: LeanResult = await self.lean_client.verify(submission, self.config.lean_timeout_seconds)
         status = CombibenchStatus(classify_lean_result(result))
         failure_reason = None
@@ -277,7 +280,8 @@ class CombibenchVerifier:
             code=submission,
             result=result,
             failure_reason=failure_reason,
-            lean_version=lean_version,
+            # Read after the compile, so a probe that finished in the meantime is reported.
+            lean_version=self.lean_client.lean_version,
         )
 
     def _respond(
@@ -358,8 +362,12 @@ class _StubLeanClient:
             return LeanResult(messages=[{"severity": "warning", "data": "declaration uses 'sorry'"}])
         return LeanResult()
 
-    async def toolchain_version(self) -> Optional[str]:
-        return None  # no Lean behind the fixture, so there is no version to report
+    def start_version_probe(self) -> None:
+        return None  # no Lean behind the fixture, so there is nothing to probe
+
+    @property
+    def lean_version(self) -> Optional[str]:
+        return None  # ... and therefore no version to report
 
 
 def _fixture_verifier() -> CombibenchVerifier:

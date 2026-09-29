@@ -64,11 +64,27 @@ SATURATION_BACKOFF_SECONDS = 1.0  # doubled each attempt: 1s, then 2s
 # answer would silently switch the guard off for the whole run.
 MAX_VERSION_PROBES = 3
 
+# Lean timeout for the probe. Shorter than a submission's because nothing waits
+# on it: the probe runs as a background task and a rollout is scored with
+# ``lean_version`` still unknown rather than behind it. Against a server that
+# accepts connections and never answers, this bounds how long one of the
+# ``max_concurrency`` slots is held by a request no verdict depends on.
+VERSION_PROBE_TIMEOUT_SECONDS = 30
+
 # Kimina exposes no version endpoint, so the toolchain is read by compiling a
 # one-line program through the same path a submission takes. ``TOOLCHAIN_PROBE``
-# is the shared one, so every Lean benchmark asks the question the same way; its
-# header is the one submissions use, so the probe also pays the cold
-# ``import Mathlib`` that would otherwise land on the first scored rollout.
+# is the shared one, so every Lean benchmark asks the question the same way, and
+# its header is the one submissions use, so the probe warms the same REPL pool
+# rather than a second one.
+
+
+def _log_probe_task(task: "asyncio.Task") -> None:
+    """Consume a finished background probe so a failure is logged, never swallowed."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        LOG.warning("Lean toolchain probe raised: %r", exc)
 
 
 class KiminaLeanClient:
@@ -79,6 +95,7 @@ class KiminaLeanClient:
         self._version: Optional[str] = None
         self._version_probes = 0
         self._version_lock = asyncio.Lock()
+        self._version_task: Optional[asyncio.Task] = None
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
@@ -147,13 +164,50 @@ class KiminaLeanClient:
             return LeanResult(error=f"{type(exc).__name__}: {exc}", transport_failure=True)
         return parse_verify_response(body)
 
-    async def toolchain_version(self, timeout_seconds: int = 120) -> Optional[str]:
+    @property
+    def lean_version(self) -> Optional[str]:
+        """The probed Lean version if it has already answered, else None.
+
+        Reading this never blocks and never starts a probe. ``None`` is the
+        documented meaning "not known", which is what a caller sees until the
+        background probe has come back.
+        """
+        return self._version
+
+    def start_version_probe(self) -> None:
+        """Start the toolchain probe in the background, at most one at a time.
+
+        Scoring must not wait on this. The probe compiles a one-line program
+        through the same path a submission takes, so against a server that
+        accepts connections but never answers it costs the full Lean timeout
+        plus the HTTP margin; awaiting it before every compile put that latency
+        in front of the first rollouts and turned a server outage into agent and
+        eval timeouts instead of the masked ``sandbox_error`` this server
+        intends. Calling this on each use keeps round 2's "probe once, cache the
+        answer, re-probe a transient failure" behaviour: the call is a no-op once
+        a version is known or ``MAX_VERSION_PROBES`` have been spent, and a probe
+        that failed is re-attempted by the next call rather than by a retry loop
+        nothing is waiting on.
+        """
+        if self._version is not None or self._version_probes >= MAX_VERSION_PROBES:
+            return
+        if self._version_task is not None and not self._version_task.done():
+            return
+        self._version_task = asyncio.ensure_future(self.toolchain_version(VERSION_PROBE_TIMEOUT_SECONDS))
+        # Nothing awaits the task, so its result has to be retrieved here or asyncio
+        # reports it as never retrieved at garbage-collection time.
+        self._version_task.add_done_callback(_log_probe_task)
+
+    async def toolchain_version(self, timeout_seconds: int = VERSION_PROBE_TIMEOUT_SECONDS) -> Optional[str]:
         """Lean version the server actually runs, probed until it answers and then cached.
 
         A server built for another Lean version scores every row
         ``proof_failed`` and nothing in the rollouts says why, which is what the
         version in every response exists to make visible. The probe pays one cold
         ``import`` on its first call.
+
+        Normally driven by ``start_version_probe`` rather than awaited by a
+        caller: no verdict depends on the answer, so nothing should wait for it.
 
         A probe that returns no version is *not* cached as an answer: caching it
         would let one transient failure — a server still starting, a single
