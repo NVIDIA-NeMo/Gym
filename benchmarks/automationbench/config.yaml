@@ -21,6 +21,10 @@ automationbench:
       max_tokens: 131072
       temperature: 1.0
       top_p: 1.0
+      # OpenAI client deadline configuration
+      client_timeout_s: 3600
+      client_connect_timeout_s: 60
+      client_max_retries: 0
       datasets:
         - name: example
           type: example

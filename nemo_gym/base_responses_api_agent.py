@@ -55,10 +55,11 @@ from nemo_gym.tool_access import ToolAccess
 
 
 class AgentSeedSessionRequest(BaseModel):
-    """Initialize agent-server state for one episode."""
+    """Idempotently initialize agent-server state under a caller-assigned identifier."""
 
     model_config = ConfigDict(extra="forbid")
 
+    agent_session_id: str = Field(min_length=1)
     episode_id: EpisodeId
     task_id: TaskId
     tool_accesses: list[ToolAccess] = Field(default_factory=list)
@@ -74,7 +75,7 @@ class AgentSeedSessionRequest(BaseModel):
 
 
 class AgentSeedSessionResponse(BaseModel):
-    """Return the opaque agent session identifier."""
+    """Confirm the caller-assigned agent session identifier."""
 
     model_config = ConfigDict(extra="forbid")
 
