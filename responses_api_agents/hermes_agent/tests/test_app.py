@@ -46,6 +46,7 @@ from responses_api_agents.hermes_agent.app import (
     HermesAgentSessionState,
     ModelServerRef,
     ResourcesServerRef,
+    _sandbox_hermes_install,
     _split_input_to_user_and_history,
     _trajectory_to_output_items,
 )
@@ -537,6 +538,46 @@ class TestSigtermHandler:
                 model_name="model",
                 fail_on_error=True,
             )
+
+
+class TestSandboxHermesInstall:
+    """The sandbox installs whatever Hermes this server has installed, so requirements.txt is the only pin."""
+
+    @staticmethod
+    def _installed(monkeypatch, *, version: str, direct_url: dict | None) -> None:
+        distribution = SimpleNamespace(
+            version=version,
+            read_text=lambda name: json.dumps(direct_url) if direct_url is not None else None,
+        )
+        monkeypatch.setattr("importlib.metadata.distribution", lambda name: distribution)
+
+    def test_git_install_becomes_a_github_archive_keyed_by_commit(self, monkeypatch) -> None:
+        commit = "26bb847a88493342ca1b194e0455b479073ae21d"
+        self._installed(
+            monkeypatch,
+            version="0.6.0",
+            direct_url={"url": "https://github.com/cmunley1/hermes-agent.git", "vcs_info": {"commit_id": commit}},
+        )
+
+        requirement, key = _sandbox_hermes_install()
+
+        assert requirement == f"hermes-agent @ https://github.com/cmunley1/hermes-agent/archive/{commit}.tar.gz"
+        assert key == commit[:12]
+
+    def test_release_install_pins_the_version(self, monkeypatch) -> None:
+        self._installed(monkeypatch, version="0.7.1", direct_url=None)
+
+        assert _sandbox_hermes_install() == ("hermes-agent==0.7.1", "0.7.1")
+
+    def test_git_install_outside_github_is_rejected(self, monkeypatch) -> None:
+        self._installed(
+            monkeypatch,
+            version="0.6.0",
+            direct_url={"url": "https://gitlab.example.com/hermes-agent", "vcs_info": {"commit_id": "abc"}},
+        )
+
+        with pytest.raises(RuntimeError, match="gitlab.example.com"):
+            _sandbox_hermes_install()
 
 
 class TestSplitInputToUserAndHistory:

@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import atexit
+import importlib.metadata
 import json
 import logging
 import os
@@ -138,14 +139,32 @@ def _trajectory_to_output_items(messages, n_input):
 
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
-_SANDBOX_RUNTIME_DIR = "/tmp/nemo-gym-hermes-runtime-26bb847a"
+
+
+def _sandbox_hermes_install() -> tuple[str, str]:
+    """Return the requirement the sandbox installs and the key that names its runtime directory.
+
+    Both come from the Hermes installed with this server, so ``requirements.txt`` is the only version pin and
+    the sandbox runs the same Hermes as the host. A git install is fetched as a GitHub archive, so the sandbox
+    does not need git.
+    """
+    distribution = importlib.metadata.distribution("hermes-agent")
+    direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
+    commit = (direct_url.get("vcs_info") or {}).get("commit_id")
+    if commit is None:
+        return f"hermes-agent=={distribution.version}", distribution.version
+    url = str(direct_url.get("url") or "").removesuffix(".git")
+    if not url.startswith("https://github.com/"):
+        raise RuntimeError(f"Cannot build a sandbox install URL for hermes-agent installed from {url!r}")
+    return f"hermes-agent @ {url}/archive/{commit}.tar.gz", commit[:12]
+
+
+_HERMES_REQUIREMENT, _HERMES_RUNTIME_KEY = _sandbox_hermes_install()
+_SANDBOX_RUNTIME_DIR = f"/tmp/nemo-gym-hermes-runtime-{_HERMES_RUNTIME_KEY}"
 _SANDBOX_UV = f"{_SANDBOX_RUNTIME_DIR}/uv"
 _SANDBOX_PYTHON = f"{_SANDBOX_RUNTIME_DIR}/venv/bin/python"
 _SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
 _SANDBOX_OBSERVER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_observer.py"
-_HERMES_REQUIREMENT = (
-    "hermes-agent @ https://github.com/cmunley1/hermes-agent/archive/26bb847a88493342ca1b194e0455b479073ae21d.tar.gz"
-)
 _AGENT_SESSION_ID_KEY = "agent_session_id"
 
 
