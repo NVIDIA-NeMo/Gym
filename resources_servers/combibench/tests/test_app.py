@@ -211,8 +211,8 @@ class TestVerify:
         assert result.mask_sample is False
         assert result.failure_kind is None
 
-    async def test_header_timeout_is_a_harness_fault(self) -> None:
-        """A cold REPL failing to load ``import Mathlib`` is not something the model did."""
+    async def test_header_timeout_on_the_reference_header_is_a_harness_fault(self) -> None:
+        """A cold REPL failing to load the statement's own ``import Mathlib`` is not the model's."""
         client = FakeLeanClient(LeanResult(error="Lean REPL header command timed out in 60 seconds"))
         result = await _make_server(client).verify(_request(_fenced(SOLUTION)))
         assert result.reward == 0.0
@@ -222,6 +222,45 @@ class TestVerify:
         # Masked: averaging a cold REPL into the score would read as a model failure.
         assert result.mask_sample is True
         assert result.failure_kind == PROVIDER_UNAVAILABLE
+
+    async def test_header_timeout_on_the_default_header_is_a_harness_fault(self) -> None:
+        """No imports in the block means ``extract_lean_code`` supplied the header, not the model."""
+        client = FakeLeanClient(LeanResult(error="Lean REPL header command timed out in 60 seconds"))
+        headerless = SOLUTION.split("\n\n", 1)[1]
+        result = await _make_server(client).verify(_request(_fenced(headerless)))
+        assert result.status == CombibenchStatus.HEADER_TIMEOUT.value
+        assert result.mask_sample is True
+
+    async def test_header_timeout_on_a_model_chosen_header_is_charged_to_the_model(self) -> None:
+        """The model picked imports that would not load in the budget; that is its submission."""
+        client = FakeLeanClient(LeanResult(error="Lean REPL header command timed out in 60 seconds"))
+        result = await _make_server(client).verify(
+            _request(_fenced(SOLUTION.replace("import Mathlib", "import Mathlib\nimport SomethingSlow", 1)))
+        )
+        assert result.reward == 0.0
+        assert result.status == CombibenchStatus.MODEL_HEADER_TIMEOUT.value
+        assert result.harness_failure == 0.0
+        assert result.mask_sample is False
+        assert result.failure_kind is None
+        assert result.failure_reason is None
+
+    async def test_a_per_snippet_server_error_is_charged_to_the_model(self) -> None:
+        """Kimina's 500 comes from executing *this* snippet, so it scores 0 rather than vanishing.
+
+        ``server/routers/check.py`` turns any exception raised while getting a
+        REPL, running the header or running the body into
+        ``HTTPException(500, ...)`` for that snippet, and one of those exceptions
+        is the ``LeanError`` ``server/repl.py`` raises whenever the REPL wrote to
+        stderr. Model output can reach it, so masking it would let a rollout the
+        model caused be deleted from the denominator instead of scored 0.
+        """
+        client = FakeLeanClient(LeanResult(error="HTTP 500: boom", server_error=True))
+        result = await _make_server(client).verify(_request(_fenced(SOLUTION)))
+        assert result.reward == 0.0
+        assert result.status == CombibenchStatus.LEAN_ERROR.value
+        assert result.harness_failure == 0.0
+        assert result.mask_sample is False
+        assert result.failure_kind is None
 
     async def test_lean_version_is_echoed(self) -> None:
         client = FakeLeanClient(version="4.24.0")

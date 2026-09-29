@@ -25,6 +25,8 @@ from resources_servers.combibench.fine_eval import (
     classify_lean_result,
     extract_lean_code,
     has_forbidden_substring,
+    header_is_harness_supplied,
+    import_header,
     missing_chunks,
     remove_comments,
     statement_chunks,
@@ -261,6 +263,34 @@ class TestClassification:
 
     def test_transport_failure_is_a_harness_fault(self) -> None:
         assert classify_lean_result(LeanResult(error="boom", transport_failure=True)) == STATUS_SANDBOX_ERROR
+
+    def test_a_per_snippet_server_error_is_charged_to_the_model(self) -> None:
+        """Kimina's 500 says executing this snippet raised, which upstream fails the model for."""
+        assert classify_lean_result(LeanResult(error="HTTP 500: boom", server_error=True)) == "lean_error"
+
+
+class TestImportHeader:
+    """Which header Kimina would load decides who a header timeout belongs to."""
+
+    def test_mirrors_kiminas_split(self) -> None:
+        """``server/split.py``: leading imports only, Mathlib hoisted, duplicates dropped."""
+        code = "import Aesop\nimport Mathlib.Tactic\n\nimport Aesop\nset_option maxHeartbeats 0\nimport Late\n"
+        assert import_header(code) == "import Mathlib\nimport Aesop"
+
+    def test_code_without_imports_has_an_empty_header(self) -> None:
+        assert import_header("theorem t : True := trivial") == ""
+
+    def test_the_reference_header_is_the_harnesss(self) -> None:
+        assert header_is_harness_supplied("import Mathlib\n\ntheorem t : True := trivial", STATEMENT) is True
+
+    def test_the_default_prepended_header_is_the_harnesss(self) -> None:
+        """``extract_lean_code`` prepends it when the model wrote no imports at all."""
+        code = extract_lean_code("```lean4\ntheorem t : True := trivial\n```")
+        assert header_is_harness_supplied(code, STATEMENT) is True
+
+    def test_an_extra_model_import_is_the_models_choice(self) -> None:
+        code = "import Mathlib\nimport SomethingSlow\n\ntheorem t : True := trivial"
+        assert header_is_harness_supplied(code, STATEMENT) is False
 
 
 class TestVerifyResponseParsing:

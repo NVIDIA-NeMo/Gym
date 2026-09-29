@@ -41,6 +41,7 @@ from resources_servers.combibench.fine_eval import (
     classify_lean_result,
     extract_lean_code,
     has_forbidden_substring,
+    header_is_harness_supplied,
     missing_chunks,
     statement_chunks,
 )
@@ -87,10 +88,12 @@ class CombibenchStatus(str, Enum):
     # CombiBench-specific outcomes.
     FORMAT_ERROR = "format_error"  # no fenced Lean block
     CODE_TOO_LONG = "code_too_long"
-    LEAN_ERROR = "lean_error"  # Lean server reported a non-timeout REPL error
+    LEAN_ERROR = "lean_error"  # Lean server reported a non-timeout REPL error, or a 5xx for this snippet
+    # The model chose an import header that would not load inside the timeout.
+    MODEL_HEADER_TIMEOUT = "model_header_timeout"
     # Harness faults: the model did not cause these.
     LEAN_SERVER_ERROR = STATUS_SANDBOX_ERROR
-    HEADER_TIMEOUT = "header_timeout"  # a cold REPL could not load 'import Mathlib' in time
+    HEADER_TIMEOUT = "header_timeout"  # a cold REPL could not load the *reference* header in time
     BAD_TASK = "bad_task"
 
 
@@ -301,7 +304,20 @@ class CombibenchVerifier:
         if status is CombibenchStatus.LEAN_SERVER_ERROR:
             failure_reason = f"Lean server unavailable or replied malformed: {result.error}"
         elif status is CombibenchStatus.HEADER_TIMEOUT:
-            failure_reason = f"Lean server could not load its import header in time: {result.error}"
+            # Kimina loads the submission's import header into a pooled REPL before it
+            # runs the body, and reports a header timeout for that step alone. Which
+            # header it was decides who the failure belongs to: the reference
+            # statement's (or the default one this harness prepends when the model
+            # wrote no imports) is not the model's choice, and a cold ``import
+            # Mathlib`` that misses the budget is infrastructure, so it is masked. A
+            # header the model wrote itself is its choice, and choosing imports that
+            # will not load inside the timeout is a failed submission, not a harness
+            # fault -- masking it would delete the rollout from the denominator
+            # instead of scoring it 0.
+            if header_is_harness_supplied(submission, body.formal_statement):
+                failure_reason = f"Lean server could not load the reference import header in time: {result.error}"
+            else:
+                status = CombibenchStatus.MODEL_HEADER_TIMEOUT
         return self._respond(
             body,
             status,

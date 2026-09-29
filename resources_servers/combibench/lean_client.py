@@ -106,8 +106,13 @@ class KiminaLeanClient:
     async def verify(self, code: str, timeout_seconds: int) -> LeanResult:
         """Compile ``code`` once and report what Lean said.
 
-        Any failure to obtain a well-formed reply is a transport failure: the
-        model cannot cause it, so callers attribute it to the harness.
+        A failure the model could not have caused — the connection refused, the
+        client timing out, a reply that is not the documented JSON, saturation
+        still unresolved after the retries — is a transport failure: callers
+        attribute it to the harness and mask the rollout. A 5xx is *not* one of
+        those: Kimina raises it per snippet, from executing this submission, so
+        it is charged to the model. See ``_verify_once`` and the README's
+        "Who a failure is charged to".
 
         A saturation reply (``SATURATION_STATUSES``) is retried with backoff,
         because it is the one failure that costs the server no REPL time and is
@@ -165,7 +170,29 @@ class KiminaLeanClient:
                 if response.status != 200:
                     text = await response.text()
                     LOG.warning("Lean server returned HTTP %s: %s", response.status, text[:500])
-                    return LeanResult(error=f"HTTP {response.status}: {text[:500]}", transport_failure=True)
+                    # A 5xx is Kimina reporting that executing *this snippet*
+                    # failed, so it is charged to the model rather than masked.
+                    # ``server/routers/check.py`` wraps every non-timeout
+                    # exception raised while getting a REPL, running the header
+                    # or running the body into ``HTTPException(500, str(e))``,
+                    # per snippet, and one of those exceptions is
+                    # ``LeanError``, which ``server/repl.py`` raises whenever
+                    # the REPL wrote anything to stderr. Model output reaches
+                    # that path: ``native_decide`` is allowed by design and the
+                    # model's own ``import`` lines become the pooled REPL's
+                    # header. Masking it would let a rollout that Lean refused
+                    # to evaluate be deleted from the denominator instead of
+                    # scored 0, which upstream never does.
+                    #
+                    # Everything else non-200 (401, 404, 422, ...) is this
+                    # client or its credentials being wrong, which the model
+                    # cannot cause, so it stays a masked transport failure.
+                    server_error = 500 <= response.status < 600
+                    return LeanResult(
+                        error=f"HTTP {response.status}: {text[:500]}",
+                        transport_failure=not server_error,
+                        server_error=server_error,
+                    )
                 body = await response.json()
         except Exception as exc:  # network errors, timeouts, bad JSON
             LOG.warning("Lean server request failed: %r", exc)

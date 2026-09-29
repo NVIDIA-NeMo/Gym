@@ -85,11 +85,38 @@ class TestKiminaLeanClient:
         await KiminaLeanClient("http://lean:8000").verify("code", 10)
         assert "Authorization" not in calls[0]["headers"]
 
-    @pytest.mark.parametrize("status", [401, 404, 500])
-    async def test_non_200_is_a_transport_failure(self, monkeypatch, status) -> None:
+    @pytest.mark.parametrize("status", [400, 401, 404, 422])
+    async def test_a_client_side_http_error_is_a_transport_failure(self, monkeypatch, status) -> None:
+        """A wrong URL, a missing key or a rejected request shape is this harness, not the model."""
         _patch_request(monkeypatch, _FakeResponse(status, text="nope"))
         result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
-        assert result.transport_failure is True and f"HTTP {status}" in result.error
+        assert result.transport_failure is True and result.server_error is False
+        assert f"HTTP {status}" in result.error
+        assert classify_lean_result(result) == STATUS_SANDBOX_ERROR
+
+    @pytest.mark.parametrize("status", [500, 502, 504])
+    async def test_a_server_error_is_charged_to_the_model(self, monkeypatch, status) -> None:
+        """Kimina raises 5xx per snippet, from executing this submission.
+
+        ``server/routers/check.py`` wraps every non-timeout exception from
+        getting a REPL, running the header or running the body into
+        ``HTTPException(500, str(e))`` for that snippet alone, and
+        ``server/repl.py`` raises ``LeanError`` whenever the REPL wrote anything
+        to stderr. Model output reaches that path — ``native_decide`` is allowed
+        by design — so a masked ``sandbox_error`` here would delete the attempt
+        from the denominator instead of scoring it 0, which upstream never does.
+        """
+        _patch_request(monkeypatch, _FakeResponse(status, text="Snippet execution failed"))
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert result.transport_failure is False and result.server_error is True
+        assert f"HTTP {status}" in result.error
+        assert classify_lean_result(result) == "lean_error"
+
+    async def test_a_server_error_saying_timed_out_is_still_a_lean_error(self, monkeypatch) -> None:
+        """The attribution is the status code, not the wording of the server's message."""
+        _patch_request(monkeypatch, _FakeResponse(500, text="worker timed out"))
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert classify_lean_result(result) == "lean_error"
 
     async def test_connection_error_is_a_transport_failure(self, monkeypatch) -> None:
         _patch_request(monkeypatch, exc=ConnectionError("refused"))
@@ -148,7 +175,10 @@ class TestSaturationIsRetried:
         result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
         assert len(calls) == MAX_SATURATION_ATTEMPTS
         assert slept == [SATURATION_BACKOFF_SECONDS, SATURATION_BACKOFF_SECONDS * 2]
-        assert result.transport_failure is True and "HTTP 503" in result.error
+        # Still masked: a server that never freed a REPL reached no verdict on this proof.
+        assert result.transport_failure is True and result.server_error is False
+        assert "HTTP 503" in result.error
+        assert classify_lean_result(result) == STATUS_SANDBOX_ERROR
 
     async def test_a_saturation_reply_releases_its_connection(self, monkeypatch, slept) -> None:
         """An unread body holds a pooled connection until GC -- when the pool is already starved."""

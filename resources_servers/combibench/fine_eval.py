@@ -111,6 +111,46 @@ def extract_lean_code(text: str) -> Optional[str]:
     return code
 
 
+def import_header(code: str) -> str:
+    """The header Kimina splits off this code and loads into a pooled REPL.
+
+    Re-derived from ``server/split.py::split_snippet`` at the pinned Kimina
+    commit: the leading run of blank and ``import ...`` lines, stripped, with a
+    single ``import Mathlib`` hoisted to the front when any import starts with
+    it, other imports in order and de-duplicated. Nothing below the first
+    non-import line is header, so ``set_option``/``open`` are body to Kimina even
+    though ``statement_chunks`` treats them as header for the statement check —
+    the two ideas of "header" are different and are deliberately not merged.
+
+    Used only to answer "is the header that failed to load the one this harness
+    supplied, or the one the model chose"; see ``header_is_harness_supplied``.
+    """
+    lines = code.splitlines()
+    index = 0
+    while index < len(lines) and (lines[index].strip() == "" or lines[index].strip().startswith("import ")):
+        index += 1
+    imports = [line.strip() for line in lines[:index] if line.strip().startswith("import ")]
+    has_mathlib = any(line.startswith("import Mathlib") for line in imports)
+    rest: list[str] = []
+    for line in imports:
+        if not line.startswith("import Mathlib") and line not in rest:
+            rest.append(line)
+    return "\n".join((["import Mathlib"] if has_mathlib else []) + rest)
+
+
+def header_is_harness_supplied(code: str, formal_statement: str) -> bool:
+    """True when the header Kimina would load for ``code`` is not the model's choice.
+
+    Two headers count as the harness's: the reference statement's own, which the
+    model is asked to reproduce verbatim, and ``DEFAULT_HEADER``, which
+    ``extract_lean_code`` prepends when the model wrote no imports at all. A
+    timeout loading either is a cold ``import Mathlib`` and infrastructure. A
+    header the model wrote itself is its own choice, and a timeout loading it is
+    charged to it.
+    """
+    return import_header(code) in {import_header(formal_statement), import_header(DEFAULT_HEADER)}
+
+
 def has_forbidden_substring(code: str) -> bool:
     """Upstream's ban on ``axiom``/``local_instance`` is a plain substring test."""
     return any(token in code for token in FORBIDDEN_SUBSTRINGS)
@@ -269,10 +309,16 @@ class LeanResult:
     messages: list[dict[str, Any]] = field(default_factory=list)
     sorries: list[dict[str, Any]] = field(default_factory=list)
     time: Optional[float] = None
-    # True when the failure happened before Lean ran (network, HTTP, malformed
-    # reply). The model cannot cause these, so they are reported as harness
-    # faults rather than as a failed proof.
+    # True when the failure happened before Lean ran and the model could not
+    # have caused it (connection refused, client timeout, a reply that is not
+    # the documented JSON, saturation that outlasted the retries). Reported as a
+    # harness fault rather than as a failed proof.
     transport_failure: bool = False
+    # True when the server answered 5xx for *this* snippet. Kimina raises that
+    # from executing the submission, so it is the model's, not the harness's;
+    # carried as its own flag rather than sniffed out of ``error`` so the
+    # attribution does not depend on the wording of a server message.
+    server_error: bool = False
 
 
 def classify_lean_result(result: LeanResult) -> str:
@@ -285,9 +331,11 @@ def classify_lean_result(result: LeanResult) -> str:
     Two departures from upstream's ``is_error``:
 
     * A header timeout is separated out rather than failing the submission like
-      any other error string. It means a cold REPL could not finish
-      ``import Mathlib`` inside the budget, which no model output can cause or
-      avoid, so the caller charges it to the harness.
+      any other error string, because the header is often not the model's: when
+      it is the reference statement's, a cold REPL that could not finish
+      ``import Mathlib`` inside the budget is infrastructure. The caller
+      (``app.CombibenchVerifier.verify``) decides which of the two it was; this
+      function only names the case.
     * The REPL's ``sorries`` list is consulted as well as the warning. Upstream
       never reads that field (``sorries`` does not appear anywhere in
       ``evaluation/``), so this is *stricter* than upstream: a submission whose
@@ -298,6 +346,10 @@ def classify_lean_result(result: LeanResult) -> str:
     """
     if result.transport_failure:
         return STATUS_SANDBOX_ERROR
+    if result.server_error:
+        # Kimina's per-snippet 500. Executing this submission raised inside the
+        # server; upstream charges that to the model and so does this.
+        return "lean_error"
     if result.error:
         if HEADER_TIMEOUT_MARKER in result.error:
             return "header_timeout"

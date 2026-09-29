@@ -84,8 +84,9 @@ Status names come from [`lean_proof/status.py`](../lean_proof/status.py)
 wherever the concept is shared, so `completed`, `empty_generation`,
 `banned_tokens`, `statement_modified`, `compile_error`, `has_sorry`, `timeout`
 and `sandbox_error` mean the same thing here as in `leancat`. CombiBench adds
-`format_error`, `code_too_long`, `lean_error`, `header_timeout` and `bad_task`
-next to them, which is the extension that module describes: upstream's
+`format_error`, `code_too_long`, `lean_error`, `header_timeout`,
+`model_header_timeout` and `bad_task` next to them, which is the extension that
+module describes: upstream's
 Fine-Eval distinguishes outcomes a whole-file benchmark has no equivalent for.
 
 1. **Extract** the last ```` ```lean4 ```` block (falling back to ```` ```lean ````);
@@ -113,28 +114,54 @@ Fine-Eval distinguishes outcomes a whole-file benchmark has no equivalent for.
 7. **Compile** through the Lean server with a 60 s timeout. Any error message →
    `compile_error`; a `sorry` warning or REPL `sorries` entry → `has_sorry`;
    the REPL timing out on the submission → `timeout`; any other REPL error
-   string → `lean_error`, which is charged to the model because upstream's
-   `is_error` fails the submission on it too.
+   string, and a 5xx for this snippet → `lean_error`, which is charged to the
+   model because upstream's `is_error` fails the submission on it too.
 
-`harness_failure` is 1.0 for the three outcomes the model cannot cause, and
-`failure_reason` is set only then. All three also set `mask_sample: true`, so the
-0.0 reward is excluded from `mean/reward` and pass@k rather than averaged in as a
-model failure. The masked rollouts stay in the rollout file and are reported
-under `coverage/`:
+### Who a failure is charged to
 
-| Status | `failure_kind` | Cause |
+Masking removes a rollout from `mean/reward` and pass@k entirely, so the rule has
+to be conservative in one specific direction: **a failure the model could have
+caused is scored 0, never masked.** Upstream charges every compile failure to the
+model; each masked case below is a case where this harness reached no verdict at
+all, so counting it as a failed proof would be the opposite error.
+
+Charged to the model (reward 0.0, `mask_sample: false`, in the denominator):
+
+| Status | When |
+| --- | --- |
+| `timeout` | the REPL hit the budget on the submission body — a proof that does not terminate is the model's output, and excusing it would make hanging reward-neutral |
+| `lean_error` | the REPL reported an error string, **or** `/verify` answered 5xx for this snippet |
+| `model_header_timeout` | the header that would not load inside the budget is one the model wrote itself |
+
+The 5xx case is the one worth spelling out. Kimina's
+`server/routers/check.py` turns every non-timeout exception raised while getting
+a REPL, running the header or running the body into `HTTPException(500, str(e))`
+*for that snippet*, and `server/repl.py` raises `LeanError` whenever the REPL
+wrote anything to stderr. Model output reaches that path — `native_decide` is
+allowed by design, and the model's own `import` lines become the pooled REPL's
+header — so treating a 5xx as a provider fault would let a model delete its own
+attempt from the denominator instead of scoring 0. It is charged on the status
+code, not on the wording of the server's message, so a 500 whose body happens to
+say "timed out" is still a `lean_error`.
+
+Charged to the harness (reward 0.0, `harness_failure: 1.0`, `mask_sample: true`,
+`failure_reason` set, out of the denominator and reported under `coverage/`):
+
+| Status | `failure_kind` | When |
 | --- | --- | --- |
-| `sandbox_error` | `provider_unavailable` | the Lean server is unreachable or replied malformed |
-| `header_timeout` | `provider_unavailable` | a cold REPL could not finish `import Mathlib` inside the timeout — Kimina reports this as `Lean REPL header command timed out`, distinct from the submission timing out |
-| `bad_task` | `combibench:bad_task` | the row cannot be scored (no `formal_statement`, malformed `answers`, or — on `split: test` — an answer count that disagrees with the number of `_solution` abbrevs) |
+| `sandbox_error` | `provider_unavailable` | the connection was refused or timed out client-side; `/verify` answered a non-5xx HTTP error (401, 404, 422 — this client or its credentials, not the model); saturation (429/503) survived all three retries; the reply was not JSON, had no `results`, or carried an error object instead of a verdict |
+| `header_timeout` | `provider_unavailable` | a cold REPL could not finish `import Mathlib` inside the timeout, **and** the header was the reference statement's own or the default one `extract_lean_code` prepends — Kimina reports this as `Lean REPL header command timed out`, distinct from the submission timing out |
+| `bad_task` | `combibench:bad_task` | the row cannot be scored (no `formal_statement`, malformed `answers`, or an answer count that disagrees with the number of `_solution` abbrevs) |
 
-`bad_task` is namespaced because `nemo_gym/failure_kinds.py` has no shared name
-for a malformed task row; the two Lean-server faults are the registered
-`provider_unavailable`.
+None of these is a verdict on the proof: the server either never ran it or never
+reported what it found. `bad_task` is namespaced because
+`nemo_gym/failure_kinds.py` has no shared name for a malformed task row; the two
+Lean-server faults are the registered `provider_unavailable`.
 
-A submission `timeout` is charged to the model and left unmasked: a proof that
-does not terminate is the model's output, and excusing it would make hanging
-reward-neutral.
+Which header a `header_timeout` belongs to is decided by re-deriving Kimina's own
+split (`server/split.py`: the leading run of `import` lines, Mathlib hoisted,
+duplicates dropped) for the submission and for the reference statement and
+comparing them; see `fine_eval.header_is_harness_supplied`.
 
 Every response carries `lean_version`, the Lean version the server reports for
 `#eval Lean.versionString`; a server built for another toolchain otherwise scores
