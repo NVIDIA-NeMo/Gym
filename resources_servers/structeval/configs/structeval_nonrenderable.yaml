@@ -28,3 +28,11 @@ structeval_nonrenderable_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/structeval/data/example.jsonl
+
+structeval_nonrenderable_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: structeval_nonrenderable_simple_agent

@@ -187,6 +187,8 @@ class JailbreakDetectionResourcesServer(SimpleResourcesServer):
     An LLM judge evaluates whether the policy model's response is safe or unsafe.
     """
 
+    ray_enabled = False
+
     config: JailbreakDetectionConfig
 
     def setup_webserver(self) -> FastAPI:

@@ -38,6 +38,7 @@ class ReasoningSearchDeepAgentConfig(DeepAgentsAgentConfig):
 
 
 class ReasoningSearchDeepAgent(DeepAgentsAgent):
+    ray_enabled = False
     config: ReasoningSearchDeepAgentConfig
 
     def build_agent(self, model: BaseChatModel):

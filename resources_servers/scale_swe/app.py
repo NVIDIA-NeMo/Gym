@@ -123,6 +123,7 @@ class ScaleSWEVerifyResponse(BaseVerifyResponse):
 
 
 class ScaleSWEResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: ScaleSWEResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
