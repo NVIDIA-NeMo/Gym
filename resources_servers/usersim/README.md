@@ -169,11 +169,16 @@ During `/verify`, the Resources Server invokes UserSim's registered scorer for
 tool use, sovereign-AI, safety, financial-services, and guarded
 health-disclosure trajectories. The four health labels share
 `health_disclosure_concealment`; the default health variant has no concealment
-ground truth, so that scorer is intentionally not applied. The two general
-probes have no registered dedicated scorer in UserSim and retain native
-conversation-completion verification. A scorer rejection, inconclusive status,
-structured error, or raised exception fails verification. The scorer name and
-complete result envelope are retained in `verifier_data`.
+ground truth, so that scorer is intentionally not applied. A scorer rejection,
+inconclusive status, structured error, or raised exception gates the reward.
+
+All completed trajectories also run through UserSim's native trajectory
+evaluator. The verifier retains every applicable normalized quality axis and
+uses UserSim's `assistant_quality` capability—the mean of normalized
+helpfulness, accuracy, and coherence—as the scalar Gym reward. Conversation
+completion and any dedicated probe scorer remain prerequisites for receiving
+that quality reward. The complete `assistant_eval` and native scorer envelopes
+are retained in `verifier_data`.
 
 ## Run
 
