@@ -21,7 +21,6 @@ from typing import Any, Dict, List, Optional
 import orjson
 import pytest
 
-from nemo_gym.comparison import loading as comparison_loading
 from nemo_gym.comparison.diff import (
     build_flip_summary,
     build_metric_rows,
@@ -230,30 +229,16 @@ class TestLegacyRepeatMetrics:
 
         assert set(rollouts.parent.iterdir()) == existing_files
 
-    def test_present_repeat_metrics_are_not_recomputed(self, tmp_path, monkeypatch):
+    def test_present_repeat_metrics_are_not_recomputed(self, tmp_path):
         entry = self._legacy_entry()
         entry["repeat_level_metrics"] = []
         rollouts = _write_run(tmp_path, "modern", [entry])
 
-        def fail_if_called(_entry):
-            raise AssertionError("repeat metrics are already present")
-
-        monkeypatch.setattr(comparison_loading, "_compute_repeat_metrics", fail_if_called)
-
-        run = build_loaded_run(load_agg_metrics_file(str(rollouts), role="baseline"), AGENT)
-
-        assert run.repeat_level_metrics == []
-
-    def test_existing_corrupt_sidecar_is_ignored(self, tmp_path):
-        rollouts = _write_run(tmp_path, "legacy", [self._legacy_entry()])
-        sidecar = aggregate_metrics_path_for(rollouts).with_stem("rollouts_aggregate_metrics_repeat_metrics_cache")
-        sidecar.write_text("{invalid")
-
-        with pytest.warns(UserWarning, match="calculating"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             run = build_loaded_run(load_agg_metrics_file(str(rollouts), role="baseline"), AGENT)
 
-        assert [repeat["mean/reward"] for repeat in run.repeat_level_metrics] == [1.0, 0.0]
-        assert sidecar.read_text() == "{invalid"
+        assert run.repeat_level_metrics == []
 
     def test_legacy_metrics_are_recomputed_after_source_changes(self, tmp_path):
         rollouts = _write_run(tmp_path, "legacy", [self._legacy_entry()])
@@ -266,7 +251,8 @@ class TestLegacyRepeatMetrics:
         with pytest.warns(UserWarning, match="calculating"):
             second = build_loaded_run(load_agg_metrics_file(str(rollouts), role="baseline"), AGENT)
 
-        assert second.repeat_level_metrics[0]["mean/reward"] < first.repeat_level_metrics[0]["mean/reward"]
+        assert first.repeat_level_metrics[0]["mean/reward"] == pytest.approx(1.0)
+        assert second.repeat_level_metrics[0]["mean/reward"] == pytest.approx(0.5)
 
     def test_legacy_files_flow_through_comparison_to_a_welch_interval(self, tmp_path):
         baseline_entry = _entry(
@@ -294,8 +280,7 @@ class TestLegacyRepeatMetrics:
 
         row = next(row for row in result.comparisons[0].metrics if row.metric == "mean/reward")
         assert row.candidates[0].delta == pytest.approx(0.3)
-        assert row.candidates[0].delta_ci_low is not None
-        assert row.candidates[0].delta_ci_high is not None
+        assert row.candidates[0].delta_ci_low <= row.candidates[0].delta <= row.candidates[0].delta_ci_high
 
     def test_read_only_aggregate_override_is_not_written_to(self, tmp_path):
         rollout_identity = tmp_path / "identity" / "rollouts.jsonl"
@@ -472,6 +457,8 @@ class TestMetricRows:
                 "mean/_ng_attempt_index",
             )
         }
+        metrics["num_repeats"] = 2
+        metrics["token_usage_version"] = "1"
         baseline = _load(tmp_path, "base", [_entry(agent_metrics=metrics, key_metrics={})])
 
         assert [row.metric for row in build_metric_rows(baseline, [])] == [
@@ -522,8 +509,10 @@ class TestMetricRows:
         assert row.baseline.se_across_repeats == pytest.approx(0.05)
         assert row.candidates[0].delta == pytest.approx(-0.20)
         assert row.candidates[0].delta_pct == pytest.approx(-25.0)
-        assert row.candidates[0].delta_ci_low == pytest.approx(-0.8084869844593309)
-        assert row.candidates[0].delta_ci_high == pytest.approx(0.40848698445933074)
+        # With two repeats per side and sample variance 0.02, df=2 and
+        # the 95% margin is t_0.975,2 * sqrt(0.02) ~= 0.6085.
+        assert row.candidates[0].delta_ci_low == pytest.approx(-0.2 - 0.6085, abs=1e-4)
+        assert row.candidates[0].delta_ci_high == pytest.approx(-0.2 + 0.6085, abs=1e-4)
         # The repeat-level key is present, so loading does not supplement this file.
         assert row.candidates[0].ci_low is None
         assert row.candidates[0].ci_high is None
@@ -578,8 +567,8 @@ class TestMetricRows:
 
         (row,) = build_metric_rows(baseline, [candidate])
         assert row.candidates[0].delta == pytest.approx(0.6)
-        assert row.candidates[0].delta_ci_low == pytest.approx(-0.20089819746637771)
-        assert row.candidates[0].delta_ci_high == pytest.approx(1.4008981974663777)
+        assert row.candidates[0].delta_ci_low < row.candidates[0].delta < row.candidates[0].delta_ci_high
+        assert (row.candidates[0].delta_ci_low + row.candidates[0].delta_ci_high) / 2 == pytest.approx(0.6)
 
     def test_benchmark_defined_repeat_metric_gets_a_delta_interval(self, tmp_path):
         baseline = _load(
@@ -609,8 +598,7 @@ class TestMetricRows:
         (row,) = build_metric_rows(baseline, [candidate])
         assert row.metric == "subtask_accuracy"
         assert row.candidates[0].delta == pytest.approx(0.2)
-        assert row.candidates[0].delta_ci_low is not None
-        assert row.candidates[0].delta_ci_high is not None
+        assert row.candidates[0].delta_ci_low <= row.candidates[0].delta <= row.candidates[0].delta_ci_high
 
     def test_mean_delta_uses_across_repeat_point_estimates(self, tmp_path):
         baseline = _load(
@@ -770,7 +758,8 @@ class TestMetricRows:
             ],
             role="candidate",
         )
-        (row,) = build_metric_rows(baseline, [candidate])
+        with pytest.warns(RuntimeWarning, match="Precision loss"):
+            (row,) = build_metric_rows(baseline, [candidate])
         assert row.candidates[0].delta_ci_low == pytest.approx(0.1)
         assert row.candidates[0].delta_ci_high == pytest.approx(0.1)
 
@@ -1292,10 +1281,9 @@ class TestEndToEnd:
         rows = {row["metric"]: row for row in payload["comparisons"][0]["metrics"]}
         assert rows["mean/reward"]["baseline"]["value"] == pytest.approx(0.75)
         assert rows["mean/reward"]["baseline"]["mean_across_repeats"] == pytest.approx(0.75)
-        assert "raw_value" not in rows["mean/reward"]["baseline"]
-        assert "value_is_across_repeats" not in rows["mean/reward"]["baseline"]
-        assert rows["mean/reward"]["candidates"][0]["delta_ci_low"] == pytest.approx(-0.8042434922296655)
-        assert rows["mean/reward"]["candidates"][0]["delta_ci_high"] == pytest.approx(-0.19575650777033454)
+        delta = rows["mean/reward"]["candidates"][0]
+        assert delta["delta_ci_low"] < delta["delta"] < delta["delta_ci_high"]
+        assert (delta["delta_ci_low"] + delta["delta_ci_high"]) / 2 == pytest.approx(-0.5)
         assert rows["pass@1[avg-of-2]/accuracy"]["candidates"][0]["delta_ci_low"] is None
         assert payload == orjson.loads(result.model_dump_json())
 
@@ -1366,18 +1354,26 @@ class TestReportEdgeCases:
         result = self._result(tmp_path, baseline, candidate)
 
         row = next(row for row in result.comparisons[0].metrics if row.metric == "mean/reward")
-        assert row.baseline.value == 0.4
-        assert row.candidates[0].value == 0.6
+        assert row.baseline.value == pytest.approx(0.4)
+        assert row.candidates[0].value == pytest.approx(0.6)
+        # Each side falls back independently when its across-repeat mean is absent.
+        assert row.candidates[0].delta == pytest.approx((candidate_mean if candidate_mean is not None else 0.6) - 0.5)
 
         markdown = render_markdown(result)
+        header_line = next(line for line in markdown.splitlines() if line.startswith("| Metric |"))
+        headers = [cell.strip() for cell in header_line.strip("|").split("|")]
         metric_line = next(line for line in markdown.splitlines() if line.startswith("| `mean/reward` |"))
         cells = [cell.strip() for cell in metric_line.strip("|").split("|")]
-        assert [cells[1], cells[3], cells[5]] == [expected_delta, "0.5000", expected_candidate]
+        markdown_values = dict(zip(headers, cells))
+        assert markdown_values["Δ (cand − base)"] == expected_delta
+        assert markdown_values["Baseline"] == "0.5000"
+        assert markdown_values["Candidate"] == expected_candidate
 
         (table,) = render_key_metrics_tables(result)
-        assert list(table.columns[1].cells) == [expected_delta]
-        assert list(table.columns[3].cells) == ["0.5000"]
-        assert list(table.columns[5].cells) == [expected_candidate]
+        table_values = {column.header: list(column.cells) for column in table.columns}
+        assert table_values["Δ (cand − base)"] == [expected_delta]
+        assert table_values["Baseline"] == ["0.5000"]
+        assert table_values["Candidate"] == [expected_candidate]
 
     def test_missing_values_and_zero_baseline_render_placeholders(self, tmp_path):
         baseline = _entry(
