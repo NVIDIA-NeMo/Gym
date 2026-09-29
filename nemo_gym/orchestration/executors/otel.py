@@ -88,6 +88,23 @@ def otel_active(config: SubmitConfig) -> bool:
     return config.otel.enabled
 
 
+def gym_telemetry_active(config: SubmitConfig) -> bool:
+    """Whether the driver is instrumented with nemo-lens and pointed at the collector."""
+    return config.otel.enabled and config.otel.gym_telemetry
+
+
+def validate_gym_telemetry(config: SubmitConfig) -> None:
+    """The telemetry extra is installed with the `gym_install` checkout; without one, Lens would be
+    switched on in a driver that cannot import it and the run would export no Gym telemetry at all."""
+    if gym_telemetry_active(config) and config.driver.gym_install is None:
+        raise ValueError(
+            "otel.gym_telemetry is on but driver.gym_install is not set, so the driver cannot install "
+            "Gym's telemetry extra and no Gym metrics or traces would be exported. Set driver.gym_install "
+            "(repo, ref), or set `otel.gym_telemetry: false` to run the collector with engine and node "
+            "metrics only."
+        )
+
+
 def validate_destination(config: SubmitConfig) -> None:
     """An enabled collector needs somewhere to send to; a bare default config has none."""
     missing = [k for k in ("endpoint", "service_name") if getattr(config.otel, k) is None]

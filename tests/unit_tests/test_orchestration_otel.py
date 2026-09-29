@@ -507,8 +507,30 @@ def _install(monkeypatch, conn, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
 
 
+_DRIVER_WITHOUT_INSTALL = {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"scicode": {}}}
+
+
 def _executor_config(tmp_path, **overrides):
-    return _config(job={"output_path": str(tmp_path / "jobs")}, **overrides)
+    """A submittable config: Gym telemetry is on by default, so the driver needs a checkout to install it from."""
+    return _config(**{"job": {"output_path": str(tmp_path / "jobs")}, "driver": _DRIVER_WITH_INSTALL, **overrides})
+
+
+def test_submit_fails_when_gym_telemetry_has_no_checkout_to_install_it_from(tmp_path, monkeypatch):
+    monkeypatch.setenv("OTEL_TOKEN", "secret-token")
+    conn = _FakeConnection([])
+    _install(monkeypatch, conn, tmp_path)
+
+    with pytest.raises(ValueError, match=r"driver\.gym_install.*otel\.gym_telemetry: false"):
+        SlurmExecutor().run(_executor_config(tmp_path, driver=_DRIVER_WITHOUT_INSTALL))
+
+    assert conn.commands == []
+
+
+def test_gym_telemetry_off_keeps_the_collector_and_skips_lens():
+    script = _script(_config(otel={"gym_telemetry": False}, driver=_DRIVER_WITH_INSTALL))
+    assert "--output=logs/otel_collector.log" in script
+    assert "NEMO_GYM_OTEL_ENABLED" not in script
+    assert "[telemetry]" not in script
 
 
 def test_submit_fails_before_staging_when_the_token_is_missing(tmp_path, monkeypatch):

@@ -20,6 +20,7 @@ otel:
   binary: /shared/otelcol-contrib     # static collector binary reachable on the compute nodes
   container: null                     # optional image instead of the host binary
   component: gym-vllm                 # display name for the scraped engine metrics
+  gym_telemetry: true                 # Gym's own nemo-lens telemetry; needs driver.gym_install (see below)
   gym_span_groups: default,verify     # Gym span groups switched on in the job (add `sandbox` for sandboxed benchmarks)
   gym_logs: true                      # ship Gym's Python logging as OTel logs too
   gpu_metrics_port: 9400              # dcgm-exporter on the node; null to skip
@@ -43,6 +44,10 @@ The collector is the first `srun --overlap` step of the sbatch script and must a
 check before the services start. By default it runs as a host process from `binary`; the upstream
 collector image is distroless and cannot start under enroot, so use `container` only with an image
 that has a shell.
+
+Gym's own telemetry needs `driver.gym_install`: the `telemetry` extra is installed with that checkout, and a
+container's preinstalled Gym is left alone. The submit fails when `gym_telemetry` is on without it; set
+`gym_telemetry: false` to keep the collector for engine and node metrics only.
 
 The driver is installed with the `telemetry` extra and started with the environment that switches
 Gym's Lens instrumentation on and points it at the collector (`NEMO_GYM_OTEL_ENABLED`,

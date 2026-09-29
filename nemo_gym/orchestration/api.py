@@ -312,9 +312,11 @@ class OtelConfig(_StrictModel):
     service_name: str | None = None
     # Display identity of the scraped metrics in the backend (`service.name.override`).
     component: str = "gym-vllm"
-    # Gym span groups to switch on (a preset or comma-separated names). `default` gives one trace
-    # per rollout and the rollout duration metric; `verify` adds the verify duration and success
-    # metrics, which are gated on that group.
+    # Gym's own nemo-lens instrumentation in the driver and its servers. Needs `driver.gym_install`,
+    # which is where the `telemetry` extra gets installed; off keeps the collector for engine and
+    # node metrics only.
+    gym_telemetry: bool = True
+    # Gym span groups to switch on: a preset or comma-separated names (`default`, `verify`, `sandbox`, ...).
     gym_span_groups: str = "default,verify"
     # Ship Gym's Python logging as OTel logs too (trace-correlated), through the same collector.
     gym_logs: bool = True

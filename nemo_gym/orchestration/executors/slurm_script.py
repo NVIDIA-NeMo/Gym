@@ -38,6 +38,7 @@ from nemo_gym.orchestration.executors.otel import (
     SHUTDOWN_WAIT_SECONDS,
     collector_config_path,
     driver_telemetry_env,
+    gym_telemetry_active,
     otel_active,
 )
 from nemo_gym.orchestration.executors.script_templates import (
@@ -791,6 +792,7 @@ def build_sbatch_script(
     )
 
     observed = otel_active(config)
+    instrumented = gym_telemetry_active(config)
 
     driver_node = _driver_node(config, compute) if is_multi_node else None
     service_commands = "\n\n".join(
@@ -856,7 +858,7 @@ def build_sbatch_script(
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
     driver_env = dict(config.driver.env)
-    if observed:
+    if instrumented:
         driver_env = {
             **driver_telemetry_env(
                 remote_bench_dir.parent.name, config.otel.gym_span_groups, logs=config.otel.gym_logs
@@ -879,7 +881,7 @@ def build_sbatch_script(
         ref=gi.ref if gi else None,
         prepare_cmd=prepare_cmd,
         command=benchmark.command,
-        extras=(GYM_TELEMETRY_EXTRA,) if observed else (),
+        extras=(GYM_TELEMETRY_EXTRA,) if instrumented else (),
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
