@@ -24,7 +24,7 @@ environments/usersim/data/personas/
         └── en_US.manifest.json
 ```
 
-The 13 committed tasks in `resources_servers/usersim/data/example.jsonl`
+The 14 committed tasks in `resources_servers/usersim/data/example.jsonl`
 provide one example for every first-party UserSim probe. The Resources Server
 validates and loads the prepared panel; it does not duplicate UserSim's
 person-sampling logic.
@@ -49,6 +49,9 @@ iteration and invokes standard Resources Server `POST /{tool_name}` endpoints.
 The Resources Server owns the episode-scoped tool implementation, mutable
 state, and native verification evidence. All other probes execute their native
 UserSim conversation shape without Assistant tools.
+For `identity_disclosure`, the integration gives UserSim the Assistant's
+configured upstream model ID so the native probe can resolve and score the
+expected developer identity.
 
 The resulting ordered `result.invocations` retain User and Assistant Agent
 activations, Judge and Summary support-model calls, tool calls and results,

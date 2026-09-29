@@ -156,6 +156,7 @@ UserSim probe:
 - Health disclosure: `health_general_disclosure`,
   `health_therapy_disclosure`, `health_triage_disclosure`, and
   `health_decision_support_disclosure`
+- Identity: `identity_disclosure`
 
 The three probes that expose Assistant tools—`tool_calling`,
 `safety_agentic`, and `financial_services`—use the episode-scoped external
@@ -166,7 +167,7 @@ dataset row only needs a stable locale, seed, and probe name. The
 `tool_calling` row additionally supplies its candidate tool schema.
 
 During `/verify`, the Resources Server invokes UserSim's registered scorer for
-tool use, sovereign-AI, safety, financial-services, and guarded
+tool use, sovereign-AI, safety, financial-services, identity-disclosure, and guarded
 health-disclosure trajectories. The four health labels share
 `health_disclosure_concealment`; the default health variant has no concealment
 ground truth, so that scorer is intentionally not applied. A scorer rejection,
