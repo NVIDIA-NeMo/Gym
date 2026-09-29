@@ -242,6 +242,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.add_middleware(RolloutContextMiddleware)
 
         app.post("/seed_session")(self.seed_session)
+        app.post("/close_session")(self.close_resources_session)
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
             traced_verify_endpoint(
@@ -273,8 +274,28 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """
         return None
 
-    async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+    async def seed_session(
+        self,
+        body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """Seed per-rollout state; the default keeps none.
+
+        An Environment Server seeds with a ``ResourcesSeedSessionRequest`` and gets its caller-assigned
+        ``resources_session_id`` back. An Agent's ``/run`` seeds with its legacy body and gets an empty
+        response. Servers that keep per-rollout state override this method.
+        """
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
         return BaseSeedSessionResponse()
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Close state an Environment Server seeded; the default keeps none.
+
+        Served at ``/close_session``. Servers that keep per-rollout state override this method, and may accept
+        other close bodies by overriding it with a different signature. The name differs from the
+        ``close_session`` helpers some servers already define for their own state.
+        """
+        return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
     @abstractmethod
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
