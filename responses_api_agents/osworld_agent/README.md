@@ -24,6 +24,12 @@ exact patch match. The relaxed mode is only valid within one Python minor and
 must be covered by a real server-registration smoke, not assumed from a
 successful resolver.
 
+For native submissions into a fresh managed environment, set
+`install_optional_runtime_dependencies: true` on the OSWorld agent config.
+On startup, the agent runs its existing optional dependency installer when
+needed, then restarts to load the installed packages. The default remains
+`false`, so installing the optional runtime packages requires explicit opt-in.
+
 ## Request and response contract
 
 The rollout collector sends the complete upstream task under
