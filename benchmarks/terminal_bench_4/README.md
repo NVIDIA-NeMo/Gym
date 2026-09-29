@@ -101,6 +101,24 @@ AA reproduction requires explicitly setting `++num_repeats=3` (the official
 Terminal-Bench leaderboard uses a separate five-attempt protocol). Scheduler allocations must cover
 setup, the full official agent budget, and verification.
 
+## Terminal Bench 4 on the Harbor task shape
+
+The same 66 tasks also run as plain Harbor task folders through the generic `harbor` resources server,
+without this benchmark's server. The dataset comes from Harbor's package store, pinned by content hash:
+
+```sh
+gym dataset validate harbor:terminal-bench/terminal-bench@4.0.0 --sandbox opensandbox \
+  --exclude-tasks fp8-rmsnorm-gemm,jax-speedrun-gpu,math-eval-grader
+gym eval run datasets/terminal-bench-4.0.0 --agent miniswe_sandboxed_agent --sandbox opensandbox \
+  --exclude-tasks fp8-rmsnorm-gemm,jax-speedrun-gpu,math-eval-grader \
+  --model-type openai_model --model <model> --model-url <url>
+```
+
+The first command fetches the packages into `datasets/terminal-bench-4.0.0/` and runs every reference
+solution through the separate verifier. `--agent terminus_2_sandboxed_agent` runs Terminus 2 instead.
+The 11 Compose tasks are skipped automatically until Compose groups land, and the 3 H100 tasks are
+excluded above until per-task GPU routing lands; `--only-tasks` selects a subset.
+
 ## Infra validation
 
 For capped smoke runs, add `++tb4_max_steps=3` and
