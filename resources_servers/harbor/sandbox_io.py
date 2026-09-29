@@ -19,7 +19,10 @@ class SandboxTransferError(RuntimeError):
 
 def _pack(source: Path, archive: Path) -> None:
     with tarfile.open(archive, "w:gz") as tar:
-        tar.add(source, arcname=".")
+        # Add the children, not the folder itself: an archive entry for "." makes tar restore the
+        # source folder's mode onto the target, which fails on a root-owned world-writable target.
+        for child in sorted(Path(source).iterdir()):
+            tar.add(child, arcname=child.name)
 
 
 def _unpack(archive: Path, target: Path) -> None:
