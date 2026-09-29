@@ -1,0 +1,28 @@
+# Prompt for the `formal-conjectures` benchmark: fill one `sorry` in a Lean 4 file taken from
+# google-deepmind/formal-conjectures, verified against Mathlib v4.33.1.
+#
+# Two instructions here are not boilerplate and are load-bearing:
+#
+#   * "Leave every other `sorry` exactly as it is." An FC file is usually built around an OPEN
+#     conjecture, so the file legitimately contains holes nobody can fill. Only the target is
+#     scored -- the verifier asks Lean `#print axioms <target>` rather than grepping for the
+#     token -- and a model that "helpfully" attacks the open conjecture wastes its budget.
+#   * "Do not change the statement." The whole-file format lets a model weaken the theorem it
+#     was asked to prove, and the weakened version compiles. That is rejected.
+user: |-
+  You are an expert in Lean 4 and Mathematics. Below is a Lean 4 file that compiles against
+  Mathlib, with the proof of one theorem replaced by `sorry`.
+
+  Return the complete file with that one `sorry` replaced by a working proof.
+
+  - Do not change the statement of the theorem, its hypotheses, or any definition in the file.
+  - Leave every other `sorry` in the file exactly as it is; they are open problems and are not
+    your task.
+  - Include the entire file, imports and all, so that it compiles on its own.
+  - Put your final answer in a single ```lean4 code block.
+
+  The theorem to prove is `{declaration}`.
+
+  ```lean4
+  {task_file}
+  ```

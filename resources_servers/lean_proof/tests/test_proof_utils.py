@@ -16,9 +16,12 @@
 import pytest
 
 from resources_servers.lean_proof.proof_utils import (
+    DECLARED_SHORTCUT_TOKENS,
     check_statement_preserved,
+    check_target_statement_preserved,
     extract_lean_code,
     find_banned_declarations,
+    has_unterminated_block_comment,
 )
 
 
@@ -192,3 +195,96 @@ def test_check_statement_preserved_across_multiple_holes():
     # the model was told to copy back.
     swapped = "import Mathlib\n\ntheorem b : False ∨ True := by\n  trivial\n\ntheorem a : True := by\n  trivial"
     assert not check_statement_preserved(reference, swapped)[0]
+
+
+# ──────────────────────────────────────────────────────────
+# The "file keeps holes on purpose" variants (formal_conjectures)
+# ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "code,expected,why",
+    [
+        # `sorry` and `admit` are off the list: the file is allowed to keep the open
+        # conjecture it sanity-checks.
+        ("theorem open_conj : True := by sorry\ntheorem t : True := trivial", [], "other holes are legal"),
+        ("axiom cheat : False", ["axiom"], "an added axiom is still cheating"),
+        ("unsafe def f := 1", ["unsafe"], "so is unsafe"),
+        # Declaration-anchored, so the word inside an identifier or mid-line is fine.
+        ("theorem t : True := by exact Classical.axiom_of_choice", [], "axiom inside a name"),
+        ("-- axiom bad : False\ntheorem t : True := trivial", [], "commented out"),
+    ],
+)
+def test_find_banned_declarations_declarations_only(code, expected, why):
+    assert find_banned_declarations(code, DECLARED_SHORTCUT_TOKENS, declarations_only=True) == expected, why
+
+
+def test_default_banned_declarations_are_unchanged_by_the_new_parameters():
+    """The leancat call path must behave exactly as before."""
+    assert find_banned_declarations("theorem t : True := by sorry") == ["sorry"]
+    assert find_banned_declarations("axiom cheat : False") == ["axiom"]
+    # The default is a word-boundary scan, so it already ignores `axiom` inside an identifier;
+    # what `declarations_only` adds is ignoring it mid-line as a standalone word.
+    assert find_banned_declarations("theorem t : True := by exact Classical.axiom_of_choice") == []
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        ("theorem t : True := trivial", False),
+        ("/- a closed comment -/\ntheorem t : True := trivial", False),
+        ("/- nested /- inner -/ still closed -/", False),
+        # The failure this exists for: a mangled `-/` swallows the rest of the file.
+        ("/- opened and never closed\ntheorem t : True := trivial", True),
+        ("/- outer /- inner -/ never closed", True),
+        # `--` line comments must not be mistaken for a block delimiter.
+        ("-- /- not a block\ntheorem t : True := trivial", False),
+    ],
+)
+def test_has_unterminated_block_comment(code, expected):
+    assert has_unterminated_block_comment(code) is expected
+
+
+TARGET = "theorem foo (n : ℕ) (h : 0 < n) : n ≠ 0"
+
+
+@pytest.mark.parametrize(
+    "submission,why",
+    [
+        (f"import Mathlib\n\n{TARGET} := by omega\n", "verbatim"),
+        # Reformatted and re-indented.
+        ("import Mathlib\n\ntheorem foo (n : ℕ)\n    (h : 0 < n) :\n    n ≠ 0 := by omega\n", "rewrapped"),
+        # `lemma` is notation for `theorem`; swapping them weakens nothing.
+        (f"import Mathlib\n\n{TARGET.replace('theorem', 'lemma')} := by omega\n", "lemma for theorem"),
+        # Other holes in the same file are none of this check's business.
+        (f"import Mathlib\n\ntheorem open_conj : True := by sorry\n\n{TARGET} := by omega\n", "other sorry"),
+        # A comment mentioning something else does not count as the statement.
+        (f"import Mathlib\n-- proving foo\n{TARGET} := by omega\n", "comments ignored"),
+    ],
+)
+def test_check_target_statement_preserved_accepts(submission, why):
+    preserved, reason = check_target_statement_preserved(TARGET, submission)
+    assert preserved, f"{why}: {reason}"
+
+
+@pytest.mark.parametrize(
+    "submission,why",
+    [
+        ("import Mathlib\n\ntheorem foo (n : ℕ) : n ≠ 0 := by omega\n", "hypothesis dropped"),
+        ("import Mathlib\n\ntheorem foo (n : ℕ) (h : 0 < n) : n ≥ 0 := by omega\n", "conclusion changed"),
+        ("import Mathlib\n\ntheorem bar (n : ℕ) (h : 0 < n) : n ≠ 0 := by omega\n", "renamed"),
+        ("import Mathlib\n\ntheorem unrelated : True := trivial\n", "target absent"),
+        # A statement that only appears inside a comment is not a statement.
+        (f"import Mathlib\n/- {TARGET} -/\ntheorem other : True := trivial\n", "only in a comment"),
+    ],
+)
+def test_check_target_statement_preserved_rejects(submission, why):
+    preserved, reason = check_target_statement_preserved(TARGET, submission)
+    assert not preserved, why
+    assert reason
+
+
+def test_check_target_statement_preserved_requires_a_recorded_statement():
+    preserved, reason = check_target_statement_preserved("", "theorem foo : True := trivial")
+    assert not preserved
+    assert "No target statement" in reason

@@ -34,7 +34,11 @@ STATUS_TIMEOUT = "timeout"
 STATUS_SANDBOX_ERROR = "sandbox_error"
 
 
-def determine_proof_status(compiler_output: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+def determine_proof_status(
+    compiler_output: Dict[str, Any],
+    *,
+    sorry_is_error: bool = True,
+) -> Tuple[str, Optional[str]]:
     """Map a sandbox result onto a proof status and, when it failed, a one-line reason.
 
     A zero exit is not sufficient: a build that declares a ``sorry`` exits zero with only a
@@ -43,6 +47,12 @@ def determine_proof_status(compiler_output: Dict[str, Any]) -> Tuple[str, Option
     ``error_type`` separates the sandbox failing to run the command from Lean rejecting the
     proof. A non-zero exit with no ``error_type`` is an ordinary compile error, which is what
     most wrong proofs look like and must not be reported as infrastructure trouble.
+
+    Pass ``sorry_is_error=False`` when the task's file is allowed to keep holes the model was
+    not asked to fill -- a Formal Conjectures file is built around an open conjecture, so the
+    warning is expected and says nothing about the declaration being scored. Such a server
+    owes a check of its own that the *target* is proved; dropping this one without that is how
+    an unfilled proof scores 1.0.
     """
     error_type = compiler_output.get("error_type")
     if error_type:
@@ -66,7 +76,7 @@ def determine_proof_status(compiler_output: Dict[str, Any]) -> Tuple[str, Option
         return STATUS_COMPILE_ERROR, "Lean rejected the proof."
     if "error:" in combined:
         return STATUS_COMPILE_ERROR, "Lean reported compilation errors."
-    if re.search(r"\bsorry\b", combined) is not None:
+    if sorry_is_error and re.search(r"\bsorry\b", combined) is not None:
         return STATUS_COMPILE_ERROR, "Lean reported a declaration that uses 'sorry'."
 
     return STATUS_COMPLETED, None
