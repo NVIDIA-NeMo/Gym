@@ -18,10 +18,17 @@ finance_agent_v2_resources_server:
       verified: false
       description: Vals finance-agent-v2 tools (web/EDGAR/price/calculator) for financial research questions
       value: Run the official Vals FABv2 agent tools at scale in NeMo Gym
-      # A null key registers that tool as unavailable rather than failing startup.
+      # A null key registers that tool as unavailable rather than failing startup,
+      # except sec_api_key in live mode, where startup fails.
       tavily_api_key: ${oc.select:tavily_api_key,${oc.env:TAVILY_API_KEY,null}}                # web_search (Tavily)
       sec_api_key: ${oc.select:sec_api_key,${oc.env:SEC_API_KEY,null}}                         # edgar_search (sec-api.io)
       pricing_data_api_key: ${oc.select:pricing_data_api_key,${oc.env:TIINGO_API_KEY,null}}    # price_history (Tiingo)
+      # Required. live: edgar_search queries sec-api.io. local: it reads the index below.
+      edgar_search_mode: ${oc.select:edgar_search_mode,null}
+      local_edgar_index_path: ${oc.select:local_edgar_index_path,null}
+      local_edgar_metadata_path: ${oc.select:local_edgar_metadata_path,null}
+      # Local mode only: parse_html_page reads SEC filings from this corpus after the cache.
+      sec_dump_path: ${oc.select:sec_dump_path,null}
       retrieval_model_server:
         type: responses_api_models
         name: policy_model

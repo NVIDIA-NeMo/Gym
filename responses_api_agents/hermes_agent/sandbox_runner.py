@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ctypes
+import functools
 import json
 import os
 import signal
@@ -16,8 +17,6 @@ import traceback
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-
-from openai.types.chat import ChatCompletion
 
 
 try:
@@ -32,28 +31,28 @@ def _write_atomic(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-class FileModelRelay:
-    """Exchange sequential model requests with the controlling agent server."""
+_MODEL_API_KEY = "gym"
 
-    def __init__(self, exchange_dir: Path) -> None:
-        self.exchange_dir = exchange_dir
-        self.request_index = 0
 
-    def call(self, api_kwargs: dict[str, Any]) -> ChatCompletion:
-        request_id = self.request_index
-        self.request_index += 1
-        request_path = self.exchange_dir / f"model-request-{request_id}.json"
-        response_path = self.exchange_dir / f"model-response-{request_id}.json"
-        _write_atomic(request_path, api_kwargs)
+def _use_model_server(base_url: str) -> None:
+    """Point every model client Hermes builds in this process at the Gym Model Server.
 
-        while not response_path.exists():
-            time.sleep(0.1)
+    The root agent and its iteration-limit summary share one client, delegated children inherit the
+    parent's base URL, and auxiliary clients such as context compression read ``OPENAI_BASE_URL``.
+    """
+    from run_agent import AIAgent
 
-        payload = json.loads(response_path.read_text())
-        response_path.unlink()
-        if payload.get("error") is not None:
-            raise RuntimeError(str(payload["error"]))
-        return ChatCompletion.model_validate(payload["response"])
+    os.environ["OPENAI_BASE_URL"] = base_url
+    os.environ["OPENAI_API_KEY"] = _MODEL_API_KEY
+
+    # The Model Server answers only whole responses, so no agent may stream, including the children Hermes builds.
+    initialize = AIAgent.__init__
+
+    @functools.wraps(initialize)
+    def initialize_without_streaming(agent: AIAgent, *args: Any, **kwargs: Any) -> None:
+        initialize(agent, *args, **{**kwargs, "use_streaming": False})
+
+    AIAgent.__init__ = initialize_without_streaming
 
 
 def _run(payload: dict[str, Any], exchange_dir: Path) -> dict[str, Any]:
@@ -65,12 +64,12 @@ def _run(payload: dict[str, Any], exchange_dir: Path) -> dict[str, Any]:
     os.environ["HERMES_HOME"] = str(hermes_home)
     os.environ["TERMINAL_ENV"] = "local"
     os.environ["TERMINAL_TIMEOUT"] = str(payload["terminal_timeout"])
+    _use_model_server(payload["model_base_url"])
 
     agent = AIAgent(
-        base_url="http://nemo-gym-model-relay.invalid/v1",
-        api_key="model-relay",
+        base_url=payload["model_base_url"],
+        api_key=_MODEL_API_KEY,
         model=payload["model"],
-        use_streaming=False,
         temperature=payload["temperature"],
         insert_reasoning=True,
         max_iterations=payload["max_turns"],
@@ -83,8 +82,6 @@ def _run(payload: dict[str, Any], exchange_dir: Path) -> dict[str, Any]:
         persist_session=False,
         save_trajectories=False,
     )
-    relay = FileModelRelay(exchange_dir)
-    agent._interruptible_api_call = relay.call
     observer = SandboxHermesObserver().instrument(agent)
 
     original_build_api_kwargs = agent._build_api_kwargs
@@ -96,6 +93,11 @@ def _run(payload: dict[str, Any], exchange_dir: Path) -> dict[str, Any]:
         chat_template_kwargs = kwargs.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})
         chat_template_kwargs.setdefault("enable_thinking", True)
         chat_template_kwargs["truncate_history_thinking"] = False
+        # Gym accepts template overrides through metadata, not an extra top-level field.
+        kwargs["extra_body"].pop("chat_template_kwargs")
+        metadata = kwargs.setdefault("metadata", {})
+        previous = json.loads(metadata.get("chat_template_kwargs") or "{}")
+        metadata["chat_template_kwargs"] = json.dumps(previous | chat_template_kwargs)
         return kwargs
 
     agent._build_api_kwargs = build_api_kwargs

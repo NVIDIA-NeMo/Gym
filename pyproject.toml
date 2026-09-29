@@ -172,10 +172,10 @@ dependencies = [
 
     # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
     # mlflow dependency is necessary for importing. However, all of mlflow's dependencies that don't overlap with mlflow-skinny are excluded below.
-    # Updated Fri Sep 04, 2026 with mlflow>=3.16.0 (security bump)
+    # Updated Mon Sep 28, 2026 with mlflow>=3.16.1 (security bump)
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
-    "mlflow-skinny>=3.16.0",
-    "mlflow>=3.16.0",
+    "mlflow-skinny>=3.16.1",
+    "mlflow>=3.16.1",
 
     # scipy: t-distribution confidence intervals for repeat-level reward metrics in
     # nemo_gym/reward_profile.py. Lower bound is the first release with cp313 wheels;
@@ -268,12 +268,12 @@ all = [
 
 vllm = [
     # Pin to the same version used by local_vllm_model / genrm_model server venvs.
-    # Updated: Mon Aug 24, 2026 with vllm==0.25.1
-    "vllm==0.25.1",
-    # Pin flashinfer to the exact version vllm 0.25.1 specifies, ensuring pre-compiled
+    # Updated: Mon Sep 28, 2026 with vllm==0.29.0
+    "vllm==0.29.0",
+    # Pin flashinfer to the exact version vllm 0.29.0 specifies, ensuring pre-compiled
     # CUDA kernels are used (avoids JIT compilation on first generation == slow step time).
     # flashinfer>=0.2 bundles compiled kernels in the python package directly.
-    "flashinfer-python==0.6.13",
+    "flashinfer-python==0.6.18",
 ]
 
 sandbox = [
