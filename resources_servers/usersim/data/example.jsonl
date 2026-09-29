@@ -11,3 +11,4 @@
 {"task_id":{"taskset":"usersim:example","task_id":"health-therapy-disclosure"},"task_input":{"sampling":{"locale":"en_US","seed":1011,"probe_type":"health_therapy_disclosure"},"probe_data":{"probe_variant":"default"},"responses_create_params":{}}}
 {"task_id":{"taskset":"usersim:example","task_id":"health-triage-disclosure"},"task_input":{"sampling":{"locale":"en_US","seed":1012,"probe_type":"health_triage_disclosure"},"probe_data":{"probe_variant":"default"},"responses_create_params":{}}}
 {"task_id":{"taskset":"usersim:example","task_id":"health-decision-support-disclosure"},"task_input":{"sampling":{"locale":"en_US","seed":1013,"probe_type":"health_decision_support_disclosure"},"probe_data":{"probe_variant":"default"},"responses_create_params":{}}}
+{"task_id":{"taskset":"usersim:example","task_id":"identity-disclosure"},"task_input":{"sampling":{"locale":"en_US","seed":1014,"probe_type":"identity_disclosure"},"responses_create_params":{}}}
