@@ -586,7 +586,7 @@ def install_sbatch_stub(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "SBATCH_PARTITION": "batch",
         "SBATCH_QOS": "interactive",
     }
-    env.pop("SBATCH_TIME", None)  # Test the default independently of the caller's allocation settings.
+    env.pop("SBATCH_TIMELIMIT", None)  # Test the default independently of the caller's allocation settings.
     return calls, env
 
 
@@ -673,7 +673,7 @@ def test_slurm_launcher_configures_walltime(tmp_path: Path, walltime: str | None
     """Only the main job's walltime changes; cleanup keeps its own limit."""
     calls_path, env = install_sbatch_stub(tmp_path)
     if walltime is not None:
-        env["SBATCH_TIME"] = walltime
+        env["SBATCH_TIMELIMIT"] = walltime
     result = subprocess.run(
         ["bash", str(SBATCH_SCRIPT), "--config", "benchmark.yaml"],
         check=False,
@@ -714,6 +714,7 @@ def test_slurm_eval_preserves_output_paths_and_explicit_resume(
         SLURM_RESTART_COUNT=restart_count,
         SLURM_JOB_USER="test-user",
         ROUTER_NODE="node-a",
+        ALL_NODES="node-a node-b",
         ROLLOUTS_FPATH=output_path or "",
         GYM_CAPTURE_DIR=str(tmp_path),
     )

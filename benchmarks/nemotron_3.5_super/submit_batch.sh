@@ -35,7 +35,7 @@ done
 : "${SBATCH_PARTITION:?Set SBATCH_PARTITION to a partition supporting the requested walltime.}"
 export MODEL CONTAINER SBATCH_ACCOUNT SBATCH_PARTITION
 export MODEL_NAME=${MODEL_NAME:-nemotron-3.5-super}
-export SBATCH_TIME=${SBATCH_TIME:-04:00:00}
+export SBATCH_TIMELIMIT=${SBATCH_TIMELIMIT:-04:00:00}
 export SBATCH_QOS=${SBATCH_QOS:-normal}
 export SBATCH_GRES=gpu:4
 export NUM_PREFILL_NODES=${NUM_PREFILL_NODES:-2}
@@ -99,7 +99,7 @@ print('PASS: Gym configuration resolves; model and service readiness are checked
 PY
 
 printf 'Batch: %s; nodes: %s+%s; walltime: %s; account: %s; partition: %s\n' \
-    "$batch" "$NUM_PREFILL_NODES" "$NUM_DECODE_NODES" "$SBATCH_TIME" "$SBATCH_ACCOUNT" "$SBATCH_PARTITION"
+    "$batch" "$NUM_PREFILL_NODES" "$NUM_DECODE_NODES" "$SBATCH_TIMELIMIT" "$SBATCH_ACCOUNT" "$SBATCH_PARTITION"
 if (( check_only )); then exit 0; fi
 
 mkdir -p "$run_dir" slurm-logs

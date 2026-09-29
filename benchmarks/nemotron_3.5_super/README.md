@@ -49,7 +49,7 @@ Several benchmarks can share one model-serving deployment while retaining separa
 
 The SWE batch shares 4 nodes (16 GPUs), compared with 8 nodes (32 GPUs) when running Verified and Multilingual as separate 4-node jobs at the same time.
 
-The suite files define which benchmarks run together and how many evaluation attempts can run at once. The Gym-only run recipes in [benchmarks/nemotron_3.5_super/batch_configs/core.yaml](batch_configs/core.yaml) and [benchmarks/nemotron_3.5_super/batch_configs/swe.yaml](batch_configs/swe.yaml) retain the pilot's global concurrency, repeat, sampling, and judge settings. You supply the checkpoint, compatible serving container, Slurm account, and credentials. The completed core pilots also used per-agent collection caps, which have since been removed. The current global-only recipes passed prebuilt-image GPU smoke tests (26 core attempts; six SWE attempts), but full matched standalone-versus-batch score validation remains pending. Existing judge/model-service request limits are unchanged.
+The suite files define which benchmarks run together and how many evaluation attempts can run at once. The Gym-only run recipes in [benchmarks/nemotron_3.5_super/batch_configs/core.yaml](batch_configs/core.yaml) and [benchmarks/nemotron_3.5_super/batch_configs/swe.yaml](batch_configs/swe.yaml) retain the pilot's global concurrency, repeat, and sampling settings. You supply the checkpoint, compatible serving container, Slurm account, and credentials. The core recipe now uses the Super 3.5 reference models.
 
 The prepared SWE inputs already include three copies of each task. Use `num_repeats=1` and `num_repeats_add_seed=false` during collection so Gym doesn’t add more repeats or sampling seeds.
 
@@ -80,7 +80,7 @@ MODEL=/shared/checkpoints/super35/hf \
 CONTAINER=/shared/containers/super35-gym.sqsh \
 SBATCH_ACCOUNT=my-slurm-account \
 SBATCH_PARTITION=batch_long \
-SBATCH_TIME=20:00:00 \
+SBATCH_TIMELIMIT=20:00:00 \
 EXPERIMENT_NAME=super35-core-run1 \
 ROLLOUTS_FPATH=results/super35-core-run1/rollouts.jsonl \
 bash benchmarks/nemotron_3.5_super/submit_batch.sh core \
@@ -91,7 +91,7 @@ MODEL=/shared/checkpoints/super35/hf \
 CONTAINER=/shared/containers/super35-gym.sqsh \
 SBATCH_ACCOUNT=my-slurm-account \
 SBATCH_PARTITION=batch_long \
-SBATCH_TIME=20:00:00 \
+SBATCH_TIMELIMIT=20:00:00 \
 EXPERIMENT_NAME=super35-swe-run1 \
 ROLLOUTS_FPATH=results/super35-swe-run1/rollouts.jsonl \
 bash benchmarks/nemotron_3.5_super/submit_batch.sh swe \

@@ -91,7 +91,7 @@ def checkout(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "CONTAINER": str(tmp_path / "container.sqsh"),
         "SBATCH_ACCOUNT": "test-account",
         "SBATCH_PARTITION": "batch_long",
-        "SBATCH_TIME": "20:00:00",
+        "SBATCH_TIMELIMIT": "20:00:00",
         "EXPERIMENT_NAME": "batch-test",
         "GYM_PYTHON": str(stub_dir / "preflight"),
         "CAPTURE": str(tmp_path),
@@ -127,6 +127,7 @@ def run_evaluation(root: Path, env: dict[str, str], **settings: str) -> subproce
         {
             **env,
             "ROUTER_NODE": "router",
+            "ALL_NODES": "router node1 node2 node3",
             "SLURM_JOB_ID": "12345",
             "SLURM_JOB_USER": "batch-test",
             "GYM_BATCH_ARGS": (root / "gym-batch-args").read_text(),
@@ -182,7 +183,7 @@ def test_submit_forwards_settings_to_dependency_check_prepare_and_run(checkout, 
 def test_defaults_do_not_enable_resume_or_select_a_stable_output(checkout, check_only: bool) -> None:
     """A name alone never opts into cached results; --check never submits or creates a run."""
     root, env = checkout
-    env.pop("SBATCH_TIME")
+    env.pop("SBATCH_TIMELIMIT")
     args = ["bash", str(SUBMIT), "swe", *(["--check"] if check_only else [])]
     result = run_shell(shlex.join(args), root, env)
     assert result.returncode == 0, result.stderr
