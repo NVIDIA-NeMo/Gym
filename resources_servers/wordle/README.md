@@ -14,16 +14,30 @@ The model guesses a secret 5-letter word in 6 attempts using three tools: `submi
 
 Every row pins its target word in `custom_target`, so all rollouts of a row play the same word. `reset()` rejects rows without a valid target.
 
-Train and validation targets come from disjoint splits of the 3,088 target words in `wordle_words.py` (2,625 train, 463 validation). `validation.jsonl` uses the first 100 validation words. Generate `train.jsonl`, `validation.jsonl`, and `example.jsonl`:
+`generate_data.py` downloads the word lists from pinned ENABLE and SCOWL/ESDB URLs, writes them to `data/targets.txt` and `data/guesses.txt`, and generates `train.jsonl`, `validation.jsonl`, and `example.jsonl`. Run it once before starting the server, which loads `data/guesses.txt`:
 
 ```bash
-python resources_servers/wordle/generate_data.py --output_dir resources_servers/wordle/data
+python resources_servers/wordle/generate_data.py
 ```
+
+Train and validation targets are disjoint splits of the 3,088 targets (2,625 train, 463 validation). `validation.jsonl` uses the first 100 validation words.
 
 ### Word lists
 
-- Valid guesses (8,636): 5-letter words from [ENABLE](https://raw.githubusercontent.com/dolph/dictionary/master/enable1.txt) (`enable1.txt`), public domain.
-- Targets (3,088): common words from the SCOWL/ESDB hunspell `en_US` dictionary ([en-wl/wordlist](https://github.com/en-wl/wordlist) release 2026.02.25) that are also in ENABLE, minus one word the dictionary flags as taboo. Copyright 2000-2026 by Kevin Atkinson, used under the SCOWL/ESDB permissive license. The full notice is in `wordle_words.py`.
+- Valid guesses (8,636): 5-letter words from ENABLE (`enable1.txt`, [dolph/dictionary mirror](https://github.com/dolph/dictionary)), public domain.
+- Targets (3,088): base forms from the SCOWL/ESDB hunspell `en_US` dictionary ([en-wl/wordlist](https://github.com/en-wl/wordlist) release 2026.02.25) that are also in ENABLE, minus one word the dictionary flags as taboo. Used under this notice, which `generate_data.py` also writes at the top of `targets.txt`:
+
+```
+Copyright 2000-2026 by Kevin Atkinson
+
+Permission to use, copy, modify, distribute, and sell any part of the English
+Speller Database (ESDB, previously known as SCOWLv2), or word lists
+created from it, is hereby granted without fee, provided that the above
+copyright notice appears in all copies and that both the above copyright
+notice and this notice appear in supporting documentation.  Kevin Atkinson
+makes no representations about the suitability of this database for any
+purpose.  It is provided "as is" without express or implied warranty.
+```
 
 ## Run
 

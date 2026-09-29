@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
+from resources_servers.wordle import app
 from resources_servers.wordle.app import (
     PENALTY_IGNORE_GREEN,
     PENALTY_IGNORE_YELLOW,
@@ -30,11 +31,12 @@ from resources_servers.wordle.app import (
     WordleResourcesServer,
     WordleResourcesServerConfig,
     calculate_win_reward,
+    read_words,
 )
-from resources_servers.wordle.generate_data import generate_training_data, generate_validation_data
-from resources_servers.wordle.wordle_words import TRAINING_WORDS, VALIDATION_WORDS, is_valid_guess
+from resources_servers.wordle.generate_data import make_row, split_targets
 
 
+_WORDS = ["abide", "crane", "light", "react", "those"]
 _CREATE_PARAMS = NeMoGymResponseCreateParamsNonStreaming(input="Make your first guess.").model_dump(mode="json")
 
 
@@ -72,6 +74,11 @@ def _text(text: str) -> dict:
         "type": "message",
         "content": [{"annotations": [], "text": text, "type": "output_text"}],
     }
+
+
+@pytest.fixture(autouse=True)
+def _words(monkeypatch):
+    monkeypatch.setattr(app, "valid_guesses", lambda: frozenset(_WORDS))
 
 
 @pytest.fixture
@@ -157,17 +164,29 @@ class TestReward:
 
 
 class TestWordLists:
-    def test_every_target_is_a_valid_guess(self):
-        assert all(is_valid_guess(w) for w in TRAINING_WORDS + VALIDATION_WORDS)
+    def test_read_words_skips_comments(self, tmp_path):
+        path = tmp_path / "targets.txt"
+        path.write_text("# Copyright notice\n#\ncrane\nlight\n")
+        assert read_words(path) == ["crane", "light"]
 
-    def test_train_and_validation_are_disjoint(self):
-        assert not set(TRAINING_WORDS) & set(VALIDATION_WORDS)
+    def test_missing_word_file_says_how_to_generate(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="generate_data.py"):
+            read_words(tmp_path / "guesses.txt")
 
-    def test_generated_rows_pin_a_target(self):
-        train = generate_training_data(10)
-        validation = generate_validation_data()
-        assert all(row["custom_target"] in TRAINING_WORDS for row in train)
-        assert all(row["custom_target"] in VALIDATION_WORDS for row in validation)
+    def test_split_is_disjoint_and_complete(self):
+        targets = [f"w{i:04d}" for i in range(100)]
+        train, validation = split_targets(targets)
+        assert len(validation) == 15
+        assert sorted(train + validation) == targets
+
+    def test_rows_pin_a_target(self):
+        row = make_row("crane")
+        assert row["custom_target"] == "crane"
+        assert [t["name"] for t in row["responses_create_params"]["tools"]] == [
+            "submit_guess",
+            "check_word_validity",
+            "get_game_state",
+        ]
 
 
 class TestServer:

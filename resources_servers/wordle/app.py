@@ -15,6 +15,8 @@
 
 import json
 from dataclasses import dataclass, field
+from functools import cache
+from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi import HTTPException
@@ -23,8 +25,9 @@ from pydantic import BaseModel, ValidationError
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseFunctionToolCall
 from resources_servers.gymnasium import GymnasiumServer
-from resources_servers.wordle.wordle_words import WORDLE_VALID_GUESSES, is_valid_guess
 
+
+GUESSES_PATH = Path(__file__).parent / "data" / "guesses.txt"
 
 WIN_REWARD_BASE = 2.0
 WIN_REWARD_PENALTY_PER_TURN = 0.2
@@ -37,6 +40,21 @@ PENALTY_WRONG_LENGTH = -0.02
 PENALTY_NOT_A_WORD = -0.02
 
 LOSS_REWARD = 0.0
+
+
+def read_words(path: Path) -> list[str]:
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found. Run `python resources_servers/wordle/generate_data.py` first.")
+    return [line.strip() for line in path.read_text().splitlines() if line.strip() and not line.startswith("#")]
+
+
+@cache
+def valid_guesses() -> frozenset[str]:
+    return frozenset(read_words(GUESSES_PATH))
+
+
+def is_valid_guess(word: str, word_length: int = 5) -> bool:
+    return len(word) == word_length and word.lower() in valid_guesses()
 
 
 def calculate_win_reward(turns_used: int) -> float:
@@ -93,7 +111,7 @@ class WordleGameLogic:
             return False, f"Word must be {word_length} letters, got {len(word)}"
         if not word.isalpha():
             return False, "Word must contain only letters"
-        if word not in WORDLE_VALID_GUESSES:
+        if word not in valid_guesses():
             return False, f"'{word}' is not a valid English word"
         return True, "Valid word"
 

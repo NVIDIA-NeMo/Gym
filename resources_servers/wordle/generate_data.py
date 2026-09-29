@@ -13,37 +13,33 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""Generate training and validation data for Wordle NemoGym environment.
-
-This script generates JSONL files with Wordle game prompts for training.
-
-Key design decisions:
-- Training data: Fixed target words cycled from TRAINING_WORDS (2,625 words), so every
-  rollout of the same row plays the same word.
-- Validation data: Fixed target words from VALIDATION_WORDS (463 words, no overlap
-  with training). This ensures reproducible evaluation across training steps.
-
-Usage:
-    python generate_data.py --output_dir data/
-    python generate_data.py --train_samples 2625 --output_dir data/
-"""
-
 import argparse
+import io
 import json
-import sys
+import random
+import urllib.request
+import zipfile
 from pathlib import Path
 
 
-# Add parent directories to path for imports
-gym_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(gym_root))
-nemo_rl_root = Path(__file__).parent.parent.parent.parent.parent
-sys.path.insert(0, str(nemo_rl_root))
+DATA_DIR = Path(__file__).parent / "data"
 
+# Valid guesses are the 5-letter words of ENABLE (enable1.txt), which is in the public domain.
+ENABLE_URL = "https://raw.githubusercontent.com/dolph/dictionary/c65f04b0b5b27a981f437b940cf62fe71320d5ec/enable1.txt"
 
-# System prompt for Wordle
-# Note: Reasoning mode disabled due to compatibility issues with multi-turn tool calling
+# Targets are the SCOWL/ESDB hunspell en_US base forms that are also in ENABLE, minus taboo words.
+# The SCOWL/ESDB license requires this notice in all copies of lists created from it.
+SCOWL_URL = "https://github.com/en-wl/wordlist/releases/download/rel-2026.02.25/hunspell-en_US-2026.02.25.zip"
+SCOWL_NOTICE = """Copyright 2000-2026 by Kevin Atkinson
+
+Permission to use, copy, modify, distribute, and sell any part of the English
+Speller Database (ESDB, previously known as SCOWLv2), or word lists
+created from it, is hereby granted without fee, provided that the above
+copyright notice appears in all copies and that both the above copyright
+notice and this notice appear in supporting documentation.  Kevin Atkinson
+makes no representations about the suitability of this database for any
+purpose.  It is provided "as is" without express or implied warranty."""
+
 SYSTEM_PROMPT = """You are playing Wordle, a word-guessing game. Your goal is to guess a secret 5-letter word in 6 attempts or fewer.
 
 After each guess, you'll receive feedback:
@@ -61,12 +57,6 @@ Strategy tips:
 
 IMPORTANT: Always respond with a tool call. Never reply with plain text. After receiving feedback, immediately call submit_guess with your next guess. When you see "won": true or "game_over": true in a response, the game is over — do not make any more tool calls."""
 
-# Single clear user prompt
-USER_PROMPTS = [
-    "Make your first guess.",
-]
-
-# Tool definitions
 TOOLS = [
     {
         "type": "function",
@@ -102,142 +92,74 @@ TOOLS = [
 ]
 
 
-def create_wordle_entry(
-    user_prompt: str,
-    custom_target: str,
-    word_length: int = 5,
-    max_turns: int = 6,
-) -> dict:
-    """Create a single Wordle data entry.
+def download(url: str) -> bytes:
+    with urllib.request.urlopen(url) as response:
+        return response.read()
 
-    Args:
-        user_prompt: The user message to start the game
-        custom_target: Target word the server will use for this game
-        word_length: Length of words (default 5)
-        max_turns: Maximum guesses allowed (default 6)
-    """
-    entry = {
+
+def build_word_lists() -> tuple[list[str], list[str]]:
+    guesses = sorted({w for w in download(ENABLE_URL).decode().split() if len(w) == 5 and w.isalpha()})
+    with zipfile.ZipFile(io.BytesIO(download(SCOWL_URL))) as z:
+        dic = z.read("en_US.dic").decode().splitlines()[1:]
+    guess_set = set(guesses)
+    # The "!" flag marks taboo words. ENABLE is lowercase, so proper nouns drop out.
+    entries = (line.partition("/") for line in dic)
+    targets = sorted({w for w, _, flags in entries if w in guess_set and "!" not in flags})
+    # The train/validation split depends on these exact lists.
+    assert (len(targets), len(guesses)) == (3088, 8636), (len(targets), len(guesses))
+    return targets, guesses
+
+
+def split_targets(targets: list[str]) -> tuple[list[str], list[str]]:
+    shuffled = list(targets)
+    random.Random(42).shuffle(shuffled)
+    num_validation = round(0.15 * len(shuffled))
+    return shuffled[num_validation:], shuffled[:num_validation]
+
+
+def make_row(target: str) -> dict:
+    return {
         "responses_create_params": {
-            "input": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
+            "input": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": "Make your first guess."},
+            ],
             "tools": TOOLS,
             "parallel_tool_calls": False,
             "temperature": 1.0,
         },
-        "word_length": word_length,
-        "max_turns": max_turns,
+        "word_length": 5,
+        "max_turns": 6,
         "agent_ref": {"type": "responses_api_agents", "name": "wordle_gymnasium_agent"},
+        "custom_target": target,
     }
 
-    entry["custom_target"] = custom_target
 
-    return entry
-
-
-def generate_training_data(num_samples: int, seed: int = 42) -> list[dict]:
-    """Generate training data with fixed target words from TRAINING_WORDS.
-
-    Args:
-        num_samples: Number of entries to generate
-        seed: Random seed for target word order
-    """
-    import random
-
-    from resources_servers.wordle.wordle_words import TRAINING_WORDS
-
-    words = list(TRAINING_WORDS)
-    random.Random(seed).shuffle(words)
-
-    entries = []
-    for i in range(num_samples):
-        # Cycle through user prompts for variety
-        user_prompt = USER_PROMPTS[i % len(USER_PROMPTS)]
-        entry = create_wordle_entry(user_prompt, custom_target=words[i % len(words)])
-        entries.append(entry)
-
-    return entries
+def write_lines(path: Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(line + "\n" for line in lines))
+    print(f"Wrote {len(lines)} lines to {path}")
 
 
-def generate_validation_data(seed: int = 43) -> list[dict]:
-    """Generate validation data WITH fixed target words.
-
-    Uses the first 100 of the 463 VALIDATION_WORDS (no overlap with training).
-    Each validation entry has a specific target word for reproducible evaluation.
-
-    Args:
-        seed: Random seed for prompt assignment
-    """
-    import random
-
-    random.seed(seed)
-
-    # Import validation words from the proper split
-    from resources_servers.wordle.wordle_words import VALIDATION_WORDS
-
-    entries = []
-    for i, target_word in enumerate(VALIDATION_WORDS[:100]):
-        # Cycle through user prompts
-        user_prompt = USER_PROMPTS[i % len(USER_PROMPTS)]
-        entry = create_wordle_entry(user_prompt, custom_target=target_word)
-        entries.append(entry)
-
-    return entries
-
-
-def save_jsonl(entries: list[dict], filepath: Path) -> None:
-    """Save entries to a JSONL file."""
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-    with open(filepath, "w") as f:
-        for entry in entries:
-            f.write(json.dumps(entry) + "\n")
-    print(f"Saved {len(entries)} entries to {filepath}")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Generate Wordle training and validation data",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Word Split:
-  - TRAINING_WORDS: 2,625 words (fixed in JSONL, cycled if --train_samples exceeds 2,625)
-  - VALIDATION_WORDS: 463 words, first 100 used (fixed in JSONL, no overlap with training)
-
-Examples:
-  python generate_data.py                          # Default: 1000 train, 100 val
-  python generate_data.py --train_samples 2625     # More training samples
-        """,
-    )
-    parser.add_argument("--train_samples", type=int, default=1000, help="Number of training samples (default: 1000)")
-    parser.add_argument(
-        "--output_dir", type=str, default="data", help="Output directory for JSONL files (default: data)"
-    )
-    parser.add_argument("--seed", type=int, default=886, help="Random seed (default: 42)")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Download the Wordle word lists and generate train/validation data")
+    parser.add_argument("--train_samples", type=int, default=1000, help="Cycles through the training targets")
+    parser.add_argument("--output_dir", type=Path, default=DATA_DIR)
+    parser.add_argument("--seed", type=int, default=886)
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
+    targets, guesses = build_word_lists()
+    notice = ["# " + line if line else "#" for line in SCOWL_NOTICE.splitlines()]
+    write_lines(DATA_DIR / "targets.txt", notice + targets)
+    write_lines(DATA_DIR / "guesses.txt", guesses)
 
-    print(f"Generating {args.train_samples} training samples...")
-    train_data = generate_training_data(args.train_samples, seed=args.seed)
-    save_jsonl(train_data, output_dir / "train.jsonl")
-
-    # Generate validation data (fixed target words from VALIDATION_WORDS)
-    print("\nGenerating validation samples...")
-    print("  - Fixed target words from 463 validation words (no overlap with training)")
-    val_data = generate_validation_data(seed=args.seed + 1)
-    save_jsonl(val_data, output_dir / "validation.jsonl")
-
-    # Generate example data (small subset of validation for quick testing)
-    print("\nGenerating example samples...")
-    import random
-
-    rng = random.Random(args.seed)
-    example_data = rng.sample(val_data, 5)
-    save_jsonl(example_data, output_dir / "example.jsonl")
-
-    print("\nDone!")
-    print("\nSummary:")
-    print(f"  Training:   {len(train_data)} samples (fixed targets from 2,625 training words)")
-    print(f"  Validation: {len(val_data)} samples (fixed targets, unique words)")
-    print(f"  Example:    {len(example_data)} samples")
+    train_words, validation_words = split_targets(targets)
+    random.Random(args.seed).shuffle(train_words)
+    train = [make_row(train_words[i % len(train_words)]) for i in range(args.train_samples)]
+    validation = [make_row(w) for w in validation_words[:100]]
+    example = random.Random(args.seed).sample(validation, 5)
+    for name, rows in [("train", train), ("validation", validation), ("example", example)]:
+        write_lines(args.output_dir / f"{name}.jsonl", [json.dumps(row) for row in rows])
 
 
 if __name__ == "__main__":
