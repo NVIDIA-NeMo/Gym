@@ -23,8 +23,9 @@ Two upstream sources publish the same 100 problems and they disagree:
   which received statement and answer corrections after the dataset was last
   updated and were bumped to Lean v4.24.0. Pinned to the current master.
 
-Twelve ``test`` statements and thirteen ``test_with_solution`` statements differ
-between the two once comments are ignored, and the answer lists differ for
+With comments stripped from both copies, 20 ``test`` and 21
+``test_with_solution`` statements differ byte for byte; 12 and 13 respectively
+differ once whitespace is normalised too. The answer lists differ for
 ``brualdi_ch1_5`` and ``brualdi_ch2_36``; see the benchmark README. Measured
 against Mathlib v4.24.0 (the toolchain upstream pins), all 100 GitHub statements
 compile while 6 Hugging Face statements do not, so ``github`` is the default.

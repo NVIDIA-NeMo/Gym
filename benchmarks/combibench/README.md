@@ -48,8 +48,10 @@ python benchmarks/combibench/prepare.py --source hf
 Upstream's harness loads the Hugging Face dataset, last updated 2025-07-13.
 The repository's Lean files were corrected afterwards (statement fixes for
 `hackmath_4`, `brualdi_ch4_35` and others; answer fixes for `brualdi_ch1_5`
-and `brualdi_ch2_36`) and bumped to Lean v4.24.0 on 2025-11-11. Ignoring
-comments, 12 of the 100 `test` statements differ between the two copies.
+and `brualdi_ch2_36`) and bumped to Lean v4.24.0 on 2025-11-11. With comments
+stripped from both copies the way `prepare.py` strips them, **20 of the 100**
+`test` statements differ byte for byte; **12** differ once whitespace is
+normalised as well, i.e. 8 of the 20 differ only in spacing and line breaks.
 
 Measured against Mathlib v4.24.0 with the statements' `sorry`s in place:
 
