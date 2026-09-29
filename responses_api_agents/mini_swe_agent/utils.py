@@ -53,6 +53,7 @@ class MiniSWEAgentUtils:
                 prompt_token_ids = provider_specific_fields.get("prompt_token_ids", [])
                 generation_token_ids = provider_specific_fields.get("generation_token_ids", [])
                 generation_log_probs = provider_specific_fields.get("generation_log_probs", [])
+                routed_experts = provider_specific_fields.get("routed_experts")
 
                 wrapped_message = NeMoGymResponseOutputMessageForTraining(
                     id=f"cht_{str(uuid4())}",
@@ -70,6 +71,7 @@ class MiniSWEAgentUtils:
                     prompt_token_ids=prompt_token_ids,
                     generation_token_ids=generation_token_ids,
                     generation_log_probs=generation_log_probs,
+                    routed_experts=routed_experts,
                 )
                 responses_idx += 1
 

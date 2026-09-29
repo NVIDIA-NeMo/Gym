@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nemo Gym Debugging"
+  short_description: "Triage Nemo Gym rollout and profiling failures"
+  default_prompt: "Use $nemo-gym-debugging to debug a Nemo Gym rollout, profiling, Ray, vLLM, sandbox, or verifier failure."

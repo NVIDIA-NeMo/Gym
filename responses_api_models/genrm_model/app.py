@@ -41,6 +41,7 @@ class GenRMModelMixin:
     def get_converter(self) -> VLLMConverter:
         return VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
+            uses_reasoning_parser=self.config.uses_reasoning_parser,
         )
 
     def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -91,6 +92,8 @@ class GenRMModel(GenRMModelMixin, LocalVLLMModel):
     starts a vLLM server (e.g. via Ray), and uses GenRM message formatting
     for response_1/response_2/principle roles.
     """
+
+    ray_enabled = True
 
     config: GenRMModelConfig
 

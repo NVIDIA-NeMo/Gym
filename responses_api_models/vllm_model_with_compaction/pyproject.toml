@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "vllm-model-with-compaction"
+version = "0.2.0rc0"
+requires-python = ">=3.13.14"
+dependencies = [
+    "nemo-gym[dev]",
+]
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61", "setuptools-scm"]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["vllm_model_with_compaction"]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }

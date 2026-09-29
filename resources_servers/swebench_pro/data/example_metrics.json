@@ -1,0 +1,139 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/swebench_pro/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 140.4,
+        "Min": 80.0,
+        "Max": 233.0,
+        "Standard deviation": 63.12
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "repo": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "instance_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "base_commit": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "patch": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "test_patch": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "problem_statement": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "requirements": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "interface": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "repo_language": {
+        "unique_count": 2,
+        "total_count": 5
+    },
+    "fail_to_pass": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "pass_to_pass": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "issue_specificity": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "issue_categories": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "before_repo_set_cmd": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "selected_test_files_to_run": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "dockerhub_tag": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "run_script": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "parser_script": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "base_dockerfile": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "instance_dockerfile": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "subset": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "split": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "evaluator_commit": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "dataset_revision": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "image_digest": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}

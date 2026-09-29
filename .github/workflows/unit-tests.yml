@@ -15,41 +15,178 @@
 name: Unit tests
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_call:
+    inputs:
+      base-ref:
+        description: Base commit or ref used to classify changes
+        required: false
+        type: string
+        default: ""
+
+env:
+  # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
+  NUM_SHARDS: "8"
 
 jobs:
-  test:
-    name: Test
+  detect:
+    name: Detect changes
     runs-on: ubuntu-latest
+    outputs:
+      run_full: ${{ steps.changes.outputs.run_full }}
+      run_servers: ${{ steps.changes.outputs.run_servers }}
+      docs_only: ${{ steps.changes.outputs.docs_only }}
+      server_all_changed_files: ${{ steps.changes.outputs.server_all_changed_files }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          submodules: 'recursive'
+          fetch-depth: 0
+
+      - name: Classify changes
+        id: changes
+        uses: ./.github/actions/classify-changes
+        with:
+          base-ref: ${{ inputs.base-ref || github.event.pull_request.base.sha || '' }}
+          force-run-all: ${{ inputs.base-ref == '' && github.event_name != 'pull_request' }}
+
+  # Core library unit tests (run once on a full run) + the changed-servers path. The full
+  # server suite is sharded into the parallel `server-suite` matrix below.
+  test:
+    name: Test
+    needs: detect
+    if: needs.detect.outputs.run_full == 'true' || needs.detect.outputs.run_servers == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: 'recursive'
 
-      - name: Fail on draft PRs
-        if: github.event.pull_request.draft == true
+      - name: Reclaim runner disk
+        run: ./scripts/ci/reclaim_runner_disk.sh
+
+      - name: Cache uv dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      - name: Install system test dependencies
+        timeout-minutes: 20
         run: |
-          echo "Failing on draft PR to enforce this check to run"
+          for i in 1 2 3 4; do
+            timeout 5m sudo bash -c "apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates" && exit 0
+            echo "apt-get attempt $i/4 failed or timed out after 5m; retrying"
+          done
           exit 1
 
-      - name: Setup for test
+      # Unconditional (not gated on run_full) and merged into one step, matching
+      # full-test-suite.yml's "Test" step, so the coverage gate below runs on every PR.
+      - name: Core + sandbox unit tests (coverage gate)
         run: |
-          sudo apt-get update
-          # Curl is required for setup_nvidia.sh to download uv
-          # ca-certificates is there to support curl and mitigate `curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt`
-          sudo apt-get install -y --no-install-recommends git curl ca-certificates
-          # The flow below should be used and synced with any Docker or container related flows. There is no script here to keep it 100% explicit.
-          # This is how we test and this is how you should use/consume.
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          uv venv --python 3.12
+          ./scripts/ci/core_unit_tests.sh
+          source ./scripts/ci/setup_dev.sh
+          uv sync --extra dev --extra sandbox --extra openshell
           source .venv/bin/activate
-          uv sync --extra dev
+          pytest --cov=. --cov-append --cov-report=term-missing \
+            --cov-fail-under="$(python3 scripts/ci/cov_fail_under.py)" --durations=10 -m sandbox
 
-      - name: Test
+      # The changed-server optimization is specific to GitHub pull requests; internal
+      # GitLab merge requests always run the full eight-shard server suite.
+      - name: Changed server tests
+        if: needs.detect.outputs.run_servers == 'true'
+        env:
+          CHANGED_SERVER_FILES: ${{ needs.detect.outputs.server_all_changed_files }}
         run: |
-          source .venv/bin/activate
-          ng_dev_test
-          ng_test_all +fail_on_total_and_test_mismatch=true
+          source ./scripts/ci/setup_dev.sh
+          CHANGED_SERVERS=$(echo "$CHANGED_SERVER_FILES" | tr ' ' '\n' | cut -d'/' -f1-2 | sort -u)
+
+          echo "Testing changed servers:"
+          while IFS= read -r server; do
+            echo "  - $server"
+          done <<< "$CHANGED_SERVERS"
+
+          EXIT_CODE=0
+          for server in $CHANGED_SERVERS; do
+            echo ""
+            echo "================================================"
+            echo "Testing: $server"
+            echo "================================================"
+            if ng_test +entrypoint="$server" +delete_venvs_after_each_test=true +should_validate_data=true; then
+              echo "PASS: $server"
+            else
+              echo "FAIL: $server"
+              EXIT_CODE=1
+            fi
+          done
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "Some server tests failed"
+            exit 1
+          fi
+
+  # Full server suite, split across NUM_SHARDS parallel runners. Only runs on a full run.
+  server-suite:
+    name: Server suite (shard ${{ matrix.shard }})
+    needs: detect
+    if: needs.detect.outputs.run_full == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          submodules: 'recursive'
+
+      - name: Reclaim runner disk
+        run: ./scripts/ci/reclaim_runner_disk.sh
+
+      - name: Cache uv dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      - name: Install system test dependencies
+        timeout-minutes: 20
+        run: |
+          for i in 1 2 3 4; do
+            timeout 5m sudo bash -c "apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates" && exit 0
+            echo "apt-get attempt $i/4 failed or timed out after 5m; retrying"
+          done
+          exit 1
+
+      - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
+        run: ./scripts/ci/server_tests.sh "${{ matrix.shard }}" "${{ env.NUM_SHARDS }}"
+
+  # Single aggregated gate for the sharded server suite — make this a required check
+  # (in addition to "Test") instead of the individual shard jobs. `always()` so it also
+  # produces a green result when the full suite isn't required for this change.
+  server-suite-result:
+    name: Server suite
+    needs: [detect, server-suite]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate shard results
+        run: |
+          if [[ "${{ needs.detect.outputs.run_full }}" != "true" ]]; then
+            echo "Full server suite not required for this change; nothing to aggregate."
+            exit 0
+          fi
+          if [[ "${{ needs.server-suite.result }}" == "success" ]]; then
+            echo "All server-suite shards passed."
+            exit 0
+          fi
+          echo "One or more server-suite shards failed (result: ${{ needs.server-suite.result }})."
+          exit 1

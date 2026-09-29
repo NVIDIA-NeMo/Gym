@@ -1,0 +1,4 @@
+# Downloaded/materialized data (see prepare.py). Not committed to git.
+source/
+tasks_*/
+example/

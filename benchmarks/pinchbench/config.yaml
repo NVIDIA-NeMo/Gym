@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Chain to existing agent config
+config_paths:
+  - responses_api_agents/pinchbench/configs/pinchbench.yaml
+
+# Run-time knobs the agent config interpolates. Declared here so `gym list` and
+# `gym eval prepare` resolve without them; a null reaching the agent fails fast in
+# PinchBenchAgentConfig
+sandbox_image: ${oc.env:PINCHBENCH_SANDBOX_IMAGE,null}
+model_base_url: ${oc.env:PINCHBENCH_MODEL_BASE_URL,null}
+model_api_key: ${oc.env:PINCHBENCH_MODEL_API_KEY,null}
+model_name: ${oc.env:PINCHBENCH_MODEL_NAME,null}
+judge_model: ${oc.env:PINCHBENCH_JUDGE_MODEL,null}
+judge_base_url: ${oc.env:PINCHBENCH_JUDGE_BASE_URL,null}
+judge_api_key: ${oc.env:PINCHBENCH_JUDGE_API_KEY,null}
+brave_api_key: ${oc.env:PINCHBENCH_BRAVE_API_KEY,null}
+tavily_api_key: ${oc.env:PINCHBENCH_TAVILY_API_KEY,null}
+
+# `_inherit_from` keeps this benchmark isolated from the generic agent instance
+# above, so overriding the dataset list here does not mutate `pinchbench_agent`.
+pinchbench_benchmark_agent:
+  _inherit_from: pinchbench_agent
+  responses_api_agents:
+    pinchbench:
+      datasets:
+      - name: pinchbench
+        type: benchmark
+        jsonl_fpath: benchmarks/pinchbench/data/pinchbench_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/pinchbench/prepare.py
+        num_repeats: 10
+        license: MIT

@@ -48,15 +48,12 @@ class StatefulCounterVerifyRequest(BaseVerifyRequest):
     expected_count: int
 
 
-class BaseVerifyResponse(BaseVerifyRequest):
-    reward: float
-
-
 class StatefulCounterSeedSessionRequest(BaseSeedSessionRequest):
     initial_count: int
 
 
 class StatefulCounterResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: StatefulCounterResourcesServerConfig
     session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
 

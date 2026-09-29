@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# BIRD text-to-SQL resource server configuration.
+# Execution-based verification on BIRD dev (1534 tasks across 11 SQLite dbs).
+
+bird_sql_resources_server:
+  resources_servers:
+    bird_sql:
+      entrypoint: app.py
+      bird_sql_dir: resources_servers/bird_sql/.bird_sql
+      max_concurrency: 32
+      sql_execution_timeout_s: 30.0
+      domain: coding
+      verified: false
+      description: Text-to-SQL with execution-based evaluation on BIRD dev (1534 SQLite tasks). Binary reward from unordered result-set equality.
+      value: Improve text-to-SQL capabilities on BIRD's realistic dev split using execution-based binary reward without an LLM judge.
+
+bird_sql_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: bird_sql_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/bird_sql/data/example.jsonl
+          license: Creative Commons Attribution-ShareAlike 4.0 International

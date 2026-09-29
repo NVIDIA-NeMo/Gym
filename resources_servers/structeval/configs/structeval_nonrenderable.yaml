@@ -1,0 +1,30 @@
+structeval_nonrenderable:
+  resources_servers:
+    structeval:
+      entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      description: StructEval non-renderable format verification (JSON, YAML, CSV, TOML, XML)
+      value: Improve structured output generation quality
+structeval_nonrenderable_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: structeval_nonrenderable
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/structeval/data/structeval_nonrenderable_train.jsonl
+        gitlab_identifier:
+          dataset_name: structeval_nonrenderable
+          version: 0.0.1
+          artifact_fpath: structeval_nonrenderable_train.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/structeval/data/example.jsonl

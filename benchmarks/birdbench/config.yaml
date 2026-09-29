@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# BIRD text-to-SQL benchmark configuration.
+
+# Chain to the BIRD execution-based resource server + agent config.
+config_paths:
+  - resources_servers/bird_sql/configs/bird_sql.yaml
+
+# Forwarded as kwargs to benchmarks/birdbench/prepare.py's prepare(). Pre-declared here (rather
+# than left implicit) to document the default; still needs the Hydra `+` prefix to override from
+# the CLI, e.g. `+prepare_script_args.include_evidence=false`, since `--config` merges this file
+# in via `+config_paths=[...]` rather than as Hydra's primary/root config.
+prepare_script_args:
+  include_evidence: true
+  dscp: name_or_col_dscp
+
+# Inherit-from directives isolate this benchmark config from the generic server config.
+birdbench_bird_sql_resources_server:
+  _inherit_from: bird_sql_resources_server
+
+birdbench_bird_sql_simple_agent:
+  _inherit_from: bird_sql_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: birdbench_bird_sql_resources_server
+      datasets:
+        - name: birdbench
+          type: benchmark
+          jsonl_fpath: benchmarks/birdbench/data/birdbench_benchmark.jsonl
+          prompt_config: benchmarks/birdbench/prompts/default.yaml
+          prepare_script: benchmarks/birdbench/prepare.py
+          num_repeats: 16

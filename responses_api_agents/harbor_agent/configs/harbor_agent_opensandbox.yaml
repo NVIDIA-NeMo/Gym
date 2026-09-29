@@ -1,0 +1,93 @@
+# Harbor agent running Terminal-Bench 2.1 with the stock Terminus-2 harness,
+# with task containers on a remote OpenSandbox cluster.
+#
+# The provider is referenced by name (`sandbox_provider: ${sandbox}`) and
+# defined in a separate config, so swapping providers is swapping that path:
+#
+#   AGENT=responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox.yaml
+#   PROVIDER=nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   gym eval run \
+#       --config $AGENT --config $PROVIDER --config $MODEL \
+#       --agent harbor_agent --split benchmark \
+#       --input <one-row-per-task>.jsonl --output rollouts.jsonl
+#
+# Requires OPENSANDBOX_DOMAIN and OPENSANDBOX_API_KEY (see $PROVIDER), plus
+# TERMINAL_BENCH_2_1_TASKS_DIR pointing at the dataset's tasks/ dir.
+harbor_agent:
+  responses_api_agents:
+    harbor_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Harbor integration for agent harnesses and environments.
+      value: Improve models in popular agentic environments supported by Harbor such as Terminus2.
+      # All 89 TB 2.1 tasks at once; also bounded by gym eval --concurrency.
+      concurrency: 89
+      # Jobs are I/O-bound, so reserve a fraction of a CPU each; Ray's default
+      # of 1 CPU/task would cap them at the driver's CPU count.
+      harbor_ray_task_num_cpus: 0.25
+
+      harbor_datasets:
+        terminal_bench:
+          local_dataset_path: ${oc.env:TERMINAL_BENCH_2_1_TASKS_DIR}
+
+      # One row per task; consumed by `gym eval run --split benchmark`.
+      datasets:
+        - name: terminal_bench_2_1
+          type: benchmark
+          jsonl_fpath: responses_api_agents/harbor_agent/example/terminal_bench_2_1_input.jsonl
+          prepare_script: responses_api_agents/harbor_agent/prepare_terminal_bench_2_1.py
+          prompt_config: null
+
+      harbor_agent_name: null
+      harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"
+      harbor_agent_kwargs:
+        collect_rollout_details: false
+        # Thinking-mode turns can run for tens of minutes, and the 120s default
+        # times out and re-sends, piling zombie requests on the model server.
+        # Do not raise this much further: the serving stack can silently drop an
+        # in-flight request, and the client then blocks for the full duration.
+        nemo_model_server_timeout_sec: 2400
+        model_info:
+          max_input_tokens: 262144
+          max_output_tokens: 81920
+          input_cost_per_token: 0.0
+          output_cost_per_token: 0.0
+
+      harbor_environment_type: null
+      harbor_environment_import_path: "responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment:NemoGymSandboxEnvironment"
+      harbor_environment_kwargs:
+        # The `sandbox` block from the included provider config.
+        sandbox_provider: ${sandbox}
+        sandbox_metadata:
+          harbor-benchmark: terminal-bench-2-1
+        # Server-side safety net; the timeouts below bound trials.
+        sandbox_ttl_s: 21600
+        sandbox_ready_timeout_s: 900
+        # Per-command bound, not a trial bound, governing every exec that
+        # carries no timeout of its own -- including Harbor's verifier. Most
+        # TB 2.1 tasks declare a verifier timeout_sec above 600, so a smaller
+        # value here silently truncates verification and scores the task 0.
+        default_exec_timeout_s: 1800
+        # Uniform per-sandbox resources, replacing each task.toml's values.
+        # 30 GiB avoids ephemeral-storage evictions on disk-heavy tasks; the
+        # roomier cpu/memory keep containers alive under load.
+        override_cpus: 8
+        override_memory_mb: 16384
+        override_storage_mb: 30720
+        # Sandboxes see the host's full core count, so build tools fan out to
+        # nproc workers and get CFS-throttled; pinning right-sizes that.
+        # Fail-open: no taskset or too few cores leaves the command unpinned.
+        cpu_pin_enabled: false
+
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      # Match the Qwen3.6 model-card harness setup: 3h agent timeout.
+      harbor_agent_override_timeout: 10800
+      harbor_agent_max_timeout: null
+      harbor_verifier_override_timeout: null
+      harbor_verifier_max_timeout: null
+      harbor_timeout_multiplier: null
+      harbor_jobs_dir: "responses_api_agents/harbor_agent/jobs"

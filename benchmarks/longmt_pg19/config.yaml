@@ -1,0 +1,20 @@
+config_paths:
+  - resources_servers/longmt_eval/configs/longmt_pg19.yaml
+
+longmt_pg19_resources_server:
+  _inherit_from: longmt_eval
+
+longmt_pg19_agent:
+  _inherit_from: longmt_pg19_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: longmt_pg19_resources_server
+      datasets:
+      - name: pg19_benchmark
+        type: benchmark
+        jsonl_fpath: benchmarks/longmt_pg19/data/pg19_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic/longmt.yaml
+        prepare_script: benchmarks/longmt_pg19/prepare.py
+        num_repeats: 5
+        license: Apache 2.0

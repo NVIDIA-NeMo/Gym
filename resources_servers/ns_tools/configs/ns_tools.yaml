@@ -4,9 +4,9 @@
 # for tool execution (e.g., stateful Python code execution).
 #
 # USAGE:
-#   ng_run "+config_paths=[resources_servers/ns_tools/configs/ns_tools.yaml,\
-#   resources_servers/math_with_judge/configs/math_with_judge.yaml,\
-#   responses_api_models/vllm_model/configs/vllm_model.yaml]"
+#   gym env start --resources-server ns_tools \
+#   --resources-server math_with_judge \
+#   --model-type vllm_model
 
 ns_tools:
   resources_servers:
@@ -24,12 +24,13 @@ ns_tools:
           name: math_with_judge
       
       # NeMo Skills tools to load
+      # DirectPythonTool is the preferred python tool path: it calls the sandbox directly
       nemo_skills_tools:
-        - nemo_skills.mcp.servers.python_tool.PythonTool
+        - nemo_skills.mcp.servers.python_tool::DirectPythonTool
       
       # Per-tool configuration overrides
       nemo_skills_tool_overrides:
-        PythonTool:
+        DirectPythonTool:
           exec_timeout_s: 10
 
       # Sandbox configuration

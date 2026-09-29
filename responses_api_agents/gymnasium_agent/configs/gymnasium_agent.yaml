@@ -1,0 +1,4 @@
+gymnasium_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py

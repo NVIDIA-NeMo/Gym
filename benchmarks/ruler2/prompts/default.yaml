@@ -1,0 +1,4 @@
+# Mirrors NeMo Skills' generic/default prompt — no system, just pass the
+# question through. ruler2 sub-tasks already bake instructions into the
+# question text in prepare.py.
+user: "{question}"

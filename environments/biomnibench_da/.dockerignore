@@ -1,0 +1,21 @@
+# docker/build_biomnibench_runtime_image.sh uses environments/biomnibench_da/ as the
+# build context. biomnibench-da-runtime.Dockerfile has no COPY steps; exclude local
+# datasets and dev trees so "docker build" does not upload multi-GB trees to the daemon.
+
+.git
+.gitignore
+.dockerignore
+.DS_Store
+
+data/
+
+tests/
+scripts/
+
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+
+*.md
+*.log

@@ -1,0 +1,26 @@
+# Refer to the params in responses_api_models/local_vllm_model/configs/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8.yaml
+# Used in browsecomp
+Qwen3-235B-A22B-Instruct-2507-FP8:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      model: ???
+      base_url: ???
+      api_key: ???
+      replace_developer_role_with_system: true
+      return_token_id_information: false
+      uses_reasoning_parser: true
+
+# Used in XSTest
+allenai_wildguard_model_server:
+  responses_api_models:
+    _delete_key: local_vllm_model
+    vllm_model:
+      entrypoint: app.py
+      model: ???
+      base_url: ???
+      api_key: ???
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      extra_body:
+        chat_template: "<|user|>\n[INST] {{ messages[0][\"content\"] }} [/INST]\n<|assistant|>\n"

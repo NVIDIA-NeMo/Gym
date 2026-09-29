@@ -13,6 +13,9 @@ Generate synthetic training data for multi-step tool-calling agents using [NeMo 
 # From this directory
 uv pip install -r requirements.txt
 
+# Gym excludes wcwidth globally; install it separately in the active environment.
+uv pip install --no-config --no-deps wcwidth==0.8.2
+
 # Or with pip
 pip install -r requirements.txt
 ```

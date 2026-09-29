@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections import Counter
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -37,12 +38,71 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.verifier_fixture import VerifierFixture
+from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_verified_server, invoke_hle_verified
+
+
+# Aggregate parsing metric, also included in key_metrics.
+JUDGEMENT_PARSING_ISSUE_RATE = "judgement_parsing_issue_rate"
+
+
+def _match_verdict_labels(text: str, equal_label: str, not_equal_label: str) -> list[str]:
+    """Return non-overlapping verdict labels in text order.
+
+    Consume each match so INCORRECT does not also count as CORRECT.
+    """
+    matches = []
+    i = 0
+    # Search by match position to avoid scanning each character in Python.
+    while i < len(text):
+        eq_at = text.find(equal_label, i) if equal_label else -1
+        neq_at = text.find(not_equal_label, i) if not_equal_label else -1
+        if eq_at < 0 and neq_at < 0:
+            break
+        if eq_at == neq_at:
+            # Prefer the longer label when both start here.
+            label = equal_label if len(equal_label) > len(not_equal_label) else not_equal_label
+            pos = eq_at
+        elif neq_at < 0 or (eq_at >= 0 and eq_at < neq_at):
+            label, pos = equal_label, eq_at
+        else:
+            label, pos = not_equal_label, neq_at
+        matches.append(label)
+        i = pos + len(label)
+    return matches
+
+
+def _parse_judge_verdict(
+    text: Optional[str], equal_label: str, not_equal_label: str, truncated: bool = False
+) -> tuple[Optional[str], list[str]]:
+    """Return the last verdict and any parsing issues."""
+    if text is None:
+        issues = ["unparseable_judge_output"]
+        if truncated:
+            issues.insert(0, "truncated_judge_output")
+        return None, issues
+
+    matches = _match_verdict_labels(text, equal_label, not_equal_label)
+    counts = Counter(matches)
+    eq_count, neq_count = counts[equal_label], counts[not_equal_label]
+    issues = []
+    if eq_count == 0 and neq_count == 0:
+        if truncated:
+            issues.append("truncated_judge_output")
+        issues.append("no_verdict")
+    else:
+        if eq_count > 0 and neq_count > 0:
+            issues.append("conflicting_verdicts")
+        if eq_count > 1 or neq_count > 1:
+            issues.append("repeated_verdict")
+
+    return matches[-1] if matches else None, issues
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
@@ -76,6 +136,12 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # The last match is used. If capture groups exist, the first non-empty group is
     # returned; otherwise, the entire last match is used.
     response_extract_regex: Optional[str] = None
+    msg_extraction_failure: str = "[NO VALID ANSWER EXTRACTED]"
+    max_answer_chars: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Score longer final assistant answers zero without calling the judge. Thinking is excluded.",
+    )
 
     # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
     check_twice_swap: bool = False
@@ -128,11 +194,28 @@ class LLMJudgeVerifyRequest(LLMJudgeRunRequest, BaseVerifyRequest):
     pass
 
 
+# Legacy in-band service failures remain readable when aggregating old runs.
+# New failures go through the shared judge_failed sidecar instead.
+JUDGE_ERROR_LABEL = "JUDGE_ERROR"
+
+
 class JudgeEvaluation(BaseModel):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    response: NeMoGymResponse
-    # Extracted verdict token from judge output, e.g., "[[A=B]]" or "[[A!=B]]".
+    # None on legacy rows whose judge call failed.
+    response: Optional[NeMoGymResponse] = None
+    # Extracted verdict token from judge output, e.g., "[[A=B]]" or "[[A!=B]]",
+    # or JUDGE_ERROR_LABEL when the judge itself failed.
     verdict_label: Optional[str] = None
+    # Per-evaluation parsing issues; empty when none were detected.
+    judgement_parsing_issues: list[str] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _drop_empty_judgement_parsing_issues(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Omit empty parsing issues; older rollouts may also lack this field."""
+        data = handler(self)
+        if not data.get("judgement_parsing_issues"):
+            data.pop("judgement_parsing_issues", None)
+        return data
 
 
 class LLMJudgeVerifyResponse(BaseVerifyResponse):
@@ -140,13 +223,15 @@ class LLMJudgeVerifyResponse(BaseVerifyResponse):
     judge_evaluations: list[JudgeEvaluation]
 
 
-def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optional[str]) -> str:
+def _extract_last_assistant_text(
+    body: BaseVerifyRequest, extract_regex: Optional[str], extraction_failure_message: str = ""
+) -> str:
     """Extract the last assistant message text from the response.
 
     - If the assistant message has multiple text blocks, they are joined with newlines.
     - If ``extract_regex`` is provided, the last regex match is used; if capture
       groups exist, the first non-empty group is returned, otherwise the full match.
-    - Returns an empty string when no assistant text is available.
+    - Returns ``extraction_failure_message`` when no assistant text is available.
     """
     # Return only the last assistant message's text content.
     for o in reversed(body.response.output):
@@ -162,7 +247,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optiona
                         texts.append(t)
                 text = "\n".join(texts).strip()
                 if not text:
-                    return text
+                    return extraction_failure_message
                 if extract_regex:
                     try:
                         matches = list(re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL))
@@ -181,7 +266,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optiona
             elif isinstance(content, str):
                 text = content.strip()
                 if not text:
-                    return text
+                    return extraction_failure_message
                 if extract_regex:
                     try:
                         matches = list(re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL))
@@ -198,7 +283,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optiona
                         return m.group(0).strip()
                 return text
             break
-    return ""
+    return extraction_failure_message
 
 
 def _extract_expected_answer(req: LLMJudgeRunRequest) -> Optional[str]:
@@ -228,6 +313,18 @@ def _extract_question_text(
             c = getattr(m, "content", None)
             if isinstance(c, str):
                 last_text = c
+            elif isinstance(c, list):
+                # Multimodal user turns (e.g. vision rows) carry a content list;
+                # join the text blocks so the judge still sees the question.
+                texts: list[str] = []
+                for block in c:
+                    t = getattr(block, "text", None)
+                    if t is None and isinstance(block, dict):
+                        t = block.get("text")
+                    if isinstance(t, str):
+                        texts.append(t)
+                if texts:
+                    last_text = "\n".join(texts)
     text = (last_text or "").strip()
     if not text:
         return text
@@ -253,6 +350,8 @@ def _extract_question_text(
 class LLMJudgeResourcesServer(SimpleResourcesServer):
     """Judge-only verifier using an LLM to compare answers."""
 
+    ray_enabled = False
+
     config: LLMJudgeResourcesServerConfig
 
     def __init__(self, *args, **kwargs):
@@ -265,10 +364,6 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
         with open(self.config.judge_prompt_template_fpath, "r") as f:
             self._judge_prompt_template = f.read().strip()
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        return app
 
     def _should_skip_for_length(self, body: LLMJudgeVerifyRequest, expected: str) -> bool:
         """Check if length threshold should skip second evaluation (rescue or swap).
@@ -353,7 +448,9 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             and body.template_metadata.get("output_regex")
         ):
             # Retry with full generation (no regex) - rescue from regex extraction failure
-            generated_full = _extract_last_assistant_text(body, extract_regex=None)
+            generated_full = _extract_last_assistant_text(
+                body, extract_regex=None, extraction_failure_message=self.config.msg_extraction_failure
+            )
             second_equal, second_eval = await self._generate_judge_evaluation(
                 question=question, expected_answer=expected, generated_answer=generated_full
             )
@@ -398,15 +495,26 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         """Verify model response by comparing with expected answer using LLM judge.
 
         Flow:
-        1. Extract question and expected answer
+        1. Extract expected answer; reject empty or over-limit final text; extract question
         2. Determine extraction regex (per-record override, length threshold)
         3. Extract answer to judge (could be regex-extracted OR full generation)
         4. Run first judge evaluation on extracted answer
         5. Handle failure → rescue with full generation or immediate fail
         6. Handle success → swap check or immediate success
         """
-        # Step 1: Extract question and expected answer
+        # Step 1: Check the raw final answer before applying extraction or calling the judge.
         expected = _extract_expected_answer(body) or ""
+        answer = _extract_last_assistant_text(body, extract_regex=None)
+        if not answer:
+            result = self._make_response(body, expected, reward=0.0, evaluations=[])
+            result.failure_reason = "empty_final_answer"
+            return result
+        if self.config.max_answer_chars is not None and len(answer) > self.config.max_answer_chars:
+            result = self._make_response(body, expected, reward=0.0, evaluations=[])
+            result.failure_reason = (
+                f"final_answer_too_long: {len(answer)} characters exceeds {self.config.max_answer_chars}"
+            )
+            return result
         question = _extract_question_text(body.responses_create_params, self.config.question_extract_regex)
 
         # Step 2: Determine extraction regex (None if long answer triggers threshold)
@@ -415,7 +523,9 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         # Step 3: Extract answer to judge
         # - If extract_regex is not None → regex-extracted answer
         # - If extract_regex is None (long answer) → full generation
-        generated = _extract_last_assistant_text(body, extract_regex)
+        generated = _extract_last_assistant_text(
+            body, extract_regex, extraction_failure_message=self.config.msg_extraction_failure
+        )
 
         # Step 4: Run first judge evaluation
         first_equal, first_eval = await self._generate_judge_evaluation(
@@ -450,19 +560,15 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         responses_create_params.input = msgs
 
         async with self._judge_endpoint_max_concurrency:
-            try:
-                response = await self.server_client.post(
-                    server_name=cfg.judge_model_server.name,
-                    url_path="/v1/responses",
-                    json=responses_create_params,
-                )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-            except Exception as e:
-                print(
-                    f"DEBUG: LLMJudgeResourcesServer: judge model server HTTP POST error: {type(e).__name__} {e}",
-                    flush=True,
-                )
-                raise e
+            # Let the shared verify-endpoint failsafe preserve exhausted judge
+            # failures for `gym eval reverify --judge-failed-only`.
+            judge_response = await call_judge(
+                self.server_client,
+                server_name=cfg.judge_model_server.name,
+                url_path="/v1/responses",
+                json=responses_create_params,
+                response_model=NeMoGymResponse,
+            )
 
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
@@ -473,23 +579,82 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         # Parse the last output; fall back to not-equal if unexpected.
         try:
             last_output = judge_response.output[-1]
-            if getattr(last_output, "type", None) != "message":
-                return False, eval_record
-            last_content = last_output.content[-1]
-            text = getattr(last_content, "text", "")
+            is_message = getattr(last_output, "type", None) == "message"
+            text = getattr(last_output.content[-1], "text", "") if is_message else None
         except Exception:
-            return False, eval_record
+            text = None
 
-        eq_pos = text.find(equal_label)
-        neq_pos = text.find(not_equal_label)
-        if eq_pos < 0 and neq_pos < 0:
-            eval_record.verdict_label = None
-            return False, eval_record
-        if eq_pos >= 0 and (neq_pos < 0 or eq_pos < neq_pos):
-            eval_record.verdict_label = equal_label
-            return True, eval_record
-        eval_record.verdict_label = not_equal_label
-        return False, eval_record
+        eval_record.verdict_label, eval_record.judgement_parsing_issues = _parse_judge_verdict(
+            text, equal_label, not_equal_label, truncated=judge_response.status == "incomplete"
+        )
+        return equal_label != not_equal_label and eval_record.verdict_label == equal_label, eval_record
+
+    def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        """Aggregate parsing issues, recovering missing diagnostics from saved responses.
+
+        Exclude service failures and records without diagnostics or a saved response.
+        Count each rollout once, including runs with multiple judge passes.
+        """
+        kind_counts: Counter[str] = Counter()
+        judged = 0
+        rollouts_with_issues = 0
+        for task in tasks:
+            for rollout in task:
+                issues: set[str] = set()
+                measured = False
+                for evaluation in rollout.get("judge_evaluations") or []:
+                    if not evaluation or evaluation.get("verdict_label") == JUDGE_ERROR_LABEL:
+                        continue
+                    parsing_issues = evaluation.get("judgement_parsing_issues")
+                    if parsing_issues is None:
+                        response = evaluation.get("response")
+                        if not isinstance(response, dict):
+                            continue
+                        # Preserve the verifier's last-output, last-content-block extraction.
+                        try:
+                            last_output = response["output"][-1]
+                            text = (
+                                last_output["content"][-1].get("text", "")
+                                if last_output.get("type") == "message"
+                                else None
+                            )
+                        except (KeyError, IndexError, TypeError, AttributeError):
+                            text = None
+                        _, parsing_issues = _parse_judge_verdict(
+                            text,
+                            self.config.judge_equal_label,
+                            self.config.judge_not_equal_label,
+                            truncated=response.get("status") == "incomplete",
+                        )
+                    measured = True
+                    issues.update(parsing_issues)
+
+                if measured:
+                    judged += 1
+                    rollouts_with_issues += bool(issues)
+                    kind_counts.update(issues)
+
+        if not judged:
+            return {}
+        metrics: dict[str, Any] = {JUDGEMENT_PARSING_ISSUE_RATE: rollouts_with_issues / judged}
+        for kind, count in sorted(kind_counts.items()):
+            metrics[f"{JUDGEMENT_PARSING_ISSUE_RATE}/{kind}"] = count / judged
+        return metrics
+
+    def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
+        """Add the parsing-issue rate to the default mean metrics."""
+        key = super().get_key_metrics(agent_metrics)
+        if JUDGEMENT_PARSING_ISSUE_RATE in agent_metrics:
+            key[JUDGEMENT_PARSING_ISSUE_RATE] = agent_metrics[JUDGEMENT_PARSING_ISSUE_RATE]
+        return key
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_hle_verified_server,
+    request_model=LLMJudgeVerifyRequest,
+    cases_path=Path(__file__).parent / "tests/hle_verified_verifier_cases.jsonl",
+    invoke=invoke_hle_verified,
+)
 
 
 if __name__ == "__main__":

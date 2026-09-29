@@ -1,0 +1,23 @@
+config_paths:
+  - resources_servers/code_fim/configs/code_fim.yaml
+
+# Default benchmark variant: random_span (matches Skills' EVAL_SPLIT).
+human_eval_infilling_resources_server:
+  _inherit_from: code_fim
+  resources_servers:
+    code_fim:
+      split: random_span
+
+human_eval_infilling_simple_agent:
+  _inherit_from: code_fim_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: human_eval_infilling_resources_server
+      datasets:
+      - name: human_eval_infilling_random_span
+        type: benchmark
+        jsonl_fpath: benchmarks/human_eval_infilling/data/random_span.jsonl
+        prompt_config: benchmarks/human_eval_infilling/prompts/default.yaml
+        prepare_script: benchmarks/human_eval_infilling/prepare.py
+        license: MIT

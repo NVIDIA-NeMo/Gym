@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 from time import time
 from typing import List
 
@@ -19,6 +20,9 @@ import requests
 from devtools import pprint
 
 from nemo_gym.server_utils import ServerClient, ServerInstanceDisplayConfig, ServerStatus
+
+
+logger = logging.getLogger(__name__)
 
 
 class StatusCommand:
@@ -73,10 +77,10 @@ class StatusCommand:
             return servers
 
         except (requests.RequestException, ConnectionError) as e:
-            print(f"""
-Could not connect to head server: {e}
-Is the head server running? Start it with: `ng_run`
-            """)
+            logger.warning(
+                "Could not connect to head server: %s. Is the head server running? Start it with: `gym env start`",
+                e,
+            )
             return []
 
     def display_status(self, servers: List[ServerInstanceDisplayConfig]) -> None:

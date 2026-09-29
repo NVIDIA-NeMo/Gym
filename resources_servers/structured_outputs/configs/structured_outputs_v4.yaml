@@ -1,0 +1,30 @@
+structured_outputs:
+  resources_servers:
+    structured_outputs:
+      entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      description: Check if responses follow tool-call structured output schemas. Created 20260424.
+      value: Improve schema adherence when structured output is expressed through tool calls
+structured_outputs_v4_simple_agent:
+  responses_api_agents:
+    non_executing_simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: structured_outputs
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_v4_tool_call.jsonl
+        gitlab_identifier:
+          dataset_name: structured_outputs_v4_tool_call
+          version: 0.0.1
+          artifact_fpath: structured_outputs_v4_tool_call.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_v4_example.jsonl

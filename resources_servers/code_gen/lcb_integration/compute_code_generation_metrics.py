@@ -75,23 +75,39 @@ def check_correctness(sample, generation, timeout, debug=True):
         return [-1], None
 
     manager = multiprocessing.Manager()
-    result = manager.list()
-    metadata_list = manager.list()
-    p = multiprocessing.Process(
-        target=_temp_run,
-        args=(in_outs, generation, debug, result, metadata_list, timeout),
-    )
-    p.start()
-    p.join(timeout=(timeout + 1) * len(in_outs["inputs"]) + 5)
-    if p.is_alive():
-        p.kill()
-    if not result:
-        # consider that all tests failed
-        result = [[-1 for i in range(len(in_outs["inputs"]))]]
-        metadata_list = [None]
+    p: multiprocessing.Process | None = None
+    try:
+        result = manager.list()
+        metadata_list = manager.list()
+        p = multiprocessing.Process(
+            target=_temp_run,
+            args=(in_outs, generation, debug, result, metadata_list, timeout),
+        )
+        p.start()
+        p.join(timeout=(timeout + 1) * len(in_outs["inputs"]) + 5)
+        if p.is_alive():
+            p.kill()
+            # Reap the worker after SIGKILL to release joinable resources.
+            p.join(timeout=5)
+
+        # Drain ListProxy values into plain lists before Manager shutdown, since access
+        # raises once the Manager helper process exits.
+        if result:
+            result_local: list = list(result)
+            metadata_local: list = list(metadata_list)
+            return result_local[0], metadata_local[0]
+
         if debug:
             print("global timeout")
-    return result[0], metadata_list[0]
+        # consider that all tests failed
+        return [-1 for _ in range(len(in_outs["inputs"]))], None
+    finally:
+        if p is not None and p.is_alive():
+            # Defensive: reap the worker if an exception bypassed the join above.
+            p.kill()
+            p.join(timeout=5)
+        # Always shut down the Manager so its helper process doesn't leak under stress.
+        manager.shutdown()
 
 
 def evaluate_generations_by_problem(args):

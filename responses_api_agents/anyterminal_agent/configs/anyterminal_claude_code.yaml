@@ -1,0 +1,28 @@
+anyterminal_claude_code:
+  responses_api_agents:
+    anyterminal_agent:
+      entrypoint: app.py
+      domain: coding
+      description: Terminal Bench run by claude-code natively inside the task container.
+      value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.claude_code_agent.app
+      agent_server_class: ClaudeCodeAgent
+      agent_config_class: ClaudeCodeAgentConfig
+      agent_kwargs:
+        model: ${policy_model_name}
+        anthropic_api_key: ${policy_api_key}
+        anthropic_base_url: ${policy_base_url}
+        timeout: 12500 # Max task timeout in Terminal Bench is 12000 seconds
+        max_turns: null # Unlimited turns
+
+      container_formatter: "docker://{docker_image}"
+
+      concurrency: 6
+
+      # Claude Code calls anthropic_base_url directly (no Gym model server).
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl

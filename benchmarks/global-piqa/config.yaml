@@ -1,0 +1,23 @@
+# Chain to the shared MCQA verifier.
+config_paths:
+  - resources_servers/mcqa/configs/mcqa.yaml
+
+global_piqa_mcqa_resources_server:
+  _inherit_from: mcqa
+  resources_servers:
+    mcqa:
+      grading_mode: null
+
+global_piqa_mcqa_simple_agent:
+  _inherit_from: mcqa_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: global_piqa_mcqa_resources_server
+      datasets:
+        - name: global-piqa
+          type: benchmark
+          jsonl_fpath: benchmarks/global-piqa/data/global-piqa_benchmark.jsonl
+          prompt_config: benchmarks/global-piqa/prompts/default.yaml
+          prepare_script: benchmarks/global-piqa/prepare.py
+          num_repeats: 1

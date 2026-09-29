@@ -1,0 +1,23 @@
+# GraphWalks — N3 1M-context variant.
+# Same data + Skills prompt fixes as `config.yaml`, but `prepare_n3_1m.py`
+# counts tokens with the Nemotron-3-Super HF tokenizer and drops samples
+# whose tokenized prompt exceeds 1048576 tokens.
+config_paths:
+  - resources_servers/graphwalks/configs/graphwalks.yaml
+
+graphwalks_n3_1m_benchmark_resources_server:
+  _inherit_from: graphwalks_resources_server
+
+graphwalks_n3_1m_benchmark_simple_agent:
+  _inherit_from: graphwalks_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: graphwalks_n3_1m_benchmark_resources_server
+      datasets:
+      - name: graphwalks_n3_1m
+        type: benchmark
+        jsonl_fpath: benchmarks/graphwalks/data/graphwalks_n3_1m_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/graphwalks/prepare_n3_1m.py
+        num_repeats: 1

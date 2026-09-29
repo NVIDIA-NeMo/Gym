@@ -1,0 +1,52 @@
+image_tools_pivot:
+  resources_servers:
+    # Nested key is the server TYPE and Gym resolves it to
+    # resources_servers/<type>/ (cli/env.py:415 _resolve_server_dir), so it must
+    # match the directory. The top-level key above is the INSTANCE name that
+    # agent_ref and resources_server.name point at -- left alone so the 15,498
+    # dataset rows carrying image_tools_pivot_agent keep resolving.
+    image_tools:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: PivotRL verifier for VLM image-tool trajectories; scores one tool call against the demonstrated SFT action.
+      value: Improve per-turn image-tool decisions (which tool, which image, which region).
+      # "binary" -> 1.0 iff argument score >= argument_threshold; cleanest GRPO advantage.
+      # Flip to "continuous" to reward partial overlap (score itself becomes the reward).
+      reward_mode: binary
+      enable_target_match: true
+      # IoU for bbox tools, closeness for point/color tools.
+      argument_threshold: 0.5
+      numeric_tolerance: 1.0e-6
+      penalize_extra_tool_calls: true
+      # image_crop_tool is image_zoom_in_tool at factor 1 (the task system
+      # prompt says exactly that), and `factor` is already ignored, so the two
+      # count as the same Level 0 decision. Set false to require the exact name.
+      unify_region_inspect_tools: true
+
+image_tools_pivot_agent:
+  responses_api_agents:
+    tool_simulation_agent:
+      entrypoint: app.py
+      # A pivot is a single decision: one model call, no tool execution.
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: image_tools_pivot
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      # `license` is REQUIRED on train/validation datasets: DatasetConfig asserts
+      # it, and without it pydantic falls through to BenchmarkDatasetConfig and
+      # the server is silently demoted to an "almost-server" that never starts.
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/image_tools/data/train.jsonl
+        num_repeats: 1
+        license: NVIDIA Internal Use Only, Do Not Distribute
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/image_tools/data/validation.jsonl
+        num_repeats: 1
+        license: NVIDIA Internal Use Only, Do Not Distribute

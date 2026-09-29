@@ -16,60 +16,96 @@
 Finance SEC Search Resource Server.
 
 Provides tools for searching SEC filings by ticker symbol or company name.
-Caches ticker mappings and filing metadata locally to minimize SEC API calls.
+Caches ticker mappings and filing metadata locally to minimize SEC.gov calls.
 """
 
 import asyncio
+import atexit
+import contextlib
 import json
 import logging
+import os
 import re
+import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-import yaml
-
-
-logger = logging.getLogger(__name__)
+from typing import Any, Dict, List, Literal, Optional
 
 import aiohttp
-from bs4 import BeautifulSoup
+import yaml
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from starlette.requests import Request
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, call_judge, reraise_judge_errors
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
+from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService
+from resources_servers.sec_local_index.html_text import html_to_text
+from resources_servers.sec_local_index.live_edgar_search import LiveEdgarSearch
+from resources_servers.sec_local_index.local_edgar_search import (
+    LocalEdgarSearch,
+    canonical_url_key,
+)
+from resources_servers.sec_local_index.sec_urls import parse_sec_archives_url
+
+
+logger = logging.getLogger(__name__)
+
+FILING_READ_SOURCES = ("cache", "sec-corpus", "live")
+FILING_READ_LOG_INTERVAL_SEC = 1800.0
+
+# The Vals v1 benchmark's evaluation cutoff. Dates beyond it are clamped so a
+# rollout cannot see filings the benchmark's answers do not account for.
+DEFAULT_MAX_END_DATE = "2025-04-07"
+
+# The judge explains first and ends with its verdict as "[[N]]" (#2852).
+_JUDGE_RATING_RE = re.compile(r"\[\[(\d+)\]\]")
+
+
+def _extract_judge_rating(judge_text: str) -> Optional[int]:
+    """Return the judge's verdict: the LAST ``[[N]]`` in its output, or None when there is none.
+
+    The judge may quote the candidate or restate the rubric on the way to its verdict, so the first
+    ``[[N]]`` is not reliable; the verdict is the one it ends with.
+    """
+    matches = _JUDGE_RATING_RE.findall(judge_text or "")
+    return int(matches[-1]) if matches else None
 
 
 class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
-    """Configuration for SEC Search resource server."""
+    """Configuration for Finance SEC Search resource server."""
 
-    cache_dir: str = Field(default="cache", description="Directory for caching ticker mappings and filing metadata")
-    user_agent: str = Field(
-        default="Gym-SEC-Search/1.0 (research@nvidia.com)", description="User-Agent header for SEC API requests"
+    cache_dir: Optional[str] = Field(
+        default=None,
+        description="Path for caching ticker mappings and filing metadata. Defaults to ~/.cache/nemo_gym/finance_sec_search/ if not set. Relative paths are resolved from cwd.",
     )
-    requests_per_second: int = Field(default=10, description="Rate limit for SEC API requests")
-    # Optional: Tavily web search (uses tavily package directly)
+    use_cache: bool = Field(default=False, description="Keep False to always fetch fresh filings (used for eval).")
+    user_agent: str = Field(
+        default="Gym-SEC-Search/1.0 (research@nvidia.com)", description="User-Agent header for SEC.gov requests"
+    )
+    requests_per_second: int = Field(default=10, description="Rate limit for SEC.gov requests")
     tavily_api_key: Optional[str] = Field(default=None, description="Tavily API key for web search")
     retrieval_model_server: Optional[ModelServerRef] = Field(
         default=None, description="Model server for retrieve_information LLM calls"
     )
-    # Judge model configuration (LLM-as-judge for answer grading)
     judge_model_server: Optional[ModelServerRef] = Field(default=None, description="Reference to judge model server")
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = Field(
         default=None, description="Parameters for judge model requests"
@@ -83,23 +119,124 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         default="prompt_templates/finance_sec_search_judge.yaml",
         description="Fallback file path for judge prompt template (used when judge_prompt_template is not set)",
     )
-    # Retrieval model parameters
+    retrieval_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = Field(
+        default=None, description="Parameters for retrieval model requests (temperature, top_p, etc.)"
+    )
+    retrieval_system_prompt: Optional[str] = Field(
+        default=None,
+        description="Inline retrieval system prompt. Takes priority over retrieval_system_prompt_fpath.",
+    )
+    retrieval_system_prompt_fpath: str = Field(
+        default="prompt_templates/finance_sec_search_retrieval.yaml",
+        description="Fallback file path for retrieval system prompt (used when retrieval_system_prompt is not set)",
+    )
     large_doc_threshold_chars: int = Field(
         default=100000,
         description="If the document is larger than this threshold characters, give a warning to the model to use char ranges.",
     )
-    retrieval_max_output_tokens: int = Field(
-        default=8192,
-        description="Max output tokens for retrieve_information LLM calls. Increase for thinking models.",
+    reward_mode: Literal["binary", "scaled"] = Field(
+        default="binary",
+        description="How judge ratings map to rewards. "
+        "'binary': only [[2]] → 1.0, else 0.0. "
+        "'scaled': [[0]] → 0.0, [[1]] → 0.5, [[2]] → 1.0.",
+    )
+    retrieval_max_output_tokens: Optional[int] = Field(
+        default=None,
+        description="Max output tokens for retrieve_information LLM calls. Increase for thinking models. "
+        "Set to null/None to leave it unset so the retrieval call inherits the full generation budget "
+        "(used for eval); set an integer to cap it (used for training).",
     )
     retrieval_model_context_length: int = Field(
         default=131072,
         description="Context window (in tokens) of the retrieval model. Used to compute prompt size limits.",
     )
     max_filing_results: int = Field(
-        default=30,
+        default=200,
         description="Maximum number of filing metadata entries returned by sec_filing_search.",
     )
+    request_timeout: int = Field(default=30, description="Per-request timeout in seconds for SEC.gov calls")
+    max_connections_per_host: int = Field(default=10, description="Max concurrent connections to SEC.gov")
+    max_retries: int = Field(default=3, description="Max retries for transient SEC.gov errors (403, 429, 503)")
+    sec_dump_path: Optional[str] = Field(
+        default=None,
+        description="Path to pre-fetched SEC dump directory (read-only). Used as fallback for filing content cache misses.",
+    )
+    max_rollout_time_seconds: Optional[float] = Field(
+        default=None,
+        description="Per-rollout wall-clock time budget in seconds. When exceeded, tool calls return an error "
+        "asking the model to submit immediately. Set to None to disable.",
+    )
+    edgar_search_mode: Optional[Literal["live", "local"]] = Field(
+        default=None,
+        description="Where edgar_search reads filings from. 'live' queries sec-api.io and needs sec_api_key. "
+        "'local' reads local_edgar_index_path and makes no network call. Left unset, edgar_search is "
+        "unavailable. Other tools are unaffected.",
+    )
+    sec_api_key: Optional[str] = Field(
+        default=None,
+        description="sec-api.io key for edgar_search in live mode.",
+    )
+    local_edgar_index_path: Optional[str] = Field(
+        default=None,
+        description="Read-only SQLite FTS5 index used by edgar_search in local mode.",
+    )
+    local_edgar_metrics_dir: Optional[str] = Field(
+        default=None,
+        description="Optional directory for per-search latency records.",
+    )
+    local_edgar_metadata_path: Optional[str] = Field(
+        default=None,
+        description="Metadata sidecar for the local EDGAR index, built by "
+        "resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py. Defaults to the index path plus "
+        "'.metadata' when that file exists. Searches are far slower without it.",
+    )
+    max_end_date: Optional[str] = Field(
+        default=None,
+        description="Maximum allowed end_date for all date-filtered tools (web_search, edgar_search, etc.). "
+        "When set, dates beyond this are clamped and omitted end_dates default to this value. "
+        "Set to null (default) to disable clamping.",
+    )
+    supplementary_tickers_fpath: Optional[str] = Field(
+        default=None,
+        description="Optional JSON overlay of extra ticker mappings in SEC company_tickers.json schema. "
+        "Merged onto the live or cached SEC registry at startup.",
+    )
+    judge_call_timeout: Optional[float] = Field(
+        default=60.0,
+        description="Per-call timeout in seconds for judge LLM requests. "
+        "Prevents stale TCP connections from blocking the rollout indefinitely. "
+        "Set to None to disable.",
+    )
+
+
+def _coerce_stringified_collection(v: Any) -> Any:
+    """Deserialize a stringified list/dict into its native Python type.
+
+    Tool-call parsers may serialize nested arguments as strings rather than
+    native types.  This handles two common formats:
+      1. JSON strings:  '["a", "b"]'  or  '[{"key": "v"}]'
+      2. Python repr:   "['a', 'b']"  or  "[{'key': 'v'}]"
+
+    Returns the parsed object when successful, or the original value
+    unchanged (letting Pydantic's normal validation handle it).
+    """
+    if not isinstance(v, str):
+        return v
+    import ast
+
+    try:
+        parsed = json.loads(v)
+        if isinstance(parsed, (list, dict)):
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+    try:
+        parsed = ast.literal_eval(v)
+        if isinstance(parsed, (list, dict)):
+            return parsed
+    except (ValueError, SyntaxError):
+        pass
+    return v
 
 
 class FinanceAgentSearchRequest(BaseModel):
@@ -108,8 +245,21 @@ class FinanceAgentSearchRequest(BaseModel):
     ticker: str = Field(description="Stock ticker symbol (e.g., 'AAPL', 'MSFT', 'NVDA')")
     form_types: Optional[List[str]] = Field(
         default=None,
-        description="Limits search to specific EDGAR form types (e.g., ['10-K', '10-Q', 'DEF 14A', '8-K']). Default: 10-K, 10-Q, and DEF 14A",
+        description="(optional) Limits search to specific EDGAR form types (e.g., ['10-K', '10-Q', '8-K']). Default: all form types.",
     )
+    start_date: Optional[str] = Field(
+        default=None,
+        description="(optional) Filter filings on or after this date (YYYY-MM-DD)",
+    )
+    end_date: Optional[str] = Field(
+        default=None,
+        description="(optional) Filter filings on or before this date (YYYY-MM-DD)",
+    )
+
+    @field_validator("form_types", mode="before")
+    @classmethod
+    def _coerce_form_types(cls, v: Any) -> Any:
+        return _coerce_stringified_collection(v)
 
 
 class FinanceAgentSearchResponse(BaseModel):
@@ -118,26 +268,50 @@ class FinanceAgentSearchResponse(BaseModel):
     results: str = Field(description="JSON string of filing results")
 
 
-class DownloadAndParseFilingRequest(BaseModel):
-    """Request model for download_and_parse_filing tool."""
+class EdgarSearchRequest(BaseModel):
+    """Request model for local full-text EDGAR search."""
 
-    url: str = Field(description="The filing URL from sec_filing_search results")
-    key: str = Field(description="The key to use when saving the result in the conversation's data storage.")
+    search_query: str = Field(description="Case-insensitive search term or phrase")
+    form_types: Optional[List[str]] = Field(default=None, description="Optional EDGAR form types")
+    ciks: Optional[List[str]] = Field(default=None, description="Optional CIK filters")
+    start_date: Optional[str] = Field(default="1900-01-01", description="Start date (YYYY-MM-DD)")
+    end_date: Optional[str] = Field(default=None, description="End date (YYYY-MM-DD)")
+    page: int = Field(default=1, ge=1, description="Result page number")
+    top_n_results: int = Field(default=100, ge=1, le=100, description="Maximum results to return")
+
+    @field_validator("form_types", "ciks", mode="before")
+    @classmethod
+    def _coerce_filters(cls, v: Any) -> Any:
+        return _coerce_stringified_collection(v)
 
 
-class DownloadAndParseFilingResponse(BaseModel):
-    """Response model for download_and_parse_filing tool."""
+class EdgarSearchResponse(BaseModel):
+    """Response model for local full-text EDGAR search."""
 
-    results: str = Field(description="Status message about data storage operation")
+    results: str = Field(description="JSON string of sec-api-compatible search results")
 
 
 class RetrieveInformationRequest(BaseModel):
     """Request model for retrieve_information tool."""
 
-    prompt: str = Field(description="Prompt with {{key_name}} placeholders for stored documents.")
+    prompt: str = Field(
+        description=(
+            "An LLM prompt applied to your saved documents. You MUST include at least "
+            "one data-storage key using the exact double-brace format {{key_name}} -- "
+            "for example: 'Summarize this 10-K filing: {{company_10k}}'. The full text "
+            "stored under each key replaces its {{key_name}} placeholder before the "
+            "prompt is sent. If you do not use this exact {{key_name}} format, the tool "
+            "will fail."
+        )
+    )
     input_character_ranges: Optional[List[Dict[str, Any]]] = Field(
         default=None, description="Optional list of character ranges: [{'key': 'doc', 'start': 0, 'end': 100000}]"
     )
+
+    @field_validator("input_character_ranges", mode="before")
+    @classmethod
+    def _coerce_input_character_ranges(cls, v: Any) -> Any:
+        return _coerce_stringified_collection(v)
 
 
 class RetrieveInformationResponse(BaseModel):
@@ -161,13 +335,29 @@ class SubmitFinalResultResponse(BaseModel):
 class WebSearchRequest(BaseModel):
     """Request model for web_search tool."""
 
-    query: str = Field(description="Search query")
+    search_query: str = Field(description="The query to search for")
+    start_date: Optional[str] = Field(default=None, description="Start date for search range (YYYY-MM-DD)")
+    end_date: Optional[str] = Field(default=None, description="End date for search range (YYYY-MM-DD)")
+    number_of_results: Optional[int] = Field(default=10, ge=1, le=20, description="Number of search results to return")
 
 
 class WebSearchResponse(BaseModel):
     """Response model for web_search tool."""
 
     results: str = Field(description="JSON string with search results")
+
+
+class ParseHtmlPageRequest(BaseModel):
+    """Request model for parse_html_page tool."""
+
+    url: str = Field(description="The URL of the HTML page to parse")
+    key: str = Field(description="The key to use when saving the result in the conversation's data storage.")
+
+
+class ParseHtmlPageResponse(BaseModel):
+    """Response model for parse_html_page tool."""
+
+    results: str = Field(description="Status message about data storage operation")
 
 
 class FinanceAgentRunRequest(BaseRunRequest):
@@ -197,7 +387,7 @@ class FinanceAgentVerifyResponse(BaseVerifyResponse):
 
 
 class RateLimiter:
-    """Sliding window rate limiter for SEC API compliance."""
+    """Sliding window rate limiter for SEC.gov compliance."""
 
     def __init__(self, max_requests: int = 10, window_seconds: float = 1.0):
         self.max_requests = max_requests
@@ -207,28 +397,20 @@ class RateLimiter:
 
     async def acquire(self):
         """Wait until a request slot is available."""
-        async with self.lock:
-            now = time.monotonic()
-
-            # Remove expired timestamps
-            while self.requests and (now - self.requests[0]) >= self.window_seconds:
-                self.requests.popleft()
-
-            # Wait if at capacity
-            if len(self.requests) >= self.max_requests:
+        while True:
+            async with self.lock:
+                now = time.monotonic()
+                while self.requests and (now - self.requests[0]) >= self.window_seconds:
+                    self.requests.popleft()
+                if len(self.requests) < self.max_requests:
+                    self.requests.append(now)
+                    return
                 sleep_time = self.window_seconds - (now - self.requests[0])
-                if sleep_time > 0:
-                    await asyncio.sleep(sleep_time)
-                    # Clean up again after sleeping
-                    now = time.monotonic()
-                    while self.requests and (now - self.requests[0]) >= self.window_seconds:
-                        self.requests.popleft()
-
-            self.requests.append(time.monotonic())
+            await asyncio.sleep(max(sleep_time, 0.01))
 
 
 # ============================================================================
-# SEC Search Resource Server
+# Finance SEC Search Resource Server
 # ============================================================================
 
 
@@ -236,37 +418,61 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     """
     SEC EDGAR Filing Search Resource Server.
     - /sec_filing_search: Search for SEC filings by ticker or company name
-    - /download_and_parse_filing: Download, parse filing, store in data storage under a key
+    - /edgar_search: Search the local EDGAR full-text index
+    - /parse_html_page: Fetch, parse, and store any HTML page (SEC URLs use XBRL-aware parsing + disk cache)
     - /retrieve_information: Query stored documents via LLM prompt with {{key}} syntax
     - /web_search: Tavily web search
     - /submit_final_result: Submit the final answer
     """
 
+    ray_enabled = False
+
     config: FinanceAgentResourcesServerConfig
 
     def model_post_init(self, context):
         """Initialize after Pydantic model creation."""
-        # Setup cache directories
-        self._cache_dir = Path(self.config.cache_dir)
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        if not self.config.cache_dir:
+            default = Path.home() / ".cache" / "nemo_gym" / "finance_sec_search"
+            logger.warning(
+                "cache_dir not set; defaulting to %s. "
+                "This path is ephemeral in containers and not shared across Slurm jobs. "
+                "Set cache_dir to a shared absolute path for production/multi-seed use.",
+                default,
+            )
+            self._cache_dir = default
+        else:
+            self._cache_dir = Path(self.config.cache_dir)
+            if not self._cache_dir.is_absolute():
+                self._cache_dir = Path.cwd() / self._cache_dir
+                logger.info("Resolved relative cache_dir to %s", self._cache_dir)
         self._filings_metadata_dir = self._cache_dir / "filings_metadata"
-        self._filings_metadata_dir.mkdir(exist_ok=True)
         self._filings_dir = self._cache_dir / "filings"
-        self._filings_dir.mkdir(exist_ok=True)
         self._tickers_file = self._cache_dir / "tickers.json"
+        # Only materialize the on-disk cache when caching is enabled. With
+        # use_cache=False every request fetches live and no dirs are created.
+        if self.config.use_cache:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            self._filings_metadata_dir.mkdir(exist_ok=True)
+            self._filings_dir.mkdir(exist_ok=True)
 
-        # Rate limiter for SEC API
         self._rate_limiter = RateLimiter(max_requests=self.config.requests_per_second, window_seconds=1.0)
 
-        # In-memory caches (loaded lazily)
         self._tickers: Dict[str, Dict[str, str]] = {}  # ticker -> {"cik": ..., "name": ...}
+        self._filings_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}  # cik -> {acc_nodash -> filing_meta}
+        # Filled in by edgar_search, read by filing fetches. Separate from
+        # _filings_cache, which is per-accession and mirrored to disk, because
+        # this is per-document (exhibits included) and process-local.
+        self._dump_paths: Dict[str, str] = {}  # canonical document key -> path below sec_dump_path
         self._session: Optional[aiohttp.ClientSession] = None
+        self._session_lock = asyncio.Lock()
+        self._filings_locks: Dict[str, asyncio.Lock] = {}
         self._initialized = False
 
-        # Data storage: key -> parsed text content
-        self._data_storage: Dict[str, str] = {}
+        # session_id -> {key -> parsed text content}; scoped by HTTP session cookie
+        self._data_storage: Dict[str, Dict[str, str]] = {}
+        self._session_start_times: Dict[str, float] = {}
 
-        # Load judge prompt template (inline takes priority over file)
+        # Inline template takes priority over file
         if self.config.judge_prompt_template:
             self._judge_prompt_template = self.config.judge_prompt_template.strip()
         else:
@@ -274,7 +480,13 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 data = yaml.safe_load(f)
             self._judge_prompt_template = data["judge_prompt_template"].strip()
 
-        # Tavily web search (optional - uses tavily package directly)
+        if self.config.retrieval_system_prompt:
+            self._retrieval_system_prompt = self.config.retrieval_system_prompt.strip()
+        else:
+            with open(self.config.retrieval_system_prompt_fpath, "r") as f:
+                data = yaml.safe_load(f)
+            self._retrieval_system_prompt = data["retrieval_system_prompt"].strip()
+
         self._tavily = None
         if self.config.tavily_api_key:
             try:
@@ -290,6 +502,97 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         else:
             logger.info("No tavily_api_key configured — web_search will be unavailable")
 
+        self._filing_read_sources: Counter[str] = Counter()
+        self._filing_read_logged_at: Optional[float] = None
+
+        self._local_edgar_search: Optional[LocalEdgarSearch] = None
+        self._edgar_search_service: Optional[EdgarSearchService] = None
+        cutoff = self.config.max_end_date or DEFAULT_MAX_END_DATE
+        mode = self.config.edgar_search_mode
+        if mode == "local":
+            if not self.config.local_edgar_index_path:
+                raise ValueError(
+                    "edgar_search_mode is 'local' but local_edgar_index_path is not set. Local mode serves "
+                    "edgar_search entirely from that index; without it every search would fail mid-rollout."
+                )
+            self._local_edgar_search = LocalEdgarSearch(
+                self.config.local_edgar_index_path,
+                max_end_date=cutoff,
+                metrics_dir=self.config.local_edgar_metrics_dir,
+                metadata_path=self.config.local_edgar_metadata_path,
+            )
+            self._edgar_search_service = EdgarSearchService(
+                self._local_edgar_search,
+                max_end_date=cutoff,
+                on_results=self._record_dump_paths,
+            )
+            logger.info(
+                "edgar_search: local mode, index %s (metadata sidecar: %s, coverage %s)",
+                self.config.local_edgar_index_path,
+                self._local_edgar_search.metadata_path or "none",
+                self._local_edgar_search.coverage,
+            )
+        elif mode == "live":
+            if not self.config.sec_api_key:
+                raise ValueError(
+                    "edgar_search_mode is 'live' but sec_api_key is not set. Set the key, or leave "
+                    "edgar_search_mode unset to run without edgar_search."
+                )
+            self._edgar_search_service = EdgarSearchService(
+                LiveEdgarSearch(
+                    self.config.sec_api_key,
+                    session_provider=self._get_session,
+                    max_retries=self.config.max_retries,
+                    request_timeout=self.config.request_timeout,
+                ),
+                max_end_date=cutoff,
+            )
+            logger.info("edgar_search: live mode against sec-api.io")
+        else:
+            logger.info("edgar_search: unavailable — edgar_search_mode is not set")
+
+    def _get_session_storage(self, session_id: str) -> Dict[str, str]:
+        """Get or create the data storage dict for a session."""
+        if session_id not in self._data_storage:
+            self._data_storage[session_id] = {}
+        return self._data_storage[session_id]
+
+    def _check_time_budget(self, session_id: str) -> Optional[str]:
+        """Return an error message if the rollout has exceeded its time budget, else None."""
+        if not self.config.max_rollout_time_seconds:
+            return None
+        start = self._session_start_times.get(session_id)
+        if start is None:
+            return None
+        elapsed = time.monotonic() - start
+        if elapsed > self.config.max_rollout_time_seconds:
+            logger.warning(
+                "Session %s exceeded time budget (%.0fs > %.0fs)",
+                session_id,
+                elapsed,
+                self.config.max_rollout_time_seconds,
+            )
+            return json.dumps(
+                {
+                    "error": f"Time budget exhausted ({elapsed:.0f}s / {self.config.max_rollout_time_seconds:.0f}s). "
+                    "No further tool calls will be executed. Call submit_final_result immediately with your best answer."
+                }
+            )
+        return None
+
+    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+        """Reset per-question data storage for this session."""
+        session_id = request.session[SESSION_ID_KEY]
+        self._data_storage[session_id] = {}
+        self._session_start_times[session_id] = time.monotonic()
+        logger.debug("seed_session: reset data storage for session %s", session_id)
+        if len(self._data_storage) > 128:
+            logger.warning(
+                "data_storage has %d active sessions — possible leak (verify cleanup failing?)",
+                len(self._data_storage),
+            )
+        return await super().seed_session(body)
+
     def setup_webserver(self) -> FastAPI:
         """Register API routes."""
         app = super().setup_webserver()
@@ -297,47 +600,89 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         self._load_tickers_or_fail()
 
         app.post("/sec_filing_search")(self.sec_filing_search)
-        app.post("/download_and_parse_filing")(self.download_and_parse_filing)
+        app.post("/edgar_search")(self.edgar_search)
+        app.post("/parse_html_page")(self.parse_html_page)
         app.post("/retrieve_information")(self.retrieve_information)
         app.post("/submit_final_result")(self.submit_final_result)
         app.post("/web_search")(self.web_search)
 
-        # Catch-all for unknown tools - return error to model so it can correct itself
         @app.post("/{tool_name}")
         async def handle_unknown_tool(tool_name: str):
             return {
                 "results": json.dumps(
                     {
-                        "error": f"Tool '{tool_name}' does not exist. Available tools: sec_filing_search, download_and_parse_filing, retrieve_information, submit_final_result, web_search"
+                        "error": f"Tool '{tool_name}' does not exist. Available tools: "
+                        "sec_filing_search, edgar_search, parse_html_page, "
+                        "retrieve_information, submit_final_result, web_search"
                     }
                 )
             }
 
+        # Process-level hook: not every FastAPI version exposes a shutdown
+        # handler API.
+        atexit.register(self._log_filing_read_sources)
+
         return app
 
+    def _log_filing_read_sources(self) -> None:
+        logger.warning(
+            "SEC filing reads by source: %s",
+            " ".join(f"{source}={self._filing_read_sources[source]}" for source in FILING_READ_SOURCES),
+        )
+
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create HTTP session."""
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(headers={"User-Agent": self.config.user_agent})
-        return self._session
+        """Get or create the shared HTTP session."""
+        async with self._session_lock:
+            if self._session is None or self._session.closed:
+                connector = aiohttp.TCPConnector(
+                    limit=50,
+                    limit_per_host=self.config.max_connections_per_host,
+                )
+                timeout = aiohttp.ClientTimeout(total=self.config.request_timeout * 2)
+                self._session = aiohttp.ClientSession(
+                    headers={"User-Agent": self.config.user_agent},
+                    connector=connector,
+                    timeout=timeout,
+                )
+            return self._session
 
-    async def _fetch_with_retry(self, url: str, max_retries: int = 3) -> Optional[str]:
-        """Fetch URL with rate limiting and retry logic."""
+    async def _fetch_with_retry(self, url: str) -> Optional[str]:
+        """Fetch URL with rate limiting, retries, and per-request timeout."""
         session = await self._get_session()
+        req_timeout = aiohttp.ClientTimeout(total=self.config.request_timeout)
 
-        for attempt in range(max_retries):
+        for attempt in range(self.config.max_retries):
             await self._rate_limiter.acquire()
             try:
-                async with session.get(url) as response:
+                async with session.get(url, timeout=req_timeout) as response:
                     if response.status == 200:
-                        return await response.text()
-                    elif response.status == 429:
-                        # Rate limited - wait and retry
+                        raw = await response.read()
+                        encoding = response.charset or "utf-8"
+                        try:
+                            return raw.decode(encoding)
+                        except (UnicodeDecodeError, LookupError):
+                            return raw.decode("latin-1")
+                    if response.status in (403, 429, 503):
+                        logger.warning(
+                            "SEC.gov %d on attempt %d/%d for %s",
+                            response.status,
+                            attempt + 1,
+                            self.config.max_retries,
+                            url,
+                        )
                         await asyncio.sleep(2**attempt)
-                    else:
-                        return None
-            except aiohttp.ClientError:
-                if attempt < max_retries - 1:
+                        continue
+                    logger.warning("SEC.gov %d (non-retryable) for %s", response.status, url)
+                    return None
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                logger.warning(
+                    "Fetch error on attempt %d/%d for %s",
+                    attempt + 1,
+                    self.config.max_retries,
+                    url,
+                    exc_info=True,
+                )
+                if attempt < self.config.max_retries - 1:
                     await asyncio.sleep(2**attempt)
         return None
 
@@ -353,7 +698,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
         raw = None
 
-        if self._tickers_file.exists():
+        if self.config.use_cache and self._tickers_file.exists():
             try:
                 with open(self._tickers_file, "r") as f:
                     raw = json.load(f)
@@ -368,8 +713,9 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                     with urllib.request.urlopen(req, timeout=30) as resp:
                         data = resp.read().decode("utf-8")
                     raw = json.loads(data)
-                    with open(self._tickers_file, "w") as f:
-                        json.dump(raw, f)
+                    if self.config.use_cache:
+                        with open(self._tickers_file, "w") as f:
+                            json.dump(raw, f)
                     break
                 except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
                     wait = 2**attempt
@@ -388,10 +734,35 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 "Failed to load SEC ticker data after retries. Server cannot start without company_tickers.json."
             )
 
+        raw = self._overlay_supplementary_tickers(raw)
+
         for item in raw.values():
-            self._tickers[item["ticker"]] = {"cik": str(item["cik_str"]).zfill(10), "name": item["title"]}
+            self._tickers[item["ticker"].upper()] = {"cik": str(item["cik_str"]).zfill(10), "name": item["title"]}
         self._initialized = True
         logger.info("Loaded %d ticker mappings", len(self._tickers))
+
+    def _overlay_supplementary_tickers(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge the overlay onto an SEC registry. Overlay wins; one row per ticker.
+
+        Registry keys are positional and carry no meaning, so overlay keys are
+        namespaced to keep them from colliding with SEC's own numbering.
+        """
+        fpath = self.config.supplementary_tickers_fpath
+        if not fpath:
+            return raw
+        path = Path(fpath)
+        if not path.is_file():
+            raise RuntimeError(f"supplementary_tickers_fpath not found: {path}")
+        with open(path, "r") as f:
+            extra = json.load(f)
+        if not isinstance(extra, dict):
+            raise RuntimeError(f"supplementary_tickers_fpath must be a JSON object: {path}")
+        overridden = {item["ticker"].upper() for item in extra.values()}
+        merged = {key: item for key, item in raw.items() if item["ticker"].upper() not in overridden}
+        for key, item in extra.items():
+            merged[f"supplementary-{key}"] = item
+        logger.info("Overlaid %d supplementary ticker mappings from %s", len(extra), path)
+        return merged
 
     async def _resolve_ticker(self, ticker: str) -> Optional[Dict[str, Any]]:
         """Look up a ticker symbol. Returns company info dict or None."""
@@ -409,122 +780,242 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         """Cache file path for a company's filing metadata (CIK zero-padded to 10 digits)."""
         return self._filings_metadata_dir / f"{str(cik).zfill(10)}.json"
 
-    async def _get_company_filings(self, cik: str, ticker: str) -> Dict[str, Dict[str, Any]]:
-        """Get filings for a company. Loads from disk cache or fetches from SEC."""
-        cache_path = self._get_company_cache_path(cik)
-        if cache_path.exists():
-            with open(cache_path, "r") as f:
-                return json.load(f)
+    @staticmethod
+    def _atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
+        """Write content to path atomically via temp-file + rename."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding=encoding) as f:
+                f.write(content)
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
 
-        # Fetch from SEC
-        data = await self._fetch_with_retry(f"https://data.sec.gov/submissions/CIK{cik}.json")
-        if not data:
-            return {}
+    @staticmethod
+    def _parse_filings_columns(columns: Dict[str, Any], cik: str, ticker: str) -> Dict[str, Dict[str, Any]]:
+        """Parse SEC columnar filing data into a dict keyed by accession number (no dashes)."""
+        acc_numbers = columns.get("accessionNumber", [])
+        forms = columns.get("form", [])
+        dates = columns.get("filingDate", [])
+        report_dates = columns.get("reportDate", [])
+        primary_docs = columns.get("primaryDocument", [])
+
+        filings: Dict[str, Dict[str, Any]] = {}
+        for acc, form, fdate, rdate, pdoc in zip(acc_numbers, forms, dates, report_dates, primary_docs):
+            acc_nodash = acc.replace("-", "")
+            filings[acc_nodash] = {
+                "ticker": ticker,
+                "cik": cik,
+                "form": form,
+                "filing_date": fdate,
+                "report_date": rdate,
+                "accession_number": acc,
+                "primary_document": pdoc,
+                "filing_url": f"https://www.sec.gov/Archives/edgar/data/{cik.lstrip('0')}/{acc_nodash}/{pdoc}",
+            }
+        return filings
+
+    async def _get_company_filings(self, cik: str, ticker: str) -> Dict[str, Dict[str, Any]]:
+        """Get filings for a company. Memory cache → disk cache → SEC.gov.
+
+        Uses per-CIK locking so concurrent requests for the same company
+        coalesce into a single fetch instead of stampeding SEC.gov.
+        """
+        cik_padded = str(cik).zfill(10)
+
+        if cik_padded in self._filings_cache:
+            return self._filings_cache[cik_padded]
+
+        lock = self._filings_locks.setdefault(cik_padded, asyncio.Lock())
+        async with lock:
+            if cik_padded in self._filings_cache:
+                return self._filings_cache[cik_padded]
+
+            cache_path = self._get_company_cache_path(cik)
+            if self.config.use_cache and cache_path.exists():
+                with open(cache_path, "r") as f:
+                    filings = json.load(f)
+                self._filings_cache[cik_padded] = filings
+                return filings
+
+            data = await self._fetch_with_retry(f"https://data.sec.gov/submissions/CIK{cik_padded}.json")
+            if not data:
+                logger.warning("SEC submissions API unavailable for CIK %s (%s)", cik, ticker)
+                return {}
+
+            try:
+                filings_data = json.loads(data).get("filings", {})
+                recent = filings_data.get("recent", {})
+
+                filings = self._parse_filings_columns(recent, cik, ticker)
+
+                for file_ref in filings_data.get("files", []):
+                    filename = file_ref.get("name", "")
+                    if not filename:
+                        continue
+                    extra_data = await self._fetch_with_retry(f"https://data.sec.gov/submissions/{filename}")
+                    if extra_data:
+                        try:
+                            extra = json.loads(extra_data)
+                            filings.update(self._parse_filings_columns(extra, cik, ticker))
+                        except json.JSONDecodeError:
+                            logger.warning("Failed to parse supplementary file %s for CIK %s", filename, cik)
+
+                if filings and self.config.use_cache:
+                    self._atomic_write(cache_path, json.dumps(filings))
+                self._filings_cache[cik_padded] = filings
+                return filings
+            except (json.JSONDecodeError, KeyError):
+                logger.warning("Failed to parse SEC submissions for CIK %s (%s)", cik, ticker, exc_info=True)
+                return {}
+
+    # ========================================================================
+    # Dump Fallback
+    # ========================================================================
+
+    async def _read_dump_file(self, dump_path: Path) -> Optional[str]:
+        """Read and parse one file from the read-only dump, or None."""
+        if not dump_path.is_file():
+            return None
+
+        def _read_and_parse() -> str:
+            return self._parse_html_to_text(dump_path.read_text(encoding="utf-8"))
 
         try:
-            recent = json.loads(data).get("filings", {}).get("recent", {})
-            acc_numbers = recent.get("accessionNumber", [])
-            forms = recent.get("form", [])
-            dates = recent.get("filingDate", [])
-            report_dates = recent.get("reportDate", [])
-            primary_docs = recent.get("primaryDocument", [])
+            return await asyncio.get_running_loop().run_in_executor(None, _read_and_parse)
+        except OSError:
+            logger.warning("Failed to read dump file %s", dump_path)
+            return None
 
-            filings: Dict[str, Dict[str, Any]] = {}
-            for acc, form, fdate, rdate, pdoc in zip(acc_numbers, forms, dates, report_dates, primary_docs):
-                acc_nodash = acc.replace("-", "")
-                filings[acc_nodash] = {
-                    "ticker": ticker,
-                    "cik": cik,
-                    "form": form,
-                    "filing_date": fdate,
-                    "report_date": rdate,
-                    "accession_number": acc,
-                    "primary_document": pdoc,
-                    "filing_url": f"https://www.sec.gov/Archives/edgar/data/{cik.lstrip('0')}/{acc_nodash}/{pdoc}",
-                }
+    async def _record_dump_paths(self, results: List[Dict[str, Any]]) -> None:
+        """Remember where edgar_search's hits live in the dump, for later reads.
 
-            if filings:
-                with open(self._get_company_cache_path(cik), "w") as f:
-                    json.dump(filings, f)
-            return filings
-        except (json.JSONDecodeError, KeyError):
-            return {}
+        Failures are non-fatal: the search result stands, reads just fall back.
+        """
+        if not self.config.sec_dump_path or self._local_edgar_search is None:
+            return
+        urls = [
+            url
+            for url in (str(result.get("filingUrl") or "") for result in results)
+            if url and canonical_url_key(url) not in self._dump_paths
+        ]
+        if not urls:
+            return
+        try:
+            self._dump_paths.update(await self._local_edgar_search.dump_paths_for_urls_async(urls))
+        except Exception:
+            logger.warning("Failed to resolve dump paths for %d search results", len(urls), exc_info=True)
+
+    async def _lookup_dump(self, url: str) -> Optional[str]:
+        """Try to read a filing from the pre-fetched SEC dump (read-only).
+
+        Returns parsed plain text or None.
+        """
+        if not self.config.sec_dump_path:
+            return None
+        root = Path(self.config.sec_dump_path)
+
+        # A path edgar_search recorded. The index holds a row per document, so
+        # this is the only route that can name an exhibit rather than a filing's
+        # primary document.
+        key = canonical_url_key(url)
+        relative_path = self._dump_paths.get(key) if key else None
+        if relative_path:
+            candidate = Path(relative_path)
+            if candidate.is_absolute() or ".." in candidate.parts:
+                logger.warning("Rejected unsafe dump path %s", relative_path)
+            else:
+                text_content = await self._read_dump_file(root / candidate)
+                if text_content is not None:
+                    return text_content
+                logger.warning("Index recorded %s but the corpus has no readable file there", relative_path)
+            # The index named this URL's own document, so the rebuild below could
+            # only answer with a different one.
+            return None
+
+        # Otherwise rebuild the path from filing metadata that sec_filing_search
+        # left in memory. Uses report_date for the year and form.replace("/", "_")
+        # for the form folder, matching download_filings.py. That metadata is keyed
+        # per filing, so the filename can only ever be the primary document.
+        parts = self._parse_sec_url(url)
+        if not parts:
+            return None
+
+        metadata = self._filings_cache.get(parts["cik"])
+        if not metadata:
+            return None
+
+        filing_meta = metadata.get(parts["accession_number"].replace("-", ""))
+        if not filing_meta:
+            return None
+
+        # Reading primary-document.html for an exhibit URL returns the wrong text
+        # and reports success, so decline whenever the URL names another document.
+        document = parts.get("document", "").strip()
+        primary_document = str(filing_meta.get("primary_document", "")).strip()
+        if document and primary_document and document.lower() != primary_document.lower():
+            return None
+
+        ticker = filing_meta.get("ticker", "")
+        form = filing_meta.get("form", "").replace("/", "_")
+        report_date = filing_meta.get("report_date", "")
+        year = report_date[:4] if len(report_date) >= 4 else ""
+        accession = filing_meta.get("accession_number", "")
+
+        if not all([ticker, form, year, accession]):
+            return None
+
+        return await self._read_dump_file(root / ticker / form / year / accession / "primary-document.html")
 
     # ========================================================================
     # URL Parsing
     # ========================================================================
 
     def _parse_sec_url(self, url: str) -> Optional[Dict[str, str]]:
-        """Parse SEC URL to extract CIK and accession number."""
-        # URL format: https://www.sec.gov/Archives/edgar/data/{CIK}/{ACCESSION_NODASH}/{filename}
-        pattern = r"sec\.gov/Archives/edgar/data/(\d+)/(\d+)/"
-        match = re.search(pattern, url)
-        if match:
-            cik = match.group(1).zfill(10)
-            acc_nodash = match.group(2)
-            # Convert to formatted accession: 0001234567-12-123456
-            if len(acc_nodash) == 18:
-                accession = f"{acc_nodash[:10]}-{acc_nodash[10:12]}-{acc_nodash[12:]}"
-            else:
-                accession = acc_nodash
-            return {"cik": cik, "accession_number": accession}
-        return None
-
-    def _parse_html_to_text(self, html_content: str) -> str:
-        """
-        Parse HTML content and extract clean text.
-        Uses space separator to keep inline content (like "$3.25 billion") together.
-        """
-        soup = BeautifulSoup(html_content, "html.parser")
-
-        # Remove iXBRL tags (unwrap to keep content)
-        for tag in soup.find_all(re.compile(r"^ix:")):
-            tag.unwrap()
-
-        # Remove XBRL-related tags completely
-        for tag in soup.find_all(re.compile(r"^(xbrl|xbrli|link|context|unit)")):
-            tag.decompose()
-
-        # Remove script and style tags completely
-        for tag in soup.find_all(["script", "style", "meta"]):
-            tag.decompose()
-
-        # Remove hidden divs that often contain XBRL data
-        for tag in soup.find_all(style=re.compile(r"display:\s*none", re.I)):
-            tag.decompose()
-
-        # Extract text with space separator - keeps "$3.25 billion" together
-        text_content = soup.get_text(separator=" ", strip=True)
-
-        # Collapse multiple spaces
-        text_content = re.sub(r" {2,}", " ", text_content)
-
-        return text_content.strip()
+        """Parse SEC URL to extract CIK, accession number, and document filename."""
+        parsed = parse_sec_archives_url(url)
+        if parsed is None:
+            return None
+        return {
+            "cik": parsed.padded_cik,
+            "accession_number": parsed.dashed_accession,
+            "document": parsed.document_path,
+        }
 
     def _url_to_filing_path(self, url: str) -> Optional[Path]:
         """Convert a SEC EDGAR URL to its local cache file path.
 
+        Keyed by (CIK, accession, document): distinct documents under one accession
+        (e.g. edgar_search sub-documents/exhibits) map to distinct cache files.
         Returns None if the URL doesn't match the expected SEC format.
         """
         parts = self._parse_sec_url(url)
         if not parts:
             return None
-        cik, accession_number = parts["cik"], parts["accession_number"]
-        cik_padded = str(cik).zfill(10)
-        acc_nodash = accession_number.replace("-", "")
-        return self._filings_dir / cik_padded / f"{acc_nodash}.txt"
+        cik_padded = str(parts["cik"]).zfill(10)
+        acc_nodash = parts["accession_number"].replace("-", "")
+        # Flatten the document path into one safe filename; fall back to "index"
+        # when the URL stops at the accession directory (no document component).
+        safe_doc = re.sub(r"[^A-Za-z0-9._-]", "_", parts.get("document", "")) or "index"
+        return self._filings_dir / cik_padded / acc_nodash / f"{safe_doc}.txt"
 
     # ========================================================================
     # sec_filing_search Endpoint
     # ========================================================================
 
-    async def sec_filing_search(self, body: FinanceAgentSearchRequest) -> FinanceAgentSearchResponse:
+    async def sec_filing_search(self, request: Request, body: FinanceAgentSearchRequest) -> FinanceAgentSearchResponse:
         """Search for SEC filings by ticker symbol.
 
-        Returns at most 30 filing metadata entries (sorted by date, newest first),
-        including URLs for the actual filings.
-        If form_types is provided, filters to those types. Otherwise returns 10-K, 10-Q, and DEF 14A.
+        Returns filing metadata entries (sorted by date, newest first),
+        capped at max_filing_results. Supports optional form_types,
+        start_date, and end_date filters.
         """
+        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
+            return FinanceAgentSearchResponse(results=timeout_msg)
+
         company = await self._resolve_ticker(body.ticker)
 
         if not company:
@@ -539,7 +1030,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             )
 
         filings = await self._get_company_filings(company["cik"], company["ticker"])
-        form_types = body.form_types if body.form_types is not None else ["10-K", "10-Q", "DEF 14A"]
+        form_types = body.form_types
 
         all_results = []
         for filing in filings.values():
@@ -559,15 +1050,28 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             )
 
         all_results.sort(key=lambda x: x["filing_date"], reverse=True)
+
+        if body.start_date:
+            all_results = [r for r in all_results if r["filing_date"] >= body.start_date]
+        if body.end_date:
+            all_results = [r for r in all_results if r["filing_date"] <= body.end_date]
+
         all_results = all_results[: self.config.max_filing_results]
 
         if not all_results:
-            filter_msg = f" with form types {form_types}" if form_types else ""
+            filters = []
+            if form_types:
+                filters.append(f"form types {form_types}")
+            if body.start_date:
+                filters.append(f"start_date={body.start_date}")
+            if body.end_date:
+                filters.append(f"end_date={body.end_date}")
+            filter_msg = f" with {', '.join(filters)}" if filters else ""
             return FinanceAgentSearchResponse(
                 results=json.dumps(
                     {
                         "error": f"No filings found for '{body.ticker}'{filter_msg}",
-                        "suggestion": "Try a different form type filter (e.g., ['10-K', '10-Q', '8-K'])",
+                        "suggestion": "Try broadening your search: remove form_types filter, widen the date range, or check the ticker symbol.",
                     }
                 )
             )
@@ -575,153 +1079,214 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         return FinanceAgentSearchResponse(results=json.dumps(all_results, indent=2))
 
     # ========================================================================
-    # download_and_parse_filing Endpoint
+    # edgar_search Endpoint
     # ========================================================================
 
-    async def download_and_parse_filing(self, body: DownloadAndParseFilingRequest) -> DownloadAndParseFilingResponse:
-        """Download and parse an SEC filing, store text in _data_storage[key]."""
-        url, key = body.url, body.key
+    async def edgar_search(self, request: Request, body: EdgarSearchRequest) -> EdgarSearchResponse:
+        """Full-text search EDGAR, from the local index or sec-api.io."""
+        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
+            return EdgarSearchResponse(results=timeout_msg)
 
-        if not url:
-            return DownloadAndParseFilingResponse(
-                results="ERROR: url is required. Use the filing_url from sec_filing_search results."
-            )
-        if not key:
-            return DownloadAndParseFilingResponse(
-                results="ERROR: key is required. Provide a key to store this filing in data storage."
+        if self._edgar_search_service is None:
+            return EdgarSearchResponse(
+                results=json.dumps({"error": "edgar_search is not available. edgar_search_mode is not set."})
             )
 
-        # Derive cache path from URL (None means the URL isn't a valid SEC EDGAR link)
+        return EdgarSearchResponse(results=await self._edgar_search_service.run(body.model_dump()))
+
+    # ========================================================================
+    # parse_html_page Endpoint
+    # ========================================================================
+
+    @staticmethod
+    def _parse_html_to_text(html_content: str) -> str:
+        """Extract plain text from HTML."""
+        return html_to_text(html_content)
+
+    async def _parse_html_page(self, url: str) -> str:
+        """Fetch a URL and extract plain text, reusing the shared session."""
+        html_content = await self._fetch_with_retry(url)
+        if not html_content:
+            raise RuntimeError(f"Failed to fetch {url}. The server may be temporarily unavailable.")
+        return self._parse_html_to_text(html_content)
+
+    async def _fetch_sec_filing_text(self, url: str) -> str:
+        """Fetch a SEC filing URL using the disk-cache / dump / live pipeline.
+
+        Uses the same generic HTML parser as non-SEC URLs
+        but caches the parsed text to disk for subsequent calls.
+
+        Raises on failure (caller handles the exception).
+        """
         file_path = self._url_to_filing_path(url)
         if file_path is None:
-            return DownloadAndParseFilingResponse(
-                results=f"ERROR: Invalid SEC URL format: {url}. Use the filing_url from sec_filing_search results."
-            )
+            raise ValueError(f"Invalid SEC URL format: {url}")
 
-        # Check disk cache first
         text_content = None
-        if file_path.exists():
+        source = None
+        if self.config.use_cache and file_path.exists():
             text_content = file_path.read_text(encoding="utf-8")
+            source = "cache"
 
-        # Download and parse if not cached
+        if text_content is None:
+            text_content = await self._lookup_dump(url)
+            if text_content is not None:
+                source = "sec-corpus"
+                if self.config.use_cache:
+                    self._atomic_write(file_path, text_content)
+
         if text_content is None:
             html_content = await self._fetch_with_retry(url)
             if not html_content:
-                return DownloadAndParseFilingResponse(
-                    results=f"ERROR: Failed to download filing from {url}. "
-                    "The SEC server may be temporarily unavailable. Try again later."
+                raise RuntimeError(
+                    f"Failed to download filing from {url}. The SEC server may be temporarily unavailable."
                 )
 
-            text_content = self._parse_html_to_text(html_content)
-
-            # Cache to disk
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(text_content)
+            text_content = await asyncio.get_running_loop().run_in_executor(
+                None, self._parse_html_to_text, html_content
+            )
+            source = "live"
+            if self.config.use_cache:
+                self._atomic_write(file_path, text_content)
 
         if not text_content:
-            return DownloadAndParseFilingResponse(results="ERROR: Filing content was empty after parsing.")
+            raise ValueError("Filing content was empty after parsing.")
 
-        # Store in data storage
-        result_msg = ""
-        if key in self._data_storage:
-            result_msg += "WARNING: Key already exists in data storage. Overwriting.\n"
+        self._filing_read_sources[source] += 1
+        # Logs the first read, then at most one line per interval, so a count
+        # survives a server that is killed without a clean shutdown.
+        now = time.monotonic()
+        if self._filing_read_logged_at is None or now - self._filing_read_logged_at >= FILING_READ_LOG_INTERVAL_SEC:
+            self._filing_read_logged_at = now
+            self._log_filing_read_sources()
+        return text_content
 
-        self._data_storage[key] = text_content
+    async def _save_tool_output(self, output: str, key: str, state: dict[str, Any]) -> str:
+        if not output:
+            raise ValueError("HTML output was empty")
 
-        result_msg += f"SUCCESS: Filed saved to data storage under key: {key}.\n"
-        result_msg += f"Document size: {len(text_content)} characters.\n"
-
-        if len(text_content) > self.config.large_doc_threshold_chars:
-            threshold = self.config.large_doc_threshold_chars
-            second_end = min(threshold * 2, len(text_content))
-            result_msg += (
-                f"WARNING: This is a large document ({len(text_content)} chars). "
-                f"Use input_character_ranges to read it in chunks of ~{threshold} characters. "
-                f"Example: [{{'key': '{key}', 'start': 0, 'end': {threshold}}}], "
-                f"then [{{'key': '{key}', 'start': {threshold}, 'end': {second_end}}}], etc. "
-                f"Financial data and notes are typically in the second half of 10-K/10-Q filings.\n"
+        tool_result = ""
+        if key in state:
+            tool_result = (
+                "WARNING: The key already exists in the data storage. The new result overwrites the old one.\n"
             )
+        tool_result += f"SUCCESS: The result has been saved to the data storage under the key: {key}.\n"
 
-        keys_list = ", ".join(self._data_storage.keys())
-        result_msg += f"Keys in data_storage: [{keys_list}]\n"
+        state[key] = output
 
-        return DownloadAndParseFilingResponse(results=result_msg)
+        keys_list = "\n".join(state.keys())
+        tool_result += f"The data_storage currently contains the following keys:\n{keys_list}\n"
+
+        return tool_result
+
+    async def parse_html_page(self, request: Request, body: ParseHtmlPageRequest) -> ParseHtmlPageResponse:
+        """Parse an HTML page from any URL and store in session data storage.
+
+        SEC URLs are detected automatically and routed through the
+        disk-cache / dump / live-download pipeline (with caching).
+        All URLs use the same generic BeautifulSoup parser.
+        """
+        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
+            return ParseHtmlPageResponse(results=timeout_msg)
+
+        url, key = body.url, body.key
+        if not url:
+            return ParseHtmlPageResponse(results="ERROR: url is required.")
+        if not key:
+            return ParseHtmlPageResponse(results="ERROR: key is required.")
+
+        storage = self._get_session_storage(request.session[SESSION_ID_KEY])
+
+        try:
+            if self._parse_sec_url(url):
+                text_output = await self._fetch_sec_filing_text(url)
+            else:
+                text_output = await self._parse_html_page(url)
+            result_msg = await self._save_tool_output(text_output, key, storage)
+        except Exception as e:
+            error_msg = str(e)
+            logger.warning("parse_html_page failed for %s: %s", url, error_msg)
+            return ParseHtmlPageResponse(results=error_msg)
+
+        return ParseHtmlPageResponse(results=result_msg)
 
     # ========================================================================
     # retrieve_information Endpoint (LLM-based document querying)
     # ========================================================================
 
-    async def retrieve_information(self, body: RetrieveInformationRequest) -> RetrieveInformationResponse:
+    async def retrieve_information(
+        self, request: Request, body: RetrieveInformationRequest
+    ) -> RetrieveInformationResponse:
         """Query stored documents using LLM-based prompting."""
+        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
+            return RetrieveInformationResponse(results=timeout_msg)
+
         if not self.config.retrieval_model_server:
             return RetrieveInformationResponse(
                 results="ERROR: Retrieval model not configured. Set retrieval_model_server in config."
             )
 
+        storage = self._get_session_storage(request.session[SESSION_ID_KEY])
         prompt = body.prompt
-        available_keys = ", ".join(self._data_storage.keys()) if self._data_storage else "(empty)"
 
         # Extract {{key}} placeholders from prompt
         keys_in_prompt = re.findall(r"\{\{([^{}]+)\}\}", prompt)
         if not keys_in_prompt:
             return RetrieveInformationResponse(
-                results="ERROR: Prompt must contain at least one {{key_name}} placeholder. "
-                f"Available keys: [{available_keys}]"
+                results="ERROR: Your prompt must include at least one key from data storage "
+                "in the format {{key_name}}. Please try again with the correct format. "
+                "You can add documents to the data storage with parse_html_page."
             )
 
         # Validate all keys exist in data storage
         for key in keys_in_prompt:
-            if key not in self._data_storage:
+            if key not in storage:
+                available = ", ".join(storage.keys()) if storage else ""
                 return RetrieveInformationResponse(
-                    results=f"ERROR: Key '{key}' not in data storage. "
-                    f"Available keys: [{available_keys}]. Use download_and_parse_filing first."
+                    results=f"ERROR: The key '{key}' was not found in the data storage. "
+                    f"Available keys are: {available}. "
+                    "Use the parse_html_page tool to add keys to the data storage."
                 )
 
-        # Parse optional character ranges
         ranges_dict: Dict[str, tuple] = {}
         for r in body.input_character_ranges or []:
             if isinstance(r, dict) and all(k in r for k in ("key", "start", "end")):
                 ranges_dict[r["key"]] = (r["start"], r["end"])
 
-        # Substitute {{key}} with document content (optionally sliced by ranges)
         final_prompt = prompt
         for key in keys_in_prompt:
-            content = self._data_storage[key]
+            content = storage[key]
             if key in ranges_dict:
                 start, end = ranges_dict[key]
                 content = content[start:end]
             final_prompt = final_prompt.replace("{{" + key + "}}", content)
 
-        max_chars = (self.config.retrieval_model_context_length - self.config.retrieval_max_output_tokens) * 4
-        if len(final_prompt) > max_chars:
-            sizes = ", ".join(f"{k}: {len(self._data_storage[k])} chars" for k in keys_in_prompt)
-            return RetrieveInformationResponse(
-                results=f"ERROR: Prompt too large ({len(final_prompt)} chars, max {max_chars}). "
-                f"Document sizes: [{sizes}]. Use input_character_ranges to select a portion. "
-                f"Split the document into sequential chunks of ~{self.config.large_doc_threshold_chars} chars and retry each."
-            )
-
-        # Call retrieval LLM
         try:
+            retrieval_params = (
+                self.config.retrieval_responses_create_params or NeMoGymResponseCreateParamsNonStreaming(input=[])
+            ).model_copy(deep=True)
+            retrieval_params.input = [
+                NeMoGymEasyInputMessage(role="system", content=self._retrieval_system_prompt),
+                NeMoGymEasyInputMessage(role="user", content=final_prompt),
+            ]
+            if retrieval_params.max_output_tokens is None:
+                retrieval_params.max_output_tokens = self.config.retrieval_max_output_tokens
+
             llm_response = await self.server_client.post(
                 server_name=self.config.retrieval_model_server.name,
                 url_path="/v1/responses",
-                json={
-                    "input": [
-                        {
-                            "role": "system",
-                            "type": "message",
-                            "content": "You are a document analysis assistant. Answer based ONLY on "
-                            "the document text provided. If the information is not present, state "
-                            "that clearly — do NOT guess or fabricate numbers.",
-                        },
-                        {"role": "user", "content": final_prompt, "type": "message"},
-                    ],
-                    "temperature": 0.0,
-                    "max_output_tokens": self.config.retrieval_max_output_tokens,
-                },
+                json=retrieval_params,
             )
+
+            # Surface HTTP-level failures (e.g. 4xx context-overflow from vLLM)
+            # explicitly rather than letting them fall through to the vague
+            # "no output" branch.  Body is capped to avoid polluting agent
+            # context with multi-KB error bodies (e.g. vLLM HTML pages).
+            if not llm_response.ok:
+                body_text = (await llm_response.text())[:500]
+                return RetrieveInformationResponse(
+                    results=f"ERROR: Retrieval LLM HTTP {llm_response.status}: {body_text}"
+                )
 
             llm_response_json = await get_response_json(llm_response)
             llm_response_obj = NeMoGymResponse.model_validate(llm_response_json)
@@ -734,42 +1299,121 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                             result_text += getattr(content_item, "text", "")
 
             if not result_text:
-                return RetrieveInformationResponse(results="ERROR: Retrieval LLM returned no output.")
+                # Include any diagnostic the server returned so the agent can
+                # see why output was empty (e.g. incomplete_details.reason ==
+                # "max_output_tokens" or content_filter).  Bare "no output"
+                # masks these.
+                diagnostic_parts: List[str] = []
+                incomplete_details = getattr(llm_response_obj, "incomplete_details", None)
+                if incomplete_details is not None:
+                    reason = getattr(incomplete_details, "reason", None)
+                    if reason:
+                        diagnostic_parts.append(f"incomplete_details.reason={reason}")
+                status = getattr(llm_response_obj, "status", None)
+                if status:
+                    diagnostic_parts.append(f"status={status}")
+                error_field = getattr(llm_response_obj, "error", None)
+                if error_field is not None:
+                    diagnostic_parts.append(f"error={error_field}")
+                diagnostic = (" (" + ", ".join(diagnostic_parts) + ")") if diagnostic_parts else ""
+                return RetrieveInformationResponse(results=f"ERROR: Retrieval LLM returned no output.{diagnostic}")
 
             return RetrieveInformationResponse(results=result_text)
 
         except Exception as e:
             return RetrieveInformationResponse(results=f"ERROR: Retrieval LLM call failed: {str(e)}")
 
+    # ========================================================================
+    # Date Validation Helper
+    # ========================================================================
+
+    _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+    def _validate_and_clamp_dates(
+        self,
+        start_date: Optional[str],
+        end_date: Optional[str],
+        default_start: str = "1900-01-01",
+    ) -> tuple:
+        max_end_date = getattr(self.config, "max_end_date", None)
+
+        if end_date:
+            if not self._DATE_RE.match(end_date):
+                raise ValueError(f"Invalid end_date format: '{end_date}'. Expected YYYY-MM-DD.")
+            if max_end_date and end_date > max_end_date:
+                end_date = max_end_date
+        elif max_end_date:
+            end_date = max_end_date
+
+        if start_date:
+            if not self._DATE_RE.match(start_date):
+                raise ValueError(f"Invalid start_date format: '{start_date}'. Expected YYYY-MM-DD.")
+            if max_end_date and start_date > max_end_date:
+                start_date = max_end_date
+        else:
+            start_date = default_start
+
+        if start_date and end_date and start_date > end_date:
+            raise ValueError(f"start_date '{start_date}' is later than end_date '{end_date}'.")
+
+        return start_date, end_date
+
     async def submit_final_result(self, body: SubmitFinalResultRequest) -> SubmitFinalResultResponse:
-        """
-        Accept the agent's final answer submission.
-        """
+        """Accept the agent's final answer submission."""
         final_result = body.final_result
         if not final_result:
             return SubmitFinalResultResponse(results="ERROR: final_result is required. Please provide your answer.")
         return SubmitFinalResultResponse(results=json.dumps({"success": True, "result": final_result}))
 
-    async def web_search(self, body: WebSearchRequest) -> WebSearchResponse:
-        """Search the web using Tavily. Returns up to 10 results."""
+    async def web_search(self, request: Request, body: WebSearchRequest) -> WebSearchResponse:
+        """Search the web using Tavily."""
+        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
+            return WebSearchResponse(results=timeout_msg)
+
         if self._tavily is None:
             return WebSearchResponse(
                 results=json.dumps(
                     {
-                        "error": "web_search is not available. Use sec_filing_search, download_and_parse_filing, and retrieve_information instead.",
+                        "error": "web_search is not available. Use sec_filing_search, parse_html_page, and retrieve_information instead.",
                     }
                 )
             )
 
+        search_query = body.search_query
+        if not search_query or not search_query.strip():
+            return WebSearchResponse(results=json.dumps({"error": "search_query is required and cannot be empty."}))
+
+        try:
+            _, end_date = self._validate_and_clamp_dates(None, body.end_date)
+        except ValueError as e:
+            return WebSearchResponse(results=json.dumps({"error": str(e)}))
+
+        kwargs: Dict[str, Any] = {}
+        if body.start_date:
+            try:
+                start_date, end_date = self._validate_and_clamp_dates(body.start_date, end_date)
+            except ValueError as e:
+                return WebSearchResponse(results=json.dumps({"error": str(e)}))
+            kwargs["start_date"] = start_date
+
+        num_results = min(body.number_of_results or 10, 20)
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                raw = self._tavily.search(body.query, num_results=10)
-                results = [
-                    {"url": r.get("url", ""), "title": r.get("title", ""), "content": r.get("content", "")}
-                    for r in raw.get("results", [])
-                ]
-                return WebSearchResponse(results=json.dumps(results))
+                raw = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: self._tavily.search(
+                        query=search_query,
+                        search_depth="fast",
+                        end_date=end_date,
+                        max_results=num_results,
+                        chunks_per_source=1,
+                        **kwargs,
+                    ),
+                )
+                results = raw.get("results", [])
+                return WebSearchResponse(results=json.dumps(results, default=str))
             except Exception as e:
                 if attempt < max_retries - 1:
                     logger.warning(f"web_search attempt {attempt + 1} failed: {e}. Retrying in {2**attempt}s...")
@@ -778,15 +1422,38 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                     logger.error(f"web_search failed after {max_retries} attempts: {e}")
                     return WebSearchResponse(results=json.dumps({"error": str(e)}))
 
-    async def verify(self, body: FinanceAgentVerifyRequest) -> FinanceAgentVerifyResponse:
-        """Verify using LLM-as-judge with strict financial grading rubric (0/1/2 scale).
+    # ========================================================================
+    # Verify Endpoint
+    # ========================================================================
 
-        Rating scale:
-            [[2]] = fully correct  → reward 1.0
-            [[1]] = partial        → reward 0.0
-            [[0]] = incorrect      → reward 0.0
+    async def _call_judge(self, judge_params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        # reraise_judge_errors also covers the wait_for timeout, which sits outside call_judge.
+        return await reraise_judge_errors(
+            asyncio.wait_for(
+                call_judge(
+                    self.server_client,
+                    server_name=self.config.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=judge_params,
+                    response_model=NeMoGymResponse,
+                ),
+                timeout=self.config.judge_call_timeout,
+            )
+        )
+
+    async def verify(self, request: Request, body: FinanceAgentVerifyRequest) -> FinanceAgentVerifyResponse:
+        """Verify the agent's answer.
+
+        Rating scale (reward depends on config.reward_mode):
+            [[2]] = fully correct  → binary: 1.0 | scaled: 1.0
+            [[1]] = partial        → binary: 0.0 | scaled: 0.5
+            [[0]] = incorrect      → binary: 0.0 | scaled: 0.0
         """
-        # Extract question from the last user message
+        session_id = request.session.get(SESSION_ID_KEY)
+        if session_id:
+            self._data_storage.pop(session_id, None)
+            self._session_start_times.pop(session_id, None)
+
         question = ""
         for msg in body.responses_create_params.input or []:
             if getattr(msg, "role", None) == "user":
@@ -794,12 +1461,19 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 if isinstance(content, str):
                     question = content
 
-        # Extract generated answer: prefer submit_final_result tool call, fall back to last assistant text message.
+        # Extract the model's answer from the submit_final_result tool call.
+        # HARD GATE: we only accept answers submitted via submit_final_result.
+        # Previously we fell back to the last assistant text message, which
+        # created a reward shortcut: the model could skip all tool use and
+        # answer from parametric knowledge. A lenient judge then still gave
+        # partial/full credit, and GRPO reinforced the no-tool policy.
+        # Now, rollouts without a valid submit_final_result call get reward=0.
         generated_answer = ""
-
+        submit_final_result_called = False
         for output_item in reversed(body.response.output):
             if getattr(output_item, "type", None) == "function_call":
                 if getattr(output_item, "name", None) == "submit_final_result":
+                    submit_final_result_called = True
                     try:
                         args = json.loads(getattr(output_item, "arguments", "{}"))
                         generated_answer = args.get("final_result", "")
@@ -807,29 +1481,35 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                         pass
                     break
 
-        if not generated_answer:
-            for output_item in reversed(body.response.output):
-                if (
-                    getattr(output_item, "type", None) == "message"
-                    and getattr(output_item, "role", None) == "assistant"
-                ):
-                    for content_item in getattr(output_item, "content", []):
-                        if getattr(content_item, "type", None) == "output_text":
-                            generated_answer = getattr(content_item, "text", "")
-                            break
-                    if generated_answer:
-                        break
+        if not submit_final_result_called or not generated_answer:
+            logger.info(
+                "Hard gate: reward=0 (submit_final_result_called=%s, final_result_present=%s)",
+                submit_final_result_called,
+                bool(generated_answer),
+            )
+            return FinanceAgentVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                judge_rating=0,
+                judge_text=(
+                    "Hard gate: submit_final_result tool call missing or empty. "
+                    "The agent must submit its final answer via submit_final_result to be graded."
+                ),
+            )
 
-        # If no judge configured, use simple substring matching
+        # No judge model → substring match
         if not self.config.judge_model_server:
             reward = 1.0 if body.expected_answer.lower() in generated_answer.lower() else 0.0
             return FinanceAgentVerifyResponse(**body.model_dump(), reward=reward)
 
-        # Build judge prompt (use .replace() to avoid KeyError on braces in content)
+        # Legacy mode: [[0]]/[[1]]/[[2]] judge
         judge_user_prompt = self._judge_prompt_template
         judge_user_prompt = judge_user_prompt.replace("{question}", question)
         judge_user_prompt = judge_user_prompt.replace("{expected_answer}", body.expected_answer)
-        judge_user_prompt = judge_user_prompt.replace("{generated_answer}", generated_answer)
+        # A candidate must not be able to plant a parseable rating for the judge to quote back (#2852).
+        judge_user_prompt = judge_user_prompt.replace(
+            "{generated_answer}", _JUDGE_RATING_RE.sub(r"[\1]", generated_answer)
+        )
 
         judge_params = (
             self.config.judge_responses_create_params or NeMoGymResponseCreateParamsNonStreaming(input=[])
@@ -838,37 +1518,51 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             NeMoGymEasyInputMessage(role="user", content=judge_user_prompt),
         ]
 
-        # Call judge model
-        try:
-            response = await self.server_client.post(
-                server_name=self.config.judge_model_server.name,
-                url_path="/v1/responses",
-                json=judge_params,
-            )
-            judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-        except Exception as e:
-            logger.error(f"Judge model call failed: {type(e).__name__}: {e}")
-            return FinanceAgentVerifyResponse(**body.model_dump(), reward=0.0)
-
-        # Extract verdict text from judge response
+        max_judge_retries = 3
         judge_text = ""
-        try:
-            last_output = judge_response.output[-1]
-            if getattr(last_output, "type", None) == "message":
-                last_content = last_output.content[-1]
-                judge_text = getattr(last_content, "text", "")
-        except Exception:
-            pass
+        rating = None
 
-        # Parse [[N]] rating from judge output
-        rating_match = re.search(r"\[\[(\d+)\]\]", judge_text)
-        rating = int(rating_match.group(1)) if rating_match else None
+        for attempt in range(max_judge_retries):
+            try:
+                judge_response = await self._call_judge(judge_params)
+            except JudgeError as judge_error:
+                logger.warning("Judge call attempt %d/%d failed: %s", attempt + 1, max_judge_retries, judge_error)
+                if attempt < max_judge_retries - 1:
+                    await asyncio.sleep(2**attempt)
+                    continue
+                logger.error("Judge model call failed after %d attempts", max_judge_retries)
+                raise
 
-        if rating is None:
-            logger.warning(f"Judge returned no [[N]] rating. Judge output: {judge_text[:200]}")
+            try:
+                last_output = judge_response.output[-1]
+                if getattr(last_output, "type", None) == "message":
+                    last_content = last_output.content[-1]
+                    judge_text = getattr(last_content, "text", "")
+            except Exception:
+                pass
 
-        # Only [[2]] (fully correct) gets reward 1.0
-        reward = 1.0 if rating == 2 else 0.0
+            # A reply cut off by max_output_tokens never reached its verdict: retry rather than read a
+            # tentative rating out of the unfinished reasoning.
+            rating = None if judge_response.incomplete_details else _extract_judge_rating(judge_text)
+
+            if rating is not None:
+                break
+
+            logger.warning(
+                "Judge returned no [[N]] rating (attempt %d/%d, incomplete_details=%s). Output: %s",
+                attempt + 1,
+                max_judge_retries,
+                judge_response.incomplete_details,
+                judge_text[:200],
+            )
+            if attempt < max_judge_retries - 1:
+                await asyncio.sleep(2**attempt)
+
+        if self.config.reward_mode == "scaled":
+            _REWARD_MAP = {0: 0.0, 1: 0.5, 2: 1.0}
+            reward = _REWARD_MAP.get(rating, 0.0)
+        else:
+            reward = 1.0 if rating == 2 else 0.0
 
         return FinanceAgentVerifyResponse(
             **body.model_dump(), reward=reward, judge_rating=rating, judge_text=judge_text
@@ -876,4 +1570,8 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
+    # Root stays at WARNING: at INFO the HTTP client logs a line per model call.
+    logging.basicConfig(level=logging.WARNING)
+    for _logger_name in (__name__, "resources_servers"):
+        logging.getLogger(_logger_name).setLevel(os.environ.get("NEMO_GYM_LOG_LEVEL", "INFO").upper())
     FinanceAgentResourcesServer.run_webserver()

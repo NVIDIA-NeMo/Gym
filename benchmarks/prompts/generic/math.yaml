@@ -1,0 +1,9 @@
+# Shared math prompt for Gym benchmarks that use free-form \boxed{} answers.
+# Mirrors nemo-skills' `nemo_skills/prompt/config/generic/math.yaml`
+# (the default `++prompt_config=generic/math` template used by gsm8k,
+# hendrycks_math, comp-math-24-25, etc.), dropped of Skills-only
+# few-shot scaffolding.
+user: |-
+  Solve the following math problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
+
+  {question}

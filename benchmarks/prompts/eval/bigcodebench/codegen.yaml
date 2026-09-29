@@ -1,0 +1,9 @@
+# default prompt for bigcodebench.
+# Mirrors nemo_skills/prompt/config/eval/bigcodebench/codegen.yaml char-for-char.
+
+system: ""
+
+user: |-
+  Generate an executable Python function generated from the given prompt.
+
+  {question}

@@ -1,0 +1,5 @@
+-e nemo-gym[dev] @ ../../
+pymupdf
+datasets
+httpx
+orjson

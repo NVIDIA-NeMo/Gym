@@ -12,15 +12,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections.abc import Callable
 from io import StringIO
 from pathlib import Path
 from subprocess import run
 from typing import Optional
 
 import yappi
-from gprof2dot import main as gprof2dot_main
 from pydantic import BaseModel
 from pydot import graph_from_dot_file
+
+
+def _require_gprof2dot() -> Callable[..., None]:
+    try:
+        from gprof2dot import main as gprof2dot_main
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "gprof2dot is required for CPU profiling. Install nemo-gym[dev] before enabling profiling."
+        ) from e
+
+    return gprof2dot_main
 
 
 class Profiler(BaseModel):
@@ -57,6 +68,8 @@ Please install dot using:
         self.dump()
 
     def dump(self) -> None:
+        gprof2dot_main = _require_gprof2dot()
+
         self.base_profile_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.base_profile_dir / f"{self.name}.log"
         callgrind_path = self.base_profile_dir / f"{self.name}.callgrind"

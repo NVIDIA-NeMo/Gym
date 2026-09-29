@@ -78,8 +78,10 @@ Each line must include either `gold_sql` (execute-and-compare) or `gold_result` 
 
 Validate example data:
 ```bash
-ng_prepare_data "+config_paths=[resources_servers/spider2_lite/configs/spider2_lite.yaml]" \
-    +output_dirpath=/tmp/prepare +mode=example_validation
+gym dataset collate \
+    --resources-server spider2_lite \
+    --output-dir /tmp/prepare \
+    --mode example_validation
 ```
 
 ## Known limitations

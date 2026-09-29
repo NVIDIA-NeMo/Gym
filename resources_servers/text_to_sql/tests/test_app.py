@@ -14,6 +14,7 @@
 # limitations under the License.
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
 
 from nemo_gym.openai_utils import (
@@ -265,6 +266,7 @@ class TestTextToSqlResourcesServerVerify:
                 "tools": [],
             }
         )
+        mock_response.read = AsyncMock(return_value=orjson.dumps(mock_response.json.return_value))
         resources_server.server_client.post = AsyncMock(return_value=mock_response)
 
         response = await resources_server.verify(request)
@@ -303,6 +305,7 @@ class TestTextToSqlResourcesServerVerify:
                 "tools": [],
             }
         )
+        mock_response.read = AsyncMock(return_value=orjson.dumps(mock_response.json.return_value))
         resources_server.server_client.post = AsyncMock(return_value=mock_response)
 
         response = await resources_server.verify(request)
@@ -342,6 +345,7 @@ class TestTextToSqlResourcesServerVerify:
                 "tools": [],
             }
         )
+        mock_response.read = AsyncMock(return_value=orjson.dumps(mock_response.json.return_value))
         resources_server.server_client.post = AsyncMock(return_value=mock_response)
 
         response = await resources_server.verify(request)
@@ -463,6 +467,7 @@ class TestTextToSqlResourcesServerVerify:
                 "tools": [],
             }
         )
+        mock_response.read = AsyncMock(return_value=orjson.dumps(mock_response.json.return_value))
         resources_server.server_client.post = AsyncMock(return_value=mock_response)
 
         response = await resources_server.verify(request)

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from harbor.llms.base import (
@@ -32,6 +32,10 @@ from tenacity import (
 )
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+
+_RoutedExperts = list[list[list[int]]] | str
+_RolloutDetailsKey = tuple[tuple[int, ...], tuple[int, ...], tuple[float, ...] | None]
 
 
 # Phrases in vLLM / OpenAI error bodies that signal context-length overflow.
@@ -67,11 +71,26 @@ class NemoGymLLM(BaseLLM):
         self._model_info = model_info or {}
         self._timeout_sec = timeout_sec
 
+        # Persistent HTTP client, reused across every turn of the episode. The Gym
+        # vllm_model server pins a session to one vLLM engine via a cookie-based
+        # SessionMiddleware (responses_api_models/vllm_model/app.py); a fresh client
+        # per call drops that cookie, so the server mints a NEW session_id each turn
+        # and round-robins it to a (usually different) engine. With many DP engines
+        # that means the growing conversation prefix is almost never warm in the engine
+        # handling the next turn -> prefix-cache miss -> the full context is re-prefilled
+        # every turn. Reusing one client keeps the session cookie, so the whole episode
+        # lands on the same engine and prefix caching only prefills the new tokens each
+        # turn. Lazily created on first use.
+        self._http_client: httpx.AsyncClient | None = None
+
         # Accumulated token IDs from the most recent turn, used for
         # on-policy correction via _replace_prefix_tokens in vLLM.
         self._last_prompt_token_ids: list[int] | None = None
         self._last_completion_token_ids: list[int] | None = None
         self._last_logprobs: list[float] | None = None
+        self._last_routed_experts: _RoutedExperts | None = None
+        self._routed_experts_by_rollout_details: dict[_RolloutDetailsKey, _RoutedExperts] = {}
+        self._ambiguous_routed_expert_keys: set[_RolloutDetailsKey] = set()
 
         # Set when the model hits the context length limit.
         self.context_length_exceeded = False
@@ -113,6 +132,8 @@ class NemoGymLLM(BaseLLM):
                     msg["prompt_token_ids"] = self._last_prompt_token_ids
                     msg["generation_token_ids"] = self._last_completion_token_ids or []
                     msg["generation_log_probs"] = self._last_logprobs or []
+                    if self._last_routed_experts is not None:
+                        msg["routed_experts"] = self._last_routed_experts
                     break
 
         payload: dict[str, Any] = {
@@ -190,10 +211,18 @@ class NemoGymLLM(BaseLLM):
         if self._collect_rollout_details:
             prompt_token_ids, completion_token_ids = self._extract_token_ids(response_dict)
             logprobs = self._extract_logprobs(response_dict)
+            routed_experts = self._extract_routed_experts(response_dict)
             # Store for on-policy correction on the next turn.
             self._last_prompt_token_ids = prompt_token_ids
             self._last_completion_token_ids = completion_token_ids
             self._last_logprobs = logprobs
+            self._last_routed_experts = routed_experts
+            self._store_routed_experts_for_rollout_details(
+                prompt_token_ids,
+                completion_token_ids,
+                logprobs,
+                routed_experts,
+            )
 
         return LLMResponse(
             content=content,
@@ -247,8 +276,12 @@ class NemoGymLLM(BaseLLM):
     ) -> dict[str, Any]:
         endpoint = self._chat_completions_endpoint()
         timeout = timeout_sec if timeout_sec is not None else self._timeout_sec
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(endpoint, json=payload)
+        # Reuse the persistent client so the session cookie (and thus the engine the
+        # session is pinned to) carries across turns. The timeout is applied per-request,
+        # so the optional per-call override is preserved regardless of the client's default.
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=timeout)
+        response = await self._http_client.post(endpoint, json=payload, timeout=timeout)
 
         if response.status_code >= 400:
             error_text = response.text.lower()
@@ -258,6 +291,16 @@ class NemoGymLLM(BaseLLM):
             response.raise_for_status()
 
         return response.json()
+
+    async def aclose(self) -> None:
+        """Close the persistent HTTP client. Called at episode end; best-effort
+        (the per-trial process exits anyway, but this avoids leaked connections /
+        'client was not closed' warnings when many episodes run in one process)."""
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            finally:
+                self._http_client = None
 
     def _chat_completions_endpoint(self) -> str:
         if self._api_base.endswith("/v1"):
@@ -284,7 +327,7 @@ class NemoGymLLM(BaseLLM):
         if not responses_create_params:
             return {}
 
-        from responses_api_models.vllm_model.app import VLLMConverter
+        from nemo_gym.responses_converter import VLLMConverter
 
         params_for_conversion = {key: value for key, value in responses_create_params.items() if key != "input"}
         params_for_conversion["input"] = []
@@ -327,6 +370,62 @@ class NemoGymLLM(BaseLLM):
                 return extracted
 
         return None
+
+    def _extract_routed_experts(self, response: dict[str, Any]) -> _RoutedExperts | None:
+        choices = response.get("choices", [])
+        choice = choices[0] if isinstance(choices, list) and choices else {}
+        message = choice.get("message", {}) if isinstance(choice, dict) else {}
+        routed_experts = message.get("routed_experts") if isinstance(message, dict) else None
+        if routed_experts is None:
+            routed_experts = response.get("routed_experts")
+        if not isinstance(routed_experts, (list, str)):
+            return None
+        return cast(_RoutedExperts, routed_experts)
+
+    def _store_routed_experts_for_rollout_details(
+        self,
+        prompt_token_ids: list[int] | None,
+        completion_token_ids: list[int] | None,
+        logprobs: list[float] | None,
+        routed_experts: _RoutedExperts | None,
+    ) -> None:
+        if routed_experts is None:
+            return
+
+        key = self._rollout_details_key(prompt_token_ids, completion_token_ids, logprobs)
+        if key is None:
+            return
+
+        if key in self._routed_experts_by_rollout_details:
+            self._ambiguous_routed_expert_keys.add(key)
+            self._routed_experts_by_rollout_details.pop(key, None)
+            return
+
+        if key not in self._ambiguous_routed_expert_keys:
+            self._routed_experts_by_rollout_details[key] = routed_experts
+
+    def pop_routed_experts_for_rollout_details(
+        self,
+        prompt_token_ids: list[int] | None,
+        completion_token_ids: list[int] | None,
+        logprobs: list[float] | None,
+    ) -> _RoutedExperts | None:
+        key = self._rollout_details_key(prompt_token_ids, completion_token_ids, logprobs)
+        if key is None or key in self._ambiguous_routed_expert_keys:
+            return None
+        return self._routed_experts_by_rollout_details.pop(key, None)
+
+    @staticmethod
+    def _rollout_details_key(
+        prompt_token_ids: list[int] | None,
+        completion_token_ids: list[int] | None,
+        logprobs: list[float] | None,
+    ) -> _RolloutDetailsKey | None:
+        if prompt_token_ids is None or completion_token_ids is None:
+            return None
+
+        logprobs_key = tuple(logprobs) if logprobs is not None else None
+        return (tuple(prompt_token_ids), tuple(completion_token_ids), logprobs_key)
 
     def _extract_usage_info(self, response: dict[str, Any]) -> UsageInfo | None:
         usage = response.get("usage")

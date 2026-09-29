@@ -1,0 +1,41 @@
+ragtruth:
+  resources_servers:
+    ragtruth:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: RAGTruth case-level hallucination detection; reward = 1 when the model's binary "any hallucination?" verdict matches the gold label.
+      value: Improve faithfulness and grounding of generated text against supplied context.
+      # Tag name used to strip thinking-model reasoning blocks before JSON parsing.
+      # Default is "think" (<think>…</think>). Override for models that use a
+      # different tag, e.g. think_tag: reasoning for <reasoning>…</reasoning>.
+      # think_tag: think
+
+ragtruth_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ragtruth
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/ragtruth/data/example.jsonl
+        license: MIT
+      # Build the test splits with `python resources_servers/ragtruth/prepare_ragtruth.py`.
+      - name: test_qa
+        type: validation
+        jsonl_fpath: resources_servers/ragtruth/data/test_qa.jsonl
+        license: MIT
+      - name: test_summary
+        type: validation
+        jsonl_fpath: resources_servers/ragtruth/data/test_summary.jsonl
+        license: MIT
+      - name: test_data2txt
+        type: validation
+        jsonl_fpath: resources_servers/ragtruth/data/test_data2txt.jsonl
+        license: MIT

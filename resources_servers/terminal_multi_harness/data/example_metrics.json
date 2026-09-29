@@ -1,0 +1,22 @@
+{
+  "name": "example",
+  "type": "example",
+  "jsonl_fpath": "resources_servers/terminal_multi_harness/data/example.jsonl",
+  "num_repeats": 1,
+  "gitlab_identifier": null,
+  "huggingface_identifier": null,
+  "license": "Apache 2.0",
+  "Number of examples": 5,
+  "harness": {
+    "unique_count": 1,
+    "total_count": 5
+  },
+  "expected_action.type": {
+    "unique_count": 3,
+    "total_count": 5
+  },
+  "agent_ref.name": {
+    "unique_count": 1,
+    "total_count": 5
+  }
+}

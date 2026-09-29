@@ -25,6 +25,7 @@ from app import (
     CompCodingVerifyResponse,
 )
 from fastapi.testclient import TestClient
+from lcb_integration.testing_util import MockStdinWithBuffer
 from pydantic import ValidationError
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
@@ -357,3 +358,11 @@ class TestGetKeyMetrics:
         # Should NOT have stat suffixes or no_answer
         assert not any("std_dev" in k for k in km)
         assert not any("no_answer" in k for k in km)
+
+
+class TestTestingUtil:
+    def test_mock_stdin_supports_iteration(self) -> None:
+        mock_stdin = MockStdinWithBuffer("first\nsecond\n")
+        assert iter(mock_stdin) is mock_stdin
+        assert next(mock_stdin) == "first\n"
+        assert list(mock_stdin) == ["second\n"]

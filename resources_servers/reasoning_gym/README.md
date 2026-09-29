@@ -82,15 +82,17 @@ policy_model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 ## Launch nemo gym servers
 
 ```bash
-ng_run "+config_paths=[resources_servers/reasoning_gym/configs/reasoning_gym.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --resources-server reasoning_gym \
+    --model-type vllm_model
 ```
 
 ## Collect rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=reasoning_gym_simple_agent \
-    +input_jsonl_fpath=resources_servers/reasoning_gym/data/example.jsonl \
-    +output_jsonl_fpath=results/reasoning_gym_rollouts.jsonl \
-    +limit=5
+gym eval run --no-serve \
+    --agent reasoning_gym_simple_agent \
+    --input resources_servers/reasoning_gym/data/example.jsonl \
+    --output results/reasoning_gym_rollouts.jsonl \
+    --limit 5
 ```

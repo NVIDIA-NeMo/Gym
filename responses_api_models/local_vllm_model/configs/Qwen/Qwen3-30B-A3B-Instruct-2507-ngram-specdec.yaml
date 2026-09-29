@@ -1,0 +1,61 @@
+# Demo local_vllm_model config for benchmarking speculative decoding on
+# Qwen3-30B-A3B with vLLM ngram (no draft model, model-agnostic). Drop into
+# `+config_paths=[…]` alongside the speed_bench resources server config to
+# get a working spec-decode-enabled vLLM out of the box. Validated by the
+# speed-bench Skills↔Gym parity comparison (see `benchmarks/speed-bench/`).
+#
+# To swap models: change `model:` and the `vllm_serve_kwargs.tensor_parallel_size`
+# to fit the new model on your hardware. ngram is model-agnostic so the
+# `speculative_config` block stays the same.
+#
+# To swap spec-decode methods (e.g. EAGLE3 with a paired draft model), see
+# nemotron_3_ultra_dev_nemorl_gb200.yaml for an MTP example, or vLLM's docs:
+#   https://docs.vllm.ai/en/latest/features/spec_decode.html
+#
+# This config inherits everything from Qwen3-30B-A3B-Instruct-2507.yaml and
+# adds the speculative_config block — the diff vs the non-spec-decode config
+# is exactly the 4-line `speculative_config:` entry below.
+Qwen3-30B-A3B-Instruct-2507-ngram-specdec:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: Qwen/Qwen3-30B-A3B-Instruct-2507
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      replace_developer_role_with_system: true
+      debug: false
+
+      # Recommended in https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507#best-practices
+      extra_body:
+        temperature: 0.7
+        top_p: 0.8
+        max_output_tokens: null
+
+      hf_home: null
+
+      vllm_serve_env_vars:
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+
+      vllm_serve_kwargs:
+        # vLLM serving is a bit quirky at the moment. These parallelism configs are fairly sensitive and need to always be set properly!
+        data_parallel_size: 1
+        tensor_parallel_size: 8
+        pipeline_parallel_size: 1
+
+        trust_remote_code: true
+        gpu_memory_utilization: 0.9
+        enable_auto_tool_choice: true
+        tool_call_parser: hermes
+        model_loader_extra_config:
+          enable_multithread_load: true
+          num_threads: 16
+
+        # Speculative decoding via vLLM's ngram method. No draft model needed —
+        # the ngram lookup hits the prompt cache for short repeated sequences.
+        # `speed_bench` reads `vllm:spec_decode_*` Prometheus counters from
+        # this server's /metrics endpoint to derive acceptance length / rate.
+        speculative_config:
+          method: ngram
+          num_speculative_tokens: 3
+          prompt_lookup_max: 5
+          prompt_lookup_min: 2

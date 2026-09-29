@@ -12,8 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import contextlib
 import logging
+import multiprocessing as mp
 from io import StringIO
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
@@ -22,7 +24,7 @@ from math_verify import grader
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, PositiveFloat, PositiveInt
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -32,19 +34,21 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.server_utils import get_response_json
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
+    library_verifier_timeout_seconds: PositiveFloat = 10.0
+    library_verifier_max_concurrency: PositiveInt = 32
 
 
 class LibraryJudgeMathRunRequest(BaseRunRequest):
@@ -68,7 +72,82 @@ class LibraryJudgeMathVerifyResponse(BaseVerifyResponse):
     judge_evaluations: Optional[list[JudgeEvaluation]]
 
 
+def _extract_last_boxed_answer(response: str) -> Optional[str]:
+    r"""Extract the exact contents of the last complete ``\boxed{...}``."""
+    boxed_start = response.rfind("\\boxed{")
+    if boxed_start < 0:
+        return None
+
+    content_start = boxed_start + len("\\boxed{")
+    brace_depth = 1
+    for index in range(content_start, len(response)):
+        if response[index] == "{":
+            brace_depth += 1
+        elif response[index] == "}":
+            brace_depth -= 1
+            if brace_depth == 0:
+                return response[content_start:index]
+
+    return None
+
+
+def _run_math_verify(
+    library_verifier: Any, expected_answer: str, generated_answer: str
+) -> tuple[float, Optional[str]]:
+    # This functionality is migrated from Nemo RL.
+    # https://github.com/NVIDIA-NeMo/RL/blob/e1f56c42ae175d3863ccaf4e21b7de7e9c46c2e1/nemo_rl/environments/math_environment.py
+    try:
+        stripped = LibraryJudgeMathResourcesServer._strip_math_delimiters(expected_answer)
+        ground_truth_parsable = "\\boxed{" + stripped + "}"
+        with LibraryJudgeMathResourcesServer._mute_output():
+            ret_score, extracted_answer = library_verifier([ground_truth_parsable], [generated_answer])
+
+        reward = float(ret_score)
+
+        if extracted_answer is not None:
+            # Make sure the extracted answer has two elements.
+            assert len(extracted_answer) == 2
+
+            extracted_gold, extracted_prediction = extracted_answer
+
+            # Get the extracted answer.
+            for pred in extracted_prediction:
+                if any(grader.verify(gold, pred) for gold in extracted_gold):
+                    extracted_answer = pred
+                    break
+            else:
+                # If no match is found, that means all the answers are
+                # incorrect.  The first prediction is used as the extracted
+                # answer.
+                extracted_answer = extracted_prediction[0] if extracted_prediction else None
+
+        return reward, extracted_answer
+
+    # It's possible to emit a TimeoutException and that wouldn't be caught since
+    # it actually subclasses from BaseException and math-verify itself does not
+    # catch it.
+    except (Exception, TimeoutException):
+        return 0.0, None
+
+
+def _run_math_verify_in_subprocess(expected_answer: str, generated_answer: str, result_connection: Any) -> None:
+    # Keep math_verify construction inside the child process. A wedged SymPy call
+    # can then be killed by terminating this process without poisoning the server.
+    library_verifier = math_metric(
+        gold_extraction_target=(LatexExtractionConfig(),),
+        pred_extraction_target=(
+            ExprExtractionConfig(),
+            LatexExtractionConfig(),
+        ),
+    )
+    try:
+        result_connection.send(_run_math_verify(library_verifier, expected_answer, generated_answer))
+    finally:
+        result_connection.close()
+
+
 class LibraryJudgeMathResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     # These judge messages are adapted from ones used in Arena Hard.
     # https://github.com/lmarena/arena-hard-auto/blob/196f6b826783b3da7310e361a805fa36f0be83f3/utils/judge_utils.py
     # They are intended to serve as example messages for an LLM judge, and have not
@@ -100,15 +179,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
         logging.getLogger("math_verify").setLevel(logging.CRITICAL)
 
-        # Use Latex and plain math extraction from predictions
-        # https://github.com/huggingface/Math-Verify?tab=readme-ov-file#extraction-targets
-        self._library_verifier = math_metric(
-            gold_extraction_target=(LatexExtractionConfig(),),
-            pred_extraction_target=(
-                ExprExtractionConfig(),
-                LatexExtractionConfig(),
-            ),
-        )
+        # The async path no longer blocks the event loop while SymPy runs, so
+        # cap child-process fanout explicitly.
+        self._library_verifier_semaphore = asyncio.Semaphore(value=self.config.library_verifier_max_concurrency)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -131,12 +204,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 assistant_responses.append(content_item.text)
 
         combined_response = "".join(assistant_responses)
-        (
-            reward,
-            extracted_answer,
-            library_reward,
-            judge_evaluations,
-        ) = await self._verify_answer(body.question, body.expected_answer, combined_response)
+        reward, extracted_answer, library_reward, judge_evaluations = await self._verify_answer(
+            body.question, body.expected_answer, combined_response
+        )
         return LibraryJudgeMathVerifyResponse(
             **body.model_dump(),
             reward=reward,
@@ -154,12 +224,17 @@ Example output: "My final verdict is different [[A!=B]]"."""
         specified question in comparison with the specified expected answer.
         """
 
-        library_reward, extracted_answer = self._verify_answer_with_library(expected_answer, generated_answer)
+        boxed_answer = _extract_last_boxed_answer(generated_answer)
+        if boxed_answer is None or not boxed_answer.strip():
+            return 0.0, None, 0.0, None
+
+        library_reward, extracted_answer = await self._verify_answer_with_library_async(
+            expected_answer, generated_answer
+        )
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
-        judge_answer = extracted_answer if extracted_answer else generated_answer
-        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, judge_answer)
+        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, boxed_answer)
         return judge_reward, extracted_answer, library_reward, judge_evaluations
 
     @classmethod
@@ -187,41 +262,65 @@ Example output: "My final verdict is different [[A!=B]]"."""
             s = s[1:-1].strip()
         return s
 
-    def _verify_answer_with_library(self, expected_answer: str, generated_answer: str) -> tuple[float, Optional[str]]:
-        # This functionality is migrated from Nemo RL.
-        # https://github.com/NVIDIA-NeMo/RL/blob/e1f56c42ae175d3863ccaf4e21b7de7e9c46c2e1/nemo_rl/environments/math_environment.py
+    async def _verify_answer_with_library_async(
+        self, expected_answer: str, generated_answer: str
+    ) -> tuple[float, Optional[str]]:
+        async with self._library_verifier_semaphore:
+            # The production rollout workers run on Linux. Pin fork so the
+            # verifier child is cheap to start and can be killed independently
+            # if SymPy wedges.
+            ctx = mp.get_context("fork")
+            result_connection, child_connection = ctx.Pipe(duplex=False)
+            process = ctx.Process(
+                target=_run_math_verify_in_subprocess,
+                args=(expected_answer, generated_answer, child_connection),
+            )
+            process.start()
+            child_connection.close()
+            return await self._wait_for_library_verifier_process(
+                process,
+                result_connection,
+                self.config.library_verifier_timeout_seconds,
+            )
+
+    @staticmethod
+    async def _wait_for_library_verifier_process(
+        process: Any, result_connection: Any, timeout_seconds: float
+    ) -> tuple[float, Optional[str]]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
         try:
-            stripped = self._strip_math_delimiters(expected_answer)
-            ground_truth_parsable = "\\boxed{" + stripped + "}"
-            with self._mute_output():
-                ret_score, extracted_answer = self._library_verifier([ground_truth_parsable], [generated_answer])
+            while process.is_alive():
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    process.terminate()
+                    terminate_deadline = loop.time() + 1.0
+                    while process.is_alive() and loop.time() < terminate_deadline:
+                        await asyncio.sleep(0.05)
+                    if process.is_alive():
+                        process.kill()
+                    while process.is_alive():
+                        await asyncio.sleep(0.05)
+                    process.join(timeout=0)
+                    return 0.0, None
+                await asyncio.sleep(min(0.05, remaining))
 
-            reward = float(ret_score)
-
-            if extracted_answer is not None:
-                # Make sure the extracted answer has two elements.
-                assert len(extracted_answer) == 2
-
-                extracted_gold, extracted_prediction = extracted_answer
-
-                # Get the extracted answer.
-                for pred in extracted_prediction:
-                    if any(grader.verify(gold, pred) for gold in extracted_gold):
-                        extracted_answer = pred
-                        break
-                else:
-                    # If no match is found, that means all the answers are
-                    # incorrect.  The first prediction is used as the extracted
-                    # answer.
-                    extracted_answer = extracted_prediction[0] if extracted_prediction else None
-
-            return reward, extracted_answer
-
-        # It's possible to emit a TimeoutException and that wouldn't be caught since
-        # it actually subclasses from BaseException and math-verify itself does not
-        # catch it.
-        except (Exception, TimeoutException):
-            return 0.0, None
+            process.join(timeout=0)
+            if process.exitcode != 0 or not result_connection.poll():
+                return 0.0, None
+            try:
+                return result_connection.recv()
+            except EOFError:
+                return 0.0, None
+        finally:
+            with contextlib.suppress(OSError, AssertionError):
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=1.0)
+                    if process.is_alive():
+                        process.kill()
+                        process.join(timeout=1.0)
+            result_connection.close()
 
     async def _verify_answer_with_judge(
         self, question: str, expected_answer: str, generated_answer: str
@@ -266,12 +365,13 @@ Example output: "My final verdict is different [[A!=B]]"."""
             ),
         ]
 
-        response = await self.server_client.post(
+        judge_response = await call_judge(
+            self.server_client,
             server_name=config.judge_model_server.name,
             url_path="/v1/responses",
             json=responses_create_params,
+            response_model=NeMoGymResponse,
         )
-        judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
         judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
 
         # Currently, for all the cases in which the response from the LLM judge

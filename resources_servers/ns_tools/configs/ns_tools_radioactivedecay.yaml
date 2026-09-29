@@ -1,0 +1,13 @@
+ns_tools_radioactivedecay:
+  resources_servers:
+    ns_tools_radioactivedecay:
+      entrypoint: app.py
+      default_verifier: math_with_judge
+      verifiers: {}
+      nemo_skills_tools:
+        - nemo_skills.mcp.servers.radioactivedecay_tool.RadioactivedecayTool
+      domain: agent
+      verified: false
+      description: NeMo Skills radioactive nuclide and decay-chain lookup tool
+      value: Enable nuclear decay calculations through NeMo Skills MCP tools
+

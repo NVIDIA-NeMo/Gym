@@ -1,0 +1,4 @@
+# Built by prepare_ragtruth.py; not committed (example.jsonl is the committed sample).
+test_qa.jsonl
+test_summary.jsonl
+test_data2txt.jsonl

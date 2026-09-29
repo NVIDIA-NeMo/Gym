@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+openapi-schema-validator==0.6.3

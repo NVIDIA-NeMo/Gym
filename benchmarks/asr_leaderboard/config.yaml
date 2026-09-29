@@ -1,0 +1,22 @@
+config_paths:
+  - resources_servers/asr_with_pc/configs/asr_with_pc.yaml
+
+asr_leaderboard_asr_with_pc_resources_server:
+  _inherit_from: asr_with_pc
+  resources_servers:
+    asr_with_pc:
+      task_type: ASR
+
+asr_leaderboard_asr_with_pc_simple_agent:
+  _inherit_from: asr_with_pc_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: asr_leaderboard_asr_with_pc_resources_server
+      datasets:
+      - name: asr_leaderboard
+        type: benchmark
+        jsonl_fpath: benchmarks/asr_leaderboard/data/asr_leaderboard_benchmark.jsonl
+        prompt_config: benchmarks/asr_leaderboard/prompts/default.yaml
+        prepare_script: benchmarks/asr_leaderboard/prepare.py
+        license: Creative Commons Attribution 4.0 International

@@ -1,0 +1,14 @@
+user: |-
+  You are given evidence excerpts from a publicly traded company's SEC filings and a financial question written by domain experts. Answer the question based only on the provided evidence. Do not use any additional context or outside knowledge. Your answer should be concise and accurate. If you cannot answer the question from the evidence, state that you cannot answer. Do not guess.
+
+  Evidence:
+  {context}
+
+  Question:
+  {question}
+
+  Provide your reasoning if helpful, then conclude with your final answer prefixed by "Answer:".
+
+  Example:
+  [Your reasoning here, if any]
+  Answer: [Your concise answer]

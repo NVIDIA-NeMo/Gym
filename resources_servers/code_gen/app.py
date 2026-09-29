@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from asyncio import Semaphore, get_running_loop
+import base64
+import json
+import zlib
+from asyncio import Semaphore
 from time import time
 from typing import Any, Dict, List, Optional, Union
 
-import ray
 from lcb_integration.compute_code_generation_metrics import check_correctness_remote
 from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel
@@ -44,7 +46,7 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
     num_processes: int
     unit_test_timeout_secs: int
     debug: bool
-    reasoning_format_penalty: float = -0.2
+    reasoning_format_penalty: float = 0.0
 
 
 # ----------------------------
@@ -81,6 +83,7 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
 # Server
 # ----------------------------
 class CompCodingResourcesServer(SimpleResourcesServer):
+    ray_enabled = True
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):
@@ -157,7 +160,20 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 difficulty=difficulty,
             )
 
-        tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
+        # Tests are stored compressed by benchmarks/livecodebench/prepare_utils.py
+        # (_pack_unit_tests) to keep the materialized-inputs file from reaching
+        # 12 GB. Decode here, immediately before use, so the plaintext exists only
+        # for this verification instead of for the whole run. Falls back to the
+        # old plaintext shape so pre-patch artifacts still verify.
+        _raw_tests = body.verifier_metadata["unit_tests"]
+        if isinstance(_raw_tests, dict) and "packed" in _raw_tests:
+            _decoded = json.loads(zlib.decompress(base64.b64decode(_raw_tests["packed"])))
+            _raw_tests = {
+                "inputs": _decoded["inputs"],
+                "outputs": _decoded["outputs"],
+                "fn_name": _raw_tests.get("fn_name"),
+            }
+        tests = UnitTests.model_validate(_raw_tests)
 
         # 3) extract code (code fence or raw)
         code = extract_code(model_out, LMStyle.OpenAIChat)
@@ -171,8 +187,6 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
         # 4) run (no sandbox)
         async with self._semaphore:
-            loop = get_running_loop()
-
             """
             Sample looks like this:
             ```json
@@ -207,7 +221,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             )
 
             future = check_correctness_remote.remote(*task_args)
-            result, metadata = await loop.run_in_executor(None, ray.get, future)
+            result, metadata = await future
 
             unit_tests_time_taken = time() - start_time
 

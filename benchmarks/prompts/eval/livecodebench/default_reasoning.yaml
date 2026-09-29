@@ -1,0 +1,10 @@
+# Default prompt for livecodebench with reasoning-style chain-of-thought intro.
+# Mirrors nemo_skills/prompt/config/eval/livecodebench/default_reasoning.yaml
+# char-for-char.
+
+system: "You are a helpful and harmless assistant. You should think step-by-step."
+
+user: |-
+  {question_content}{starter_code}
+
+  {formatting_message}

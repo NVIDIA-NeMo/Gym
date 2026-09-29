@@ -14,10 +14,12 @@
 # limitations under the License.
 
 import re
-from typing import Optional
+from typing import ClassVar, Optional
 
+from nemo_gym.base_resources_server import ReverifyMode
 from resources_servers.mcqa.app import (
     MCQAResourcesServer,
+    MCQAResourcesServerConfig,
     MCQAVerifyRequest,
     MCQAVerifyResponse,
     _extract_options_and_expected,
@@ -44,8 +46,16 @@ def extract_letter(text: str) -> Optional[str]:
     return None
 
 
+class GPQADiamondResourcesServerConfig(MCQAResourcesServerConfig):
+    # Reuses mcqa's MCQAResourcesServerConfig (STATELESS); pin back to the safe default so this
+    # benchmark does not inherit reverify support until it is separately reviewed.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
+
+
 class GPQADiamondResourcesServer(MCQAResourcesServer):
     """GPQA-Diamond verifier with GPQA-specific answer extraction."""
+
+    config: GPQADiamondResourcesServerConfig
 
     async def verify(self, body: MCQAVerifyRequest) -> MCQAVerifyResponse:
         text = body.response.output_text.strip()

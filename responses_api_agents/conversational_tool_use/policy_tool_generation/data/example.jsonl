@@ -1,0 +1,1 @@
+{"responses_create_params":{"input":[]},"profile":"general","domain":{"name":"Order & Returns (Online)/Support","applications":[{"function":"Track an order"},{"any_raw_shape":["is","accepted"]}]},"agent_ref":{"type":"responses_api_agents","name":"conversational_tool_use_policy_tool_generation"}}

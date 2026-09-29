@@ -11,60 +11,131 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from __future__ import annotations
 
+import json
 import logging
 import traceback
-from typing import Any
+from collections.abc import Mapping
+from http.cookiejar import CookieJar
+from typing import Any, Optional
 
 import verifiers as vf
-import verifiers.envs.multiturn_env as _multiturn_env_module
 from fastapi import Body, Request, Response
-from openai.types.chat.chat_completion import ChatCompletion
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from pydantic import ConfigDict, Field
-from verifiers.utils.async_utils import maybe_semaphore
-from verifiers.utils.response_utils import parse_response_messages as _original_parse_response_messages
+from verifiers.clients import NeMoRLChatCompletionsClient
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import get_global_aiohttp_client
 
 
 logger = logging.getLogger(__name__)
 
 
-# patch verifiers to include prompt and generation token ids and logprobs for
-# re-tokenization correction in replace_prefix_tokens (https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/models/generation/vllm/vllm_worker_async.py#L40)
-async def _patched_parse_response_messages(response, message_type):
-    messages = await _original_parse_response_messages(response, message_type)
-    if message_type == "chat" and isinstance(messages, list):
-        for msg in messages:
-            if isinstance(msg, dict) and msg.get("role") == "assistant":
-                if hasattr(response, "prompt_token_ids"):
-                    msg["prompt_token_ids"] = response.prompt_token_ids
-                if response.choices and hasattr(response.choices[0], "token_ids"):
-                    msg["generation_token_ids"] = response.choices[0].token_ids
-                if (
-                    response.choices
-                    and response.choices[0].logprobs
-                    and hasattr(response.choices[0].logprobs, "content")
-                    and response.choices[0].logprobs.content
-                ):
-                    msg["generation_log_probs"] = [t.logprob for t in response.choices[0].logprobs.content]
-    return messages
+def _as_dict(msg: Any) -> dict:
+    if isinstance(msg, dict):
+        return msg
+    return {k: getattr(msg, k, None) for k in ("role", "content", "tool_calls", "tool_call_id", "tokens")}
 
 
-_multiturn_env_module.parse_response_messages = _patched_parse_response_messages
+def _text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    return json.dumps(content, default=str)
+
+
+def _tok_kwargs(tokens: dict | None) -> dict:
+    if not tokens:
+        return {}
+    kwargs = {
+        "prompt_token_ids": tokens.get("prompt_ids", []),
+        "generation_token_ids": tokens.get("completion_ids", []),
+        "generation_log_probs": tokens.get("completion_logprobs", []),
+    }
+    routed_experts = tokens.get("routed_experts")
+    if routed_experts is not None:
+        kwargs["routed_experts"] = routed_experts
+    return kwargs
+
+
+def _normalize_tool_call(tool_call: Any) -> dict:
+    if isinstance(tool_call, str):
+        try:
+            return json.loads(tool_call)
+        except json.JSONDecodeError:
+            return {"arguments": tool_call}
+    return tool_call
+
+
+def _build_tool_result_item(msg: dict, raw: Any) -> dict:
+    call_id = msg.get("tool_call_id") or f"call_{id(raw)}"
+    return NeMoGymFunctionCallOutput(
+        call_id=call_id,
+        id=call_id,
+        output=_text(msg.get("content")),
+        status="completed",
+    ).model_dump()
+
+
+def _build_function_call_item(tool_call: Any, tokens: dict | None) -> dict:
+    tc = _normalize_tool_call(tool_call)
+    function = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+    call_id = tc.get("id") or tc.get("call_id") or f"call_{id(tool_call)}"
+    name = tc.get("name") or function.get("name", "")
+    arguments = _text(tc.get("arguments") or function.get("arguments") or "{}")
+
+    cls = NeMoGymResponseFunctionToolCallForTraining if tokens else NeMoGymResponseFunctionToolCall
+    return cls(
+        id=call_id,
+        call_id=call_id,
+        name=name,
+        arguments=arguments,
+        status="completed",
+        **_tok_kwargs(tokens),
+    ).model_dump()
+
+
+def _build_message_item(raw: Any, body: str, tokens: dict | None) -> dict:
+    cls = NeMoGymResponseOutputMessageForTraining if tokens else NeMoGymResponseOutputMessage
+    return cls(
+        id=f"msg_{id(raw)}",
+        content=[NeMoGymResponseOutputText(text=body, annotations=[])],
+        **_tok_kwargs(tokens),
+    ).model_dump()
+
+
+def _build_assistant_items(msg: dict, raw: Any, tokens: dict | None) -> list[dict]:
+    tool_calls = msg.get("tool_calls") or []
+    body = _text(msg.get("content"))
+    items: list[dict] = []
+
+    if body:
+        items.append(_build_message_item(raw, body, tokens if not tool_calls else None))
+
+    for i, tool_call in enumerate(tool_calls):
+        is_last = i == len(tool_calls) - 1
+        items.append(_build_function_call_item(tool_call, tokens if is_last else None))
+
+    if not items:
+        items.append(_build_message_item(raw, "", tokens))
+
+    return items
 
 
 class VerifiersNeMoGymResponse(NeMoGymResponse):
@@ -73,8 +144,8 @@ class VerifiersNeMoGymResponse(NeMoGymResponse):
     output: list[dict[str, Any]]
     reward: float
     metrics: dict[str, Any] = Field(default_factory=dict)
-    parallel_tool_calls: bool = False
-    tool_choice: str = "none"
+    parallel_tool_calls: bool = True
+    tool_choice: str = "auto"
     tools: list = Field(default_factory=list)
 
 
@@ -84,76 +155,16 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
     reward: float
 
 
-class VLLMOpenAIClient:
-    def __init__(self, base_url: str) -> None:
-        self._base_url = base_url.rstrip("/")
-        self.chat = self._Chat(self)
+class _NoStoreCookieJar(CookieJar):
+    """A cookie jar that drops every Set-Cookie, so no request ever carries one.
 
-    class _Chat:
-        def __init__(self, client: "VLLMOpenAIClient") -> None:
-            self.completions = client
+    See VerifiersAgent._get_client: the policy server's session cookie decides
+    which vLLM engine serves a request, and a jar that remembers it would pin
+    every rollout in this process to one engine.
+    """
 
-    async def create(self, *args: Any, **kwargs: Any) -> ChatCompletion:
-        request_body: dict[str, Any] = {
-            "model": kwargs.get("model", ""),
-            "messages": kwargs.get("messages", []),
-        }
-        for key in (
-            "temperature",
-            "max_tokens",
-            "max_completion_tokens",
-            "top_p",
-            "stop",
-            "n",
-            "tools",
-            "tool_choice",
-        ):
-            if key in kwargs and kwargs[key] is not None:
-                request_body[key] = kwargs[key]
-
-        url = f"{self._base_url}/chat/completions"
-        try:
-            session = get_global_aiohttp_client()
-            async with session.post(url, json=request_body) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    logger.error(f"Request to {url} failed with status {resp.status}: {error_text}")
-                    resp.raise_for_status()
-                response_dict = await resp.json()
-        except Exception as e:
-            logger.error(f"Exception calling {url}: {type(e).__name__}: {e}")
-            raise
-
-        choice_dict = response_dict["choices"][0]
-        message_dict = choice_dict.get("message", {})
-
-        prompt_token_ids = message_dict.pop("prompt_token_ids", [])
-        generation_token_ids = message_dict.pop("generation_token_ids", [])
-        generation_log_probs = message_dict.pop("generation_log_probs", [])
-
-        if not generation_token_ids:
-            logger.warning(
-                f"No generation_token_ids in response! Full message keys were: {list(choice_dict.get('message', {}).keys())}"
-            )
-
-        if prompt_token_ids and isinstance(prompt_token_ids[0], str):
-            prompt_token_ids = [int(tid) for tid in prompt_token_ids]
-
-        if generation_token_ids and isinstance(generation_token_ids[0], str):
-            generation_token_ids = [int(tid) for tid in generation_token_ids]
-
-        if generation_token_ids and generation_log_probs:
-            choice_dict["logprobs"] = {
-                "content": [
-                    {"token": f"token_id:{tid}", "logprob": lp, "top_logprobs": []}
-                    for tid, lp in zip(generation_token_ids, generation_log_probs)
-                ]
-            }
-
-        response = ChatCompletion.model_validate(response_dict)
-        setattr(response, "prompt_token_ids", prompt_token_ids)
-        setattr(response.choices[0], "token_ids", generation_token_ids)
-        return response
+    def set_cookie(self, cookie) -> None:
+        return None
 
 
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
@@ -162,11 +173,6 @@ class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
 
     vf_env_id: str = Field(default="", description="Verifiers environment ID")
     vf_env_args: dict = Field(default_factory=dict, description="Verifiers environment arguments")
-
-    max_concurrent_generation: int = Field(
-        default=-1, description="Max concurrent generation requests (-1 = unlimited)"
-    )
-    max_concurrent_scoring: int = Field(default=-1, description="Max concurrent scoring requests (-1 = unlimited)")
 
     max_tokens: int = Field(default=8192, description="Max tokens for generation")
 
@@ -190,67 +196,151 @@ class VerifiersAgentRunRequest(BaseRunRequest):
 
 
 class VerifiersAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
     config: VerifiersAgentConfig
 
-    envs_cache: dict[str, Any] = Field(default_factory=dict)  # vf.Environment
-    openai_client_cache: dict[str, VLLMOpenAIClient] = Field(default_factory=dict)
+    envs_cache: dict[str, Any] = Field(default_factory=dict)
+    client_cache: dict[str, NeMoRLChatCompletionsClient] = Field(default_factory=dict)
 
     def _get_env(self, vf_env_id: str) -> vf.Environment:
         if vf_env_id not in self.envs_cache:
             self.envs_cache[vf_env_id] = vf.load_environment(vf_env_id, **self.config.vf_env_args)
         return self.envs_cache[vf_env_id]
 
-    def _get_openai_client(self) -> VLLMOpenAIClient:
+    def _rollout_id_for(self, body: Any = None, request: Optional[Request] = None) -> Optional[str]:
+        """The capture id for this call, from the run body or the request path.
+
+        ``rollout_id_from_run`` only covers ``/run``, where rollout collection
+        injects ``_ng_rollout_id`` into the body. A direct
+        ``/ng-rollout/<id>/v1/responses`` call carries the id in the path
+        instead, and agents get no ``RolloutContextMiddleware`` -- that is
+        installed on resources servers, not here -- so the contextvar is unset
+        on that route. Without reading the path, a supported prefixed call
+        builds an unprefixed client and its model calls are never correlated,
+        which is the same silent capture loss this agent already had.
+
+        Gated on the same ``_capture_correlation_enabled`` as the body path, so
+        a run with capture off keeps the shared unprefixed client.
+        """
+        if body is not None and (from_body := self.rollout_id_from_run(body)):
+            return from_body
+        if request is None or not self._capture_correlation_enabled():
+            return None
+        path_params = getattr(request, "path_params", None)
+        if not isinstance(path_params, Mapping):
+            return None
+        return path_params.get("rollout_id") or None
+
+    def _get_client(self, body: Any = None, request: Optional[Request] = None) -> NeMoRLChatCompletionsClient:
+        """Return a rollout-prefixed client over one shared policy transport.
+
+        The vllm_model server picks a vLLM engine per session
+        (``sha256(session_id) % len(base_urls)`` in
+        responses_api_models/vllm_model/app.py ``_resolve_client``) and mints the
+        session id per cookie jar (nemo_gym/server_utils.py
+        ``setup_session_middleware``). openai's AsyncOpenAI sits on an httpx client
+        that persists cookies, so a plain shared client is one session and
+        therefore one engine: on CMH job 3670120 (2026-09-10) 512 concurrent
+        rollouts ran on 6 of 48 engines while 42 sat idle. Gym's own aiohttp
+        client avoids exactly this with a DummyCookieJar; ``_NoStoreCookieJar``
+        is the httpx equivalent. Every request is then a fresh session and the
+        router spreads them over every engine.
+
+        Why not a client per rollout: each rollout's single pooled connection sat
+        idle through its tool phases, the router's uvicorn closes idle
+        connections after 30 s, and the next turn raced that close -- CMH 3670792
+        aborted 468 of 512 rollouts with
+        ``APIConnectionError -> ReadError(BrokenResourceError)`` while the
+        shared-client runs before it had zero. One shared pool keeps connections
+        hot. The price is per-turn engine affinity, which Gym's own client does
+        not have either.
+
+        Model-call capture is keyed by the ``/ng-rollout/<id>`` URL prefix. The
+        lightweight per-run OpenAI client copy changes only ``base_url`` and
+        shares the cached client's transport, so calls remain correlated without
+        accumulating a connection pool per rollout. ``rollout_id_from_run``
+        returns ``None`` when capture is disabled, preserving the shared
+        unprefixed client path.
+
+        The per-run client BORROWS that transport rather than owning it, so it
+        must never be closed: ``Client.close()`` closes the underlying httpx
+        client, which every later rollout is still using. Nothing on the current
+        path closes it -- neither this agent nor ``run_group``/``generate`` on
+        the verifiers legacy API, and every ``.close()`` call site in verifiers
+        sits under ``verifiers/v1/``, which this agent does not use -- but the
+        wrapper looks disposable, so the rule is written down here.
+        """
         cache_key = self.config.model_server.name
-        if cache_key not in self.openai_client_cache:
-            server_config_dict = get_first_server_config_dict(
-                self.server_client.global_config_dict,
-                self.config.model_server.name,
+        if cache_key not in self.client_cache:
+            openai_client = AsyncOpenAI(
+                base_url=self.resolve_model_base_url(self.config.model_server.name),
+                api_key="EMPTY",  # pragma: allowlist secret
+                # DefaultAsyncHttpxClient keeps the SDK's pool limits and redirect
+                # policy. Pass the bare CookieJar: httpx.Cookies adopts a CookieJar
+                # instance as-is but COPIES an httpx.Cookies into a fresh stdlib
+                # jar, which would silently discard the no-store behaviour.
+                http_client=DefaultAsyncHttpxClient(cookies=_NoStoreCookieJar()),
             )
-            model_server_url = f"http://{server_config_dict.host}:{server_config_dict.port}"
+            self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
 
-            if not model_server_url.endswith("/v1"):
-                model_server_url = model_server_url.rstrip("/") + "/v1"
+        shared_client = self.client_cache[cache_key]
+        rollout_id = self._rollout_id_for(body, request)
+        if rollout_id is None:
+            return shared_client
 
-            self.openai_client_cache[cache_key] = VLLMOpenAIClient(base_url=model_server_url)
+        model_server_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+        return NeMoRLChatCompletionsClient(shared_client.client.copy(base_url=model_server_url))
 
-        return self.openai_client_cache[cache_key]
+    def _convert_trajectory_to_output(self, rollout_output: dict) -> list:
+        assistant_tokens = self._collect_assistant_tokens(rollout_output.get("trajectory") or [])
 
-    def _convert_trajectory_to_output(self, state: dict) -> list:
-        output = []
-        trajectory = state.get("trajectory", [])
+        output: list[dict] = []
+        assist_idx = 0
+        for raw in rollout_output.get("completion") or []:
+            msg = _as_dict(raw)
+            role = msg.get("role", "user")
 
-        for step in trajectory:
-            for msg in step.get("prompt", []):
-                if isinstance(msg, dict):
-                    role = msg.get("role", "user")
-                    content = msg.get("content", "")
-                    output.append(NeMoGymEasyInputMessage(role=role, content=content).model_dump())
+            if role == "tool":
+                output.append(_build_tool_result_item(msg, raw))
+            elif role == "assistant":
+                tokens = assistant_tokens[assist_idx] if assist_idx < len(assistant_tokens) else None
+                assist_idx += 1
+                output.extend(_build_assistant_items(msg, raw, tokens))
+            else:
+                output.append(NeMoGymEasyInputMessage(role=role, content=_text(msg.get("content"))).model_dump())
 
-            tokens = step.get("tokens")
-            for msg in step.get("completion", []):
-                if isinstance(msg, dict):
-                    content = msg.get("content", "")
-                    if tokens:
-                        output.append(
-                            NeMoGymResponseOutputMessageForTraining(
-                                id=f"msg_{id(msg)}",
-                                content=[NeMoGymResponseOutputText(text=content, annotations=[])],
-                                prompt_token_ids=tokens.get("prompt_ids", []),
-                                generation_token_ids=tokens.get("completion_ids", []),
-                                generation_log_probs=tokens.get("completion_logprobs", []),
-                            ).model_dump()
-                        )
-                    else:
-                        output.append(
-                            NeMoGymResponseOutputMessage(
-                                id=f"msg_{id(msg)}",
-                                content=[NeMoGymResponseOutputText(text=content, annotations=[])],
-                            ).model_dump()
-                        )
+        if not any(item.get("generation_token_ids") for item in output):
+            err = rollout_output.get("error") or {}
+            err_msg = err.get("error") or err.get("error_chain_repr") or "unknown (no error info on rollout_output)"
+            logger.warning(
+                "[verifiers_agent] rollout produced no trainable tokens. This can happen when sandbox concurrency quota is exceeded. Returning empty trajectory. "
+                "Underlying error: %s",
+                err_msg,
+            )
+            output.append(
+                NeMoGymResponseOutputMessageForTraining(
+                    id="msg_empty",
+                    content=[NeMoGymResponseOutputText(text="", annotations=[])],
+                    prompt_token_ids=[0],
+                    generation_token_ids=[0],
+                    generation_log_probs=[0.0],
+                ).model_dump()
+            )
 
         return output
+
+    @staticmethod
+    def _collect_assistant_tokens(trajectory: list) -> list[dict | None]:
+        tokens_per_turn: list[dict | None] = []
+        for step in trajectory:
+            if not isinstance(step, dict):
+                continue
+            step_tokens = step.get("tokens")
+            for m in step.get("completion") or []:
+                if _as_dict(m).get("role") == "assistant":
+                    tokens_per_turn.append(step_tokens)
+        return tokens_per_turn
 
     async def responses(
         self,
@@ -260,6 +350,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     ) -> VerifiersNeMoGymResponse:
         try:
             vf_env_id = body.vf_env_id or self.config.vf_env_id
+            if not vf_env_id:
+                raise ValueError("vf_env_id must be set on the request or in the agent config")
             vf_env = self._get_env(vf_env_id)
             task_idx = body.task_idx
 
@@ -273,36 +365,32 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             rollout_input = vf.RolloutInput(
                 prompt=prompt_messages,
                 answer=body.answer,
-                task=body.task,
                 info=body.info,
                 example_id=body.example_id,
             )
 
-            client = self._get_openai_client()
+            client = self._get_client(body, request)
 
-            gen_sem = await maybe_semaphore(self.config.max_concurrent_generation)
-            score_sem = await maybe_semaphore(self.config.max_concurrent_scoring)
-
-            # prefer NeMo RL generation config set in responses_create_params https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/experience/rollouts.py#L1045-L1046
+            # prefer NeMo RL generation config set in responses_create_params
+            # https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/experience/rollouts.py#L1045-L1046
             sampling_args = {
                 "max_tokens": self.config.max_tokens,
                 "temperature": getattr(body.responses_create_params, "temperature", None) or self.config.temperature,
                 "top_p": getattr(body.responses_create_params, "top_p", None) or self.config.top_p,
             }
-            states = await vf_env.run_group(
+            outputs = await vf_env.run_group(
                 group_inputs=[rollout_input],
                 client=client,
                 model=self.config.model_name,
-                gen_sampling_args=sampling_args,
-                gen_sem=gen_sem,
-                score_sem=score_sem,
+                sampling_args=sampling_args,
+                state_columns=["trajectory"],
             )
 
-            state = states[0]
-            reward = state.get("reward", 0.0) or 0.0
-            metrics = state.get("metrics", {}) or {}
+            rollout_output = outputs[0]
+            reward = rollout_output.get("reward", 0.0) or 0.0
+            metrics = rollout_output.get("metrics", {}) or {}
 
-            output = self._convert_trajectory_to_output(state)
+            output = self._convert_trajectory_to_output(rollout_output)
 
             return VerifiersNeMoGymResponse(
                 id=f"verifiers-{vf_env_id}-{task_idx}",

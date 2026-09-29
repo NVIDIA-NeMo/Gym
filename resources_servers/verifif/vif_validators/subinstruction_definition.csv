@@ -1,0 +1,126 @@
+instruction_label,subinstruction,definition
+stylistic:tone_formality,formal,implies professional or academic language
+stylistic:tone_formality,informal,allows conversational or casual phrasing
+stylistic:tone_formality,neutral,is factual and unbiased
+stylistic:emotional_tone,positive,"uses uplifting, supportive language."
+stylistic:emotional_tone,negative,expresses criticism or pessimism; focuses on problems.
+stylistic:emotional_tone,neutral,"factual, objective, and unbiased; avoids emotion."
+stylistic:emotional_tone,motivational,encourages action and confidence; uses calls to action.
+stylistic:emotional_tone,empathetic,acknowledges feelings and offers understanding.
+stylistic:emotional_tone,sarcastic,conveys meaning through irony or mock praise; can be biting.
+stylistic:emotional_tone,humorous,"aims to amuse with wit, exaggeration, or playfulness."
+stylistic:politeness,polite,"uses courteous language (“please”, “thank you”)"
+stylistic:politeness,impolite,uses commanding or blunt phrasing;
+stylistic:politeness,neutral,remains factual and straightforward.
+stylistic:literary_style,poetic,focuses on rhythm and metaphor
+stylistic:literary_style,narrative,tells a story
+stylistic:literary_style,dramatic,heightens tension and conflict
+stylistic:literary_style,persuasive,argues a stance
+stylistic:literary_style,expository,explains logically
+stylistic:literary_style,journalistic,follows report-like brevity
+stylistic:sentence_tone_consistency,formal,professional or academic language
+stylistic:sentence_tone_consistency,informal,allows conversational or casual phrasing
+stylistic:sentence_tone_consistency,neutral,"factual, objective, and unbiased; avoids emotion."
+stylistic:sentence_tone_consistency,positive,"uses uplifting, supportive language."
+stylistic:sentence_tone_consistency,negative,expresses criticism or pessimism; focuses on problems.
+stylistic:voice,active,means subject performs action
+stylistic:voice,passive,means subject receives action
+stylistic:voice,mixed,allows both active (means subject performs action) and passive (means subject receives action) but in balance.
+stylistic:figurative_language,simile,compares unlike things using “like” or “as”
+stylistic:figurative_language,metaphor,claims one thing is another to imply shared qualities
+stylistic:figurative_language,personification,attributes human traits to nonhuman things or ideas
+stylistic:figurative_language,hyperbole,deliberate exaggeration for emphasis or effect
+stylistic:figurative_language,idiom,"fixed expression with a nonliteral, conventional meaning"
+stylistic:sensory_detail,visual,"evokes sight—color, light, shape, and spatial layout"
+stylistic:sensory_detail,auditory,"evokes sound—pitch, volume, rhythm, timbre, and silence"
+stylistic:sensory_detail,tactile,"evokes touch—texture, temperature, pressure, and movement"
+stylistic:sensory_detail,olfactory,"evokes smell—aroma, odor quality, intensity, and freshness/decay"
+stylistic:sensory_detail,gustatory,"evokes taste—sweet, sour, salty, bitter, umami, and flavor nuances"
+stylistic:rhythm_pattern,short,rapid cadence with brief sentences or fragments that quicken pace
+stylistic:rhythm_pattern,balanced,"mixes short and long sentences to create a steady, varied flow"
+stylistic:rhythm_pattern,long,"extended, detailed sentences that slow pace and invite reflection"
+linguistic:pragmatic_context,formal_discourse,academic tone
+linguistic:pragmatic_context,dialogue,two-party conversation
+linguistic:pragmatic_context,dialect,"regional variation in vocabulary, grammar, and pronunciation"
+linguistic:pragmatic_context,sociolect,"group-specific register tied to identity, class, or profession; in-group jargon"
+linguistic:pragmatic_context,classical,classical ancient or highly literary register with elevated diction and rhetoric
+linguistic:pragmatic_context,policy_style,"fficial/governmental language stressing clarity, compliance, and guidance"
+linguistic:speech_act,declarative,states or asserts information; conveys facts or opinions
+linguistic:speech_act,interrogative,asks a question to solicit information or confirmation
+linguistic:speech_act,imperative,"issues commands, requests, or instructions"
+linguistic:speech_act,exclamatory,expresses strong emotion or emphasis with heightened tone
+linguistic:speech_act,conditional,presents outcomes dependent on conditions
+linguistic:speech_act,suggestive,"offers recommendations or proposals, often using modals"
+linguistic:syntactic_pattern,compound_sentence,joins two or more independent clauses with a conjunction
+linguistic:syntactic_pattern,complex_sentence,combines one independent clause with at least one dependent clause
+linguistic:syntactic_pattern,subordinate_clause,"dependent clause functioning as noun, adjective, or adverb; cannot stand alone"
+linguistic:syntactic_pattern,passive_construction,patient becomes subject; formed with be/get + past participle; agent optional in a by-phrase
+linguistic:syntactic_pattern,parallel_structure,uses matching grammatical forms for related ideas to enhance clarity and rhythm
+linguistic:grammatical_mood,indicative,"expresses facts, beliefs, or objective statements about reality"
+linguistic:grammatical_mood,subjunctive,"expresses wishes, hypotheticals, demands, or necessity (“if I were,” “that he be”)"
+linguistic:grammatical_mood,imperative,"issues commands, requests, or prohibitions; subject “you” is implied"
+linguistic:grammatical_mood,interrogative,asks questions to seek information or confirmation
+linguistic:morphological_form,inflectional,"adds grammatical features (tense, number, case) without changing word class or core meaning"
+linguistic:morphological_form,derivational,"creates a new lexeme, often shifting meaning and sometimes part of speech"
+linguistic:morphological_form,compound,combines two or more roots/stems into a single word with unified or idiomatic meaning
+linguistic:morphological_form,reduplicated,"repeats all or part of a base to mark intensity, plurality, aspect, or other nuance"
+linguistic:phonological_pattern,alliteration,repetition of initial consonant sounds in nearby words
+linguistic:phonological_pattern,rhyme,matching sounds—typically stressed vowel plus following consonants—often at line ends
+linguistic:phonological_pattern,rhythm,"patterned arrangement of stresses, beats, and pauses that governs flow"
+linguistic:phonological_pattern,assonance,repetition of vowel sounds in nearby (often stressed) syllables
+linguistic:phonological_pattern,consonance,repetition of consonant sounds within or at the ends of words
+situation:perspective,first_person,narrator is “I/we”; direct access to the narrator’s thoughts and perceptions
+situation:perspective,second_person,addresses “you”; casts the reader as participant or protagonist
+situation:perspective,third_person,external narrator uses “he/she/they”; can be limited or omniscient
+situation:perspective,mixed,"alternates perspectives (e.g., first/third) across scenes or characters for contrast"
+situation:temporal_context,past,narrates events that have already occurred; often uses past tenses and retrospection
+situation:temporal_context,present,unfolds in real time; uses present tense for immediacy and immersion
+situation:temporal_context,future,anticipates events yet to happen; uses future or modal constructions; speculative tone
+situation:temporal_context,mixed,"shifts among past, present, and future for contrast."
+situation:task_specific,consultation,"collaborative Q&A to elicit goals and constraints, then tailor guidance"
+situation:task_specific,recommendation,"proposes options prioritized with rationale, trade-offs, and next steps"
+situation:task_specific,instruction,"step-by-step procedure with prerequisites, cautions, and expected outcomes"
+situation:task_specific,analysis,"examines evidence to derive patterns, insights, and implications"
+situation:task_specific,diagnosis,infers root cause from symptoms/evidence; proposes tests and remedies
+situation:task_specific,debate,"presents opposing arguments with evidence, rebuttals, and conclusions"
+situation:task_specific,summary,"condenses key points, conclusions, and action items"
+situation:task_specific,explanation,"clarifies how/why using concepts, mechanisms, and examples"
+situation:task_specific,critique,evaluates strengths and weaknesses against criteria; suggests improvements
+situation:task_specific,comparison,contrasts alternatives on defined criteria; highlights similarities and differences
+situation:audience_alignment,children,"simple vocabulary, concrete examples, playful/encouraging tone, short sentences"
+situation:audience_alignment,students,"learning-oriented with objectives, scaffolded steps, examples, and checks for understanding"
+situation:audience_alignment,experts,"assumes domain knowledge; precise terminology, depth, and evidence; focuses on nuance"
+situation:audience_alignment,general_public,"plain language, relatable analogies, minimal jargon, clear context and relevance"
+situation:audience_alignment,policymakers,"concise and outcome-focused; presents options, impacts, trade-offs, and clear recommendations"
+situation:audience_alignment,professionals,"industry-focused with best practices, workflows, and actionable takeaways"
+situation:audience_alignment,elderly,"clear and respectful; familiar references; low cognitive load; explicit, stepwise guidance"
+situation:audience_alignment,beginners,assumes no prior knowledge; defines terms; step-by-step instructions with simple examples
+situation:contextual_scenario,business_meeting,"agenda-driven discussion to make decisions, assign owners, and set timelines"
+situation:contextual_scenario,academic_lecture,"instructor-centered explanation of concepts with evidence, examples, and citations; Q&A often follows"
+situation:contextual_scenario,courtroom,"formal legal proceeding with arguments, testimony, evidence, and strict procedural rules"
+situation:contextual_scenario,therapy_session,"confidential, empathetic dialogue using reflective listening and guided strategies for well-being"
+situation:contextual_scenario,news_report,"objective, concise account answering who/what/when/where/why/how with verified sources"
+situation:contextual_scenario,press_conference,prepared statements plus live Q&A from a spokesperson; controlled messaging and soundbites
+situation:contextual_scenario,classroom,"interactive instruction with activities, checks for understanding, and clear learning objectives"
+situation:contextual_scenario,emergency_briefing,"urgent, plain-language updates with concrete directives and safety actions"
+situation:emotional_alignment,sympathetic,"acknowledges feelings, validates experience, and offers gentle support"
+situation:emotional_alignment,neutral,objective and even-toned; avoids judgment or emotive language
+situation:emotional_alignment,optimistic,hopeful and solution-oriented; highlights possibilities and progress
+situation:emotional_alignment,serious,sober and direct; minimal humor; emphasizes gravity and importance
+situation:emotional_alignment,cautious,measured claims with caveats; risk-aware and avoids overpromising
+situation:emotional_alignment,motivational,energizing and encouraging; uses calls to action and growth mindset cues
+situation:emotional_alignment,respectful,"polite and considerate; honors autonomy, boundaries, and diverse perspectives"
+situation:environment_setting,urban,"dense built environment; diverse populations; fast pace; transit, noise, and infrastructure constraints"
+situation:environment_setting,rural,low population density; agricultural or open land; close-knit communities; longer distances to services
+situation:environment_setting,digital,"virtual/online context with platforms and interfaces; remote, asynchronous or real-time communication"
+situation:environment_setting,natural,"outdoor landscapes (forest, ocean, desert); weather, terrain, and wildlife shape interaction"
+situation:environment_setting,professional,"workplace norms and etiquette; goal- and outcome-oriented; roles, timelines, and stakeholders"
+situation:environment_setting,academic,"educational or research context; learning objectives, citations, peer review, and specialized jargon"
+situation:environment_setting,cultural,"arts/heritage settings (museums, festivals, rituals); symbolic meaning and etiquette sensitivity"
+situation:cultural_context,western,"references norms and conventions common to Europe/North America; align examples, calendars, and etiquette accordingly while avoiding stereotypes"
+situation:cultural_context,eastern,"references traditions and conventions from Asia (e.g., East, South, Southeast) and adjacent regions; adapt formality, symbols, and holidays with sensitivity to diversity"
+situation:cultural_context,global,"aims for cross-cultural accessibility; minimize idioms, use inclusive examples, and standardize formats (dates, units, names)"
+situation:cultural_context,local,"anchors to a specific community’s customs, slang, and constraints; uses locally meaningful references and practices"
+situation:cultural_context,specific_region,"tailors content to a named region (e.g., West Africa, Andes, Nordics); reflects regional norms, regulations, and references"
+situation:cultural_context,implicit,"subtle tailoring of tone, examples, and etiquette to cultural expectations without calling them out; avoids stereotypes"
+situation:cultural_context,explicit,"overt localization that names norms and context; translates idioms, adjusts formats (dates/units), and uses region-specific references"

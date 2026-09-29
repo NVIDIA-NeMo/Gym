@@ -37,13 +37,12 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import (
-    ServerClient,
     get_first_server_config_dict,
 )
 from responses_api_agents.mini_swe_agent.utils import MiniSWEAgentUtils
@@ -51,7 +50,6 @@ from responses_api_agents.mini_swe_agent.utils import MiniSWEAgentUtils
 
 class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
-    resources_server: ResourcesServerRef
     env: Literal["docker", "singularity"]
     concurrency: int
     cache_dir_template: Optional[str] = None
@@ -65,6 +63,12 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
 
 class MiniSWEAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
+    # Optional per-request policy endpoint override. External trainers that
+    # route each episode through its own OpenAI-compatible URL (e.g. RL
+    # trainers recording rollouts via a per-episode proxy) set these per /run;
+    # when unset, the configured model_server is used, as before.
+    policy_base_url: Optional[str] = None
+    policy_api_key: Optional[str] = None
 
 
 class MiniSWEAgentVerifyRequest(BaseVerifyRequest):
@@ -86,6 +90,7 @@ def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
 
 
 class MiniSWEAgent(SimpleResponsesAPIAgent):
+    ray_enabled = True
     config: MiniSWEAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -105,7 +110,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
     async def run(self, body: MiniSWEAgentRunRequest) -> MiniSWEAgentVerifyResponse:
         async with self.sem:
             model_server_name = self.config.model_server.name
-            global_config_dict = ServerClient.load_from_global_config().global_config_dict
+            global_config_dict = self.server_client.global_config_dict
 
             model_server_config = get_first_server_config_dict(
                 global_config_dict,
@@ -120,8 +125,8 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             workers = 1
             cache_dir_template = self.config.cache_dir_template
             run_golden = self.config.run_golden
-            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
-            dummy_key = "dummy_key"
+            base_url = body.policy_base_url or f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+            api_key = body.policy_api_key or "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
             eval_timeout = self.config.eval_timeout
@@ -175,7 +180,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     workers=workers,
                     output=output_file_dir,
                     model=model_name,
-                    api_key=dummy_key,
+                    api_key=api_key,
                     base_url=base_url,
                     cache_dir_template=cache_dir_template,
                     env=env,

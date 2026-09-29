@@ -133,6 +133,7 @@ over_refusal_detection_simple_agent:
       - name: train
         type: train
         jsonl_fpath: resources_servers/over_refusal_detection/data/train.jsonl
+        license: TBD
       - name: example
         type: example
         jsonl_fpath: resources_servers/over_refusal_detection/data/example.jsonl

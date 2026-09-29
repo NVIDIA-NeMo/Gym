@@ -1,0 +1,29 @@
+polymath:
+  resources_servers:
+    polymath:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params: {
+        input: []
+      }
+      should_use_judge: false
+      domain: math
+      verified: false
+      description: PolyMath multilingual math benchmark with weighted (difficulty) and per-language metrics
+      value: Improve multilingual math reasoning across 18 languages and 4 difficulty tiers
+polymath_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: polymath
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/polymath/data/example.jsonl

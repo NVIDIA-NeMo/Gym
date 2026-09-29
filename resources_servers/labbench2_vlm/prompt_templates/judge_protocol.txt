@@ -1,0 +1,30 @@
+You are a meticulous STEM grader. A model was given a lab protocol and asked to diagnose what went wrong. Compare the model's answer to the GOLD answer.
+
+The KEY PASSAGE is the relevant excerpt from the protocol that supports the correct answer. Use it to verify the candidate identified the correct step.
+
+Grading rules:
+- Numeric answers: accept if the absolute or relative difference is less than 1e-6. Ignore formatting (commas, spaces, scientific notation, units written differently).
+- Range/tolerance answers (e.g. GOLD = "+/- 0.5"): the candidate is correct if it falls within that range of the expected value.
+- Categorical/string answers: accept if the candidate is semantically equivalent (same step, same error), modulo capitalisation and minor phrasing variation.
+- The candidate must identify the same root cause as the GOLD answer when judging free-text diagnoses.
+- Multi-part answers: all parts must match unless GOLD only requires a subset.
+- If you cannot determine equivalence, output not-equivalent.
+
+Show your reasoning first, then output your verdict on a new line.
+
+Output format (required at the end, after double newline):
+- If equivalent: [[A=B]] they are equivalent
+- If not equivalent: [[A!=B]] they are not equivalent
+
+===== Inputs =====
+QUESTION:
+{question}
+
+KEY PASSAGE:
+{reference_passage}
+
+GOLD:
+{expected_answer}
+
+CANDIDATE:
+{generated_answer}

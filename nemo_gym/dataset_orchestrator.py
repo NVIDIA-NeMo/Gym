@@ -15,15 +15,11 @@
 from typing import Union
 
 from nemo_gym.config_types import (
-    DeleteJsonlDatasetGitlabConfig,
-    DownloadJsonlDatasetHuggingFaceConfig,
     UploadJsonlDatasetHuggingFaceConfig,
     UploadJsonlDatasetHuggingFaceMaybeDeleteConfig,
 )
 from nemo_gym.gitlab_utils import delete_model_from_gitlab, is_model_in_gitlab
-from nemo_gym.hf_utils import download_hf_dataset_as_jsonl
 from nemo_gym.hf_utils import upload_jsonl_dataset as upload_jsonl_dataset_to_hf
-from nemo_gym.server_utils import get_global_config_dict
 
 
 def delete_jsonl_dataset_from_gitlab(gitlab_model_name: str) -> None:  # pragma: no cover
@@ -59,31 +55,17 @@ def upload_jsonl_dataset_to_hf_maybe_delete(
         delete_jsonl_dataset_from_gitlab(gitlab_model_name)
 
 
-def upload_jsonl_dataset_to_hf_cli() -> None:  # pragma: no cover
-    global_config = get_global_config_dict()
-    config = UploadJsonlDatasetHuggingFaceMaybeDeleteConfig.model_validate(global_config)
-    upload_jsonl_dataset_to_hf_maybe_delete(config, delete_from_gitlab=config.delete_from_gitlab)
+# Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.dataset`.
+# Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
 
 
-def upload_jsonl_dataset_to_hf_and_delete_gitlab_cli() -> None:  # pragma: no cover
-    global_config = get_global_config_dict()
-    config = UploadJsonlDatasetHuggingFaceConfig.model_validate(global_config)
-    upload_jsonl_dataset_to_hf_maybe_delete(config, delete_from_gitlab=True)
-
-
-def download_jsonl_dataset_from_hf_cli() -> None:  # pragma: no cover
-    global_config = get_global_config_dict()
-    config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(global_config)
-
-    if config.artifact_fpath:
-        print(f"Downloading file '{config.artifact_fpath}' from '{config.repo_id}'...")
-    else:
-        print(f"Downloading '{config.split or 'all'}' split(s) from '{config.repo_id}'...")
-
-    download_hf_dataset_as_jsonl(config)
-
-
-def delete_jsonl_dataset_from_gitlab_cli() -> None:  # pragma: no cover
-    global_config = get_global_config_dict()
-    config = DeleteJsonlDatasetGitlabConfig.model_validate(global_config)
-    delete_jsonl_dataset_from_gitlab(config.dataset_name)
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "upload_jsonl_dataset_to_hf_cli": "nemo_gym.cli.dataset",
+        "upload_jsonl_dataset_to_hf_and_delete_gitlab_cli": "nemo_gym.cli.dataset",
+        "download_jsonl_dataset_from_hf_cli": "nemo_gym.cli.dataset",
+        "delete_jsonl_dataset_from_gitlab_cli": "nemo_gym.cli.dataset",
+    },
+)

@@ -33,6 +33,8 @@ import zlib
 from pathlib import Path
 from typing import Callable, Optional
 
+import orjson
+
 
 # From LiveCodeBench lcb_runner/prompts/code_generation.py — tells the model which code style to use
 _FORMATTING_WITH_STARTER_CODE = (
@@ -58,6 +60,24 @@ def _decode_test_cases(raw) -> list:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return json.loads(pickle.loads(zlib.decompress(base64.b64decode(raw.encode("utf-8")))))
+
+
+def _pack_unit_tests(inputs: list, outputs: list, fn_name):
+    """Store test cases compressed rather than as plaintext JSON.
+
+    LiveCodeBench ships its hidden tests base64+zlib+pickle compressed; decoding
+    them at prepare time and embedding the plaintext in every row made the
+    materialized-inputs file 12 GB, against 4-6 MB for every other benchmark
+    (p50 70 KB, p90 20 MB, max 189 MB per row). That file is read in full and
+    held for the whole run, so it dominated eval-client RAM and slowed every
+    tool that walks rollouts.
+
+    Score-neutral by construction: the verifier decodes these exact bytes back
+    before use, so the tests it runs are identical. See the matching decode in
+    resources_servers/code_gen/app.py.
+    """
+    blob = zlib.compress(json.dumps({"inputs": inputs, "outputs": outputs}).encode("utf-8"), 6)
+    return {"packed": base64.b64encode(blob).decode("ascii"), "fn_name": fn_name}
 
 
 def _add_prompt_fields(row: dict, starter_code: str) -> None:
@@ -124,11 +144,7 @@ def prepare_from_hf_raw(
             "verifier_metadata": {
                 "problem_id": example.get("question_id", ""),
                 "difficulty": example.get("difficulty", "unknown"),
-                "unit_tests": {
-                    "inputs": inputs,
-                    "outputs": outputs,
-                    "fn_name": meta.get("func_name") or None,
-                },
+                "unit_tests": _pack_unit_tests(inputs, outputs, meta.get("func_name") or None),
             },
         }
         _add_prompt_fields_fn(row, example.get("starter_code", ""))
@@ -139,8 +155,8 @@ def prepare_from_hf_raw(
 
 def _write_rows(rows: list, output_path: Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
+    with open(output_path, "wb") as f:
         for row in rows:
-            f.write(json.dumps(row) + "\n")
+            f.write(orjson.dumps(row) + b"\n")
     print(f"Wrote {len(rows)} problems to {output_path}")
     return output_path

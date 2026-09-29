@@ -98,6 +98,7 @@ class AviaryAgentRunRequest(BaseRunRequest):
 
 
 class AviaryAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: AviaryAgentConfig
 
     def update_agent_state(
@@ -165,9 +166,11 @@ class AviaryAgent(SimpleResponsesAPIAgent):
 
                 # Sample action from model
                 try:
+                    # responses() receives the full run request (run() delegates in-process), so the
+                    # correlation id comes straight from the request body rather than a path prefix.
                     raw_model_response = await self.server_client.post(
                         server_name=self.config.model_server.name,
-                        url_path="/v1/responses",
+                        url_path=self.url_path_for_run("/v1/responses", req),
                         json=agent_state,
                         cookies=model_server_cookies,
                     )

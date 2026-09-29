@@ -1,0 +1,5 @@
+# Shared prompt mirroring NeMo Skills' `eval/aai/mcq-10choices` template.
+user: |-
+  Answer the following multiple choice question. The last line of your response should be in the following format: 'Answer: A/B/C/D/E/F/G/H/I/J' (e.g. 'Answer: A').
+
+  {problem}

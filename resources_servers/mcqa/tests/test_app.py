@@ -293,6 +293,82 @@ class TestApp:
         assert result.reward == 1.0
         assert result.extracted_answer == "B"
 
+    async def test_template_metadata_regex_list(self) -> None:
+        """Test that template_metadata can try a list of regexes in order."""
+        server = MCQAResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "Antwort: B", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Question?"}]},
+            response=response,
+            options=[{"A": "optA"}, {"B": "optB"}],
+            expected_answer="B",
+            template_metadata={"output_regex": [r"Answer\s*:\s*([A-Za-z])", r"Antwort\s*:\s*([A-Za-z])"]},
+        )
+
+        result = await server.verify(verify_request)
+        assert result.reward == 1.0
+        assert result.extracted_answer == "B"
+
+    async def test_template_metadata_multilingual_letter_normalization(self) -> None:
+        """Test MMMLU-style localized answer letters normalize to A-D."""
+        server = MCQAResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "الإجابة: ب", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Question?"}]},
+            response=response,
+            options=[{"A": "optA"}, {"B": "optB"}],
+            expected_answer="B",
+            template_metadata={"output_regex": [r"الإجابة:\s*([أ-د])"]},
+        )
+
+        result = await server.verify(verify_request)
+        assert result.reward == 1.0
+        assert result.extracted_answer == "B"
+
     async def test_template_metadata_rightmost_match(self) -> None:
         """Test that rightmost (last) match is used when multiple matches exist"""
         server = MCQAResourcesServer(
@@ -465,7 +541,13 @@ class TestApp:
         assert result.extracted_answer == "B"
 
 
-def _make_verify_request(text: str, expected: str = "B", grading_mode: str = "strict_single_letter_boxed"):
+def _make_verify_request(
+    text: str,
+    expected: str = "B",
+    grading_mode: str = "strict_single_letter_boxed",
+    option_letters: str = "ABCD",
+    template_metadata: dict | None = None,
+):
     """Helper to build a MCQAVerifyRequest with proper schema."""
     response = NeMoGymResponse(
         id="resp_test",
@@ -488,9 +570,10 @@ def _make_verify_request(text: str, expected: str = "B", grading_mode: str = "st
     return MCQAVerifyRequest(
         responses_create_params={"input": [{"role": "user", "content": "Q?"}]},
         response=response,
-        options=[{"A": "opt1"}, {"B": "opt2"}, {"C": "opt3"}, {"D": "opt4"}],
+        options=[{letter: f"opt{letter}"} for letter in option_letters],
         expected_answer=expected,
         grading_mode=grading_mode,
+        template_metadata=template_metadata,
     )
 
 
@@ -577,12 +660,175 @@ class TestGradingModeAnswerColonMD:
         assert result.extracted_answer == "A"
         assert result.reward == 1.0
 
+    async def test_leading_letter_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: B because C is not valid", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    async def test_repeated_letter_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: B/B", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    async def test_wrapped_answers(self) -> None:
+        server = self._make_server()
+        cases = [
+            ("Answer: $D$", "D", "ABCD"),
+            ("Answer: (D)", "D", "ABCD"),
+            (r"\boxed{\text{Answer: G}}", "G", "ABCDEFGHIJ"),
+        ]
+        for text, expected, option_letters in cases:
+            body = _make_verify_request(text=text, expected=expected, option_letters=option_letters)
+            result = await server.verify(body)
+            assert result.extracted_answer == expected, text
+            assert result.reward == 1.0, text
+
+    async def test_unextractable_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: unknown", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_disallowed_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: G", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_ambiguous_answer_lists(self) -> None:
+        server = self._make_server()
+        cases = [
+            ("Answer: A/B/C", "A", "ABCD"),
+            ("Answer: B/I", "B", "ABCDEFGHIJ"),
+            ("**Answer: D/H**", "D", "ABCDEFGHIJ"),
+            ("Answer: A or B", "A", "ABCD"),
+            ("Answer: A and B", "A", "ABCD"),
+            ("Answer: A, B", "A", "ABCD"),
+        ]
+        for text, expected, option_letters in cases:
+            body = _make_verify_request(text=text, expected=expected, option_letters=option_letters)
+            result = await server.verify(body)
+            assert result.extracted_answer is None, text
+            assert result.reward == 0.0, text
+
+    async def test_rightmost_answer_match(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: A\nAnswer: B", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    async def test_invalid_rightmost_answer_fallback(self) -> None:
+        server = self._make_server()
+        for invalid_payload in ["unknown", "G", "A/B/C"]:
+            body = _make_verify_request(text=f"Answer: B\nAnswer: {invalid_payload}", expected="B")
+            result = await server.verify(body)
+            assert result.extracted_answer == "B", invalid_payload
+            assert result.reward == 1.0, invalid_payload
+
     async def test_no_answer_pattern(self) -> None:
         server = self._make_server()
         body = _make_verify_request(text="I think it might be B but I'm not sure", expected="B")
         result = await server.verify(body)
         assert result.extracted_answer is None
         assert result.reward == 0.0
+
+    async def test_answer_prefix_requires_metadata(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="the answer is (C).", expected="C")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_strict_boxed_final_fallback_is_row_scoped(self) -> None:
+        server = self._make_server()
+        without_prefix = _make_verify_request(
+            text=r"\boxed{H}",
+            expected="H",
+            option_letters="ABCDEFGHIJ",
+        )
+        result = await server.verify(without_prefix)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+        with_prefix = _make_verify_request(
+            text=r"\boxed{H}",
+            expected="H",
+            option_letters="ABCDEFGHIJ",
+            template_metadata={
+                "output_regex": r"NEVER_MATCH_([A-Z])",
+                "answer_prefix": "answer is",
+            },
+        )
+        result = await server.verify(with_prefix)
+        assert result.extracted_answer == "H"
+        assert result.reward == 1.0
+
+    async def test_multilingual_closing_phrases(self) -> None:
+        server = self._make_server()
+        cases = [
+            ("The answer is (C).", "answer is", "C"),
+            ("Answer is (D).", "answer is", "D"),
+            ("Die Antwort ist (D).", "Die Antwort ist", "D"),
+            ("La respuesta es (A).", "La respuesta es", "A"),
+            ("La réponse est (B).", "La réponse est", "B"),
+            ("La risposta è (C).", "La risposta è", "C"),
+            ("答えは（C）です。", "答えは", "C"),
+            ("答案是 (F)", "答案是", "F"),
+            ("답은 (G)입니다", "답은", "G"),
+            ("A resposta é (H)", "A resposta é", "H"),
+            ("उत्तर है (I)", "उत्तर है", "I"),
+        ]
+        for text, answer_prefix, expected in cases:
+            body = _make_verify_request(
+                text=text,
+                expected=expected,
+                option_letters="ABCDEFGHIJ",
+                template_metadata={
+                    "output_regex": r"NEVER_MATCH_([A-Z])",
+                    "answer_prefix": answer_prefix,
+                },
+            )
+            result = await server.verify(body)
+            assert result.extracted_answer == expected, text
+            assert result.reward == 1.0, text
+
+    async def test_multilingual_ambiguous_list_rejected(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(
+            text="答えは A/D/E/F です。",
+            expected="A",
+            option_letters="ABCDEFGHIJ",
+            template_metadata={
+                "output_regex": r"NEVER_MATCH_([A-Z])",
+                "answer_prefix": "答えは",
+            },
+        )
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_prox_regex_miss_falls_back_to_payload_parser(self) -> None:
+        """Old spaced Japanese regex misses fullwidth parens; md fallback recovers."""
+        server = self._make_server()
+        body = _make_verify_request(
+            text="段階的に考える。答えは（C）です。",
+            expected="C",
+            option_letters="ABCDEFGHIJ",
+            template_metadata={
+                "output_regex": r"答えは \(?([ABCDEFGHIJ])\)? です",
+                "answer_prefix": "答えは",
+            },
+        )
+        result = await server.verify(body)
+        assert result.extracted_answer == "C"
+        assert result.reward == 1.0
 
 
 class TestComputeMetrics:
@@ -614,3 +860,156 @@ class TestComputeMetrics:
             "pass@2/no_answer": result.agent_metrics["pass@2/no_answer"],
             "mean/reward": result.agent_metrics["mean/reward"],
         }
+
+
+def _make_verify_request_with_options(
+    text: str,
+    options: list[dict[str, str]],
+    expected: str,
+    grading_mode: str = "strict_single_letter_boxed",
+):
+    """Like _make_verify_request but with caller-supplied options (e.g. letters beyond A-D)."""
+    response = NeMoGymResponse(
+        id="resp_test",
+        created_at=0.0,
+        model="dummy",
+        object="response",
+        output=[
+            {
+                "id": "msg_test",
+                "content": [{"annotations": [], "text": text, "type": "output_text"}],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }
+        ],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    )
+    return MCQAVerifyRequest(
+        responses_create_params={"input": [{"role": "user", "content": "Q?"}]},
+        response=response,
+        options=options,
+        expected_answer=expected,
+        grading_mode=grading_mode,
+    )
+
+
+class TestStrictBoxedLatexExtraction:
+    """strict_single_letter_boxed must read the answer letter even when it is wrapped in
+    \\text{} or followed by option text. These are the real rollout formats that used to be
+    scored as no_answer.
+    """
+
+    def _make_server(self, grading_mode="strict_single_letter_boxed"):
+        config = MCQAResourcesServerConfig(
+            host="127.0.0.1",
+            port=12345,
+            entrypoint="app.py",
+            name="mcqa",
+            grading_mode=grading_mode,
+        )
+        return MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    # Options spanning A-J so we can exercise letters E and I from the real rollouts.
+    OPTIONS = [{chr(ord("A") + i): f"option {chr(ord('A') + i)} text"} for i in range(10)]
+
+    async def test_text_wrapped_bare_letter(self) -> None:
+        """\\boxed{\\text{E}} -> E (LaTeX \\text{} wrapper around a bare letter)."""
+        server = self._make_server()
+        body = _make_verify_request_with_options(r"\boxed{\text{E}}", self.OPTIONS, expected="E")
+        result = await server.verify(body)
+        assert result.extracted_answer == "E"
+        assert result.reward == 1.0
+
+    async def test_text_wrapped_letter_with_option_text(self) -> None:
+        """\\boxed{\\text{I: ...}} -> I (letter + option text, both inside the \\text wrapper)."""
+        server = self._make_server()
+        text = r"\boxed{\text{I: NGS can detect both coding and non-coding regions of the genome.}}"
+        body = _make_verify_request_with_options(text, self.OPTIONS, expected="I")
+        result = await server.verify(body)
+        assert result.extracted_answer == "I"
+        assert result.reward == 1.0
+
+    async def test_leading_letter_colon_then_wrapped_text(self) -> None:
+        """\\boxed{E: \\text{...}} -> E (letter outside, trailing colon + wrapped option text)."""
+        server = self._make_server()
+        text = r"\[ \boxed{E: \text{A polygenic risk score can provide a probability.}} \]"
+        body = _make_verify_request_with_options(text, self.OPTIONS, expected="E")
+        result = await server.verify(body)
+        assert result.extracted_answer == "E"
+        assert result.reward == 1.0
+
+    async def test_plain_boxed_letter_unchanged(self) -> None:
+        """\\boxed{B} -> B (existing behavior must be preserved)."""
+        server = self._make_server()
+        body = _make_verify_request(text=r"\boxed{B}", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    async def test_bracketed_letter_unchanged(self) -> None:
+        """\\boxed{ [C] } -> C (existing non-letter padding must still parse)."""
+        server = self._make_server()
+        body = _make_verify_request(text=r"Final: \boxed{ [C] }", expected="C")
+        result = await server.verify(body)
+        assert result.extracted_answer == "C"
+        assert result.reward == 1.0
+
+    async def test_bare_option_text_not_matched_in_strict(self) -> None:
+        """Guard: bare option text with no leading letter label must NOT match in strict mode.
+
+        A sentence-initial capital ("A polygenic ...") must not be mistaken for answer A.
+        Option-text matching is the job of lenient_boxed, not strict.
+        """
+        server = self._make_server()
+        text = r"\boxed{A polygenic risk score can provide a probability.}"
+        body = _make_verify_request_with_options(text, self.OPTIONS, expected="A")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_lenient_boxed_handles_text_wrapper(self) -> None:
+        """lenient_boxed inherits the strict improvement: \\boxed{\\text{E}} -> E."""
+        server = self._make_server(grading_mode="lenient_boxed")
+        body = _make_verify_request_with_options(
+            r"\boxed{\text{E}}", self.OPTIONS, expected="E", grading_mode="lenient_boxed"
+        )
+        result = await server.verify(body)
+        assert result.extracted_answer == "E"
+        assert result.reward == 1.0
+
+    async def test_unbalanced_box_is_no_answer(self) -> None:
+        """A \\boxed{ with no matching closing brace yields no_answer, not a crash."""
+        server = self._make_server()
+        body = _make_verify_request(text=r"\boxed{B", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_last_box_wins_over_thinking_box(self) -> None:
+        """Two letter boxes: the LAST \\boxed{} is the final answer, not the first.
+
+        A chain-of-thought rollout may box a discarded candidate before the real
+        answer; strict mode must read the final box (E), not the earlier one (C).
+        """
+        server = self._make_server()
+        text = r"Candidate is \boxed{C}, but on reflection the answer is \boxed{E}"
+        body = _make_verify_request_with_options(text, self.OPTIONS, expected="E")
+        result = await server.verify(body)
+        assert result.extracted_answer == "E"
+        assert result.reward == 1.0
+
+    async def test_non_letter_thinking_box_does_not_shadow_answer(self) -> None:
+        """A non-letter intermediate box must not block extraction of a later answer box.
+
+        Regression guard: reading only the first box would parse \\text{some idea},
+        find no letter, and return no_answer despite the real \\boxed{E} that follows.
+        """
+        server = self._make_server()
+        text = r"Thinking: \boxed{\text{some idea}}. Final answer: \boxed{E}"
+        body = _make_verify_request_with_options(text, self.OPTIONS, expected="E")
+        result = await server.verify(body)
+        assert result.extracted_answer == "E"
+        assert result.reward == 1.0

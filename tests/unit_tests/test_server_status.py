@@ -12,15 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 from io import StringIO
 from unittest.mock import MagicMock
 
 import requests
 from pytest import MonkeyPatch
 
-from nemo_gym.cli import ServerInstanceDisplayConfig
 from nemo_gym.server_status import StatusCommand
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import ServerClient, ServerInstanceDisplayConfig
 
 
 class TestServerStatus:
@@ -209,7 +209,7 @@ class TestServerStatus:
         first_call = mock_get.call_args_list[0]
         assert first_call[0][0] == "http://127.0.0.1:11000/server_instances"
 
-    def test_discover_servers_head_server_down(self, monkeypatch: MonkeyPatch, capsys) -> None:
+    def test_discover_servers_head_server_down(self, monkeypatch: MonkeyPatch, capsys, caplog) -> None:
         mock_head_config = MagicMock()
         mock_head_config.host = "127.0.0.1"
         mock_head_config.port = 11000
@@ -220,9 +220,11 @@ class TestServerStatus:
         monkeypatch.setattr(requests, "get", mock_get)
 
         cmd = StatusCommand()
-        servers = cmd.discover_servers()
+        with caplog.at_level(logging.WARNING):
+            servers = cmd.discover_servers()
 
         assert len(servers) == 0
-        captured = capsys.readouterr()
-        assert "Could not connect to head server" in captured.out
-        assert "ng_run" in captured.out
+        # The warning goes through logging (stderr), keeping stdout machine-readable for `--json`.
+        assert capsys.readouterr().out == ""
+        assert "Could not connect to head server" in caplog.text
+        assert "gym env start" in caplog.text

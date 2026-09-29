@@ -19,7 +19,7 @@ Downloads GPQA Diamond from HuggingFace and converts to Gym JSONL format
 compatible with the mcqa resource server.
 
 Output is raw data (no prompts baked in). Use prompt_config at rollout time
-to specify the prompt, or ng_materialize_prompts to produce RL-ready data.
+to specify the prompt, or gym dataset render to produce RL-ready data.
 """
 
 import hashlib
@@ -73,6 +73,10 @@ def prepare() -> Path:
         row = {
             "question": example["Question"],
             "options_text": options_text,
+            # `problem` mirrors the field name NeMo Skills' MCQ prompts use
+            # (eval/aai/mcq-Nchoices), so the shared prompt yaml can reference
+            # the canonical `{problem}` placeholder without per-benchmark drift.
+            "problem": f"{example['Question']}\n{options_text}",
             "options": options,
             "expected_answer": correct_letter,
             "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, example["Question"])),

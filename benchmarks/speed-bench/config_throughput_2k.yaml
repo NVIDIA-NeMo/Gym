@@ -1,0 +1,19 @@
+config_paths:
+  - resources_servers/speed_bench/configs/speed_bench.yaml
+
+speed_bench_throughput_2k_resources_server:
+  _inherit_from: speed_bench_resources_server
+
+speed_bench_throughput_2k_simple_agent:
+  _inherit_from: speed_bench_simple_agent
+  responses_api_agents:
+    speed_bench_agent:
+      resources_server:
+        name: speed_bench_throughput_2k_resources_server
+      datasets:
+      - name: speed_bench_throughput_2k
+        type: benchmark
+        jsonl_fpath: benchmarks/speed-bench/data/speed_bench_throughput_2k_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/speed-bench/prepare_throughput_2k.py
+        license: NVIDIA Evaluation Dataset License Agreement

@@ -24,15 +24,16 @@ We use the LiveCodeBench execution code.
 
 ```bash
 # Running the server
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/code_gen/configs/code_gen.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type openai_model \
+    --resources-server code_gen
 
 # Collect rollouts from example problems
-ng_collect_rollouts +agent_name=code_gen_simple_agent \
-    +input_jsonl_fpath=resources_servers/code_gen/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/code_gen/data/example_rollouts.jsonl \
-    +limit=null
+gym eval run --no-serve \
+    --agent code_gen_simple_agent \
+    --input resources_servers/code_gen/data/example.jsonl \
+    --output resources_servers/code_gen/data/example_rollouts.jsonl \
+    --limit null
 ```
 
 ## Licensing information

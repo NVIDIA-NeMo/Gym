@@ -1,32 +1,32 @@
 {
     "name": "example",
     "type": "example",
-    "jsonl_fpath": "resources_servers/structured_outputs/data/example.jsonl",
+    "jsonl_fpath": "resources_servers/structured_outputs/data/structured_outputs_v4_example.jsonl",
     "num_repeats": 1,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
     "license": null,
     "Number of examples": 5,
     "Number of tools": {
-        "Total # non-null values": 0,
-        "Average": 0.0,
-        "Min": 0.0,
-        "Max": 0.0,
-        "Standard deviation": 0.0
+        "Total # non-null values": 5,
+        "Average": 12.4,
+        "Min": 1.0,
+        "Max": 17.0,
+        "Standard deviation": 6.5
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 820.2,
-        "Min": 760.0,
-        "Max": 927.0,
-        "Standard deviation": 82.06
+        "Average": 3258.4,
+        "Min": 2248.0,
+        "Max": 5145.0,
+        "Standard deviation": 1122.75
     },
     "Number of turns": {
         "Total # non-null values": 5,
-        "Average": 1.6,
+        "Average": 1.0,
         "Min": 1.0,
-        "Max": 2.0,
-        "Standard deviation": 0.548
+        "Max": 1.0,
+        "Standard deviation": 0.0
     },
     "Temperature": {
         "Total # non-null values": 0,
@@ -43,7 +43,98 @@
         "unique_count": 1,
         "total_count": 5
     },
-    "schema_fields_count": {
+    "response_mode": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "problem_type": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "schema_repr": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "source_format": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "source_schema_type": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "tool_choice": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "parallel_tool_calls": {
+        "Total # non-null values": 5,
+        "Average": 0.6,
+        "Min": 0.0,
+        "Max": 1.0,
+        "Standard deviation": 0.548
+    },
+    "tool_name": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "tool_schema_mode": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "tool_payload_key": {
+        "unique_count": 2,
+        "total_count": 4
+    },
+    "tool_name_style": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "distractor_style": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "num_turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "num_tools": {
+        "Total # non-null values": 5,
+        "Average": 12.4,
+        "Min": 1.0,
+        "Max": 17.0,
+        "Standard deviation": 6.5
+    },
+    "num_distractors": {
+        "Total # non-null values": 5,
+        "Average": 14.0,
+        "Min": 13.0,
+        "Max": 16.0,
+        "Standard deviation": 1.41
+    },
+    "has_distractors": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "instruction_layout": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "instruction_detail_level": {
+        "unique_count": 2,
+        "total_count": 5
+    },
+    "system_instruction_style": {
+        "unique_count": 2,
+        "total_count": 5
+    },
+    "source_record_id": {
         "unique_count": 5,
         "total_count": 5
     }

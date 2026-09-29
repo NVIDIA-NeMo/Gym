@@ -14,20 +14,25 @@
 # limitations under the License.
 import asyncio
 import json
+import os
 import shutil
 import tempfile
 import time
+from contextlib import ExitStack
 from pathlib import Path
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import responses_api_agents.swe_agents.app as swe_app
 from nemo_gym.config_types import ModelServerRef, OmegaConf
+from nemo_gym.global_config import CACHE_DIR_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.swe_agents.app import (
     ActiveContainerCommand,
@@ -35,6 +40,7 @@ from responses_api_agents.swe_agents.app import (
     BaseDatasetHarnessProcessor,
     ExecuteContainerCommandArgs,
     NVInternalDatasetProcessor,
+    OpenCodeHarnessProcessor,
     OpenHandsHarnessProcessor,
     R2EGymDatasetProcessor,
     RunOpenHandsAgent,
@@ -47,8 +53,24 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchWrapperInstanceConfig,
     SWEBenchWrapperServerConfig,
     SWERebenchDatasetProcessor,
+    _extract_instance_dict,
+    _extract_replay_system_content,
+    _parse_replay_messages,
+    _render_opencode_user_message,
+    _resolve_opencode_workspace_path,
+    file_lock,
     runner_ray_remote,
-    update_metrics,
+    update_and_read_metrics,
+)
+from responses_api_agents.swe_agents.opencode_replay import (
+    build_replay_prefix_row,
+    build_replay_subagent_manifest,
+    completed_tool_turn_cut_indices,
+    extract_responses_task_records,
+    extract_task_spawn_records,
+    merge_replay_subagent_trajectories,
+    parse_replay_subagent_payload,
+    truncate_replay_subagent_payload,
 )
 
 
@@ -61,6 +83,30 @@ def _cleanup_swebench_results():
     yield
     for d in SWE_AGENTS_DIR.glob("swebench_results_*"):
         shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_setup_root(monkeypatch, tmp_path_factory):
+    """Resolve setup trees under a throwaway cache root instead of the machine's.
+
+    `resolve_setup_dir` / `_openhands_setup_target` prefer a pre-staged
+    install-relative `swe_agents/swe_*_setup/` tree while the global `cache_dir`
+    is unset (the pre-`cache_dir` layout). A checkout that has one baked next to
+    the package therefore hijacks every test that builds a processor, and the
+    OpenHands path goes on to run a real `git checkout` of the dummy SHA these
+    tests configure, which fails. Configuring `cache_dir` opts out of that
+    fallback, so resolution takes the cache-root branch these tests assert on
+    regardless of what is staged locally.
+
+    Tests that cover pre-staged resolution itself re-patch
+    `maybe_get_global_config_dict` inside the test body, which shadows this.
+    """
+    cache_root = tmp_path_factory.mktemp("gym_cache")
+    monkeypatch.setattr(
+        swe_app,
+        "maybe_get_global_config_dict",
+        lambda: {CACHE_DIR_KEY_NAME: str(cache_root)},
+    )
 
 
 ########################################
@@ -78,12 +124,31 @@ def _minimal_server_config() -> SWEBenchWrapperConfig:
         swebench_tests_timeout=900,
         model_server=ModelServerRef(type="responses_api_models", name="test_model"),
         concurrency=1,
+        # A full SHA short-circuits _resolve_remote_commit (no repo, no network).
+        agent_framework_commit="deadbeef" * 5,
     )
 
 
 def _create_wrapper(monkeypatch) -> SWEBenchWrapper:
     """Create a SWEBenchWrapper with all setup calls mocked."""
-    monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
+    global_config = OmegaConf.create(
+        {
+            "test_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "host": "test-host",
+                        "port": 12345,
+                        "model": "test-model",
+                    }
+                }
+            }
+        }
+    )
+    monkeypatch.setattr(
+        swe_app,
+        "get_global_config_dict",
+        MagicMock(return_value=global_config),
+    )
     monkeypatch.setattr(BaseDatasetHarnessProcessor, "_run_setup_command", MagicMock(return_value=None))
 
     config = _minimal_server_config()
@@ -102,13 +167,14 @@ def _make_instance_config(tmpdir: str, **overrides) -> SWEBenchWrapperInstanceCo
         port=9003,
         name="test_swe_agent",
         entrypoint="responses_api_agents/swe_agents",
-        agent_framework="swe_agent",
+        agent_framework="openhands",
         container_formatter=["docker://custom/{instance_id}"],
         swebench_tests_timeout=900,
         model_server=ModelServerRef(type="responses_api_models", name="test_model"),
         concurrency=1,
         ng_global_config_dict_str="'{}'",
         model_server_name="test_model",
+        model_server_base_url="http://test-host:12345",
         openhands_setup_dir=Path(tmpdir) / "openhands",
         swebench_setup_dir=Path(tmpdir) / "swebench",
         swebench_multilingual_setup_dir=Path(tmpdir) / "swebench_multilingual",
@@ -143,6 +209,7 @@ def _make_instance_config(tmpdir: str, **overrides) -> SWEBenchWrapperInstanceCo
         inference_params={"temperature": 1.0, "top_p": 1.0},
         agent_run_id="test_run_123",
         instance_dataset_path=persistent_dir / "data.jsonl",
+        agent_instance_dataset_path=persistent_dir / "data_agent.jsonl",
         trajectories_root=persistent_dir / "trajectories" / "django__django-12345",
         prediction_path=persistent_dir / "output.jsonl",
         output_for_eval_mounted_path=base_mounted_dir / "output_for_eval.jsonl",
@@ -210,7 +277,7 @@ class TestSWEBenchWrapperConfig:
         assert config.agent_max_turns == 100
         assert config.swebench_tests_timeout == 30 * 60
         assert config.swebench_agent_timeout == 45 * 60
-        assert config.apptainer_memory_limit_mb == 32 * 1024
+        assert config.apptainer_memory_limit_mb == 64 * 1024
         assert config.command_exec_timeout == 5 * 60
         assert config.concurrency == 256
         assert config.dataset_path is None
@@ -285,6 +352,7 @@ class TestSWEBenchWrapperServerConfig:
         config = SWEBenchWrapperServerConfig(
             ng_global_config_dict_str="'{}'",
             model_server_name="test_model",
+            model_server_base_url="http://test-host:12345",
             openhands_setup_dir=Path("/tmp/openhands"),
             swebench_setup_dir=Path("/tmp/swebench"),
             r2e_gym_setup_dir=Path("/tmp/r2e"),
@@ -356,6 +424,7 @@ class TestSWEBenchVerifyResponse:
         assert "resolved" in fields
         assert "patch_exists" in fields
         assert "instance_config" in fields
+        assert "subagent_trajectories" in fields
 
 
 ########################################
@@ -369,9 +438,7 @@ class TestUpdateMetrics:
             fpath = Path(tmpdir) / "metrics.json"
             fpath.write_text(json.dumps({"a": 1, "b": 2}))
 
-            update_metrics(fpath, {"b": 3, "c": 4})
-
-            result = json.loads(fpath.read_text())
+            result = update_and_read_metrics(fpath, {"b": 3, "c": 4})
             assert result == {"a": 1, "b": 3, "c": 4}
 
     def test_none_values_filtered(self) -> None:
@@ -379,9 +446,8 @@ class TestUpdateMetrics:
             fpath = Path(tmpdir) / "metrics.json"
             fpath.write_text(json.dumps({"a": 1, "b": None}))
 
-            update_metrics(fpath, {"c": None, "d": 5})
+            result = update_and_read_metrics(fpath, {"c": None, "d": 5})
 
-            result = json.loads(fpath.read_text())
             assert result == {"a": 1, "d": 5}
             assert "b" not in result
             assert "c" not in result
@@ -397,6 +463,60 @@ class TestBaseDatasetHarnessProcessor:
         config = _minimal_server_config()
         processor = BaseDatasetHarnessProcessor(config=config)
         assert processor.parent_dir == Path(swe_app.__file__).parent
+
+    def test_setup_root_defaults_to_install_cache_without_config(self) -> None:
+        processor = BaseDatasetHarnessProcessor(config=_minimal_server_config())
+        with patch.object(swe_app, "maybe_get_global_config_dict", return_value=None):
+            assert processor.setup_root == swe_app.CACHE_DIR / "swe_agents"
+
+    def test_setup_root_honors_configured_cache_dir(self) -> None:
+        processor = BaseDatasetHarnessProcessor(config=_minimal_server_config())
+        config_dict = OmegaConf.create({"cache_dir": "/configured/cache"})
+        with patch.object(swe_app, "maybe_get_global_config_dict", return_value=config_dict):
+            assert processor.setup_root == Path("/configured/cache") / "swe_agents"
+
+    def test_resolve_setup_dir_prefers_prestaged_install_tree(self, tmp_path: Path) -> None:
+        processor = BaseDatasetHarnessProcessor(config=_minimal_server_config())
+        cache_root = tmp_path / "cache"
+        legacy_root = tmp_path / "legacy"
+        with (
+            patch.object(
+                BaseDatasetHarnessProcessor, "setup_root", new_callable=lambda: property(lambda self: cache_root)
+            ),
+            patch.object(
+                BaseDatasetHarnessProcessor, "parent_dir", new_callable=lambda: property(lambda self: legacy_root)
+            ),
+            patch.object(swe_app, "maybe_get_global_config_dict", return_value=None),
+        ):
+            # Nothing staged: build under the cache root.
+            assert processor.resolve_setup_dir("swe_x_setup") == cache_root / "swe_x_setup"
+            # At the default cache_dir, a pre-staged install-relative tree wins
+            # while it exists, even if something created the cache-root
+            # directory meanwhile (e.g. a crashed attempt) — resolution stays
+            # stable over time.
+            (legacy_root / "swe_x_setup").mkdir(parents=True)
+            (cache_root / "swe_x_setup").mkdir(parents=True)
+            assert processor.resolve_setup_dir("swe_x_setup") == legacy_root / "swe_x_setup"
+
+    def test_resolve_setup_dir_honors_explicit_cache_dir(self, tmp_path: Path) -> None:
+        # An explicitly configured cache_dir opts out of the pre-staged
+        # fallback: SWE must honor cache_dir=/shared/cache even in an image
+        # that ships legacy trees.
+        processor = BaseDatasetHarnessProcessor(config=_minimal_server_config())
+        cache_root = tmp_path / "cache"
+        legacy_root = tmp_path / "legacy"
+        (legacy_root / "swe_x_setup").mkdir(parents=True)
+        config_dict = OmegaConf.create({"cache_dir": str(cache_root)})
+        with (
+            patch.object(
+                BaseDatasetHarnessProcessor, "setup_root", new_callable=lambda: property(lambda self: cache_root)
+            ),
+            patch.object(
+                BaseDatasetHarnessProcessor, "parent_dir", new_callable=lambda: property(lambda self: legacy_root)
+            ),
+            patch.object(swe_app, "maybe_get_global_config_dict", return_value=config_dict),
+        ):
+            assert processor.resolve_setup_dir("swe_x_setup") == cache_root / "swe_x_setup"
 
     def test_setup_returns_none(self) -> None:
         config = _minimal_server_config()
@@ -433,20 +553,16 @@ class TestBaseDatasetHarnessProcessor:
         with pytest.raises(AssertionError, match="Command failed"):
             processor._run_setup_command("false")
 
-    def test_setup_directory_lock(self) -> None:
-        config = _minimal_server_config()
-        processor = BaseDatasetHarnessProcessor(config=config)
+    def test_file_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             setup_dir = Path(tmpdir) / "target"
             setup_dir.mkdir()
             lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
-            with processor._setup_directory_lock(setup_dir, "test"):
+            with file_lock(setup_dir, "test"):
                 assert lock_path.exists()
             assert not lock_path.exists()
 
-    def test_setup_directory_lock_stale_lock(self) -> None:
-        config = _minimal_server_config()
-        processor = BaseDatasetHarnessProcessor(config=config)
+    def test_file_lock_stale_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             setup_dir = Path(tmpdir) / "target"
             setup_dir.mkdir()
@@ -458,13 +574,98 @@ class TestBaseDatasetHarnessProcessor:
             old_time = time.time() - 7200  # 2 hours ago
             os.utime(lock_path, (old_time, old_time))
 
-            with processor._setup_directory_lock(setup_dir, "test"):
+            with file_lock(setup_dir, "test"):
                 pass  # should break the stale lock
 
 
 ########################################
 # NVInternalDatasetProcessor tests
 ########################################
+
+
+class TestOpenHandsSetupDirResolution:
+    SHA = "deadbeef" * 5
+
+    def _processor(self, commit: str) -> OpenHandsHarnessProcessor:
+        config = _minimal_server_config().model_copy(update={"agent_framework_commit": commit})
+        return OpenHandsHarnessProcessor(config=config)
+
+    def _patched_roots(self, cache_root: Path, legacy_root: Path, config_dict=None) -> ExitStack:
+        stack = ExitStack()
+        stack.enter_context(
+            patch.object(
+                BaseDatasetHarnessProcessor, "setup_root", new_callable=lambda: property(lambda self: cache_root)
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                BaseDatasetHarnessProcessor, "parent_dir", new_callable=lambda: property(lambda self: legacy_root)
+            )
+        )
+        stack.enter_context(patch.object(swe_app, "maybe_get_global_config_dict", return_value=config_dict))
+        return stack
+
+    def _make_valid_legacy_tree(self, legacy_root: Path) -> Path:
+        legacy_setup = legacy_root / "swe_openhands_setup"
+        (legacy_setup / "OpenHands" / ".venv" / "bin").mkdir(parents=True)
+        (legacy_setup / "OpenHands" / ".venv" / "bin" / "python").touch()
+        return legacy_setup
+
+    def test_target_keys_by_repo_identity_and_commit(self, tmp_path: Path) -> None:
+        processor = self._processor(self.SHA)
+        with self._patched_roots(tmp_path / "cache", tmp_path / "legacy"):
+            expected = tmp_path / "cache" / "swe_openhands_setup" / swe_app._repo_slug(None) / self.SHA
+            assert processor._openhands_setup_target(self.SHA) == expected
+
+    def test_valid_prestaged_tree_wins_at_default_cache_dir(self, tmp_path: Path) -> None:
+        processor = self._processor(self.SHA)
+        legacy_setup = self._make_valid_legacy_tree(tmp_path / "legacy")
+        with self._patched_roots(tmp_path / "cache", tmp_path / "legacy"):
+            assert processor._openhands_setup_target(self.SHA) == legacy_setup
+
+    def test_valid_prestaged_tree_ignored_when_cache_dir_configured(self, tmp_path: Path) -> None:
+        # An explicitly configured cache_dir opts out of the compatibility
+        # fallback: the user's choice wins over a pre-staged tree.
+        processor = self._processor(self.SHA)
+        self._make_valid_legacy_tree(tmp_path / "legacy")
+        config_dict = OmegaConf.create({"cache_dir": str(tmp_path / "cache")})
+        with self._patched_roots(tmp_path / "cache", tmp_path / "legacy", config_dict=config_dict):
+            expected = tmp_path / "cache" / "swe_openhands_setup" / swe_app._repo_slug(None) / self.SHA
+            assert processor._openhands_setup_target(self.SHA) == expected
+
+    def test_invalid_prestaged_tree_builds_under_cache_root(self, tmp_path: Path) -> None:
+        # A half-baked pre-staged tree must not be rmtree'd and rebuilt in
+        # place (other nodes may be executing from it): build in the cache.
+        processor = self._processor(self.SHA)
+        (tmp_path / "legacy" / "swe_openhands_setup").mkdir(parents=True)
+        with self._patched_roots(tmp_path / "cache", tmp_path / "legacy"):
+            expected = tmp_path / "cache" / "swe_openhands_setup" / swe_app._repo_slug(None) / self.SHA
+            assert processor._openhands_setup_target(self.SHA) == expected
+
+
+class TestResolveRemoteCommit:
+    def test_full_sha_passes_through_without_network(self) -> None:
+        with patch.object(swe_app, "subprocess_run") as run_mock:
+            assert swe_app._resolve_remote_commit("https://x/repo.git", "DEADBEEF" * 5) == "deadbeef" * 5
+            run_mock.assert_not_called()
+
+    def test_mutable_ref_resolves_via_ls_remote(self) -> None:
+        result = MagicMock()
+        result.stdout = f"{'a1' * 20}\trefs/heads/main\n"
+        with patch.object(swe_app, "subprocess_run", return_value=result) as run_mock:
+            assert swe_app._resolve_remote_commit("https://x/repo.git", "main") == "a1" * 20
+            assert "ls-remote" in run_mock.call_args.args[0]
+
+    def test_non_sha_without_repo_raises(self) -> None:
+        with pytest.raises(ValueError, match="full 40-hex SHA"):
+            swe_app._resolve_remote_commit(None, "HEAD")
+
+    def test_unresolvable_ref_raises(self) -> None:
+        result = MagicMock()
+        result.stdout = ""
+        with patch.object(swe_app, "subprocess_run", return_value=result):
+            with pytest.raises(ValueError, match="could not resolve"):
+                swe_app._resolve_remote_commit("https://x/repo.git", "nonexistent-branch")
 
 
 class TestNVInternalDatasetProcessor:
@@ -685,6 +886,7 @@ class TestSWERebenchDatasetProcessor:
                     "container_formatter": ["/containers/{instance_id}.sif"],
                 },
             )
+            config.eval_private_dir.mkdir(parents=True, exist_ok=True)
             processor = SWERebenchDatasetProcessor(config=config)
             result = processor.get_run_command()
             assert isinstance(result, ExecuteContainerCommandArgs)
@@ -694,7 +896,7 @@ class TestSWERebenchDatasetProcessor:
             assert result.mode == "eval"
 
             # Check that eval metadata files were written
-            eval_meta_dir = config.persistent_dir / "eval_meta"
+            eval_meta_dir = config.eval_private_dir / "eval_meta"
             assert (eval_meta_dir / "expected_passed.json").exists()
             assert (eval_meta_dir / "fail_to_pass.json").exists()
             assert (eval_meta_dir / "pass_to_pass.json").exists()
@@ -720,6 +922,7 @@ class TestSWERebenchDatasetProcessor:
                     "container_formatter": ["/containers/{instance_id}.sif"],
                 },
             )
+            config.eval_private_dir.mkdir(parents=True, exist_ok=True)
             processor = SWERebenchDatasetProcessor(config=config)
             result = processor.get_run_command()
             assert "pytest tests/" in result.command
@@ -759,10 +962,17 @@ class TestSweBenchDatasetProcessor:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _minimal_server_config()
 
-            with patch.object(
-                BaseDatasetHarnessProcessor,
-                "parent_dir",
-                new_callable=lambda: property(lambda self: Path(tmpdir)),
+            with (
+                patch.object(
+                    BaseDatasetHarnessProcessor,
+                    "setup_root",
+                    new_callable=lambda: property(lambda self: Path(tmpdir)),
+                ),
+                patch.object(
+                    BaseDatasetHarnessProcessor,
+                    "_cache_dir_is_default",
+                    return_value=False,
+                ),
             ):
                 setup_dir = Path(tmpdir) / "swe_swebench_setup"
                 setup_dir.mkdir()
@@ -858,7 +1068,27 @@ class TestOpenHandsHarnessProcessor:
             config.persistent_dir.mkdir(parents=True, exist_ok=True)
             processor = OpenHandsHarnessProcessor(config=config)
             processor.get_run_command()
-            assert "LOG_LEVEL=DEBUG" in self._read_agent_script(config)
+            script = self._read_agent_script(config)
+            assert "LOG_LEVEL=DEBUG" in script
+            assert "NEMO_GYM_MODEL_SERVER_BASE_URL" not in script
+            assert "nemo_gym_capture_overlay" not in script
+
+    def test_get_run_command_routes_capture_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(
+                tmpdir,
+                model_server_base_url="http://test-host:12345/ng-rollout/rollout-1/training-token-capture",
+                install_openhands_capture_overlay=True,
+            )
+            processor = OpenHandsHarnessProcessor(config=config)
+            processor.get_run_command()
+            script = self._read_agent_script(config)
+            assert "http://test-host:12345/ng-rollout/rollout-1/training-token-capture/v1" in script
+            assert (
+                "NEMO_GYM_MODEL_SERVER_BASE_URL="
+                "http://test-host:12345/ng-rollout/rollout-1/training-token-capture" in script
+            )
+            assert "export PYTHONPATH=/nemo_gym_capture_overlay:${PYTHONPATH:-}" in script
 
     def test_get_run_command_nv_internal(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -929,6 +1159,753 @@ class TestOpenHandsHarnessProcessor:
             processor = OpenHandsHarnessProcessor(config=config)
             processor.get_run_command()
             assert "CAMEL_CASE_TOOL_NAMES=true" in self._read_agent_script(config)
+
+    def test_get_run_command_replay_messages_pins_system_prompt_and_arg(self) -> None:
+        replay_messages = [
+            {"role": "system", "content": "REPLAY-SYSTEM-PROMPT"},
+            {"role": "user", "content": "Fix bug"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "execute_bash", "arguments": "{}"}}
+                ],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(
+                tmpdir,
+                # Should be overridden unconditionally by the replay's own system message.
+                resolved_system_prompt_template="/path/to/agent_prompt_override_system.j2",
+                problem_info={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": "{}",
+                    "container_formatter": ["docker://custom/{instance_id}"],
+                    "replay_messages": json.dumps(replay_messages),
+                },
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenHandsHarnessProcessor(config=config)
+            processor.get_run_command()
+
+            replay_path = config.persistent_dir / "replay_messages.json"
+            assert json.loads(replay_path.read_text()) == replay_messages
+
+            sp_path = config.persistent_dir / "replay_system_prompt.j2"
+            assert sp_path.read_text() == "REPLAY-SYSTEM-PROMPT"
+            assert config.resolved_system_prompt_template == str(sp_path)
+
+            script = self._read_agent_script(config)
+            assert "replay_messages.json" in script
+
+    def test_get_run_command_no_replay_messages_omits_replay_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenHandsHarnessProcessor(config=config)
+            processor.get_run_command()
+            assert not (config.persistent_dir / "replay_messages.json").exists()
+            assert "replay_messages.json" not in self._read_agent_script(config)
+
+
+########################################
+# Workspace path + user-message resolver tests
+########################################
+
+
+class TestResolveOpencodeWorkspacePath:
+    def _info(self, dataset_name, instance_dict=None):
+        return {
+            "dataset_name": dataset_name,
+            "instance_dict": json.dumps(instance_dict or {}),
+        }
+
+    def test_default_swebench(self):
+        assert (
+            _resolve_opencode_workspace_path(
+                self._info("princeton-nlp/SWE-bench_Verified", {"repo": "django/django", "version": "4.2"})
+            )
+            == "/testbed"
+        )
+
+    def test_swebench_live_uses_instance_id(self):
+        assert (
+            _resolve_opencode_workspace_path(self._info("SWE-bench-Live", {"instance_id": "django__django-12345"}))
+            == "/testbed"
+        )
+
+    def test_nv_internal_1(self):
+        assert _resolve_opencode_workspace_path(self._info("nv-internal-1")) == "/app"
+
+    def test_swe_bench_ext(self):
+        assert _resolve_opencode_workspace_path(self._info("swe-bench-ext")) == "/workspace/repo"
+
+    def test_swe_rebench_v2_uses_repo_name(self):
+        assert _resolve_opencode_workspace_path(self._info("SWE-rebench-V2", {"repo": "owner/myrepo"})) == "/myrepo"
+
+    def test_swe_rebench_v2_no_slash_in_repo(self):
+        assert _resolve_opencode_workspace_path(self._info("SWE-rebench-V2", {"repo": "myrepo"})) == "/myrepo"
+
+    def test_r2e_gym(self):
+        assert _resolve_opencode_workspace_path(self._info("R2E-Gym")) == "/testbed"
+
+    def test_swe_gym(self):
+        assert _resolve_opencode_workspace_path(self._info("SWE-Gym")) == "/testbed"
+
+    def test_invalid_instance_dict_falls_back_safely(self):
+        # Bad JSON shouldn't crash; the resolver just sees an empty instance dict.
+        info = {"dataset_name": "princeton-nlp/SWE-bench_Verified", "instance_dict": "not json"}
+        assert _resolve_opencode_workspace_path(info) == "/testbed"
+
+
+class TestRenderOpencodeUserMessage:
+    def test_default_includes_problem_and_workspace(self):
+        msg = _render_opencode_user_message({"problem_statement": "MY PROBLEM"}, "/workspace/foo__1.0")
+        assert "MY PROBLEM" in msg
+        assert "/workspace/foo__1.0" in msg
+        assert "<issue_description>" in msg
+
+    def test_override_template_used(self, tmp_path):
+        tpl = tmp_path / "user.txt"
+        tpl.write_text("HEAD\nworkspace={workspace_path}\nissue={problem_statement}\nTAIL")
+        msg = _render_opencode_user_message({"problem_statement": "P"}, "/testbed", template_override_path=str(tpl))
+        assert msg == "HEAD\nworkspace=/testbed\nissue=P\nTAIL"
+
+    def test_override_missing_falls_back(self, tmp_path):
+        msg = _render_opencode_user_message(
+            {"problem_statement": "P"}, "/testbed", template_override_path=str(tmp_path / "nope")
+        )
+        # Should not raise; should produce default output.
+        assert "<issue_description>" in msg
+        assert "/testbed" in msg
+
+    def test_override_with_unknown_brace_falls_back(self, tmp_path):
+        # Template author included an unknown slot; we tolerate it by falling back.
+        tpl = tmp_path / "user.txt"
+        tpl.write_text("{unknown_slot}")
+        msg = _render_opencode_user_message({"problem_statement": "P"}, "/testbed", template_override_path=str(tpl))
+        assert "<issue_description>" in msg
+
+
+########################################
+# OpenCodeHarnessProcessor tests
+########################################
+
+
+class TestOpenCodeHarnessProcessor:
+    """Cover the new opencode harness path. Uses the same _make_instance_config
+    helper as the openhands tests; only the agent_framework + opencode_setup_dir
+    fields differ."""
+
+    def _opencode_config(self, tmpdir, **overrides) -> SWEBenchWrapperInstanceConfig:
+        opencode_setup_dir = Path(tmpdir) / "opencode_setup"
+        opencode_setup_dir.mkdir(parents=True, exist_ok=True)
+        return _make_instance_config(
+            tmpdir,
+            agent_framework="opencode",
+            opencode_setup_dir=opencode_setup_dir,
+            agent_framework_repo="https://example.invalid/opencode.git",
+            agent_framework_commit="deadbeef",
+            **overrides,
+        )
+
+    def _read_agent_script(self, config) -> str:
+        return (config.persistent_dir / f"agent_script_{config.agent_run_id}.sh").read_text()
+
+    @pytest.fixture
+    def _stub_model_server_lookup(self, monkeypatch):
+        """Stub get_first_server_config_dict so we don't need a live gym head server."""
+
+        def _fake(_global, name):
+            assert name == "test_model"
+            return type("Cfg", (), {"host": "test-host", "port": 12345, "model": "test-model"})()
+
+        monkeypatch.setattr(swe_app, "get_first_server_config_dict", _fake)
+        monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
+        return _fake
+
+    def test_get_run_command_writes_script(self, _stub_model_server_lookup) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenCodeHarnessProcessor(config=config)
+            result = processor.get_run_command()
+
+            assert isinstance(result, ExecuteContainerCommandArgs)
+            assert result.mode == "agent"
+            assert "timeout" in result.command  # wrapped with `timeout --signal=TERM`
+
+            script = self._read_agent_script(config)
+            # Bun runtime + opencode dir mount points must be on PATH.
+            assert "/opencode_setup/bun/bin" in script
+            assert "/opencode_setup/opencode" in script
+            # Hits the in-tree run_infer.sh.
+            assert "evaluation/benchmarks/swe_bench/scripts/run_infer.sh" in script
+            # Resolved gym envs.
+            assert "NEMO_GYM_MODEL_SERVER_NAME=test_model" in script
+            assert "NEMO_GYM_MODEL_SERVER_BASE_URL=" in script
+            assert "http://test-host:12345" in script
+            # Per-instance args propagated.
+            assert config.problem_info["instance_id"] in script
+            assert "--max-turns" not in script  # max_turns is positional
+            assert str(config.agent_max_turns) in script
+
+    def test_get_run_command_routes_capture_when_enabled(
+        self,
+        _stub_model_server_lookup,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(
+                tmpdir,
+                model_server_base_url="http://test-host:12345/ng-rollout/rollout-1/training-token-capture",
+            )
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+            script = self._read_agent_script(config)
+            assert "http://test-host:12345/ng-rollout/rollout-1/training-token-capture" in script
+
+    def test_get_run_command_subagents_disabled_by_default(self, _stub_model_server_lookup) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+            script = self._read_agent_script(config)
+            assert "ENABLE_SUBAGENTS=0" in script
+
+    def test_get_run_command_subagents_enabled(self, _stub_model_server_lookup) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(tmpdir, opencode_subagents_enabled=True)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+            script = self._read_agent_script(config)
+            assert "ENABLE_SUBAGENTS=1" in script
+
+    def test_get_run_command_does_not_export_removed_legacy_envs(self, _stub_model_server_lookup) -> None:
+        """Opencode path no longer wires DIVERSIFY/CAMEL_CASE/NG_OPENCODE_LOG_LEVEL —
+        bench/cli.ts and language-model.ts don't honor them."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(
+                tmpdir, resolved_diversify_tool_names=True, resolved_camel_case_tool_names=True
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+            script = self._read_agent_script(config)
+            assert "DIVERSIFY_TOOL_NAMES" not in script
+            assert "CAMEL_CASE_TOOL_NAMES" not in script
+            assert "NG_OPENCODE_LOG_LEVEL" not in script
+
+    def test_get_run_command_propagates_prompt_overrides(self, _stub_model_server_lookup, tmp_path) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            user_template_path = tmp_path / "user_template.txt"
+            user_template_path.write_text(
+                "OVERRIDE-USER-TEMPLATE\nworkspace={workspace_path}\nproblem={problem_statement}\n"
+            )
+            config = self._opencode_config(
+                tmpdir,
+                resolved_user_prompt_template=str(user_template_path),
+                resolved_system_prompt_template="/host/system.txt",
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenCodeHarnessProcessor(config=config)
+            processor.get_run_command()
+            script = self._read_agent_script(config)
+            # The pre-rendered user message file is always mounted; the system
+            # override lands at a fixed path in the SIF when configured.
+            assert "/opencode_setup/opencode/user_message.txt" in script
+            assert "/opencode_setup/opencode/system_prompt.txt" in script
+
+            # The user-message file should contain the rendered override (not the default).
+            user_msg_file = config.persistent_dir / f"user_message_{config.agent_run_id}.txt"
+            rendered = user_msg_file.read_text()
+            assert "OVERRIDE-USER-TEMPLATE" in rendered
+            # workspace_path comes from the dataset resolver (default SWE-bench → /testbed)
+            assert "workspace=/testbed" in rendered
+            assert "problem=Fix bug" in rendered
+
+    def test_get_run_command_default_user_message_is_workspace_aware(self, _stub_model_server_lookup) -> None:
+        """Default user message includes the resolved workspace path + problem."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenCodeHarnessProcessor(config=config)
+            processor.get_run_command()
+            user_msg_file = config.persistent_dir / f"user_message_{config.agent_run_id}.txt"
+            rendered = user_msg_file.read_text()
+            assert "<issue_description>" in rendered
+            assert "Fix bug" in rendered
+            # default SWE-bench dataset → /testbed
+            assert "/testbed" in rendered
+
+    def test_get_run_command_search_path_targets_opencode_dir(self, _stub_model_server_lookup) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenCodeHarnessProcessor(config=config)
+            result = processor.get_run_command()
+            # gym globs `expected_file_pattern` post-run; must point under the
+            # opencode setup dir, not the openhands one.
+            assert str(config.opencode_setup_dir) in result.expected_file_pattern
+            assert "output.jsonl" in result.expected_file_pattern
+
+    def test_get_run_command_requires_opencode_setup_dir(self, _stub_model_server_lookup) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(tmpdir)
+            config.opencode_setup_dir = None  # type: ignore[assignment]
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            with pytest.raises(AssertionError, match="opencode setup directory"):
+                OpenCodeHarnessProcessor(config=config).get_run_command()
+
+    def test_get_run_command_replay_messages_pins_system_prompt_and_arg(self, _stub_model_server_lookup) -> None:
+        replay_messages = [
+            {"role": "system", "content": "REPLAY-SYSTEM-PROMPT"},
+            {"role": "user", "content": "Fix bug"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(
+                tmpdir,
+                # Should be overridden unconditionally by the replay's own system message.
+                resolved_system_prompt_template="/path/to/agent_prompt_override_system.txt",
+                problem_info={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": "{}",
+                    "container_formatter": ["docker://custom/{instance_id}"],
+                    "replay_messages": json.dumps(replay_messages),
+                },
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenCodeHarnessProcessor(config=config)
+            processor.get_run_command()
+
+            replay_path = config.persistent_dir / "replay_messages.json"
+            assert json.loads(replay_path.read_text()) == replay_messages
+
+            sp_path = config.persistent_dir / "replay_system_prompt.txt"
+            assert sp_path.read_text() == "REPLAY-SYSTEM-PROMPT"
+            assert config.resolved_system_prompt_template == str(sp_path)
+
+            script = self._read_agent_script(config)
+            assert "replay_messages.json" in script
+            # Positional arg ordering: system prompt (#12) must precede the
+            # replay path (#13) so run_infer.sh's shift index stays aligned.
+            assert script.index("/opencode_setup/opencode/system_prompt.txt") < script.index("replay_messages.json")
+
+    def test_get_run_command_no_replay_messages_omits_replay_file(self, _stub_model_server_lookup) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+            assert not (config.persistent_dir / "replay_messages.json").exists()
+            assert "replay_messages.json" not in self._read_agent_script(config)
+
+    def test_get_run_command_mounts_subagent_manifest_and_enables_task_tool(self, _stub_model_server_lookup) -> None:
+        replay_messages = [{"role": "user", "content": "Fix bug"}]
+        replay_subagents = {
+            "version": 1,
+            "root_session_id": "recorded_root",
+            "sessions": [
+                {
+                    "session_id": "recorded_child",
+                    "parent_session_id": "recorded_root",
+                    "spawn_call_id": "call_child",
+                    "spawn_index": 0,
+                    "messages": [{"role": "user", "content": "Inspect parser"}],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(
+                tmpdir,
+                problem_info={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": "{}",
+                    "container_formatter": ["docker://custom/{instance_id}"],
+                    "replay_messages": json.dumps(replay_messages),
+                    "replay_subagent_manifest": json.dumps(replay_subagents),
+                },
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+
+            manifest_path = config.persistent_dir / "replay_subagents.json"
+            assert json.loads(manifest_path.read_text()) == replay_subagents
+            script = self._read_agent_script(config)
+            assert "ENABLE_SUBAGENTS=1" in script
+            assert "replay_subagents.json" in script
+            assert script.index("replay_messages.json") < script.index("replay_subagents.json")
+
+
+########################################
+# _extract_instance_dict tests
+########################################
+
+
+class TestExtractInstanceDict:
+    def test_returns_dict_passthrough(self):
+        d = {"instance_id": "x", "base_commit": "abc"}
+        assert _extract_instance_dict({"instance_dict": d}) == d
+
+    def test_parses_json_string(self):
+        d = {"instance_id": "x", "base_commit": "abc"}
+        assert _extract_instance_dict({"instance_dict": json.dumps(d)}) == d
+
+    def test_returns_empty_on_invalid_json(self):
+        assert _extract_instance_dict({"instance_dict": "{not json"}) == {}
+
+    def test_returns_empty_when_missing(self):
+        assert _extract_instance_dict({}) == {}
+
+    def test_returns_empty_for_non_string_non_dict(self):
+        assert _extract_instance_dict({"instance_dict": 123}) == {}
+        assert _extract_instance_dict({"instance_dict": None}) == {}
+        assert _extract_instance_dict({"instance_dict": ["x"]}) == {}
+
+
+########################################
+# Replay-message helper tests (shared by OpenHands + opencode harnesses)
+########################################
+
+
+class TestParseReplayMessages:
+    def test_parses_json_string(self):
+        messages = [{"role": "system", "content": "hi"}]
+        assert _parse_replay_messages({"replay_messages": json.dumps(messages)}) == messages
+
+    def test_passes_through_list(self):
+        messages = [{"role": "user", "content": "hi"}]
+        assert _parse_replay_messages({"replay_messages": messages}) == messages
+
+    def test_returns_none_on_invalid_json(self):
+        assert _parse_replay_messages({"replay_messages": "{not json"}) is None
+
+    def test_returns_none_when_missing(self):
+        assert _parse_replay_messages({}) is None
+
+
+class TestExtractReplaySystemContent:
+    def test_finds_first_system_message(self):
+        messages = [
+            {"role": "system", "content": "SYS-1"},
+            {"role": "system", "content": "SYS-2"},
+        ]
+        assert _extract_replay_system_content(messages) == "SYS-1"
+
+    def test_skips_non_system_and_empty_content(self):
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": "   "},
+            {"role": "system", "content": "SYS-REAL"},
+        ]
+        assert _extract_replay_system_content(messages) == "SYS-REAL"
+
+    def test_returns_none_when_no_system_message(self):
+        assert _extract_replay_system_content([{"role": "user", "content": "hi"}]) is None
+
+
+########################################
+# _maybe_build_replay_messages tests
+########################################
+
+
+class TestMaybeBuildReplayMessages:
+    _TRAJECTORY_INPUT = [
+        {"type": "message", "role": "system", "content": "sys"},
+        {"type": "message", "role": "user", "content": "Fix bug"},
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "bash",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "ok",
+        },
+    ]
+
+    def _body(self, input_items) -> NeMoGymResponseCreateParamsNonStreaming:
+        return NeMoGymResponseCreateParamsNonStreaming(model="test-model", input=input_items)
+
+    def test_returns_none_for_plain_seed_input(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        body = self._body([{"type": "message", "role": "user", "content": "Fix bug"}])
+        assert wrapper._maybe_build_replay_messages(body) is None
+
+    def test_builds_replay_messages_for_openhands(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        wrapper.config.agent_framework = "openhands"
+        body = self._body(self._TRAJECTORY_INPUT)
+        result = wrapper._maybe_build_replay_messages(body)
+        assert result is not None
+        messages = json.loads(result)
+        assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in messages)
+
+    def test_builds_replay_messages_for_opencode(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        wrapper.config.agent_framework = "opencode"
+        body = self._body(self._TRAJECTORY_INPUT)
+        result = wrapper._maybe_build_replay_messages(body)
+        assert result is not None
+        messages = json.loads(result)
+        assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in messages)
+
+
+########################################
+# Per-session host-copy + trajectory extractor tests
+########################################
+
+
+def _write_completion(path: Path, *, session_id, parent_session_id, turn, content_text="hello", **metadata):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "messages": [{"role": "user", "content": "Fix bug"}],
+                "response": {"choices": [{"message": {"role": "assistant", "content": content_text}}]},
+                "provider_specific_fields": {"prompt_token_ids": [1, 2, 3]},
+                "kwargs": {"tools": [{"name": "edit"}]},
+                "session_id": session_id,
+                "parent_session_id": parent_session_id,
+                "turn": turn,
+                "timestamp": 1.0,
+                **metadata,
+            }
+        )
+    )
+
+
+class TestOpencodeMultiSessionCopy:
+    """`_openhands_dir_copy_from_host` must keep latest-per-session, not just one
+    global latest, when the opencode bench writes session-tagged JSONs."""
+
+    def _agent(self, tmpdir) -> RunOpenHandsAgent:
+        opencode_setup_dir = Path(tmpdir) / "opencode_setup"
+        opencode_setup_dir.mkdir(parents=True, exist_ok=True)
+        cfg = _make_instance_config(
+            tmpdir,
+            agent_framework="opencode",
+            opencode_setup_dir=opencode_setup_dir,
+            agent_framework_repo="https://example.invalid/opencode.git",
+            agent_framework_commit="deadbeef",
+        )
+        return RunOpenHandsAgent(config=cfg)
+
+    def _eval_dir(self, agent: RunOpenHandsAgent) -> Path:
+        eval_dir = Path(agent.config.opencode_setup_dir) / "opencode" / agent.config.eval_dir_in_openhands
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        return eval_dir
+
+    def test_copies_latest_per_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._agent(tmpdir)
+            eval_dir = self._eval_dir(agent)
+            traj_root = agent.config.trajectories_root
+            traj_root.mkdir(parents=True, exist_ok=True)
+
+            inst = agent.config.problem_info["instance_id"]
+            comp_root = eval_dir / inst / "bench_run" / "llm_completions" / inst
+            # main session: two turns (turn 0 older, turn 1 newer)
+            _write_completion(comp_root / "m-0.json", session_id="ses_main", parent_session_id=None, turn=0)
+            _write_completion(comp_root / "m-1.json", session_id="ses_main", parent_session_id=None, turn=1)
+            # subagent A: one turn
+            _write_completion(comp_root / "a-0.json", session_id="ses_a", parent_session_id="ses_main", turn=0)
+            # subagent B: two turns
+            _write_completion(comp_root / "b-0.json", session_id="ses_b", parent_session_id="ses_main", turn=0)
+            _write_completion(comp_root / "b-1.json", session_id="ses_b", parent_session_id="ses_main", turn=1)
+
+            # Bump mtimes: latest = m-1, a-0, b-1.
+            now = time.time()
+            for name, off in [
+                ("m-0.json", 100),
+                ("m-1.json", 10),
+                ("a-0.json", 50),
+                ("b-0.json", 80),
+                ("b-1.json", 5),
+            ]:
+                p = comp_root / name
+                os.utime(p, (now - off, now - off))
+
+            # Create an output.jsonl so the copy path returns normally.
+            (eval_dir / "output.jsonl").write_text("{}\n")
+            agent.config.prediction_path.parent.mkdir(parents=True, exist_ok=True)
+            agent._openhands_dir_copy_from_host(output_file_path=str(eval_dir / "output.jsonl"))
+
+            copied = sorted((traj_root / "llm_completions" / inst).glob("*.json"))
+            # 3 unique sessions → 3 files copied (latest from each).
+            names = {p.name for p in copied}
+            assert names == {"m-1.json", "a-0.json", "b-1.json"}
+
+    def test_falls_back_to_single_latest_when_files_untagged(self) -> None:
+        """Openhands-style files (no session_id) bucket under "main" → one copy."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._agent(tmpdir)
+            eval_dir = self._eval_dir(agent)
+            traj_root = agent.config.trajectories_root
+            traj_root.mkdir(parents=True, exist_ok=True)
+            inst = agent.config.problem_info["instance_id"]
+
+            comp_root = eval_dir / inst / "a" / "b" / "llm_completions" / inst
+            comp_root.mkdir(parents=True)
+            (comp_root / "old.json").write_text(
+                json.dumps({"messages": [], "response": {"choices": [{"message": {}}]}})
+            )
+            (comp_root / "new.json").write_text(
+                json.dumps({"messages": [], "response": {"choices": [{"message": {}}]}})
+            )
+            now = time.time()
+            os.utime(comp_root / "old.json", (now - 100, now - 100))
+            os.utime(comp_root / "new.json", (now - 1, now - 1))
+
+            (eval_dir / "output.jsonl").write_text("{}\n")
+            agent.config.prediction_path.parent.mkdir(parents=True, exist_ok=True)
+            agent._openhands_dir_copy_from_host(output_file_path=str(eval_dir / "output.jsonl"))
+
+            copied = sorted((traj_root / "llm_completions" / inst).glob("*.json"))
+            assert [p.name for p in copied] == ["new.json"]
+
+
+class TestGetOpenhandsTrajectoryFromCompletions:
+    def _wrapper(self, tmpdir) -> SWEBenchWrapper:
+        # Use the same fixture pattern as TestSWEBenchWrapper if present; we
+        # only need the method, not a fully booted server, so use a stub
+        # subclass that skips post-init.
+        class _Stub(SWEBenchWrapper):
+            def model_post_init(self, *_args, **_kwargs):
+                return None
+
+        return _Stub.model_construct()
+
+    def test_prefers_main_session_when_tagged(self, tmp_path) -> None:
+        inst = "demo-1"
+        comp_dir = tmp_path / inst / "llm_completions" / inst
+        _write_completion(
+            comp_dir / "sub.json", session_id="ses_sub", parent_session_id="ses_main", turn=5, content_text="SUBAGENT"
+        )
+        _write_completion(
+            comp_dir / "main.json", session_id="ses_main", parent_session_id=None, turn=2, content_text="MAIN"
+        )
+
+        w = self._wrapper(tmp_path)
+        messages, tools, _, _ = w.get_openhands_trajectory_from_completions(tmp_path, inst)
+        # The final assistant message of the main session ("MAIN") should ride
+        # along; the subagent's content should NOT be in the returned messages.
+        joined = json.dumps(messages)
+        assert "MAIN" in joined
+        assert "SUBAGENT" not in joined
+        assert tools == [{"name": "edit"}]
+
+    def test_falls_back_to_last_file_for_untagged(self, tmp_path) -> None:
+        inst = "demo-2"
+        comp_dir = tmp_path / inst / "llm_completions" / inst
+        comp_dir.mkdir(parents=True)
+        # Two openhands-style files, no session_id field.
+        for name, content in [("00.json", "OLD"), ("01.json", "LAST")]:
+            (comp_dir / name).write_text(
+                json.dumps(
+                    {
+                        "messages": [{"role": "user", "content": "x"}],
+                        "response": {"choices": [{"message": {"content": content}}]},
+                        "kwargs": {"tools": []},
+                    }
+                )
+            )
+        w = self._wrapper(tmp_path)
+        messages, _, _, _ = w.get_openhands_trajectory_from_completions(tmp_path, inst)
+        assert any("LAST" in json.dumps(m) for m in messages)
+
+    def test_returns_empty_when_dir_missing(self, tmp_path) -> None:
+        w = self._wrapper(tmp_path)
+        msgs, tools, _, _ = w.get_openhands_trajectory_from_completions(tmp_path, "no-such-instance")
+        assert msgs == [] and tools == []
+
+
+class TestGetAllSessionTrajectories:
+    def _wrapper(self, _tmp) -> SWEBenchWrapper:
+        class _Stub(SWEBenchWrapper):
+            def model_post_init(self, *_args, **_kwargs):
+                return None
+
+        return _Stub.model_construct()
+
+    def test_returns_one_entry_per_session(self, tmp_path) -> None:
+        inst = "multi"
+        comp_dir = tmp_path / inst / "llm_completions" / inst
+        _write_completion(comp_dir / "m.json", session_id="ses_main", parent_session_id=None, turn=3)
+        _write_completion(comp_dir / "a.json", session_id="ses_a", parent_session_id="ses_main", turn=1)
+        _write_completion(comp_dir / "b.json", session_id="ses_b", parent_session_id="ses_main", turn=7)
+
+        w = self._wrapper(tmp_path)
+        out = w.get_all_session_trajectories_from_completions(tmp_path, inst)
+        ids = {entry["session_id"] for entry in out}
+        assert ids == {"ses_main", "ses_a", "ses_b"}
+        # Each entry has messages + tools + parent linkage.
+        for entry in out:
+            assert "messages" in entry and "tools" in entry
+            if entry["session_id"] == "ses_main":
+                assert entry["parent_session_id"] is None
+            else:
+                assert entry["parent_session_id"] == "ses_main"
+
+    def test_returns_empty_when_files_have_no_session_id(self, tmp_path) -> None:
+        inst = "untagged"
+        comp_dir = tmp_path / inst / "llm_completions" / inst
+        comp_dir.mkdir(parents=True)
+        (comp_dir / "00.json").write_text(
+            json.dumps({"messages": [], "response": {"choices": [{"message": {}}]}, "kwargs": {"tools": []}})
+        )
+        w = self._wrapper(tmp_path)
+        assert w.get_all_session_trajectories_from_completions(tmp_path, inst) == []
+
+    def test_preserves_replay_linkage_and_global_order_metadata(self, tmp_path) -> None:
+        inst = "replayed"
+        comp_dir = tmp_path / inst / "llm_completions" / inst
+        _write_completion(
+            comp_dir / "child.json",
+            session_id="live_child",
+            parent_session_id="live_root",
+            turn=2,
+            recorded_session_id="recorded_child",
+            recorded_parent_session_id="recorded_root",
+            spawn_call_id="call_child",
+            spawn_index=1,
+            subagent_type="explore",
+            replay_prefix_message_count=7,
+            global_turn=12,
+            session_start_global_turn=8,
+        )
+
+        out = self._wrapper(tmp_path).get_all_session_trajectories_from_completions(tmp_path, inst)
+        for key, value in {
+            "recorded_session_id": "recorded_child",
+            "recorded_parent_session_id": "recorded_root",
+            "spawn_call_id": "call_child",
+            "spawn_index": 1,
+            "subagent_type": "explore",
+            "replay_prefix_message_count": 7,
+            "global_turn": 12,
+            "session_start_global_turn": 8,
+        }.items():
+            assert out[0][key] == value
+
+    def test_returns_empty_when_dir_missing(self, tmp_path) -> None:
+        w = self._wrapper(tmp_path)
+        assert w.get_all_session_trajectories_from_completions(tmp_path, "nope") == []
 
 
 ########################################
@@ -1137,7 +2114,7 @@ class TestRunOpenHandsAgent:
                 timeout=10,
             )
             active = await agent._start_container_command(cmd, "bash -c 'exit 1'")
-            with pytest.raises(AssertionError, match="Command failed with return code"):
+            with pytest.raises(RuntimeError, match="Command failed with return code"):
                 await agent._finish_container_command(active, cmd)
 
     @pytest.mark.asyncio
@@ -1321,8 +2298,8 @@ class TestSWEBenchWrapperFindContainer:
     def test_swe_rebench_dataset(self, monkeypatch) -> None:
         wrapper = self._create_wrapper_for_find(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
-            # SWE-rebench: owner__repo-123 -> owner-repo:123, then looks for owner-repo:123-*.sif
-            container_file = Path(tmpdir) / "owner-repo:123-abc.sif"
+            # SWE-rebench fuzzy match: glob {instance_id}*.sif against the directory
+            container_file = Path(tmpdir) / "owner__repo-123-abc.sif"
             container_file.touch()
 
             data_point = {
@@ -1382,7 +2359,7 @@ class TestSWEBenchWrapperBuildApptainerCommand:
     def test_basic_command(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
-            params = _make_instance_config(tmpdir)
+            params = _make_instance_config(tmpdir, install_openhands_capture_overlay=True)
             params.persistent_dir.mkdir(parents=True, exist_ok=True)
             (params.persistent_dir / "container_scripts").mkdir(parents=True, exist_ok=True)
 
@@ -1403,6 +2380,7 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             assert "apptainer exec" in result
             assert "--writable-tmpfs" in result
             assert params.container in result
+            assert f"src={swe_app.OPENHANDS_CAPTURE_OVERLAY_DIR},dst=/nemo_gym_capture_overlay,ro" in result
 
     def test_eval_mode_swebench_mounts(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
@@ -1425,6 +2403,9 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             assert "/swebench_setup" in result
 
     def test_memory_limit(self, monkeypatch) -> None:
+        # No cgroups in the enroot sandbox, so the memory limit is enforced by
+        # the gym-side RSS watchdog (_memory_watchdog), not a static ulimit
+        # baked into the apptainer command.
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
             params = _make_instance_config(tmpdir, apptainer_memory_limit_mb=16384)
@@ -1442,7 +2423,7 @@ class TestSWEBenchWrapperBuildApptainerCommand:
                 timeout=300,
             )
             result = wrapper._build_apptainer_command(params, cmd_args)
-            assert "ulimit -v" in result
+            assert "ulimit -v" not in result
 
     def test_nv_internal_eval_mounts(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
@@ -1615,7 +2596,7 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
             }
             (completions_dir / "001_completion.json").write_text(json.dumps(completion_data))
 
-            messages, tools = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
+            messages, tools, _, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
             assert len(messages) == 3  # system, user, assistant
             assert messages[2]["role"] == "assistant"
             assert messages[2]["prompt_token_ids"] == [1, 2]
@@ -1624,7 +2605,7 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
     def test_no_completions_dir(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
-            messages, tools = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), "nonexistent")
+            messages, tools, _, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), "nonexistent")
             assert messages == []
             assert tools == []
 
@@ -1635,7 +2616,7 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
             completions_dir = Path(tmpdir) / instance_id / "llm_completions" / instance_id
             completions_dir.mkdir(parents=True)
 
-            messages, tools = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
+            messages, tools, _, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
             assert messages == []
             assert tools == []
 
@@ -1662,7 +2643,7 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
             }
             (completions_dir / "001_completion.json").write_text(json.dumps(completion_data))
 
-            messages, tools = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
+            messages, tools, _, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
             assert len(messages) == 1  # only user, assistant not appended
 
 
@@ -1705,6 +2686,64 @@ class TestSWEBenchWrapperSetupParams:
             assert params.eval_command is not None
             assert params.agent_command is not None
             assert params.metrics_fpath.exists()
+
+    def test_token_capture_flag_rides_setup_params(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            container_file = Path(tmpdir) / "django__django-12345.sif"
+            container_file.touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            body = NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                temperature=1.0,
+                top_p=1.0,
+                metadata={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": json.dumps({"repo": "django/django"}),
+                },
+            )
+
+            monkeypatch.setattr(type(wrapper), "_token_id_capture_enabled", lambda self: True)
+            with rollout_context("rollout-1"):
+                params, _ = wrapper._setup_params(body)
+
+            assert params.install_openhands_capture_overlay is True
+            assert params.model_server_base_url.endswith("/ng-rollout/rollout-1/training-token-capture")
+            # The sandboxed agent reaches the model through the capture-prefixed URL.
+            assert "/training-token-capture/" in params.agent_script
+
+    def test_setup_params_raises_when_capture_enabled_without_rollout_id(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            container_file = Path(tmpdir) / "django__django-12345.sif"
+            container_file.touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            body = NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                temperature=1.0,
+                top_p=1.0,
+                metadata={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": json.dumps({"repo": "django/django"}),
+                },
+            )
+
+            monkeypatch.setattr(type(wrapper), "_token_id_capture_enabled", lambda self: True)
+            # No rollout_context: the request carries no rollout id.
+            with pytest.raises(RuntimeError, match="no rollout id"):
+                wrapper._setup_params(body)
 
     def test_setup_params_nv_internal(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
@@ -1854,7 +2893,8 @@ class TestSWEBenchWrapperResponses:
             )
 
             with patch.object(wrapper, "_inner_responses", new_callable=AsyncMock, return_value=mock_response):
-                result = await wrapper.responses(body)
+                with rollout_context("rollout-1"):
+                    result = await wrapper.responses(body)
                 assert result.id == "swebench-django__django-12345"
 
     @pytest.mark.asyncio
@@ -1889,13 +2929,22 @@ class TestSWEBenchWrapperResponses:
                 side_effect=RuntimeError("test error"),
             ):
                 with pytest.raises(RuntimeError, match="test error"):
-                    await wrapper.responses(body)
+                    with rollout_context("rollout-1"):
+                        await wrapper.responses(body)
 
 
 class TestSWEBenchWrapperRun:
     @pytest.mark.asyncio
     async def test_run_resolved(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
+        subagents = [
+            {
+                "session_id": "child",
+                "parent_session_id": "root",
+                "messages": [{"role": "user", "content": "inspect"}],
+                "tools": [],
+            }
+        ]
 
         mock_response = NeMoGymResponse(
             id="swebench-test",
@@ -1910,6 +2959,7 @@ class TestSWEBenchWrapperRun:
                 "input": "[]",
                 "metrics": json.dumps({"resolved": True, "patch_exists": True}),
                 "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
+                "subagent_trajectories": json.dumps(subagents),
             },
         )
 
@@ -1934,6 +2984,8 @@ class TestSWEBenchWrapperRun:
             result = await wrapper.run(body)
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 1.0
+            assert result.subagent_trajectories == subagents
+            assert json.loads(result.responses_create_params.metadata["subagent_trajectories"]) == subagents
 
     @pytest.mark.asyncio
     async def test_run_not_resolved(self, monkeypatch) -> None:
@@ -2008,3 +3060,359 @@ class TestLoadRebenchLogParsers:
 
             mod = _load_rebench_log_parsers(rebench_dir)
             assert "lib_test" in mod.NAME_TO_PARSER
+
+
+########################################
+# opencode replay manifest / prefix-row / merge tests
+# (migrated from may_test_opencode_replay.py)
+########################################
+
+
+def _task_call(call_id: str, prompt: str, subagent_type: str = "general") -> dict:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": "task",
+            "arguments": json.dumps(
+                {
+                    "description": prompt,
+                    "prompt": prompt,
+                    "subagent_type": subagent_type,
+                }
+            ),
+        },
+    }
+
+
+def _task_result(call_id: str, session_id: str) -> dict:
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": f"task_id: {session_id} (for resuming)\n\n<task_result>done</task_result>",
+    }
+
+
+def _responses_task_call(call_id: str, prompt: str, task_id: Optional[str] = None) -> dict:
+    arguments = {"description": prompt, "prompt": prompt, "subagent_type": "general"}
+    if task_id is not None:
+        arguments["task_id"] = task_id
+    return {
+        "type": "function_call",
+        "name": "task",
+        "call_id": call_id,
+        "arguments": json.dumps(arguments),
+    }
+
+
+def _responses_task_result(call_id: str, session_id: str) -> dict:
+    return {
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": f"task_id: {session_id} (for resuming)\n\n<task_result>done</task_result>",
+    }
+
+
+def test_extract_task_spawns_uses_parent_message_and_tool_order() -> None:
+    messages = [
+        {"role": "user", "content": "root"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [_task_call("call_a", "A"), _task_call("call_b", "B", "explore")],
+        },
+        # Tool results can finish in the opposite order.
+        _task_result("call_b", "session_b"),
+        _task_result("call_a", "session_a"),
+    ]
+
+    spawns = extract_task_spawn_records(messages)
+    assert [(spawn["spawn_call_id"], spawn["spawn_index"]) for spawn in spawns] == [
+        ("call_a", 0),
+        ("call_b", 1),
+    ]
+    assert [spawn["child_session_id"] for spawn in spawns] == ["session_a", "session_b"]
+
+
+def test_responses_task_records_and_cut_preserve_parallel_call_order() -> None:
+    items = [
+        {"type": "reasoning", "summary": []},
+        _responses_task_call("call_a", "A"),
+        _responses_task_call("call_b", "B"),
+        # Results deliberately finish in the opposite order.
+        _responses_task_result("call_b", "session_b"),
+        _responses_task_result("call_a", "session_a"),
+        {"type": "function_call", "name": "read", "call_id": "call_read", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_read", "output": "content"},
+    ]
+
+    records = extract_responses_task_records(items)
+    assert [(record["spawn_call_id"], record["child_session_id"]) for record in records] == [
+        ("call_a", "session_a"),
+        ("call_b", "session_b"),
+    ]
+    assert completed_tool_turn_cut_indices(items, require_task=True) == [4]
+    assert completed_tool_turn_cut_indices(items) == [4, 6]
+
+
+def test_truncate_payload_keeps_only_completed_child_invocations_and_nested_branches() -> None:
+    child_messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "first result"},
+        {"role": "user", "content": "resume"},
+        {"role": "assistant", "content": None, "tool_calls": [_task_call("call_nested", "nested")]},
+        _task_result("call_nested", "session_nested"),
+        {"role": "assistant", "content": "resume result"},
+    ]
+    payload = {
+        "root_session_id": "session_root",
+        "sessions": [
+            {
+                "session_id": "session_nested",
+                "parent_session_id": "session_child",
+                "messages": [{"role": "user", "content": "nested"}, {"role": "assistant", "content": "done"}],
+            },
+            {
+                "session_id": "session_child",
+                "parent_session_id": "session_root",
+                "messages": child_messages,
+            },
+        ],
+    }
+    first_call = extract_responses_task_records(
+        [_responses_task_call("call_child", "first"), _responses_task_result("call_child", "session_child")]
+    )
+    first_prefix = truncate_replay_subagent_payload(first_call, payload)
+    assert first_prefix is not None
+    assert [session["session_id"] for session in first_prefix["sessions"]] == ["session_child"]
+    assert first_prefix["sessions"][0]["messages"] == child_messages[:3]
+
+    resumed_calls = extract_responses_task_records(
+        [
+            _responses_task_call("call_child", "first"),
+            _responses_task_result("call_child", "session_child"),
+            _responses_task_call("call_resume", "resume", task_id="session_child"),
+            _responses_task_result("call_resume", "session_child"),
+        ]
+    )
+    resumed_prefix = truncate_replay_subagent_payload(resumed_calls, payload)
+    assert resumed_prefix is not None
+    assert [session["session_id"] for session in resumed_prefix["sessions"]] == [
+        "session_child",
+        "session_nested",
+    ]
+    assert resumed_prefix["sessions"][0]["messages"] == child_messages
+
+
+def test_build_prefix_row_moves_legacy_subagents_into_request_metadata() -> None:
+    row = {
+        "responses_create_params": {
+            "input": [{"role": "user", "content": "root"}],
+            "metadata": {"instance_id": "example"},
+        },
+        "response": {
+            "output": [
+                _responses_task_call("call_a", "A"),
+                _responses_task_call("call_b", "B"),
+                _responses_task_result("call_b", "session_b"),
+                _responses_task_result("call_a", "session_a"),
+                {"type": "message", "role": "assistant", "content": "later"},
+            ]
+        },
+        # Metadata order intentionally differs from parent task-call order.
+        "subagent_trajectories": [
+            {
+                "session_id": "session_b",
+                "parent_session_id": "session_root",
+                "messages": [{"role": "user", "content": "B"}, {"role": "assistant", "content": "b"}],
+            },
+            {
+                "session_id": "session_a",
+                "parent_session_id": "session_root",
+                "messages": [{"role": "user", "content": "A"}, {"role": "assistant", "content": "a"}],
+            },
+        ],
+        "reward": 1.0,
+    }
+
+    prefix = build_replay_prefix_row(row, source_line=96)
+    assert set(prefix) == {"responses_create_params", "replay_provenance"}
+    assert prefix["replay_provenance"] == {
+        "cut_output_index": 3,
+        "source_line": 96,
+        "strategy": "first-task-batch",
+    }
+    assert len(prefix["responses_create_params"]["input"]) == 5
+    payload = json.loads(prefix["responses_create_params"]["metadata"]["subagent_trajectories"])
+    assert [session["session_id"] for session in payload["sessions"]] == ["session_a", "session_b"]
+
+
+def test_build_manifest_links_parallel_children_by_task_call_not_metadata_order() -> None:
+    main_messages = [
+        {"role": "user", "content": "root"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [_task_call("call_a", "A"), _task_call("call_b", "B", "explore")],
+        },
+        _task_result("call_a", "session_a"),
+        _task_result("call_b", "session_b"),
+    ]
+    payload = {
+        # Deliberately reverse the metadata array relative to task-call order.
+        "sessions": [
+            {
+                "session_id": "session_b",
+                "parent_session_id": "session_root",
+                "messages": [{"role": "user", "content": "B"}, {"role": "assistant", "content": "b"}],
+            },
+            {
+                "session_id": "session_a",
+                "parent_session_id": "session_root",
+                "messages": [{"role": "user", "content": "A"}, {"role": "assistant", "content": "a"}],
+            },
+        ]
+    }
+
+    manifest = build_replay_subagent_manifest(main_messages, payload)
+    assert manifest is not None
+    assert manifest["root_session_id"] == "session_root"
+    assert [session["session_id"] for session in manifest["sessions"]] == ["session_a", "session_b"]
+    by_id = {session["session_id"]: session for session in manifest["sessions"]}
+    assert (by_id["session_a"]["spawn_call_id"], by_id["session_a"]["spawn_index"]) == ("call_a", 0)
+    assert (
+        by_id["session_b"]["spawn_call_id"],
+        by_id["session_b"]["spawn_index"],
+        by_id["session_b"]["subagent_type"],
+    ) == ("call_b", 1, "explore")
+
+
+def test_build_manifest_links_nested_child_in_its_parent_messages() -> None:
+    main_messages = [
+        {"role": "user", "content": "root"},
+        {"role": "assistant", "content": None, "tool_calls": [_task_call("call_child", "child")]},
+        _task_result("call_child", "session_child"),
+    ]
+    child_messages = [
+        {"role": "user", "content": "child"},
+        {"role": "assistant", "content": None, "tool_calls": [_task_call("call_nested", "nested", "explore")]},
+        _task_result("call_nested", "session_nested"),
+    ]
+    manifest = build_replay_subagent_manifest(
+        main_messages,
+        {
+            "sessions": [
+                {
+                    "session_id": "session_nested",
+                    "parent_session_id": "session_child",
+                    "messages": [{"role": "user", "content": "nested"}],
+                },
+                {
+                    "session_id": "session_child",
+                    "parent_session_id": "session_root",
+                    "messages": child_messages,
+                },
+            ]
+        },
+    )
+
+    assert manifest is not None
+    assert [session["session_id"] for session in manifest["sessions"]] == ["session_child", "session_nested"]
+    by_id = {session["session_id"]: session for session in manifest["sessions"]}
+    assert by_id["session_child"]["spawn_call_id"] == "call_child"
+    assert by_id["session_nested"]["spawn_call_id"] == "call_nested"
+    assert by_id["session_nested"]["parent_session_id"] == "session_child"
+
+
+def test_build_manifest_falls_back_to_unique_prompt_when_task_result_is_missing() -> None:
+    main_messages = [
+        {"role": "user", "content": "root"},
+        {"role": "assistant", "content": None, "tool_calls": [_task_call("call_interrupted", "child")]},
+    ]
+    manifest = build_replay_subagent_manifest(
+        main_messages,
+        {
+            "sessions": [
+                {
+                    "session_id": "session_child",
+                    "parent_session_id": "session_root",
+                    "messages": [{"role": "user", "content": "child"}],
+                }
+            ]
+        },
+    )
+    assert manifest is not None
+    assert manifest["sessions"][0]["spawn_call_id"] == "call_interrupted"
+
+
+def test_parse_payload_accepts_legacy_json_list() -> None:
+    sessions = [{"session_id": "child"}]
+    assert parse_replay_subagent_payload({"subagent_trajectories": json.dumps(sessions)}) == {
+        "version": 1,
+        "sessions": sessions,
+    }
+
+
+def test_merge_carries_original_prefix_and_appends_only_live_continuation() -> None:
+    original = {
+        "version": 1,
+        "root_session_id": "recorded_root",
+        "sessions": [
+            {
+                "session_id": "recorded_child",
+                "parent_session_id": "recorded_root",
+                "spawn_call_id": "call_child",
+                "spawn_index": 0,
+                "messages": [
+                    {"role": "user", "content": "child"},
+                    {"role": "assistant", "content": "recorded"},
+                ],
+            }
+        ],
+    }
+    captured = [
+        {
+            "session_id": "live_child",
+            "parent_session_id": "live_root",
+            "recorded_session_id": "recorded_child",
+            "replay_prefix_message_count": 2,
+            "messages": [
+                {"role": "user", "content": "child"},
+                {"role": "assistant", "content": "recorded"},
+                {"role": "assistant", "content": "live continuation"},
+            ],
+            "tools": [{"name": "read"}],
+        }
+    ]
+
+    merged = merge_replay_subagent_trajectories(original, captured)
+    assert len(merged) == 1
+    assert merged[0]["session_id"] == "recorded_child"
+    assert merged[0]["live_session_id"] == "live_child"
+    assert [message["content"] for message in merged[0]["messages"]] == [
+        "child",
+        "recorded",
+        "live continuation",
+    ]
+
+
+def test_merge_reparents_a_new_live_child_to_the_stable_recorded_root() -> None:
+    manifest = {
+        "version": 1,
+        "root_session_id": "recorded_root",
+        "sessions": [],
+    }
+    captured = [
+        {
+            "session_id": "new_live_child",
+            "parent_session_id": "live_root",
+            "recorded_parent_session_id": "recorded_root",
+            "spawn_call_id": "new_call",
+            "spawn_index": 2,
+            "messages": [{"role": "user", "content": "new work"}],
+        }
+    ]
+
+    merged = merge_replay_subagent_trajectories(manifest, captured)
+    assert merged[0]["parent_session_id"] == "recorded_root"

@@ -1,0 +1,634 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import asyncio
+import shutil
+import subprocess
+from pathlib import Path
+from shlex import quote
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from fastapi import Request
+from fastapi.testclient import TestClient
+from pytest import MonkeyPatch
+
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from resources_servers.swebench_pro.app import (
+    SWEBenchProInstanceRequest,
+    SWEBenchProResourcesServer,
+    SWEBenchProResourcesServerConfig,
+    SWEBenchProSeedSessionRequest,
+    _attempt_budget,
+    _budget_spent,
+)
+from resources_servers.swebench_pro.verification import VerificationResult
+
+
+def request_body() -> dict:
+    return {
+        "repo": "example/repo",
+        "instance_id": "instance_example",
+        "base_commit": "abc123",
+        "patch": "gold patch",
+        "test_patch": "",
+        "problem_statement": "Fix it",
+        "fail_to_pass": '["new_test"]',
+        "pass_to_pass": '["old_test"]',
+        "before_repo_set_cmd": "",
+        "selected_test_files_to_run": '["tests"]',
+        "dockerhub_tag": "example-tag",
+        "run_script": "#!/bin/bash\nexit 0\n",
+        "parser_script": "print('{}')\n",
+        "responses_create_params": {"input": []},
+        "response": {
+            "output": [],
+            "id": "",
+            "created_at": 0,
+            "model": "",
+            "object": "response",
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        },
+    }
+
+
+def make_server(
+    *,
+    golden: bool,
+    apply_anti_cheating: bool = True,
+    **overrides: object,
+) -> SWEBenchProResourcesServer:
+    config = SWEBenchProResourcesServerConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="swebench_pro_resources_server",
+        sandbox_provider="test",
+        sandbox_config={},
+        is_verifying_golden_patch=golden,
+        apply_anti_cheating=apply_anti_cheating,
+        prefetch_go_modules=True,
+        **overrides,
+    )
+    return SWEBenchProResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def test_golden_patch_verify_and_cleanup(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(golden=True)
+    sandbox = SimpleNamespace(stop=AsyncMock())
+    create = AsyncMock(return_value=sandbox)
+    verify = AsyncMock(
+        return_value=VerificationResult(
+            completed=True,
+            resolved=True,
+            patch_applied=True,
+            test_results={
+                "tests": [{"name": "new_test", "status": "PASSED"}, {"name": "old_test", "status": "PASSED"}]
+            },
+        )
+    )
+    monkeypatch.setattr(server, "_create_sandbox", create)
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    assert response.json()["reward"] == 1.0
+    assert response.json()["evaluation_completed"] is True
+    assert response.json()["model_patch"] == "gold patch"
+    assert response.json()["resolved"] is True
+    assert verify.await_args.kwargs["inputs"].prefetch_go_modules is True
+    create.assert_awaited_once()
+    sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "tests,completed",
+    [
+        ([{"name": "new_test", "status": "FAILED"}, {"name": "old_test", "status": "PASSED"}], True),
+        ([{"name": "new_test", "status": "FAILED"}], True),
+        ([{"name": "old_test", "status": "PASSED"}], True),
+        ([], True),  # Pass-only parsers and compilation failures can produce empty reports.
+    ],
+)
+def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch, tests: list[dict], completed: bool) -> None:
+    server = make_server(golden=False, inconclusive_verification_retries=0)
+    sandbox = SimpleNamespace(stop=AsyncMock())
+    monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="agent patch"))
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+    verify = AsyncMock(
+        return_value=VerificationResult(
+            completed=True,
+            resolved=False,
+            patch_applied=True,
+            test_results={"tests": tests},
+            test_output="test run output",
+        )
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    assert response.json()["model_patch"] == "agent patch"
+    assert response.json()["reward"] == 0.0
+    assert response.json()["test_output"] == "test run output"
+    assert response.json()["evaluation_completed"] is completed
+    assert bool(response.json()["error"]) is not completed
+    verify.assert_awaited_once()
+
+
+def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(golden=True)
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=RuntimeError("sandbox unavailable")))
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    assert response.json()["evaluation_completed"] is False
+    assert response.json()["reward"] == 0.0
+    assert "sandbox unavailable" in response.json()["error"]
+
+
+def test_schema_rejects_missing_evaluator_asset() -> None:
+    body = request_body()
+    del body["parser_script"]
+
+    response = TestClient(make_server(golden=True).setup_webserver()).post("/verify", json=body)
+
+    assert response.status_code == 422
+
+
+def test_image_digest_avoids_case_sensitive_tag_rewriting() -> None:
+    body = request_body()
+    body["image_digest"] = "sha256:abc123"
+    instance = SWEBenchProInstanceRequest.model_validate(body)
+
+    assert make_server(golden=True)._image(instance) == "docker.io/jefzda/sweap-images@sha256:abc123"
+
+
+@pytest.mark.asyncio
+async def test_seed_session_applies_shared_anti_cheat_setup(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        upload=AsyncMock(),
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    body = SWEBenchProSeedSessionRequest.model_validate(request_body())
+
+    response = await server.seed_session(request, body)
+
+    expected_script = Path(__file__).parents[2] / "swebench" / "anti_cheat_setup.sh"
+    sandbox.upload.assert_awaited_once_with(expected_script, "/app/anti_cheat_setup.sh")
+    # anti-cheat first, then normalize the container, then snapshot its untracked files
+    assert sandbox.exec.await_count == 3
+    assert sandbox.exec.await_args_list[0].args[0] == (
+        "git reset --hard && WORKING_DIRECTORY=/app bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"
+    )
+    assert sandbox.exec.await_args_list[0].kwargs["timeout_s"] == 600
+    assert response.sandbox_handle == "sandbox-id"
+    assert server._session_id_to_sandbox["session"] is sandbox
+
+
+@pytest.mark.asyncio
+async def test_seed_session_can_skip_anti_cheat_setup(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(golden=False, apply_anti_cheating=False)
+    sandbox = SimpleNamespace(
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        upload=AsyncMock(),
+        exec=AsyncMock(),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    body = SWEBenchProSeedSessionRequest.model_validate(request_body())
+
+    await server.seed_session(request, body)
+
+    sandbox.upload.assert_not_awaited()
+    # anti-cheat is skipped, but the container is still normalized and snapshotted
+    assert sandbox.exec.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_extract_model_patch_includes_commits_and_untracked_files() -> None:
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="complete patch", stderr="")),
+        download=AsyncMock(side_effect=lambda remote, local: local.write_text("complete patch")),
+        stop=AsyncMock(),
+    )
+    server._session_id_to_sandbox["session"] = sandbox
+
+    patch = await server._extract_model_patch("session", "abc123")
+
+    assert patch == "complete patch"
+    command = sandbox.exec.await_args_list[0].args[0]
+    assert "git -C /app add -N ." in command
+    assert "git -C /app --no-pager diff abc123" in command
+    sandbox.stop.assert_awaited_once()
+    assert "session" not in server._session_id_to_sandbox
+
+
+@pytest.mark.asyncio
+async def test_extract_model_patch_drops_untracked_files_the_image_already_shipped() -> None:
+    """Artifacts the task image ships are not the agent's work and break `git apply`."""
+    artifact = (
+        "diff --git a/dump.rdb b/dump.rdb\nnew file mode 100644\n--- /dev/null\n+++ b/dump.rdb\n@@ -0,0 +1 @@\n+x\n"
+    )
+    fix = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n"
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout=artifact + fix, stderr="")),
+        download=AsyncMock(side_effect=lambda remote, local: local.write_text(artifact + fix)),
+        stop=AsyncMock(),
+    )
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_pristine_untracked["session"] = frozenset({"dump.rdb"})
+
+    patch = await server._extract_model_patch("session", "abc123")
+
+    assert patch == fix
+    assert "session" not in server._session_id_to_pristine_untracked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during", ["git", "download", "cleanup"])
+async def test_extract_model_patch_cleans_up_after_cancellation(cancel_during: str) -> None:
+    entered = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def wait_for_cancellation(stage: str) -> None:
+        if stage == cancel_during:
+            entered.set()
+            await blocked.wait()
+
+    async def exec_command(command: str) -> SimpleNamespace:
+        await wait_for_cancellation("cleanup" if command.startswith("rm -f -- ") else "git")
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    async def download(remote: str, local: Path) -> None:
+        local.write_text("complete patch\n")
+        await wait_for_cancellation("download")
+
+    sandbox = SimpleNamespace(exec=exec_command, download=AsyncMock(side_effect=download), stop=AsyncMock())
+    server = make_server(golden=False)
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_pristine_untracked["session"] = frozenset({"pristine.txt"})
+    task = asyncio.create_task(server._extract_model_patch("session", "abc123"))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert task.cancelled()
+    sandbox.stop.assert_awaited_once()
+    assert "session" not in server._session_id_to_sandbox
+    assert "session" not in server._session_id_to_pristine_untracked
+    if sandbox.download.await_count:
+        assert not sandbox.download.await_args.args[1].parent.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
+@pytest.mark.parametrize("new_content", [b"new\n", b"new\r\n", b"new"])
+async def test_extract_model_patch_survives_lossy_exec_logs(tmp_path: Path, new_content: bytes) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str, **kwargs: object) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True, **kwargs)
+
+    git("init")
+    git("config", "core.autocrlf", "false")
+    git("config", "apply.whitespace", "nowarn")
+    (repo / "tracked.txt").write_bytes(b"old\n")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "base")
+    base_commit = git("rev-parse", "HEAD").stdout.decode().strip()
+    (repo / "tracked.txt").write_bytes(new_content)
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-am", "agent commit")
+    (repo / "untracked.txt").write_bytes(b"created\n")
+    git("add", "-N", ".")
+    expected = git("diff", base_commit).stdout
+    # Reproduce the provider's line-log transport dropping the terminal LF.
+    with pytest.raises(subprocess.CalledProcessError, match="returned non-zero"):
+        git("apply", "--numstat", "-", input=expected.rstrip(b"\n"))
+
+    async def exec_command(command: str) -> SimpleNamespace:
+        result = subprocess.run(command.replace("/app", quote(str(repo))), shell=True, capture_output=True)
+        return SimpleNamespace(
+            return_code=result.returncode,
+            stdout=result.stdout.decode().rstrip("\n"),
+            stderr=result.stderr.decode(),
+        )
+
+    sandbox = SimpleNamespace(
+        exec=exec_command,
+        download=AsyncMock(side_effect=shutil.copyfile),
+        stop=AsyncMock(),
+    )
+    server = make_server(golden=False)
+    server._session_id_to_sandbox["session"] = sandbox
+    patch = await server._extract_model_patch("session", base_commit)
+
+    assert patch.encode() == expected
+    remote_patch, local_patch = sandbox.download.await_args.args
+    assert not Path(remote_patch).exists()
+    assert not local_patch.exists()
+    git("reset", "--hard", base_commit)
+    git("clean", "-fd")
+    git("apply", "-", input=patch.encode())
+    assert (repo / "tracked.txt").read_bytes() == new_content
+    assert (repo / "untracked.txt").read_bytes() == b"created\n"
+    sandbox.stop.assert_awaited_once()
+    assert "session" not in server._session_id_to_sandbox
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["git", "download"])
+async def test_extract_model_patch_cleans_up_after_failure(failure: str) -> None:
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(return_code=1 if failure == "git" else 0, stdout="", stderr="git diff failed"),
+                SimpleNamespace(return_code=0, stdout="", stderr=""),
+            ]
+        ),
+        download=AsyncMock(side_effect=RuntimeError("download failed")),
+        stop=AsyncMock(),
+    )
+    server = make_server(golden=False)
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_pristine_untracked["session"] = frozenset()
+
+    with pytest.raises(RuntimeError, match="git diff failed" if failure == "git" else "download failed"):
+        await server._extract_model_patch("session", "abc123")
+
+    assert sandbox.exec.await_args.args[0].startswith("rm -f -- /tmp/nemo-gym-swebench-pro-")
+    if failure == "git":
+        sandbox.download.assert_not_awaited()
+    else:
+        assert not sandbox.download.await_args.args[1].parent.exists()
+    sandbox.stop.assert_awaited_once()
+    assert "session" not in server._session_id_to_sandbox
+    assert "session" not in server._session_id_to_pristine_untracked
+
+
+@pytest.mark.asyncio
+async def test_seed_session_normalizes_the_agent_environment_before_snapshotting() -> None:
+    """The agent runs the same suites, so it needs the same repaired container the verifier gets.
+
+    Order matters: normalization deletes stale files, so the untracked baseline must be
+    taken afterwards or it records paths that no longer exist.
+    """
+    server = make_server(golden=False)
+    calls: list[str] = []
+
+    async def record(command, *args, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    sandbox = SimpleNamespace(
+        exec=record,
+        upload=AsyncMock(),
+        stop=AsyncMock(),
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+    )
+    server._create_sandbox = AsyncMock(return_value=sandbox)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+
+    await server.seed_session(request, SWEBenchProSeedSessionRequest.model_validate(request_body()))
+
+    normalize = next(i for i, c in enumerate(calls) if "Xvfb" in c)
+    snapshot = next(i for i, c in enumerate(calls) if "ls-files --others" in c)
+    assert normalize < snapshot, calls
+
+
+@pytest.mark.asyncio
+async def test_seed_session_survives_a_container_it_cannot_normalize() -> None:
+    server = make_server(golden=False)
+
+    async def boom(command, *args, **kwargs):
+        if "Xvfb" in command:
+            raise RuntimeError("exec failed")
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    sandbox = SimpleNamespace(
+        exec=boom,
+        upload=AsyncMock(),
+        stop=AsyncMock(),
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+    )
+    server._create_sandbox = AsyncMock(return_value=sandbox)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+
+    # A container that cannot be normalized is still worth running.
+    await server.seed_session(request, SWEBenchProSeedSessionRequest.model_validate(request_body()))
+    assert server._session_id_to_sandbox["session"] is sandbox
+
+
+@pytest.mark.asyncio
+async def test_pristine_untracked_files_lists_and_tolerates_failure() -> None:
+    server = make_server(golden=False)
+    listing = SimpleNamespace(return_code=0, stdout="dump.rdb\nappendonlydir/appendonly.aof.manifest\n\n", stderr="")
+    sandbox = SimpleNamespace(exec=AsyncMock(return_value=listing))
+
+    assert await server.pristine_untracked_files(sandbox) == frozenset(
+        {"dump.rdb", "appendonlydir/appendonly.aof.manifest"}
+    )
+    assert "ls-files --others --exclude-standard" in sandbox.exec.await_args.args[0]
+
+    failing = SimpleNamespace(exec=AsyncMock(return_value=SimpleNamespace(return_code=1, stdout="", stderr="boom")))
+    assert await server.pristine_untracked_files(failing) == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_stops_abandoned_session_sandboxes() -> None:
+    server = make_server(golden=False)
+    first = SimpleNamespace(stop=AsyncMock())
+    second = SimpleNamespace(stop=AsyncMock())
+    server._session_id_to_sandbox = {"first": first, "second": second}
+
+    await server.shutdown()
+
+    first.stop.assert_awaited_once()
+    second.stop.assert_awaited_once()
+    assert server._session_id_to_sandbox == {}
+
+
+def inconclusive_result() -> VerificationResult:
+    """A verdict-less run: `inconclusive_reason` reports "no usable output"."""
+    return VerificationResult(completed=True, resolved=False, patch_applied=True, test_results=None)
+
+
+def test_verify_bounds_an_attempt_that_never_returns(monkeypatch: MonkeyPatch) -> None:
+    """A hung attempt must fail the rollout, not hold the run open until the wall clock."""
+    server = make_server(golden=True, verification_attempt_timeout=0.05, inconclusive_verification_retries=0)
+
+    async def _hang(*args: object, **kwargs: object) -> None:
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(server, "_create_sandbox", _hang)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    assert response.json()["evaluation_completed"] is False
+    assert response.json()["reward"] == 0.0
+    assert "Verification failed" in response.json()["error"]
+
+
+def test_verify_stops_retrying_once_the_rollout_budget_is_spent(monkeypatch: MonkeyPatch) -> None:
+    """The retry sequence is bounded in aggregate, not just per attempt."""
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("resources_servers.swebench_pro.app.time", lambda: clock["t"])
+    server = make_server(golden=True, verification_total_timeout=1500.0)
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+
+    async def _verify(**kwargs: object) -> VerificationResult:
+        clock["t"] += 1000.0
+        return inconclusive_result()
+
+    verify = AsyncMock(side_effect=_verify)
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    # Budget is 1500s and each attempt burns 1000s: the second attempt still
+    # starts (500s left, which is what its own ceiling is clamped to) and the
+    # third never does.
+    assert verify.await_count == 2
+    assert response.json()["evaluation_completed"] is False
+    assert response.json()["error"] == "parser produced no usable output"
+
+
+def test_verify_uses_every_attempt_when_no_budget_is_set(monkeypatch: MonkeyPatch) -> None:
+    """Leaving both ceilings unset preserves the previous unbounded behaviour."""
+    server = make_server(golden=True, verification_attempt_timeout=None, verification_total_timeout=None)
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+    verify = AsyncMock(
+        return_value=VerificationResult(completed=True, resolved=False, patch_applied=True, test_results=None)
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    assert verify.await_count == 3
+    assert response.json()["evaluation_completed"] is False
+    assert response.json()["error"] == "parser produced no usable output"
+
+
+def test_attempt_budget_takes_the_smaller_of_the_two_ceilings(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr("resources_servers.swebench_pro.app.time", lambda: 100.0)
+    assert _attempt_budget(None, None) is None
+    assert _attempt_budget(30.0, None) == 30.0
+    assert _attempt_budget(None, 150.0) == 50.0
+    assert _attempt_budget(30.0, 150.0) == 30.0
+    assert _attempt_budget(80.0, 150.0) == 50.0
+    # A spent budget yields zero rather than a negative timeout.
+    assert _attempt_budget(30.0, 90.0) == 0.0
+    assert _budget_spent(None) is False
+    assert _budget_spent(90.0) is True
+    assert _budget_spent(150.0) is False
+
+
+def test_local_image_template_preserves_case() -> None:
+    server = make_server(golden=False, image_template="/sifs/{dockerhub_tag}.sif")
+    body = SWEBenchProInstanceRequest.model_validate(
+        request_body() | {"dockerhub_tag": "org.Repo-ABC", "image_digest": "sha256:" + "a" * 64}
+    )
+    assert server._image(body) == "/sifs/org.Repo-ABC.sif"
+
+
+@pytest.mark.asyncio
+async def test_seed_returns_reconnect_descriptor_and_cleanup_releases_container() -> None:
+    server = make_server(golden=False)
+    descriptor = {"sandbox_id": "sandbox-id", "workdir": "/app", "staging_dir": "/tmp/shared"}
+    sandbox = SimpleNamespace(
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        _provider=SimpleNamespace(connect=AsyncMock(), serialize_handle=AsyncMock()),
+        serialize=AsyncMock(return_value=descriptor),
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+        upload=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    server._create_sandbox = AsyncMock(return_value=sandbox)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    body = SWEBenchProSeedSessionRequest.model_validate(request_body())
+
+    response = await server.seed_session(request, body)
+
+    assert response.sandbox_descriptor == descriptor
+    assert server._session_id_to_sandbox["session"] is sandbox
+
+    # An agent that fails before verification must still release the benchmark's state.
+    await server.close_session(request)
+    await server.close_session(request)
+    sandbox.stop.assert_awaited_once()
+    assert server._session_id_to_sandbox == {}
+    assert server._session_id_to_pristine_untracked == {}
+
+
+@pytest.mark.asyncio
+async def test_failed_seed_releases_container() -> None:
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(upload=AsyncMock(side_effect=OSError("upload failed")), stop=AsyncMock())
+    server._create_sandbox = AsyncMock(return_value=sandbox)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    body = SWEBenchProSeedSessionRequest.model_validate(request_body())
+
+    with pytest.raises(OSError, match="upload failed"):
+        await server.seed_session(request, body)
+
+    sandbox.stop.assert_awaited_once()
+    assert server._session_id_to_sandbox == {}
+    assert server._session_id_to_pristine_untracked == {}
+
+
+def test_close_session_endpoint_cleans_up_matching_cookie_only() -> None:
+    server = make_server(golden=False)
+    mine = SimpleNamespace(stop=AsyncMock())
+    other = SimpleNamespace(stop=AsyncMock())
+    app = server.setup_webserver()
+
+    @app.post("/test_seed")
+    async def seed(request: Request):
+        server._session_id_to_sandbox = {request.session[SESSION_ID_KEY]: mine, "other": other}
+        return {"seeded": True}
+
+    client = TestClient(app)
+    assert client.post("/test_seed").status_code == 200
+    response = client.post("/close_session", json={})
+    assert response.status_code == 200 and response.json() == {"closed": True}
+    mine.stop.assert_awaited_once()
+    other.stop.assert_not_awaited()
+
+
+async def test_close_session_without_session_is_a_noop() -> None:
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(stop=AsyncMock())
+    server._session_id_to_sandbox["other"] = sandbox
+    assert await server.close_session(SimpleNamespace(session={})) == {"closed": True}
+    sandbox.stop.assert_not_awaited()

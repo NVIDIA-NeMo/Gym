@@ -1,0 +1,47 @@
+Let $n \ge 3$ be a given integer. We want to determine all nonnegative integers $k$ such that there exist $n$ distinct lines in the plane that cover the set of points $P_n = \{(a,b) \in \Z^+ \times \Z^+ : a+b \le n+1\}$, and exactly $k$ of these lines are sunny. A line is sunny if it is not parallel to the x-axis (Horizontal, H), the y-axis (Vertical, V), or the line $x+y=0$ (Diagonal, D, slope -1). Lines of these three types are called shady.
+
+We will show that the possible values for $k$ are $\{0, 1, 3\}$.
+
+The proof relies on reducing the problem to the specific case where $n=k$ and all lines must be sunny. Let $C(k)$ be the assertion that $P_k$ can be covered by $k$ distinct sunny lines. We define $P_0 = \emptyset$.
+
+\section*{1. The Reduction Principle}
+Let $\calL$ be a set of $n$ distinct lines covering $P_n$. Let $k$ be the number of sunny lines. Let $N_V, N_H, N_D$ be the number of V, H, D lines in $\calL$, respectively. Then $N_V + N_H + N_D = n-k$.
+
+\begin{lemma}[Structural Lemma]
+The $N_V$ vertical lines in $\calL$ must be $\{x=1, \dots, x=N_V\}$. The $N_H$ horizontal lines must be $\{y=1, \dots, y=N_H\}$. The $N_D$ diagonal lines must be $\{x+y=s\}$ for $s=n+2-N_D, \dots, n+1$.
+\end{lemma}
+\begin{proof}
+Consider the column $C_a = P_n \cap \{x=a\}$. We have $|C_a| = n+1-a$. Suppose the line $x=a$ is not in $\calL$. The points in $C_a$ must be covered by the other lines in $\calL$. The $N_V$ vertical lines in $\calL$ are distinct from $x=a$, so they do not cover any point in $C_a$. The remaining $n-N_V$ non-vertical lines each cover at most one point in $C_a$. Thus, $|C_a| \le n-N_V$. $n+1-a \le n-N_V$, which implies $a \ge N_V+1$. By contraposition, if $1 \le a \le N_V$, the line $x=a$ must be in $\calL$. Since there are exactly $N_V$ vertical lines in $\calL$, these must be $\{x=1, \dots, x=N_V\}$. The argument for horizontal lines is symmetric.
+
+For diagonal lines, consider the anti-diagonal $D_s = P_n \cap \{x+y=s\}$. We have $|D_s|=s-1$. If $x+y=s$ is not in $\calL$, the points in $D_s$ must be covered by the $n-N_D$ lines with slope $\ne -1$. Thus, $s-1 \le n-N_D$, so $s \le n+1-N_D$. By contraposition, if $s \ge n+2-N_D$, the line $x+y=s$ must be in $\calL$.
+\end{proof}
+
+\begin{theorem}[Reduction Theorem]
+For $n \ge 3$ and $0 \le k \le n$, a configuration of $n$ distinct lines covering $P_n$ with exactly $k$ sunny lines exists if and only if $C(k)$ is true.
+\end{theorem}
+\begin{proof}
+$(\Rightarrow)$ Let $\calL$ be such a configuration. Let $N_V, N_H, N_D$ be the counts of the shady lines, $N_V+N_H+N_D=n-k$. By Lemma 1, the set of shady lines $\mathcal{N}$ is determined. Let $R$ be the set of points in $P_n$ not covered by $\mathcal{N}$. $R = \{(a,b) \in P_n \mid a > N_V, b > N_H, a+b \le n+1-N_D\}$. The $k$ sunny lines $\mathcal{S} \subset \calL$ must cover $R$. Consider the translation $T(a,b) = (a-N_V, b-N_H)=(a',b')$. If $(a,b) \in R$, then $a' \ge 1, b' \ge 1$. Also, $a'+b' = a+b-(N_V+N_H) \le (n+1-N_D)-(N_V+N_H) = n+1-(n-k)=k+1$. $T$ maps $R$ bijectively to $P_k$. The translated lines $T(\mathcal{S})$ cover $P_k$. Since translation preserves slopes, these $k$ lines are distinct and sunny. Thus $C(k)$ is true.
+
+$(\Leftarrow)$ Suppose $C(k)$ is true. Let $\calL_k$ be $k$ distinct sunny lines covering $P_k$. Let $N=n-k$. We construct a configuration for $P_n$. Let $\mathcal{N}$ be the set of $N$ diagonal lines $\{x+y=s \mid s=k+2, \dots, n+1\}$. Let $\calL = \calL_k \cup \mathcal{N}$. This set has $n$ lines. They are distinct since lines in $\calL_k$ have slope $\ne -1$ and lines in $\mathcal{N}$ have slope $-1$. They cover $P_n$. If $(a,b) \in P_n$, then $2 \le a+b \le n+1$. If $a+b \le k+1$, then $(a,b) \in P_k$, covered by $\calL_k$. If $k+2 \le a+b \le n+1$, then $(a,b)$ is covered by $\mathcal{N}$. The configuration has exactly $k$ sunny lines.
+\end{proof}
+
+\section*{2. Analysis of the Core Problem C(k)}
+We determine the values of $k \ge 0$ for which $P_k$ can be covered by $k$ distinct sunny lines.
+\begin{enumerate}
+    \item $k=0$. $P_0 = \emptyset$. Covered by 0 lines. $C(0)$ is true.
+    \item $k=1$. $P_1 = \{(1,1)\}$. Covered by $y=x$ (slope 1, sunny). $C(1)$ is true.
+    \item $k=2$. $P_2 = \{(1,1), (1,2), (2,1)\}$. The lines connecting any pair of these points are $x=1$ (V), $y=1$ (H), or $x+y=3$ (D). All are shady. A sunny line can cover at most one point of $P_2$. To cover the 3 points, we need at least 3 sunny lines. Thus $C(2)$ is false.
+    \item $k \ge 3$. Let $T_k$ be the convex hull of $P_k$. $T_k$ is the triangle with vertices $V_1=(1,1), V_2=(1,k), V_3=(k,1)$. The edges of $T_k$ lie on the lines $x=1$ (V), $y=1$ (H), and $x+y=k+1$ (D). These lines are shady.
+
+    Let $B_k$ be the set of points in $P_k$ lying on the boundary of $T_k$. Each edge contains $k$ points. Since the vertices are distinct (as $k>2$), the total number of points on the boundary is $|B_k|=3k-3$.
+
+    Suppose $P_k$ is covered by $k$ sunny lines $\calL_k$. These lines must cover $B_k$. Let $L \in \calL_k$. Since $L$ is sunny, it does not coincide with the lines containing the edges of $T_k$. A line that does not contain an edge of a convex polygon intersects the boundary of the polygon at most at two points. Thus, $|L \cap B_k| \le 2$. The total coverage of $B_k$ by $\calL_k$ is at most $2k$. We must have $|B_k| \le 2k$. $3k-3 \le 2k$, which implies $k \le 3$.
+
+    Since we assumed $k \ge 3$, we must have $k=3$.
+    \item $k=3$. We verify $C(3)$. $P_3$ consists of 6 points: $(1,1), (1,2), (1,3), (2,1), (2,2), (3,1)$. We provide a covering with 3 sunny lines: $L_1: y=x$ (slope 1). Covers (1,1), (2,2). $L_2: 2x+y=5$ (slope -2). Covers (1,3), (2,1). $L_3: x+2y=5$ (slope -1/2). Covers (1,2), (3,1). These lines are sunny and cover $P_3$. $C(3)$ is true.
+\end{enumerate}
+
+\section*{3. Conclusion}
+The property $C(k)$ is true if and only if $k \in \{0,1,3\}$. By the Reduction Theorem, for a given $n \ge 3$, a configuration with $k$ sunny lines exists if and only if $C(k)$ is true and $k \le n$. Since $n \ge 3$, the condition $k \le n$ is satisfied for all $k \in \{0,1,3\}$.
+
+The possible values for $k$ are 0, 1, and 3.

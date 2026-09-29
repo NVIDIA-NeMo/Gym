@@ -14,55 +14,74 @@
 # limitations under the License.
 """Benchmark discovery and preparation utilities."""
 
-import importlib
+import sys
 from glob import glob
 from pathlib import Path
-from types import ModuleType
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
-import rich
+import yaml
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
-from rich.table import Table
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig
+from nemo_gym.config_types import BenchmarkDatasetConfig, ConfigError
+from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values, discover_components
 from nemo_gym.global_config import (
+    POLICY_MODEL_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
-    get_global_config_dict,
+    resolve_dataset_agent,
 )
 
 
-BENCHMARKS_DIR = PARENT_DIR / "benchmarks"
+BENCHMARKS_SUBDIR = "benchmarks"
+BENCHMARKS_DIR = PARENT_DIR / BENCHMARKS_SUBDIR
+MANIFEST_FILENAME = "manifest.yaml"
 
 
 class BenchmarkConfig(BaseModel):
-    name: str
+    name: str  # this is a dataset name, not the config name (they are usually the same)
     path: Path
     agent_name: str
     num_repeats: int
     dataset: BenchmarkDatasetConfig
 
     @classmethod
-    def from_config_path(cls, config_path: Path) -> "Optional[BenchmarkConfig]":
-        return cls.from_initial_config_dict(path=config_path, initial_config_dict=OmegaConf.load(config_path))
-
-    @classmethod
-    def from_initial_config_dict(cls, path: Path, initial_config_dict: DictConfig) -> "Optional[BenchmarkConfig]":
-        initial_config_dict = OmegaConf.merge(
-            initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
+    def from_config_path(cls, config_path: Path, *, strict: bool = True) -> "Optional[BenchmarkConfig]":
+        return cls.from_initial_config_dict(
+            path=config_path, initial_config_dict=OmegaConf.load(config_path), strict=strict
         )
 
-        parser = GlobalConfigDictParser()
-        global_config_dict = parser.parse_no_environment(initial_global_config_dict=initial_config_dict)
+    @classmethod
+    def from_initial_config_dict(
+        cls, path: Path, initial_config_dict: DictConfig, *, strict: bool = True
+    ) -> "Optional[BenchmarkConfig]":
+        if POLICY_MODEL_KEY_NAME not in initial_config_dict:
+            initial_config_dict = OmegaConf.merge(
+                initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
+            )
 
+        # `strict=True` (default): unset `???`/`${...}` values are errors, as non-listing workflows expect.
+        # `strict=False`: listing-only tolerance for those runtime-only values (see the helper's docstring).
+        if strict:
+            global_config_dict = GlobalConfigDictParser().parse_no_environment(
+                initial_global_config_dict=initial_config_dict
+            )
+        else:
+            global_config_dict = _parse_no_environment_tolerating_unset_values(initial_config_dict)
+
+        # A benchmark dataset may be declared by an agent block (legacy) or a resources server
+        # block (decoupled layout). `resolve_dataset_agent` is the same resolver rollout
+        # dispatch uses, so the listed agent is always the agent that runs.
         datasets: List[BenchmarkDatasetConfig] = []
-        candidate_agent_server_instance_names: List[str] = []
+        declaring_instance_names: List[str] = []
         for server_instance_name in global_config_dict:
             server_config = global_config_dict[server_instance_name]
-            if not isinstance(server_config, (dict, DictConfig)) or "responses_api_agents" not in server_config:
+            if not isinstance(server_config, (dict, DictConfig)):
+                continue
+            is_agent = "responses_api_agents" in server_config
+            if not is_agent and "resources_servers" not in server_config:
                 continue
 
             inner_server_config = get_first_server_config_dict(global_config_dict, server_instance_name)
@@ -72,147 +91,129 @@ class BenchmarkConfig(BaseModel):
                     continue
 
                 datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
-                candidate_agent_server_instance_names.append(server_instance_name)
+                declaring_instance_names.append(str(server_instance_name))
 
         if len(datasets) < 1:
             return
 
-        assert len(datasets) == 1, f"Expected 1 benchmark dataset for config {path}, but found {len(datasets)}!"
+        # A config resolving to several benchmark datasets is an eval suite. Reporting the first would alias
+        # the suite to whichever benchmark happened to sort first, under the suite's own name.
+        if len(datasets) > 1:
+            print(
+                f"Warning: skipping '{path}': it resolves to {len(datasets)} benchmark datasets, "
+                "so it is an eval suite rather than a single benchmark.",
+                file=sys.stderr,
+            )
+            return
 
         dataset = datasets[0]
+
+        try:
+            agent_name = resolve_dataset_agent(global_config_dict, declaring_instance_names[0], pin=dataset.agent)
+        except ConfigError as e:
+            raise ConfigError(f"Benchmark config {path}: dataset {dataset.name!r}: {e}") from e
 
         return cls(
             name=dataset.name,
             path=path,
-            agent_name=candidate_agent_server_instance_names[0],
+            agent_name=agent_name,
             num_repeats=dataset.num_repeats,
             dataset=dataset,
         )
 
 
-def _load_benchmarks_from_config_paths(config_paths: List[Path]) -> Dict[str, BenchmarkConfig]:
-    benchmarks_dict = dict()
-    for config_path in config_paths:
-        config_path = Path(config_path)
+def _benchmark_config_name(rel_config_path: Path) -> str:
+    """The name of the benchmark config, given its path relative to ``benchmarks/``, sans ``.yaml``.
 
-        maybe_bc = BenchmarkConfig.from_config_path(config_path)
+    This is the identity we key benchmarks by, so a listed benchmark is always a valid ``--benchmark`` argument.
+    """
+    rel = rel_config_path.with_suffix("")
+    parts = rel.parts
+    if len(parts) == 2 and parts[1] == "config":
+        return parts[0]
+    return rel.as_posix()
+
+
+def _is_benchmark_config(config_path: Path) -> bool:
+    """True if the config declares exactly one `type: benchmark` dataset in its own structure.
+
+    A raw single-file parse (no `config_paths`/interpolation resolution), so it's format-agnostic and can't
+    fail on includes. Declaring several makes it an eval suite rather than a benchmark: there is no single
+    name, agent, or repeat count to catalog it under, so it is not a valid `--benchmark` argument. An
+    unparseable file is kept (returns True) so the resolve step surfaces a diagnostic.
+    """
+    if config_path.name == MANIFEST_FILENAME:
+        return False
+
+    def count(node: object) -> int:
+        if isinstance(node, dict):
+            return (1 if node.get("type") == "benchmark" else 0) + sum(count(v) for v in node.values())
+        if isinstance(node, list):
+            return sum(count(v) for v in node)
+        return 0
+
+    try:
+        return count(yaml.safe_load(config_path.read_text(errors="ignore"))) == 1
+    except yaml.YAMLError:
+        return True
+
+
+def _benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
+    """Sorted config paths under one dir that declare a benchmark, discovered by content.
+
+    A config is a benchmark iff it declares exactly one `type: benchmark` dataset, regardless of filename, so
+    we scan every yaml. :func:`_is_benchmark_config` is a cheap prefilter (pay the resolve cost only on real
+    candidates) that also catches non-`config.yaml` names like tau2's `configs/*.yaml`. Empty if dir missing.
+    """
+    if not benchmarks_dir.is_dir():
+        return []
+    config_paths = [benchmarks_dir / p for p in glob("**/*.yaml", root_dir=benchmarks_dir, recursive=True)]
+    return sorted(p for p in config_paths if _is_benchmark_config(p))
+
+
+def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConfig]:
+    """Map benchmark name -> :class:`BenchmarkConfig` for every benchmark config under one dir."""
+    benchmarks_dict = dict()
+    for config_path in _benchmark_config_paths(benchmarks_dir):
+        try:
+            # Listing has no runtime context, so tolerate unset runtime-only values.
+            maybe_bc = BenchmarkConfig.from_config_path(config_path, strict=False)
+        except Exception as e:
+            # Still unresolvable (e.g. missing runtime-only values) — skip with a warning rather than fail
+            # the whole listing, so it isn't silently invisible.
+            print(
+                f"Warning: skipping benchmark config '{config_path}': could not resolve it "
+                f"({type(e).__name__}: {str(e).splitlines()[0]}).",
+                file=sys.stderr,
+            )
+            continue
         if not maybe_bc:
             continue
 
-        benchmarks_dict[maybe_bc.name] = maybe_bc
+        benchmarks_dict[_benchmark_config_name(config_path.relative_to(benchmarks_dir))] = maybe_bc
 
     return benchmarks_dict
 
 
-def list_benchmarks() -> None:
-    """CLI command: list available benchmarks."""
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        )
-    )
-    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
+    """Map benchmark name -> :class:`BenchmarkConfig` for every discoverable benchmark config.
 
-    assert BENCHMARKS_DIR.exists(), "Missing benchmarks directory"
-
-    config_paths = glob("**/config.yaml", root_dir=BENCHMARKS_DIR, recursive=True)
-    config_paths = [BENCHMARKS_DIR / p for p in config_paths]
-    config_paths = sorted(config_paths)
-
-    benchmarks = _load_benchmarks_from_config_paths(config_paths)
-
-    if not benchmarks:
-        rich.print("[yellow]No benchmarks found.[/yellow]")
-        rich.print(f"Expected benchmarks directory: {BENCHMARKS_DIR}")
-        return
-
-    table = Table(title=f"Available benchmarks in NeMo Gym ({len(benchmarks)})")
-    table.add_column("Benchmark name")
-    table.add_column("Agent name")
-    table.add_column("Num repeats")
-
-    for name, bench in benchmarks.items():
-        table.add_row(name, bench.agent_name, str(bench.num_repeats))
-
-    rich.print(table)
-
-
-class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
+    Scans the ``benchmarks/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots` root
+    (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user benchmarks shadow same-named built-ins.
     """
-    Prepare benchmark data by running the benchmark's prepare.py script.
-
-    The benchmark is identified from a config_paths entry pointing to a
-    benchmarks/*/config.yaml file.
-
-    Examples:
-
-    ```bash
-    ng_prepare_benchmark "+config_paths=[benchmarks/aime24/config.yaml]"
-    ```
-    """
+    return discover_components(BENCHMARKS_SUBDIR, _discover_benchmarks_in_dir)
 
 
-def prepare_benchmark() -> None:
-    """CLI command: prepare benchmark data."""
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        )
-    )
-    PrepareBenchmarkConfig.model_validate(global_config_dict)
+# Backward-compatibility shims (CLI refactor): these symbols moved to `nemo_gym.cli.eval`.
+# Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
 
-    config_paths = global_config_dict.get("config_paths") or []
-    config_paths = list(map(Path, config_paths))
-    benchmarks_dict = _load_benchmarks_from_config_paths(config_paths)
 
-    assert benchmarks_dict, (
-        'No benchmark config found in config_paths. Pass a benchmark config, e.g.: "+config_paths=[benchmarks/aime24/config.yaml]"'
-    )
-
-    # Validate all benchmarks before preparing any
-    prepare_script_missing: List[BenchmarkConfig] = []
-    prepare_function_missing: List[BenchmarkConfig] = []
-
-    validated: List[Tuple[BenchmarkConfig, ModuleType]] = []
-    for benchmark_config in benchmarks_dict.values():
-        prepare_script_path = benchmark_config.dataset.prepare_script
-        if not prepare_script_path.exists():
-            prepare_script_missing.append(benchmark_config)
-            continue
-
-        prepare_module_path = ".".join(prepare_script_path.with_suffix("").parts)
-        module = importlib.import_module(prepare_module_path)
-        if not hasattr(module, "prepare"):
-            prepare_function_missing.append(benchmark_config)
-            continue
-
-        validated.append((benchmark_config, module))
-
-    errors_to_print = ""
-    if prepare_script_missing:
-        prepare_script_missing_str = "".join(
-            f"- {bc.name}: {bc.dataset.prepare_script}\n" for bc in prepare_script_missing
-        )
-        errors_to_print += f"""The following benchmarks are missing a valid prepare script:
-{prepare_script_missing_str}
-"""
-    if prepare_function_missing:
-        prepare_function_missing_str = "".join(
-            f"- {bc.name}: {bc.dataset.prepare_script}\n" for bc in prepare_function_missing
-        )
-        errors_to_print += f"""The following benchmarks have a prepare script, but are missing the prepare function:
-{prepare_function_missing_str}
-"""
-    if errors_to_print:
-        errors_to_print = f"""Did not prepare any benchmarks due to benchmark config errors.
-{errors_to_print}"""
-        raise RuntimeError(errors_to_print)
-
-    # Prepare after all validations pass
-    for benchmark_config, module in validated:
-        print(f"Preparing benchmark: {benchmark_config.name}")
-        output_fpath: Path = module.prepare()
-        assert output_fpath.absolute() == benchmark_config.dataset.jsonl_fpath.absolute(), (
-            f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
-        )
-        print(f"Benchmark data prepared at: {output_fpath}")
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "list_benchmarks": "nemo_gym.cli.eval",
+        "PrepareBenchmarkConfig": "nemo_gym.cli.eval",
+        "prepare_benchmark": "nemo_gym.cli.eval",
+    },
+)

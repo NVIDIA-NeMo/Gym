@@ -1,0 +1,29 @@
+# Chain to the reusable Litmus Agent resources server and agent config.
+config_paths:
+  - resources_servers/litmus_agent/configs/litmus_agent.yaml
+
+# Long reasoning traces are common on this benchmark.
+responses_create_params:
+  max_output_tokens: 131072
+
+# Keep the generic environment isolated from this fixed benchmark configuration.
+litmus_bench_benchmark_resources_server:
+  _inherit_from: litmus_agent
+  resources_servers:
+    litmus_agent:
+      verified: false
+
+litmus_bench_benchmark_agent:
+  _inherit_from: litmus_agent_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: litmus_bench_benchmark_resources_server
+      datasets:
+        - name: litmus-bench
+          type: benchmark
+          jsonl_fpath: benchmarks/litmus-bench/data/litmus-bench_benchmark.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/litmus-bench/prepare.py
+          num_repeats: 5
+          license: CC-BY-4.0

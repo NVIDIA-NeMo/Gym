@@ -1,0 +1,88 @@
+# ASR with PC (Word Error Rate)
+
+Generic ASR / ASR-PC scoring for audio benchmarks. Reusable across benchmarks
+that score Word Error Rate; the LibriSpeech-PC benchmark is the first
+consumer, with `asr-leaderboard`, `numb3rs`, and `audiobench` as natural
+follow-ups.
+
+## What it scores
+
+Server config dispatches per row on `task_type` (default at the server level,
+overridable per-row in the verify request body):
+
+- **`task_type: ASR-PC`** — full WER + WER_C + WER_PC + PER.
+  `is_correct = wer_pc < 0.5`.
+- **`task_type: ASR`** — standard WER only (Whisper-normalized, lowercased,
+  no punctuation). `is_correct = wer < 0.5`.
+- **`task_type: Hallucination`** — char-rate based (used by MUSAN). The
+  request must carry `audio_duration` (seconds); the metric flags
+  `char_rate > 1500` chars/min as hallucination. `expected_answer` is
+  typically empty for this mode. `is_correct = not is_hallucinating`.
+- **`task_type: ASR_LEADERBOARD`** — primary standard WER against
+  `expected_answer` plus per-reference WER against each entry in the
+  request's `reference_fields` (e.g. `["text_tn", "text_itn"]`). Emits
+  `wer_<suffix>` and `is_correct_<suffix>` per field; suffix is the field
+  name with leading `text_` stripped (`text_tn` → `tn`).
+
+Aggregation:
+
+- `wer` (corpus-level, the headline) via `jiwer.wer(refs, hyps)` over the
+  whole eval set.
+- `wer_c`, `wer_pc`, `per` are mean-of-per-sample.
+- `hallucination_rate` (Hallucination) is sample-mean.
+- `wer_<suffix>` (ASR_LEADERBOARD) is corpus-level over each row's
+  `text_<suffix>` reference.
+
+Standard WER uses Whisper's English text normalizer + lowercase + punctuation
+strip. WER_PC tokenizes punctuation as separate tokens so word boundaries and
+punctuation errors both count.
+
+## Audio plumbing
+
+Audio is carried separately from text content in `responses_create_params.metadata`.
+The `vllm_model` adapter accepts one of three mutually exclusive fields:
+
+- `audio_data`: a `data:audio/...;base64,...` URI embedded in the row.
+- `audio_path`: one audio file path resolved by the model server.
+- `audio_paths`: multiple audio file paths resolved by the model server.
+
+The adapter removes the selected metadata field and splices an `audio_url`
+content block into the user message before forwarding it to vLLM Chat
+Completions. The committed example data uses `audio_data`.
+
+This path requires an audio-capable vLLM endpoint. `--model-type vllm_model`
+selects the Gym adapter; it does not launch vLLM or change `policy_base_url`.
+Set `--model-url` to the vLLM server rather than `https://api.openai.com/v1`.
+OpenAI Chat Completions uses `input_audio`, while this adapter emits vLLM's
+`audio_url` content block.
+
+## Running servers
+
+```bash
+gym env start \
+    --model-type vllm_model \
+    --model-url http://<vllm-host>:<port>/v1 \
+    --model <audio-capable-model> \
+    --resources-server asr_with_pc
+```
+
+## Collecting rollouts (5-example smoke test)
+
+```bash
+gym eval run --no-serve \
+    --agent asr_with_pc_simple_agent \
+    --input resources_servers/asr_with_pc/data/example.jsonl \
+    --output results/asr_with_pc_rollouts.jsonl \
+    --num-repeats 1
+```
+
+## Regenerating example data
+
+```bash
+python resources_servers/asr_with_pc/generate_example_data.py
+```
+
+The committed `data/example.jsonl` uses 1-second silence WAVs as audio
+placeholders — small enough to commit, sufficient for unit tests and schema
+smoke tests. The actual benchmark JSONLs (with real audio) are built by each
+benchmark's own `prepare.py`.

@@ -51,7 +51,7 @@ By default the converter reads the `problem` field and routes examples to the
 - The verifier can run through Gym's `/v1/responses` path or through external
   OpenAI-compatible judge servers exposed with `JUDGE_SERVER_ARGS`.
 - `alpha` and `beta` in
-  [proof_judge.yaml](/Users/smahdavi/Desktop/ls/Gym/resources_servers/proof_judge/configs/proof_judge.yaml)
+  [proof_judge.yaml](configs/proof_judge.yaml)
   control the weight of verifier reward versus self-evaluation consistency.
 
 ## Licensing Information

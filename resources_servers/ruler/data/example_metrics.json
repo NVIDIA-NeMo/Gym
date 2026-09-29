@@ -1,0 +1,53 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/ruler/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 40.0,
+        "Min": 40.0,
+        "Max": 40.0,
+        "Standard deviation": 0.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "outputs": {
+        "unique_count": 25,
+        "total_count": 25
+    },
+    "length": {
+        "Total # non-null values": 5,
+        "Average": 262062.2,
+        "Min": 262060.0,
+        "Max": 262065.0,
+        "Standard deviation": 2.28
+    },
+    "subset": {
+        "unique_count": 1,
+        "total_count": 5
+    }
+}

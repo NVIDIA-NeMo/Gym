@@ -1,0 +1,53 @@
+compute:
+  cluster:
+    type: slurm
+    hostname: myslurmcluster
+    walltime: "01:00:00"
+    account: myaccount
+    node_pools:
+      compute:
+        partition: batch
+        nodes: 1
+        ntasks_per_node: 1
+        gpus_per_node: 8
+
+services:
+  vllm_model:
+    container: vllm/vllm-openai:v0.9.0
+    type: vllm
+    model: Qwen/Qwen2.5-7B-Instruct
+    trust_remote_code: true
+    tensor_parallel_size: 2
+    number_of_instances: 4       # 4 engine replicas, total 8 GPUs
+    port: 8000
+    health_check:
+      timeout_seconds: 1200
+    mounts:
+      - /lustre/datasets:/data
+    # env values are resolved with one of three prefixes (a bare value is an implicit `lit:`):
+    #   lit:VALUE   - literal value, used as-is.
+    #   host:VAR    - read from VAR in the shell running `gym eval submit` (this machine).
+    #   runtime:VAR - left unresolved until the job actually runs; the compute node picks up
+    #                 whatever value VAR has in the job's own environment at that point.
+    env:
+      HF_TOKEN: host:HF_TOKEN
+      TRUST_REMOTE_CODE: lit:1
+      NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID      
+      CUDA_VISIBLE_DEVICES: runtime:CUDA_VISIBLE_DEVICES
+
+driver:
+  policy_model: vllm_model
+  container: python:3.12
+  gym_install:
+    ref: main
+  env:
+    HF_TOKEN: host:HF_TOKEN
+  benchmarks:
+    gpqa:
+      run:
+        split: benchmark
+        config_paths:
+          - benchmarks/gpqa/config.yaml
+
+job:
+  output_path: /lustre/fsw/my-path

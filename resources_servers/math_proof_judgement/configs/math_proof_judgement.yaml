@@ -1,0 +1,23 @@
+math_proof_judgement:
+  resources_servers:
+    math_proof_judgement:
+      entrypoint: app.py
+      domain: math
+      verified: false
+      description: "Binary judgement of math proofs — the policy model reads a problem plus a candidate proof and outputs Judgement: Yes/No."
+      value: "Improve the NVIDIA ProofBench judge benchmark and math-proof verification skill."
+
+math_proof_judgement_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_proof_judgement
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/math_proof_judgement/data/example.jsonl

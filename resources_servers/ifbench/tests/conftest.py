@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Pre-import packages that nltk pulls in during its init so they are already in
+# sys.modules before nltk's inisec.py finder is installed. This must happen here
+# (before ensure_ifbench() calls _ensure_nltk_data() → import nltk) so that the
+# punkt download inside _ensure_nltk_data() is not silently blocked.
+import defusedxml.ElementTree  # noqa: F401
+import regex  # noqa: F401
+
+from resources_servers.ifbench.setup_ifbench import ensure_ifbench
+
+
+def pytest_configure(config):
+    """Clone and set up IFBench before pytest collects any test modules.
+
+    This runs early enough that instructions_registry is on sys.path by the
+    time any test file is imported.
+    """
+    ensure_ifbench()

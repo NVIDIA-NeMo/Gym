@@ -1,0 +1,39 @@
+anyswe_nemo_fabric:
+  responses_api_agents:
+    anyswe_agent:
+      entrypoint: app.py
+      domain: coding
+      description: SWE-bench run by a NeMo Fabric-selected harness inside each task environment.
+      value: Evaluate software-engineering agents with a harness-neutral Fabric lifecycle.
+
+      agent_server_module: responses_api_agents.nemo_fabric_agent.app
+      agent_server_class: NeMoFabricAgent
+      agent_config_class: NeMoFabricAgentConfig
+      agent_kwargs:
+        adapter_id: nvidia.fabric.mini-swe-agent
+        model_provider: openai
+        model: gym-policy-model
+        model_api_key: local  # pragma: allowlist secret
+        timeout: 2700
+        cwd: /testbed
+        fabric_config:
+          environment:
+            env:
+              MSWEA_COST_TRACKING: ignore_errors
+          runtime:
+            max_turns: 90
+
+      agent_runtime_source: auto
+      container_formatter: ${oc.env:ANYSWE_CONTAINER_FORMATTER}
+      sandbox_provider: sandbox
+      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,null}
+      swebench_agent_timeout: 2700
+      swebench_tests_timeout: 1800
+      concurrency: 1
+      model_server:
+        name: policy_model
+        type: responses_api_models
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyswe_agent/data/example.jsonl

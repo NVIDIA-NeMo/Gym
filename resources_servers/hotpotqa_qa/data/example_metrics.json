@@ -1,0 +1,57 @@
+{
+    "name": "example",
+    "type": {
+        "unique_count": 2,
+        "total_count": 5
+    },
+    "jsonl_fpath": "resources_servers/hotpotqa_qa/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 120.0,
+        "Min": 112.0,
+        "Max": 131.0,
+        "Standard deviation": 8.86
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "expected_answer": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "question": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "level": {
+        "unique_count": 2,
+        "total_count": 5
+    }
+}

@@ -57,7 +57,7 @@ class TestApp:
             entrypoint="",
             name="",
         )
-        return AzureOpenAIModelServer(config=config, server_client=MagicMock(spec=ServerClient))
+        return AzureOpenAIModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     async def test_sanity(self) -> None:
         self._setup_server()
@@ -123,7 +123,7 @@ class TestApp:
 
         monkeypatch.setattr("responses_api_models.azure_openai_model.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.azure_openai_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         mock_response_data = NeMoGymChatCompletion(
             id="chtcmpl-123",

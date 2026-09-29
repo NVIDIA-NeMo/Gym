@@ -1,0 +1,146 @@
+---
+title: "Aggregate Metrics"
+description: ""
+position: 7
+---
+After rollout collection, NeMo Gym computes **aggregate metrics** for each agent by calling the `/aggregate_metrics` endpoint on the agent server. The results are written to a single `_aggregate_metrics.json` file.
+
+---
+
+## How It Works
+
+1. **Rollouts complete** — `ng_collect_rollouts` gathers verify responses (reward + custom fields) for every task/rollout pair.
+2. **Group by agent** — responses are partitioned by agent name.
+3. **Call `/aggregate_metrics`** — for each agent, the stripped verify responses are POSTed to the agent's `/aggregate_metrics` endpoint.
+4. **Compute stats** — per-task and overall statistics (`mean`, `max`, `min`, `median`, `std`) are computed for every numeric field. If the resources server overrides `compute_metrics()` or `get_key_metrics()`, those are called to add additional metrics.
+5. **Write results** — all per-agent metrics are written to `<output>_aggregate_metrics.json`.
+
+## Output Format
+
+The output file is a JSON array with one entry per agent:
+
+```json
+[
+  {
+    "agent_ref": {"name": "my_agent"},
+    "agent_metrics": {
+      "mean/reward": 0.75,
+      "max/reward": 1.0,
+      "min/reward": 0.0,
+      "median/reward": 1.0,
+      "std/reward": 0.433
+    },
+    "key_metrics": {
+      "mean/reward": 0.75
+    },
+    "group_level_metrics": [
+      {"mean/reward": 1.0, "sample": {"...": "..."}},
+      {"mean/reward": 0.5, "sample": {"...": "..."}}
+    ]
+  }
+]
+```
+
+| Field | Description |
+|---|---|
+| `agent_ref` | Agent identity (`{"name": "..."}`) |
+| `agent_metrics` | Overall stats across all rollouts, plus any custom metrics from `compute_metrics()` |
+| `key_metrics` | Headline numbers (default: all `mean/*` entries from `agent_metrics`) |
+| `group_level_metrics` | Per-task breakdown — one entry per task with stats across that task's rollouts |
+
+---
+
+## Custom Metrics
+
+Override two hooks on your resources server to add custom metrics.
+
+### `compute_metrics(tasks)`
+
+Receives all verify responses grouped by task. Use this for metrics that need the full dataset — pass@k, confidence intervals, cross-task statistics.
+
+### `get_key_metrics(agent_metrics)`
+
+Selects headline numbers from the final `agent_metrics` dict. Default returns all `mean/*` entries.
+
+### Example: pass@k
+
+```python
+from nemo_gym.base_resources_server import (
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+
+class MathServer(SimpleResourcesServer):
+    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        # ... verification logic ...
+        pass
+
+    def compute_metrics(self, tasks):
+        n_tasks = len(tasks)
+        # pass@k: fraction of tasks where at least one rollout got reward=1
+        pass_at_k = sum(
+            1 for rollouts in tasks if any(r["reward"] >= 1.0 for r in rollouts)
+        ) / n_tasks
+
+        # pass@1 (average of per-task mean rewards)
+        pass_at_1 = sum(
+            sum(r["reward"] for r in rollouts) / len(rollouts)
+            for rollouts in tasks
+        ) / n_tasks
+
+        return {"pass@k": pass_at_k, "pass@1": pass_at_1}
+
+    def get_key_metrics(self, agent_metrics):
+        return {
+            k: agent_metrics[k]
+            for k in ("pass@k", "pass@1")
+            if k in agent_metrics
+        }
+```
+
+Given 3 tasks with 4 rollouts each (task 0: all correct, task 1: all wrong, task 2: half correct), this produces:
+
+```json
+[
+  {
+    "agent_ref": {"name": "math_simple_agent"},
+    "agent_metrics": {
+      "mean/reward": 0.5,
+      "max/reward": 1.0,
+      "min/reward": 0.0,
+      "median/reward": 0.5,
+      "std/reward": 0.522,
+      "pass@k": 0.667,
+      "pass@1": 0.5
+    },
+    "key_metrics": {
+      "pass@k": 0.667,
+      "pass@1": 0.5
+    },
+    "group_level_metrics": [
+      {
+        "mean/reward": 1.0,
+        "max/reward": 1.0,
+        "min/reward": 1.0,
+        "median/reward": 1.0,
+        "std/reward": 0.0
+      },
+      {
+        "mean/reward": 0.0,
+        "max/reward": 0.0,
+        "min/reward": 0.0,
+        "median/reward": 0.0,
+        "std/reward": 0.0
+      },
+      {
+        "mean/reward": 0.5,
+        "max/reward": 1.0,
+        "min/reward": 0.0,
+        "median/reward": 0.5,
+        "std/reward": 0.577
+      }
+    ]
+  }
+]
+```

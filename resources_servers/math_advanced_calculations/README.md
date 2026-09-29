@@ -8,18 +8,18 @@ Commands -
 Spin up server:
 
 ```
-  config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/math_advanced_calculations/configs/math_advanced_calculations.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type openai_model \
+    --resources-server math_advanced_calculations
 ```
 
 Collect trajectories:
 ```
-ng_collect_rollouts +agent_name=math_advanced_calculations_simple_agent \
-    +input_jsonl_fpath=resources_servers/math_advanced_calculations/data/train.jsonl \
-    +output_jsonl_fpath=results/math_advanced_calculations_trajectory_collection.jso
-nl \
-   +limit=1
+gym eval run --no-serve \
+    --agent math_advanced_calculations_simple_agent \
+    --input resources_servers/math_advanced_calculations/data/train.jsonl \
+    --output results/math_advanced_calculations_trajectory_collection.jsonl \
+   --limit 1
 ```
 
 Data links: https://huggingface.co/datasets/nvidia/Nemotron-RL-math-advanced_calculations 

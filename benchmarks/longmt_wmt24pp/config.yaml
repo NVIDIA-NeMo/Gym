@@ -1,0 +1,20 @@
+config_paths:
+  - resources_servers/longmt_eval/configs/longmt_wmt24pp.yaml
+
+longmt_wmt24pp_resources_server:
+  _inherit_from: longmt_eval
+
+longmt_wmt24pp_agent:
+  _inherit_from: longmt_wmt24pp_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: longmt_wmt24pp_resources_server
+      datasets:
+      - name: wmt24pp_benchmark
+        type: benchmark
+        jsonl_fpath: benchmarks/longmt_wmt24pp/data/wmt24pp_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic/longmt.yaml
+        prepare_script: benchmarks/longmt_wmt24pp/prepare.py
+        num_repeats: 5
+        license: Creative Commons Attribution-ShareAlike 4.0 International
