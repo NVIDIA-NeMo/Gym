@@ -13,14 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from functools import wraps
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 from warnings import warn
 
 from fastapi import Body, FastAPI, Request
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
 
+from nemo_gym._checkpoint.agent import AgentSessionParticipant, RestartOnlyAgentParticipant, RestoredAgentSession
+from nemo_gym._checkpoint.control import install_participant
+from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -39,7 +42,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body, rollout_context
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import (
@@ -133,6 +136,65 @@ class BaseResponsesAPIAgent(BaseServer):
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
+    # Agents that implement the AgentSessionHooks methods set this to take part in partial-rollout
+    # checkpoints. Other agents restart unfinished rollouts from their input.
+    checkpoint_sessions_supported: ClassVar[bool] = False
+    _checkpoint_participant: Optional[AgentSessionParticipant] = PrivateAttr(default=None)
+    _restart_only: Optional[RestartOnlyAgentParticipant] = PrivateAttr(default=None)
+
+    def _restart_only_tracked(self, handler: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+        """Count a /run or /v1/responses call against a restart-only checkpoint participant.
+
+        The call is keyed by its ``/ng-rollout/<id>`` path when the handler receives the request, and
+        otherwise by the rollout context, which ``/run`` sets before this wrapper runs.
+        """
+
+        @wraps(handler)
+        async def tracked(*args: Any, **kwargs: Any) -> Any:
+            if self._restart_only is None:
+                return await handler(*args, **kwargs)
+            request = kwargs.get("request") or next((arg for arg in args if isinstance(arg, Request)), None)
+            path_key = request.path_params.get("rollout_id") if request is not None else None
+            async with self._restart_only.track(path_key or current_rollout_id()):
+                return await handler(*args, **kwargs)
+
+        return tracked
+
+    @property
+    def checkpoint_participant(self) -> Optional[AgentSessionParticipant]:
+        """The checkpoint participant, or ``None`` when checkpointing is off for this agent."""
+        return self._checkpoint_participant
+
+    def setup_agent_checkpoint(self, app: FastAPI) -> None:
+        settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
+        if settings is None:
+            return
+        if (self.config.num_workers or 1) != 1:
+            # Each worker would track only its own calls, so a checkpoint could miss work in the others.
+            raise ValueError("agent checkpointing requires num_workers=1: sessions live in one process")
+        if not self.checkpoint_sessions_supported:
+            # Fail closed: in-flight work blocks a checkpoint until the controller retires it.
+            self._restart_only = RestartOnlyAgentParticipant()
+            participant = self._restart_only
+        else:
+            self._checkpoint_participant = AgentSessionParticipant(self)
+            participant = self._checkpoint_participant
+        install_participant(
+            app,
+            participant,
+            auth_token=settings.control_auth_token,
+            lease_grace_seconds=settings.lease_grace_seconds,
+            instance_name=self.config.name,
+        )
+
+    def export_agent_session(self, session_key: str) -> dict[str, JsonValue]:
+        raise NotImplementedError
+
+    def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
+        raise NotImplementedError
+
+    def retire_agent_session(self, session_key: str) -> None:
+        raise NotImplementedError
 
     def effective_tool_accesses(self, request: AgentSeedSessionRequest) -> list[ToolAccess]:
         """Overlay episode-scoped tool access onto configured declarations by name."""
@@ -144,9 +206,12 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        self.setup_agent_checkpoint(app)
 
         agent_attributes = {"nemo.gym.server.name": self.config.name}
-        traced_responses = traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes)
+        traced_responses = self._restart_only_tracked(
+            traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes)
+        )
         app.post("/v1/responses")(traced_responses)
         # A self-call made with ``url_path_for_run`` lands on a prefixed twin.
         # ``responses`` recovers the rollout id from the path.
@@ -159,7 +224,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # start the span before the ContextVar is set and every rollout span would be
         # missing its `nemo.gym.rollout.id` — which is exactly what a first run on real
         # hardware showed.
-        run = traced_rollout_endpoint(self.run, agent_attributes)
+        run = self._restart_only_tracked(traced_rollout_endpoint(self.run, agent_attributes))
 
         @wraps(run)
         async def run_with_rollout_context(*args: Any, **kwargs: Any) -> BaseVerifyResponse:
@@ -199,9 +264,16 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
         Training capture requires ``token_id_capture.enabled``.
         It also requires the static agent flag or run-level ``all_agents``.
+        Partial-rollout checkpointing also needs it for this agent.
         Missing global configuration disables correlation.
         """
-        return self._model_call_capture_enabled() or self._token_id_capture_enabled()
+        return (
+            self._model_call_capture_enabled()
+            or self._token_id_capture_enabled()
+            # Checkpointing keys a legacy /run by its rollout, so its self-dispatch must carry the rollout.
+            or self._checkpoint_participant is not None
+            or self._restart_only is not None
+        )
 
     def _model_call_capture_enabled(self) -> bool:
         """Whether evaluation model-call observability is enabled."""
