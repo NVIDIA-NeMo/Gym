@@ -60,6 +60,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
 from nemo_gym import WORKING_DIR
+from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.config_types import (
     ROLLOUT_PATH_PREFIX,
     TOKEN_CAPTURE_PATH_SEGMENT,
@@ -96,6 +97,8 @@ from nemo_gym.telemetry.span_groups import GymSpanGroup
 logger = logging.getLogger(__name__)
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
+_GLOBAL_AIOHTTP_CLIENT_CONFIG: Optional["GlobalAIOHTTPAsyncClientConfig"] = None
+_GLOBAL_AIOHTTP_CONTROL_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY: bool = False
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
@@ -268,6 +271,10 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
         gt=0,
         description="Optional per-server expected concurrent HTTP requests to one host used for capacity warnings.",
     )
+    # Control calls (checkpoint coordination, generation cuts) use their own pool, so long-running data
+    # calls that hold every data connection to a host cannot starve them.
+    global_aiohttp_control_connector_limit: int = 256
+    global_aiohttp_control_connector_limit_per_host: int = 64
 
     global_aiohttp_client_request_debug: bool = False
 
@@ -394,8 +401,9 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         cookie_jar=DummyCookieJar(),
     )
 
-    global _GLOBAL_AIOHTTP_CLIENT
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_CONFIG
     _GLOBAL_AIOHTTP_CLIENT = client_session
+    _GLOBAL_AIOHTTP_CLIENT_CONFIG = cfg
 
     global _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
@@ -404,6 +412,29 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = isinstance(connector, QueueTimedTCPConnector)
 
     return _GLOBAL_AIOHTTP_CLIENT
+
+
+def get_global_aiohttp_control_client() -> ClientSession:  # pragma: no cover
+    """The reserved pool for control calls, created on first use next to the data client."""
+    global _GLOBAL_AIOHTTP_CONTROL_CLIENT
+    if _GLOBAL_AIOHTTP_CONTROL_CLIENT is None or _GLOBAL_AIOHTTP_CONTROL_CLIENT.closed:
+        get_global_aiohttp_client()
+        cfg = _GLOBAL_AIOHTTP_CLIENT_CONFIG or GlobalAIOHTTPAsyncClientConfig()
+        _GLOBAL_AIOHTTP_CONTROL_CLIENT = ClientSession(
+            connector=build_connection_pool_connector(
+                limit=cfg.global_aiohttp_control_connector_limit,
+                limit_per_host=cfg.global_aiohttp_control_connector_limit_per_host,
+                keepalive_timeout=15.0,
+                socket_factory=_make_keepalive_socket_factory(
+                    idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+                    interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+                    probes=cfg.global_aiohttp_tcp_keepalive_probes,
+                ),
+            ),
+            timeout=ClientTimeout(),
+            cookie_jar=DummyCookieJar(),
+        )
+    return _GLOBAL_AIOHTTP_CONTROL_CLIENT
 
 
 def is_global_aiohttp_client_setup() -> bool:  # pragma: no cover
@@ -418,10 +449,17 @@ def global_aiohttp_client_exit():  # pragma: no cover
     if not is_global_aiohttp_client_setup():
         return
 
-    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
-    asyncio.run(_GLOBAL_AIOHTTP_CLIENT.close())
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CONTROL_CLIENT, _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
+
+    async def close() -> None:
+        await _GLOBAL_AIOHTTP_CLIENT.close()
+        if _GLOBAL_AIOHTTP_CONTROL_CLIENT is not None:
+            await _GLOBAL_AIOHTTP_CONTROL_CLIENT.close()
+
+    asyncio.run(close())
 
     _GLOBAL_AIOHTTP_CLIENT = None
+    _GLOBAL_AIOHTTP_CONTROL_CLIENT = None
     _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = False
 
 
@@ -450,6 +488,7 @@ async def request(
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
     _max_num_tries: Optional[int] = None,
+    _control: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -486,6 +525,7 @@ async def request(
             _max_num_tries=_max_num_tries,
             _max_connection_retries=_max_connection_retries,
             _server_name=_server_name,
+            _control=_control,
             **kwargs,
         )
     return await _request_with_retries(
@@ -495,6 +535,7 @@ async def request(
         _max_num_tries=_max_num_tries,
         _max_connection_retries=_max_connection_retries,
         _server_name=_server_name,
+        _control=_control,
         **kwargs,
     )
 
@@ -506,6 +547,7 @@ async def _traced_request(
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
     _max_num_tries: Optional[int] = None,
+    _control: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -547,6 +589,7 @@ async def _traced_request(
             _max_num_tries=_max_num_tries,
             _max_connection_retries=_max_connection_retries,
             _server_name=_server_name,
+            _control=_control,
             **kwargs,
         )
 
@@ -598,9 +641,10 @@ async def _request_with_retries(
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
     _max_num_tries: Optional[int] = None,
+    _control: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
-    client = get_global_aiohttp_client()
+    client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
     # Initialization stays inside the client span and sets the metrics flag before it is read.
     token = set_server_name(_server_name or "external") if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY else None
     try:
@@ -726,6 +770,13 @@ class ServerClient(BaseModel):
 
     # Resolved base URLs, cached by server name.
     _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
+    _checkpoint_enabled: Optional[bool] = PrivateAttr(default=None)
+
+    def checkpoint_enabled(self) -> bool:
+        """Return whether the global ``checkpoint:`` block enables partial-rollout checkpointing."""
+        if self._checkpoint_enabled is None:
+            self._checkpoint_enabled = checkpoint_settings(self.global_config_dict) is not None
+        return self._checkpoint_enabled
 
     def assistant_message_header(self, model_server_name: str) -> bytes | None:
         """Read the optional header property of harnesses using this model server.
@@ -789,8 +840,15 @@ class ServerClient(BaseModel):
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
     async def request(
-        self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
+        self,
+        server_name: str,
+        url_path: str,
+        method: str,
+        *,
+        _control: bool = False,
+        **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
+        """Call another server. ``_control`` sends the call over the reserved control pool."""
         model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
         model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
         if model_server_base_url and server_name == model_server_name:
@@ -807,10 +865,14 @@ class ServerClient(BaseModel):
                 json_obj = json_obj.model_dump(exclude_unset=True)
                 kwargs["json"] = json_obj
 
-        observability_enabled = self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
+        # Checkpointing needs every model and resources call attributed to its rollout attempt, so it
+        # carries the rollout prefix even when observability is off.
+        attribute_rollout = (
+            self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False) or self.checkpoint_enabled()
+        )
         server_entry = self.global_config_dict.get(server_name)
         rollout_id = current_rollout_id()
-        if observability_enabled and server_entry is not None and "resources_servers" in server_entry:
+        if attribute_rollout and server_entry is not None and "resources_servers" in server_entry:
             if url_path == "/verify":
                 rollout_id = rollout_id or maybe_rollout_id_from_run_body(json_obj)
             if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
@@ -818,7 +880,7 @@ class ServerClient(BaseModel):
 
         if (
             rollout_id is not None
-            and observability_enabled
+            and attribute_rollout
             and server_entry is not None
             and "responses_api_models" in server_entry
             and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}
@@ -831,6 +893,7 @@ class ServerClient(BaseModel):
             url=f"{base_url}{url_path}",
             _internal=True,
             _server_name=server_name,
+            _control=_control,
             **kwargs,
         )
 
