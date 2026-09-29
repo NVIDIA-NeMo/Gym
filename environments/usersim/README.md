@@ -50,15 +50,17 @@ The Resources Server owns the episode-scoped tool implementation, mutable
 state, and native verification evidence. All other probes execute their native
 UserSim conversation shape without Assistant tools.
 
-The resulting ordered `result.invocations` retain User, Assistant, Judge, and
-Summary Agent activations, tool calls and results, post-activation state, and
-observations.
+The resulting ordered `result.invocations` retain User and Assistant Agent
+activations, Judge and Summary support-model calls, tool calls and results,
+post-activation state, and observations.
 
-The four Agents have explicit policy Model Servers. Resources-owned tool-result
-synthesis uses `tool_simulation_model`, while `probe_scorer_model` reuses
-`judge_model` by default. All Model Servers inherit the standard
-`policy_base_url`, `policy_api_key`, and `policy_model_name` settings unless
-their role-specific settings override them.
+The User and Assistant Agents share `policy_model`. The Environment Server
+routes UserSim's Judge and Summary calls directly to `support_model`, without
+creating support Agent sessions. Resources-owned tool-result synthesis and
+native probe scoring retain their purpose-specific `tool_simulation_model` and
+`probe_scorer_model` fields, but both reference the same support server. Its
+endpoint settings default to the standard policy settings and can be overridden
+independently.
 
 After preparation:
 
@@ -78,5 +80,6 @@ model names in the repository.
 
 For participant-specific SFT or custom collation, filter
 `result.invocations` by the `assistant` or `user` role and use each selected
-invocation's exact `request` and `response`. Judge and Summary Agent calls
-retain their own roles and cannot be mistaken for participant training data.
+invocation's exact `request` and `response`. Judge and Summary support-model
+calls retain their own roles and cannot be mistaken for participant training
+data.
