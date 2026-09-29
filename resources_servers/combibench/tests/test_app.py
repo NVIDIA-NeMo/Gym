@@ -283,6 +283,25 @@ class TestVerify:
         result = await _make_server().verify(_request(_fenced(SOLUTION), answers=[10]))
         assert result.status == CombibenchStatus.BAD_TASK.value
 
+    @pytest.mark.parametrize("answers", [None, [], ["10", "11"]], ids=["none", "empty", "surplus"])
+    async def test_answer_count_disagreeing_with_the_tags_is_a_bad_task(self, answers: Any) -> None:
+        """A row whose answers do not match its abbrevs cannot be scored on ``test``.
+
+        The zip drops the surplus, so a truncated row would lose an answer check
+        and could still score 1.0 with the wrong answer filled in.
+        """
+        client = FakeLeanClient()
+        result = await _make_server(client).verify(_request(_fenced(SOLUTION), answers=answers))
+        assert result.status == CombibenchStatus.BAD_TASK.value
+        assert result.mask_sample is True
+        assert "solution abbrev" in result.failure_reason
+        assert client.calls == []  # never compiled, so no 1.0 is possible
+
+    async def test_the_with_solution_split_is_left_alone(self) -> None:
+        """Its answers are already substituted into the statement, so the count is not load-bearing."""
+        result = await _make_server().verify(_request(_fenced(SOLUTION), answers=None, split="test_with_solution"))
+        assert result.status == CombibenchStatus.SUCCESS.value
+
     async def test_echoed_lean_diagnostics_are_bounded(self) -> None:
         """Lean output is model-influenced, so what lands in every rollout row is capped.
 

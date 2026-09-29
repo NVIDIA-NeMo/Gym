@@ -105,6 +105,12 @@ Fine-Eval distinguishes outcomes a whole-file benchmark has no equivalent for.
    This is the guard against proving a weaker theorem.
 6. **Answer check.** For each `abbrev <name>_solution`, append
    `example : <name>_solution = (<gold> : <type>) := by try rfl; try norm_num`.
+   Tags and answers are zipped positionally and a surplus on either side is
+   dropped, as upstream does. On `split: test` a disagreement between the two
+   counts is a `bad_task` instead of a silently skipped check: the answer is
+   what the model has to supply there, so a truncated row could otherwise score
+   1.0 with the wrong answer filled in. `prepare.py::validate_rows` already
+   refuses to write such a row, so this only catches a hand-made one.
 7. **Compile** through the Lean server with a 60 s timeout. Any error message →
    `compile_error`; a `sorry` warning or REPL `sorries` entry → `has_sorry`;
    the REPL timing out on the submission → `timeout`; any other REPL error
@@ -122,7 +128,7 @@ are reported under `coverage/`:
 | --- | --- | --- |
 | `sandbox_error` | `provider_unavailable` | the Lean server is unreachable or replied malformed |
 | `header_timeout` | `provider_unavailable` | a cold REPL could not finish `import Mathlib` inside the timeout — Kimina reports this as `Lean REPL header command timed out`, distinct from the submission timing out |
-| `bad_task` | `combibench:bad_task` | the row cannot be scored (no `formal_statement`, malformed `answers`) |
+| `bad_task` | `combibench:bad_task` | the row cannot be scored (no `formal_statement`, malformed `answers`, or — on `split: test` — an answer count that disagrees with the number of `_solution` abbrevs) |
 
 `bad_task` is namespaced because `nemo_gym/failure_kinds.py` has no shared name
 for a malformed task row; the two Lean-server faults are the registered

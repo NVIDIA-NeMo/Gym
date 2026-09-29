@@ -253,6 +253,26 @@ class CombibenchVerifier:
 
         chunks = statement_chunks(body.formal_statement)
         tags = answer_tags(chunks)
+        # ``build_submission`` zips tags with answers and silently drops the surplus,
+        # which is upstream's behaviour and is kept. On a ``test`` row that is not a
+        # harmless difference: the answer is the part of the task the model has to
+        # supply, so a row with more abbrevs than answers loses an answer check
+        # entirely and can still score 1.0 with the wrong answer filled in.
+        # ``prepare.py::validate_rows`` refuses to write such a row, so this can only
+        # be reached by a hand-made or truncated one -- which is exactly the case
+        # where a silent 1.0 would be believed. ``test_with_solution`` is left alone:
+        # its answers are already substituted into the statement, so the count
+        # carries no verdict.
+        if body.split == "test" and len(tags) != len(body.answers or []):
+            return self._respond(
+                body,
+                CombibenchStatus.BAD_TASK,
+                tags=tags,
+                failure_reason=(
+                    f"{len(tags)} solution abbrev(s) {tags} but {len(body.answers or [])} answer(s); "
+                    "the answer checks are zipped positionally, so the surplus would be dropped unchecked"
+                ),
+            )
 
         text = _text_of(body)
         if not text:
