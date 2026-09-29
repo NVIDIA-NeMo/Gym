@@ -320,8 +320,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             try:
                 with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
                     await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
-                    temp_file.seek(0)
-                    reward = float(temp_file.read())
+                    # Read by path: some providers (e.g. Docker's `docker cp`) replace the file,
+                    # leaving the already-open handle pointing at the original empty inode.
+                    reward = float(Path(temp_file.name).read_text())
 
                 evaluation_completed = True
             except:
