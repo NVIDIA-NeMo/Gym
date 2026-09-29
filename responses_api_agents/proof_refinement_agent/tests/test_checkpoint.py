@@ -23,13 +23,16 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 
 from nemo_gym._checkpoint import (
+    AGENT_COMPLETION_RECEIPT_HEADER,
     AGENT_EXECUTION_GENERATION_HEADER,
     RESOURCE_REQUEST_ID_HEADER,
     RESOURCE_STATE_REVISION_HEADER,
     AgentBoundaryKind,
     commit_agent_state,
+    decode_agent_completion_receipt,
     restore_agent_state,
 )
 from nemo_gym.rollout_correlation import (
@@ -45,6 +48,7 @@ from responses_api_agents.proof_refinement_agent.app import (
     ProofRefinementAgent,
     ProofRefinementAgentConfig,
     ProofRefinementRunRequest,
+    ProofRefinementVerifyResponse,
 )
 
 
@@ -192,7 +196,14 @@ class _Run:
                 "verifier_metadata": {"theorem": "example"},
             }
         )
-        return await self.endpoint(request=_request(), body=body)
+        result = await self.endpoint(request=_request(), body=body)
+        if self.agent._checkpoint_participant is None:
+            return result
+        assert isinstance(result, JSONResponse)
+        assert result.status_code == 200
+        receipt = decode_agent_completion_receipt(result.headers[AGENT_COMPLETION_RECEIPT_HEADER])
+        assert receipt == self.participant.completion_receipt(ROLLOUT, attempt)
+        return ProofRefinementVerifyResponse.model_validate_json(result.body)
 
     async def save(self, directory, attempt=0):
         task = asyncio.create_task(self.run(attempt))
