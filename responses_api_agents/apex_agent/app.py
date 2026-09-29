@@ -12,6 +12,7 @@ import logging
 import re
 import shlex
 import shutil
+import subprocess
 import tempfile
 import time
 import uuid
@@ -189,6 +190,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
     _setup_lock: Any = None
     _image: Any = None
     _stirrup_archive: Any = None
+    _host_stirrup_runtime: Any = None
     _prebuilt_worlds: Any = None
 
     def model_post_init(self, context: Any) -> None:
@@ -200,6 +202,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
         self._setup_lock = asyncio.Lock()
         self._image = None
         self._stirrup_archive = None
+        self._host_stirrup_runtime = None
         self._prebuilt_worlds = self._load_prebuilt_worlds()
 
     def _load_prebuilt_worlds(self) -> dict[str, dict[str, Any]]:
@@ -285,6 +288,11 @@ class ApexAgent(SimpleResponsesAPIAgent):
         create = (provider.get("apptainer") or {}).get("create") or {}
         args = create.get("extra_start_args") or []
         return any(str(arg) == "--net" or str(arg).startswith("--network") for arg in args)
+
+    def _sandbox_uses_fakeroot(self) -> bool:
+        provider = self._sandbox_provider if isinstance(self._sandbox_provider, dict) else {}
+        create = (provider.get("apptainer") or {}).get("create") or {}
+        return "--fakeroot" in (create.get("extra_start_args") or [])
 
     def _policy_egress_relay_enabled(self) -> bool:
         if self.config.policy_egress_relay == "auto":
@@ -377,6 +385,37 @@ class ApexAgent(SimpleResponsesAPIAgent):
                 self._stirrup_archive = await self._build_stirrup_archive(self._image)
             return self._stirrup_archive
 
+    async def _prepare_host_stirrup_runtime(self, archive: Path) -> Path:
+        """Extract once on the host so fakeroot worlds do not unpack the archive."""
+        async with self._setup_lock:
+            if self._host_stirrup_runtime is None:
+                host_runtime = tempfile.TemporaryDirectory(prefix="apex-stirrup-runtime-")
+                try:
+                    await asyncio.to_thread(
+                        subprocess.run,
+                        [
+                            "tar",
+                            "--no-same-owner",
+                            "--no-same-permissions",
+                            "-xzf",
+                            str(archive),
+                            "-C",
+                            host_runtime.name,
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                except Exception as exc:
+                    host_runtime.cleanup()
+                    if isinstance(exc, subprocess.CalledProcessError):
+                        raise RuntimeError(
+                            f"could not prepare host Stirrup runtime: {(exc.stderr or '')[-2000:]}"
+                        ) from exc
+                    raise
+                self._host_stirrup_runtime = host_runtime
+            return Path(self._host_stirrup_runtime.name)
+
     async def _download_world(self, cookies: Any, target: Path) -> None:
         response = await self.server_client.get(
             server_name=self.config.resources_server.name,
@@ -409,12 +448,18 @@ class ApexAgent(SimpleResponsesAPIAgent):
         image: str | None = None,
         prebuilt_world: bool = False,
         relay: PolicyEgressRelay | None = None,
+        host_stirrup_runtime: Path | None = None,
     ) -> SandboxSpec:
         extra, provider_options, metadata, resources = self._sandbox_parts()
         if relay is not None:
             binds = provider_options.get("binds")
             binds = [binds] if isinstance(binds, str) else list(binds or [])
             binds.append(f"{relay.socket_dir}:{_EGRESS_MOUNT}")
+            provider_options["binds"] = binds
+        if host_stirrup_runtime is not None:
+            binds = provider_options.get("binds")
+            binds = [binds] if isinstance(binds, str) else list(binds or [])
+            binds.append(f"{host_stirrup_runtime}:{_STIRRUP_ROOT}:ro")
             provider_options["binds"] = binds
         metadata.update({"nemo_gym_agent": self.config.name, "task_id": _safe_id(body.task_id)})
         policy_model = self._policy_model()
@@ -611,6 +656,11 @@ class ApexAgent(SimpleResponsesAPIAgent):
                             failure_terminal=True,
                         )
                 stirrup_archive = await self._ensure_runtime_setup()
+                host_stirrup_runtime = (
+                    await self._prepare_host_stirrup_runtime(stirrup_archive)
+                    if prebuilt_world and self._sandbox_uses_fakeroot()
+                    else None
+                )
                 cookies = request.cookies
                 with tempfile.TemporaryDirectory(prefix=f"apex-{_safe_id(body.task_id)}-") as scratch:
                     scratch_path = Path(scratch)
@@ -639,6 +689,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
                             image=selected_image,
                             prebuilt_world=prebuilt_world,
                             relay=relay,
+                            host_stirrup_runtime=host_stirrup_runtime,
                         )
                         async with AsyncSandbox(self._sandbox_provider, spec) as sandbox:
                             await sandbox.start()
@@ -646,16 +697,21 @@ class ApexAgent(SimpleResponsesAPIAgent):
                                 await sandbox.upload(world_zip, f"{_GUEST_ROOT}/world.zip")
                                 if body.task_input_files:
                                     await sandbox.upload(task_files_zip, f"{_GUEST_ROOT}/task_files.zip")
-                            await sandbox.upload(stirrup_archive, f"{_GUEST_ROOT}/stirrup-runtime.tar.gz")
-                            interpreter_setup = (
-                                f" && ( {stirrup_runtime_bootstrap_script(_STIRRUP_ROOT)} )" if prebuilt_world else ""
+                            if host_stirrup_runtime is None:
+                                await sandbox.upload(stirrup_archive, f"{_GUEST_ROOT}/stirrup-runtime.tar.gz")
+                            extraction = (
+                                ""
+                                if host_stirrup_runtime is not None
+                                else f"mkdir -p {shlex.quote(_STIRRUP_ROOT)} && "
+                                f"tar --no-same-owner -xzf "
+                                f"{shlex.quote(_GUEST_ROOT + '/stirrup-runtime.tar.gz')} "
+                                f"-C {shlex.quote(_STIRRUP_ROOT)} && "
                             )
-                            # Root-mapped Apptainer fakeroot can misreport unrelated world directories
-                            # after tar restores thousands of owners or chmod walks the whole runtime.
+                            bootstrap = (
+                                f"( {stirrup_runtime_bootstrap_script(_STIRRUP_ROOT)} ) && " if prebuilt_world else ""
+                            )
                             unpack = await sandbox.exec(
-                                f"mkdir -p {shlex.quote(_STIRRUP_ROOT)} && "
-                                f"tar --no-same-owner -xzf {shlex.quote(_GUEST_ROOT + '/stirrup-runtime.tar.gz')} "
-                                f"-C {shlex.quote(_STIRRUP_ROOT)}{interpreter_setup} && "
+                                f"{extraction}{bootstrap}"
                                 f"{shlex.quote(_STIRRUP_ROOT + '/bin/python')} -c "
                                 f"{shlex.quote(STIRRUP_PREFLIGHT)}",
                                 user="root",
@@ -664,8 +720,11 @@ class ApexAgent(SimpleResponsesAPIAgent):
                             if unpack.return_code != 0:
                                 detail = (unpack.stderr or unpack.stdout or "")[-4000:]
                                 return self._failure(body, f"could not install sandbox Stirrup runtime: {detail}")
+                            protection_prefix = (
+                                f"chmod 700 {shlex.quote(_STIRRUP_ROOT)} && " if host_stirrup_runtime is None else ""
+                            )
                             protect = await sandbox.exec(
-                                f"chmod 700 {shlex.quote(_STIRRUP_ROOT)} && "
+                                f"{protection_prefix}"
                                 f"chmod -R go-rwx {shlex.quote(_GUEST_ROOT)} && "
                                 f"mkdir -p {shlex.quote(_GUEST_ROOT + '/output')} && "
                                 f"chmod 700 {shlex.quote(_GUEST_ROOT + '/output')}",

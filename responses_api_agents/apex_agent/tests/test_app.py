@@ -363,8 +363,11 @@ async def test_prebuilt_world_config_errors_are_terminal(tmp_path: Path) -> None
 
 async def test_prebuilt_world_adds_localhost_before_startup(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     agent, _ = _prebuilt_agent(tmp_path)
+    agent._sandbox_provider = {"apptainer": {"create": {"extra_start_args": ["--fakeroot"]}}}
     agent._ensure_runtime_setup = AsyncMock(return_value=tmp_path / "stirrup-runtime.tar.gz")
+    agent._prepare_host_stirrup_runtime = AsyncMock(return_value=tmp_path / "runtime")
     commands: list[str] = []
+    uploads: list[str] = []
     specs = []
 
     class FakeSandbox:
@@ -377,7 +380,8 @@ async def test_prebuilt_world_adds_localhost_before_startup(monkeypatch: MonkeyP
         async def start(self) -> None:
             return None
 
-        async def upload(self, *_args) -> None:
+        async def upload(self, _source, destination: str) -> None:
+            uploads.append(destination)
             return None
 
         async def exec(self, command: str, **_kwargs):
@@ -396,6 +400,25 @@ async def test_prebuilt_world_adds_localhost_before_startup(monkeypatch: MonkeyP
     assert commands[2] == "printf '%s\\n' '127.0.0.1 localhost' >> /etc/hosts"
     assert "could not configure sandbox localhost" in payload["apex_error"]
     assert "sandbox_local_dns.py" not in str(specs[0].files)
+    assert specs[0].provider_options["binds"] == [f"{tmp_path}/runtime:/app/stirrup-runtime:ro"]
+    assert "/app/apex-gym/stirrup-runtime.tar.gz" not in uploads
+
+
+async def test_host_stirrup_runtime_extracts_once(tmp_path: Path) -> None:
+    agent = _agent()
+    archive = tmp_path / "stirrup-runtime.tar.gz"
+    payload = b"portable runtime"
+    with tarfile.open(archive, "w:gz") as tar:
+        member = tarfile.TarInfo("bin/python")
+        member.mode = 0o755
+        member.size = len(payload)
+        tar.addfile(member, io.BytesIO(payload))
+
+    runtime = await agent._prepare_host_stirrup_runtime(archive)
+    assert (runtime / "bin/python").read_bytes() == payload
+    archive.unlink()
+    assert await agent._prepare_host_stirrup_runtime(archive) == runtime
+    agent._host_stirrup_runtime.cleanup()
 
 
 def test_prebuilt_manifest_rejects_image_outside_cache(tmp_path: Path) -> None:
