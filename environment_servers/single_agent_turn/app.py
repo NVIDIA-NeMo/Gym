@@ -6,7 +6,7 @@
 from typing import Any, Literal
 from uuid import uuid4
 
-from aiohttp import ClientConnectionError, ClientResponseError
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Body
 from pydantic import ConfigDict, Field
 
@@ -20,7 +20,6 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
-    ResourcesVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
@@ -39,7 +38,7 @@ from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnFailure,
     SingleAgentTurnRequest,
@@ -100,12 +99,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 json=ResourcesCloseSessionRequest(
                     resources_session_id=resources_session_id,
                     episode_id=request.episode_id,
-                ),
+                ).model_dump(mode="json"),
                 cookies=resources_cookies,
             )
             await raise_for_status(close_response)
 
         # Register cleanup before seed so a lost seed response cannot hide the caller-assigned session ID.
+        # Final cleanup closes this session after run() returns, outside the episode deadline.
         resources_cleanup = cleanup.register_cleanup("resources session", close_resources)
 
         try:
@@ -117,7 +117,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
                     task_data=task_input.task_data,
-                ),
+                ).model_dump(mode="json"),
             )
             await raise_for_status(seed_http_response)
             resources_cookies = _cookies(seed_http_response)
@@ -183,7 +183,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 json=AgentCloseSessionRequest(
                     agent_session_id=agent_session_id,
                     episode_id=request.episode_id,
-                ),
+                ).model_dump(mode="json"),
                 cookies=agent_cookies,
             )
             await raise_for_status(close_http_response)
@@ -208,7 +208,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     task_id=request.task.task_id,
                     tool_accesses=tool_accesses,
                     sandbox_access=seed.sandbox_access,
-                ),
+                ).model_dump(mode="json"),
             )
             await raise_for_status(agent_create_http_response)
             agent_session = AgentSeedSessionResponse.model_validate(
@@ -246,13 +246,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
+        # Verification needs this close response: it carries the Agent's observations and final Resources cookies.
+        # A repeated close cannot return them, so a transient failure retries the whole episode instead.
         try:
             await agent_cleanup.close()
         except Exception as error:
             raise self._failure(
                 stage="cleanup",
                 message=str(error),
-                terminal=True,
+                terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
             ) from error
         try:
@@ -270,7 +272,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 cookies=resources_cookies,
             )
             await raise_for_status(verify_http_response)
-            verification = ResourcesVerifyResponse.model_validate(await get_response_json(verify_http_response))
+            verification = SingleAgentTurnResult.model_validate(await get_response_json(verify_http_response))
         except Exception as error:
             raise self._failure(
                 stage="verification",
@@ -279,19 +281,17 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 partial_response=agent_response,
             ) from error
 
-        # Verification is already complete. Use the bounded final unwind so
-        # cleanup errors or an expired episode deadline cannot erase its result.
-        # Keep the original registration active for a retry if this close fails.
+        # Keep one bounded retry in final unwind without erasing a completed verdict.
         cleanup.register_cleanup("post-verification resources session", resources_cleanup.close)
-
         return SingleAgentTurnResponse(
             episode_id=request.episode_id,
             task_id=request.task.task_id,
-            result=SingleAgentTurnResult(
-                verification=verification,
-                agent_observations=agent_close_response.agent_observations
-                if agent_close_response is not None
-                else None,
+            result=verification.model_copy(
+                update={
+                    "ng_agent_observations": agent_close_response.agent_observations
+                    if agent_close_response is not None
+                    else None
+                }
             ),
         )
 
@@ -332,8 +332,11 @@ def _cookies(response: Any) -> dict[str, str]:
 def _is_retryable_dependency_error(error: Exception) -> bool:
     if isinstance(error, ClientResponseError):
         return error.status in {408, 425, 429} or error.status >= 500
-    return isinstance(error, (ClientConnectionError, TimeoutError))
+    # A dropped connection mid-body raises ClientPayloadError, which is transient like a refused connection.
+    return isinstance(error, (ClientConnectionError, ClientPayloadError, TimeoutError))
 
 
 if __name__ == "__main__":
     SingleAgentTurnEnvironmentServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = SingleAgentTurnEnvironmentServer.run_webserver()  # noqa: F401

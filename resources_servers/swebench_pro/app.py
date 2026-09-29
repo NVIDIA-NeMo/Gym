@@ -16,6 +16,7 @@
 """SWE-bench Pro resources server."""
 
 import asyncio
+import logging
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -24,11 +25,12 @@ from shlex import quote
 from tempfile import TemporaryDirectory
 from time import time
 from traceback import format_exc
-from typing import Any
+from typing import Annotated, Any
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
-from pydantic import BaseModel, ConfigDict
+from fastapi import Body, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -47,8 +49,10 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.providers.base import ConnectableProvider
 from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.single_agent_turn_types import SingleAgentTurnResourcesVerifyRequest
+from resources_servers.swebench_pro.image_cache import digest_hex, verify_local_image
 from resources_servers.swebench_pro.verification import (
     DEFAULT_ENVIRONMENT_REPAIRS,
     VerificationInputs,
@@ -63,6 +67,7 @@ from resources_servers.swebench_pro.verification import (
 
 # K8s maps localhost to ::1 and Node 17+ honours that, but servers under test bind IPv4.
 SANDBOX_ENV_OVERRIDES = {"NODE_OPTIONS": "--dns-result-order=ipv4first"}
+LOG = logging.getLogger(__name__)
 
 
 # Blanked on the spec so the agent sees a clean env; the entryscript unsets them for real.
@@ -132,6 +137,7 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     # Which container repairs to apply; see `ENVIRONMENT_REPAIRS`.
     environment_repairs: tuple[str, ...] = DEFAULT_ENVIRONMENT_REPAIRS
     image_repository: str = "docker.io/jefzda/sweap-images"
+    image_template: str | None = None  # Local SIF path with a checked provenance manifest.
     sandbox_provider: str
     sandbox_config: dict[str, Any]
 
@@ -172,6 +178,8 @@ class SWEBenchProSeedSessionRequest(SWEBenchProInstanceRequest, BaseSeedSessionR
 
 class SWEBenchProSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str
+    sandbox_descriptor: dict[str, Any] | None = Field(default=None, exclude_if=lambda value: value is None)
+    image_provenance: dict[str, Any] = Field(default_factory=dict)
 
 
 class SWEBenchProVerifyRequest(SWEBenchProInstanceRequest, BaseVerifyRequest):
@@ -179,7 +187,9 @@ class SWEBenchProVerifyRequest(SWEBenchProInstanceRequest, BaseVerifyRequest):
 
 
 class SWEBenchProVerifyResponse(BaseVerifyResponse):
+    image_provenance: dict[str, Any] = Field(default_factory=dict)
     evaluation_completed: bool
+    eval_timed_out: bool = False
     resolved: bool
     patch_applied: bool
     eval_sandbox_start_time_taken: float
@@ -202,14 +212,14 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         # Untracked files the image ships, per session. Leading underscore: pydantic needs it.
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
+        # Typed sessions, which an Environment Server seeds and closes by resources_session_id.
         self._session_id_to_task: dict[str, SWEBenchProInstanceRequest] = {}
         self._session_id_to_identity: dict[str, tuple[EpisodeId, TaskId]] = {}
         self._native_session_locks: dict[str, asyncio.Lock] = {}
-        self._closed_native_session_ids: set[str] = set()
+        self._closed_native_sessions: dict[str, EpisodeId] = {}
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
-        app.post("/close_session")(self.close_session)
         parent_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -221,26 +231,81 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 await self.shutdown()
 
         app.router.lifespan_context = lifespan
+        app.post("/close_session")(self.close_session)
         return app
 
+    async def close_session(
+        self,
+        request: Request,
+        body: Annotated[dict[str, Any] | None, Body()] = None,
+    ) -> ResourcesCloseSessionResponse | dict[str, bool]:
+        # Agents that seeded through /run close their cookie session with an empty body.
+        if not body:
+            session_id = request.session.get(SESSION_ID_KEY)
+            if session_id is None:
+                return {"closed": True}
+            await self._stop_session_sandbox(session_id)
+            return {"closed": True}
+
+        try:
+            typed = ResourcesCloseSessionRequest.model_validate(body)
+        except ValidationError as error:
+            raise RequestValidationError(error.errors()) from error
+        session_id = typed.resources_session_id
+        lock = self._native_session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            closed_episode_id = self._closed_native_sessions.get(session_id)
+            if closed_episode_id is not None:
+                if typed.episode_id != closed_episode_id:
+                    raise ValueError("episode_id does not match the closed resources session")
+                request.session.pop(SESSION_ID_KEY, None)
+                return ResourcesCloseSessionResponse(resources_session_id=session_id)
+            identity = self._session_id_to_identity.get(session_id)
+            if identity is not None and typed.episode_id != identity[0]:
+                raise ValueError("episode_id does not match the seeded resources session")
+            await self._stop_session_sandbox(session_id)
+            self._session_id_to_task.pop(session_id, None)
+            self._session_id_to_identity.pop(session_id, None)
+            self._closed_native_sessions[session_id] = typed.episode_id
+            request.session.pop(SESSION_ID_KEY, None)
+            return ResourcesCloseSessionResponse(resources_session_id=session_id)
+
+    async def _stop_session_sandbox(self, session_id: str) -> None:
+        sandbox = self._session_id_to_sandbox.get(session_id)
+        if sandbox is not None:
+            async with asyncio.timeout(self.config.verification_stop_timeout):
+                await sandbox.stop()
+            self._session_id_to_sandbox.pop(session_id, None)
+        self._session_id_to_pristine_untracked.pop(session_id, None)
+
     async def shutdown(self) -> None:
-        sandboxes = list(self._session_id_to_sandbox.values())
-        self._session_id_to_sandbox.clear()
-        self._session_id_to_pristine_untracked.clear()
         self._session_id_to_task.clear()
         self._session_id_to_identity.clear()
         self._native_session_locks.clear()
-        self._closed_native_session_ids.clear()
-        for sandbox in sandboxes:
+        self._closed_native_sessions.clear()
+        for session_id in list(self._session_id_to_sandbox):
             try:
-                await sandbox.stop()
+                await self._stop_session_sandbox(session_id)
             except Exception:
-                print("Failed to stop abandoned SWE-bench Pro sandbox", format_exc(), file=sys.stderr)
+                LOG.exception("Failed to stop abandoned SWE-bench Pro sandbox %s", session_id)
 
     def _image(self, body: SWEBenchProInstanceRequest) -> str:
+        if self.config.image_template:
+            return self.config.image_template.format(
+                instance_id=body.instance_id,
+                dockerhub_tag=body.dockerhub_tag,
+                image_digest_hex=digest_hex(body.image_digest),
+            )
         if body.image_digest:
             return f"{self.config.image_repository}@{body.image_digest}"
         return f"{self.config.image_repository}:{body.dockerhub_tag}"
+
+    def _image_info(self, body: SWEBenchProInstanceRequest) -> dict[str, Any]:
+        image = self._image(body)
+        if self.config.image_template:
+            source = f"docker://{self.config.image_repository}@{body.image_digest}"
+            return verify_local_image(Path(image), source)
+        return {"image": image, "source_uri": image}
 
     async def _create_sandbox(
         self,
@@ -250,8 +315,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+        image_info = await asyncio.to_thread(self._image_info, body)
         spec = SandboxSpec(
-            image=self._image(body),
+            image=image_info["image"],
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir="/app",
@@ -295,53 +361,50 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         body: SWEBenchProSeedSessionRequest | ResourcesSeedSessionRequest,
     ) -> SWEBenchProSeedSessionResponse | ResourcesSeedSessionResponse:
         if not isinstance(body, ResourcesSeedSessionRequest):
-            return await self._seed_session(request, body, request.session[SESSION_ID_KEY])
+            return await self._seed_session(request.session[SESSION_ID_KEY], body)
 
         session_id = body.resources_session_id
         request.session[SESSION_ID_KEY] = session_id
         lock = self._native_session_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
-            if session_id in self._closed_native_session_ids:
+            if session_id in self._closed_native_sessions:
                 raise ValueError(f"Resources session is already closed: {session_id}")
             identity = self._session_id_to_identity.get(session_id)
             if identity is not None:
                 if identity != (body.episode_id, body.task_id):
                     raise ValueError("resources_session_id is already bound to another episode or task")
-                sandbox = self._session_id_to_sandbox[session_id]
-                return ResourcesSeedSessionResponse(
-                    resources_session_id=session_id,
-                    sandbox_access=SandboxAccess(
-                        connection=DirectSandboxConnection(
-                            provider_config_ref=self.config.sandbox_provider,
-                            descriptor=await sandbox.serialize(),
-                        ),
-                        workdir="/app",
-                    ),
-                )
-            return await self._seed_session(request, body, session_id)
+                return await self._typed_seed_response(session_id)
+            task = SWEBenchProInstanceRequest.model_validate(body.task_data)
+            if body.task_id.task_id != task.instance_id:
+                raise ValueError("TaskId does not match the SWE-bench Pro instance_id")
+            await self._seed_session(session_id, task)
+            try:
+                response = await self._typed_seed_response(session_id)
+            except BaseException:
+                # The agent cannot reach a sandbox it was never handed, so stop it here.
+                await self._stop_session_sandbox(session_id)
+                raise
+            self._session_id_to_task[session_id] = task
+            self._session_id_to_identity[session_id] = (body.episode_id, body.task_id)
+            return response
 
-    async def _seed_session(
-        self,
-        request: Request,
-        body: SWEBenchProSeedSessionRequest | ResourcesSeedSessionRequest,
-        session_id: str,
-    ) -> SWEBenchProSeedSessionResponse | ResourcesSeedSessionResponse:
-        self._session_id_to_pristine_untracked.pop(session_id, None)
-        previous = self._session_id_to_sandbox.pop(session_id, None)
-        if previous is not None:
-            await previous.stop()
-        self._session_id_to_task.pop(session_id, None)
-        self._session_id_to_identity.pop(session_id, None)
-
-        native_request = isinstance(body, ResourcesSeedSessionRequest)
-        task = (
-            SWEBenchProInstanceRequest.model_validate(body.task_data)
-            if native_request
-            else SWEBenchProInstanceRequest.model_validate(body.model_dump())
+    async def _typed_seed_response(self, session_id: str) -> ResourcesSeedSessionResponse:
+        return ResourcesSeedSessionResponse(
+            resources_session_id=session_id,
+            sandbox_access=SandboxAccess(
+                connection=DirectSandboxConnection(
+                    provider_config_ref=self.config.sandbox_provider,
+                    descriptor=await self._session_id_to_sandbox[session_id].serialize(),
+                ),
+                workdir="/app",
+            ),
         )
-        if native_request and body.task_id.task_id != task.instance_id:
-            raise ValueError("TaskId does not match the SWE-bench Pro instance_id")
-        sandbox = await self._create_sandbox(task)
+
+    async def _seed_session(self, session_id: str, body: SWEBenchProInstanceRequest) -> SWEBenchProSeedSessionResponse:
+        await self._stop_session_sandbox(session_id)
+        sandbox = await self._create_sandbox(body)
+        # Keep ownership before initialization, including when cleanup itself fails.
+        self._session_id_to_sandbox[session_id] = sandbox
         try:
             if self.config.apply_anti_cheating:
                 anti_cheat_setup_fpath = Path(__file__).parent.parent / "swebench" / "anti_cheat_setup.sh"
@@ -352,33 +415,30 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 )
                 if result.return_code != 0:
                     print(
-                        f"Failed to setup anti-cheating for {task.instance_id}. Return code: {result.return_code}\n"
+                        f"Failed to setup anti-cheating for {body.instance_id}. Return code: {result.return_code}\n"
                         f"Stdout:\n{result.stdout}\nStderr:\n{result.stderr}"
                     )
-            await self.normalize_sandbox_environment(sandbox, task.instance_id)
-            pristine_untracked = await self.pristine_untracked_files(sandbox)
-            descriptor = await sandbox.serialize() if native_request else None
-        except BaseException:
-            await sandbox.stop()
-            raise
-
-        self._session_id_to_task[session_id] = task
-        if native_request:
-            self._session_id_to_identity[session_id] = (body.episode_id, body.task_id)
-        self._session_id_to_pristine_untracked[session_id] = pristine_untracked
-        self._session_id_to_sandbox[session_id] = sandbox
-        if native_request:
-            return ResourcesSeedSessionResponse(
-                resources_session_id=session_id,
-                sandbox_access=SandboxAccess(
-                    connection=DirectSandboxConnection(
-                        provider_config_ref=self.config.sandbox_provider,
-                        descriptor=descriptor,
-                    ),
-                    workdir="/app",
-                ),
+            await self.normalize_sandbox_environment(sandbox, body.instance_id)
+            pristine = await self.pristine_untracked_files(sandbox)
+            descriptor = (
+                await sandbox.serialize()
+                if isinstance(getattr(sandbox, "_provider", None), ConnectableProvider)
+                else None
             )
-        return SWEBenchProSeedSessionResponse(sandbox_handle=sandbox._handle.sandbox_id)
+            response = SWEBenchProSeedSessionResponse(
+                sandbox_handle=sandbox._handle.sandbox_id,
+                sandbox_descriptor=descriptor,
+                image_provenance=await asyncio.to_thread(self._image_info, body),
+            )
+        except BaseException:
+            try:
+                await self._stop_session_sandbox(session_id)
+            except Exception:
+                LOG.exception("Failed to stop partially initialized SWE-bench Pro sandbox %s", session_id)
+            raise
+        self._session_id_to_pristine_untracked[session_id] = pristine
+        self._session_id_to_sandbox[session_id] = sandbox
+        return response
 
     async def normalize_sandbox_environment(self, sandbox: AsyncSandbox, instance_id: str) -> None:
         """Give the agent container the same repairs the verifier gets; best effort."""
@@ -417,8 +477,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             )
             if result.return_code != 0:
                 raise RuntimeError(result.stderr or "git diff failed")
-            # Exec logs may omit line terminators, corrupting a valid diff. File
-            # transfer also preserves CRLF within hunks and no-newline markers.
+            # Command logs can drop line endings; download the patch bytes instead.
             with TemporaryDirectory(prefix="nemo-gym-swebench-pro-") as directory:
                 local_patch = Path(directory) / "model.diff"
                 await original_sandbox.download(patch_path, local_patch)
@@ -428,18 +487,14 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             try:
                 cleanup = await original_sandbox.exec(f"rm -f -- {quote(patch_path)}")
                 if cleanup.return_code != 0:
-                    print(f"Failed to remove agent patch file: {cleanup.stderr}", file=sys.stderr)
+                    LOG.warning("Failed to remove agent patch file: %s", cleanup.stderr)
             except Exception:
-                print("Failed to remove agent patch file", format_exc(), file=sys.stderr)
+                LOG.exception("Failed to remove agent patch file")
             finally:
                 try:
-                    await original_sandbox.stop()
+                    await self._stop_session_sandbox(session_id)
                 except Exception:
-                    print("Failed to stop agent sandbox", format_exc(), file=sys.stderr)
-                else:
-                    # Keep the live handle if destruction failed so native close can retry.
-                    self._session_id_to_sandbox.pop(session_id, None)
-                    self._session_id_to_pristine_untracked.pop(session_id, None)
+                    LOG.exception("Failed to stop agent sandbox %s", session_id)
 
     async def verify(
         self,
@@ -454,6 +509,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 raise ValueError("Unknown SWE-bench Pro resources session")
             if identity != (body.episode_id, body.task_id):
                 raise ValueError("Verification identity does not match the seeded resources session")
+            if not self.config.is_verifying_golden_patch and session_id not in self._session_id_to_sandbox:
+                raise ValueError("SWE-bench Pro task sandbox is no longer available")
             body = SWEBenchProVerifyRequest.model_validate(
                 task.model_dump()
                 | {
@@ -515,7 +572,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     except Exception:
                         print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
 
-            reason = inconclusive_reason(result, asdict(inputs))
+            reason = inconclusive_reason(result)
             if reason is not None and _budget_spent(deadline):
                 print(
                     f"Verification for {body.instance_id} gave up after {attempt} attempt(s): "
@@ -538,8 +595,10 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             )
 
         response_data = body.model_dump() | {
+            "image_provenance": await asyncio.to_thread(self._image_info, body),
             "reward": float(result.resolved),
-            "evaluation_completed": result.completed,
+            "evaluation_completed": result.completed and reason is None,
+            "eval_timed_out": result.timed_out,
             "resolved": result.resolved,
             "patch_applied": result.patch_applied,
             "eval_sandbox_start_time_taken": eval_sandbox_start_time_taken,
@@ -548,32 +607,10 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "model_patch": model_patch or None,
             "test_results": result.test_results,
             "test_output": result.test_output,
-            "error": extraction_error or result.error,
+            "error": extraction_error or result.error or reason,
             "log_dir": str(run_log_dir),
         }
         return SWEBenchProVerifyResponse.model_validate(response_data)
-
-    async def close_session(
-        self,
-        request: Request,
-        body: ResourcesCloseSessionRequest,
-    ) -> ResourcesCloseSessionResponse:
-        session_id = body.resources_session_id
-        lock = self._native_session_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
-            identity = self._session_id_to_identity.get(session_id)
-            if identity is not None and body.episode_id != identity[0]:
-                raise ValueError("episode_id does not match the seeded resources session")
-            sandbox = self._session_id_to_sandbox.get(session_id)
-            if sandbox is not None:
-                await sandbox.stop()
-            self._session_id_to_sandbox.pop(session_id, None)
-            self._session_id_to_task.pop(session_id, None)
-            self._session_id_to_identity.pop(session_id, None)
-            self._session_id_to_pristine_untracked.pop(session_id, None)
-            self._closed_native_session_ids.add(session_id)
-            request.session.pop(SESSION_ID_KEY, None)
-            return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
 
 if __name__ == "__main__":

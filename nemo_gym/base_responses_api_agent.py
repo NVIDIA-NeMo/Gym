@@ -59,7 +59,8 @@ class AgentSeedSessionRequest(BaseModel):
 
     Repeating the same identifier and episode must return the existing session.
     Closing an unknown identifier must prevent a racing seed from creating it later.
-    Implementations must reap abandoned state after a bounded lifetime.
+    External resources should use provider TTLs when available. Current process-local
+    session records may remain until the server shuts down.
     """
 
     model_config = ConfigDict(extra="forbid")

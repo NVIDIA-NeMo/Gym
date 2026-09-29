@@ -1,3 +1,5 @@
+# The top-level key names this instance; routes, `_inherit_from`, and server references use it.
+# The key under `environment_servers` names the implementation directory, environment_servers/single_agent_turn.
 single_agent_turn:
   environment_servers:
     single_agent_turn:

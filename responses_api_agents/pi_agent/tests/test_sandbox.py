@@ -841,10 +841,10 @@ async def test_native_recipe_collects_through_environment_run(setup, monkeypatch
             return Response(result.model_dump(mode="json"))
         if server_name == resources_name:
             if url_path == "/seed_session":
-                assert body.task_data == {"instance_id": "instance"}
+                assert body["task_data"] == {"instance_id": "instance"}
                 return Response(
                     {
-                        "resources_session_id": body.resources_session_id,
+                        "resources_session_id": body["resources_session_id"],
                         "sandbox_access": seed().sandbox_access.model_dump(),
                     },
                     cookie="resources-cookie",
@@ -855,13 +855,15 @@ async def test_native_recipe_collects_through_environment_run(setup, monkeypatch
                 assert sandbox.disconnect.await_count == 1
                 return Response({**body.verification_input.model_dump(mode="json"), "reward": 1.0})
             assert url_path == "/close_session"
-            return Response({"resources_session_id": body.resources_session_id})
+            return Response({"resources_session_id": body["resources_session_id"]})
         assert server_name == agent_name
         request = Request({"type": "http", "session": cookies})
         if url_path == "/v1/agent_sessions":
+            body = AgentSeedSessionRequest.model_validate(body)
             result = await agent.seed_agent_session(request, body)
             assert result.agent_session_id == body.agent_session_id
         elif url_path == "/v1/agent_sessions/close":
+            body = AgentCloseSessionRequest.model_validate(body)
             result = await agent.close_agent_session(request, body)
         else:
             assert url_path.endswith("/v1/responses")
@@ -888,9 +890,10 @@ async def test_native_recipe_collects_through_environment_run(setup, monkeypatch
     )
     _, result = await next(RolloutCollectionHelper().run_examples(rows))
     assert result["failure"] is None
-    assert result["result"]["verification"]["reward"] == 1.0
-    assert result["result"]["verification"]["response"]["usage"]["total_tokens"] == 22
-    assert result["result"]["agent_observations"]["source"] == "pi"
+    assert "verification" not in result["result"]
+    assert result["result"]["reward"] == 1.0
+    assert result["result"]["response"]["usage"]["total_tokens"] == 22
+    assert result["result"]["ng_agent_observations"]["source"] == "pi"
     assert calls == [
         (environment_name, "/run"),
         (resources_name, "/seed_session"),

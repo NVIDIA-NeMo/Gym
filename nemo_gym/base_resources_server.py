@@ -186,7 +186,8 @@ class ResourcesSeedSessionRequest(BaseModel):
 
     Repeating the same identifier and episode must return the existing session.
     Closing an unknown identifier must prevent a racing seed from creating it later.
-    Implementations must reap abandoned state after a bounded lifetime.
+    External resources should use provider TTLs when available. Current process-local
+    session records may remain until the server shuts down.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -218,12 +219,6 @@ class ResourcesVerifyRequest(BaseModel, Generic[VerificationInputT]):
     episode_id: EpisodeId
     task_id: TaskId
     verification_input: VerificationInputT
-
-
-class ResourcesVerifyResponse(BaseVerifyResponse):
-    """Preserve environment-specific verification fields across the server boundary."""
-
-    model_config = ConfigDict(extra="allow")
 
 
 class ResourcesCloseSessionRequest(BaseModel):
