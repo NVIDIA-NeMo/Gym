@@ -360,3 +360,31 @@ async def test_price_history_never_opens_a_network_session(tmp_path: Path, monke
     )
 
     assert output.error is None
+
+
+@pytest.mark.asyncio
+async def test_loaded_price_records_stay_within_the_budget(tmp_path: Path, monkeypatch) -> None:
+    for ticker in ("AAA", "BBB", "CCC"):
+        _write_prices(tmp_path, ticker, WEEK)
+    monkeypatch.setattr(LocalPriceHistory, "MAX_LOADED_RECORDS", 2 * len(WEEK))
+    local = LocalPriceHistory(tmp_path)
+
+    for ticker in ("AAA", "BBB", "AAA", "CCC"):
+        output = await local.execute(_price_args(ticker, "2024-01-02", "2024-01-08"), {}, logging.getLogger(__name__))
+        assert output.error is None
+
+    assert [path.stem for path in local._loaded] == ["AAA", "CCC"]
+    assert local._loaded_records == 2 * len(WEEK)
+
+
+@pytest.mark.asyncio
+async def test_a_ticker_larger_than_the_budget_is_still_served(tmp_path: Path, monkeypatch) -> None:
+    _write_prices(tmp_path, "AAA", WEEK)
+    monkeypatch.setattr(LocalPriceHistory, "MAX_LOADED_RECORDS", 1)
+
+    output = await LocalPriceHistory(tmp_path).execute(
+        _price_args("AAA", "2024-01-02", "2024-01-08"), {}, logging.getLogger(__name__)
+    )
+
+    assert output.error is None
+    assert output.output.count("\n") == len(WEEK)

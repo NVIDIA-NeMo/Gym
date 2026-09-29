@@ -176,8 +176,9 @@ that use the same store. When you generate training answers from your own
 dataset, serve that same dataset here so a correct reading of the tool always
 matches the answer.
 
-Files are read on first use and at most 1,024 tickers stay in memory, so
-startup loads no prices and memory stays bounded for large stores.
+Files are read on first use and at most 2 million daily records stay in memory
+(about 1-3 GB, depending on the price columns), so startup loads no prices and
+memory stays bounded however long the histories are.
 
 Local mode behaves like live mode where it can:
 

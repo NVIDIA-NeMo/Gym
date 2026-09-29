@@ -138,7 +138,8 @@ class LocalPriceHistory(PriceHistory):
     no pricing data. The network is never used.
     """
 
-    MAX_LOADED_TICKERS = 1024
+    # Roughly 0.5-1.5 KB of memory per record, depending on how many price columns the files carry.
+    MAX_LOADED_RECORDS = 2_000_000
     # The ticker becomes a file name, so this must never admit "/" or a leading "." (path traversal).
     # It covers US symbols with share classes (BRK.B, BRK-B) and digits; 15 characters is a loose cap.
     _SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,14}$")
@@ -148,6 +149,7 @@ class LocalPriceHistory(PriceHistory):
         if not self._equity_dir.is_dir():
             raise ValueError(f"local pricing directory {self._equity_dir} does not exist")
         self._loaded: OrderedDict[Path, list[dict[str, Any]]] = OrderedDict()
+        self._loaded_records = 0
 
     @property
     def ticker_count(self) -> int:
@@ -173,9 +175,12 @@ class LocalPriceHistory(PriceHistory):
         records = self._loaded.get(path)
         if records is None:
             records = await asyncio.to_thread(self._read, path)
-            self._loaded[path] = records
-            if len(self._loaded) > self.MAX_LOADED_TICKERS:
-                self._loaded.popitem(last=False)
+            if path not in self._loaded:
+                self._loaded[path] = records
+                self._loaded_records += len(records)
+            while self._loaded_records > self.MAX_LOADED_RECORDS and len(self._loaded) > 1:
+                _, evicted = self._loaded.popitem(last=False)
+                self._loaded_records -= len(evicted)
         else:
             self._loaded.move_to_end(path)
         return records
