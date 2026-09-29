@@ -889,11 +889,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         )
         if collect_observations:
             assert remote_data_home is not None
-            observations_remote_fpath = f"{remote_data_home}/opencode/opencode.db"
             snapshot_remote_fpath = f"{remote_data_home}/opencode/nemo-gym-observations.db"
             observations_local_fpath = results_dir / "opencode.db"
             observations_local_fpath.unlink(missing_ok=True)
             try:
+                # Release channels and OPENCODE_DB can change the database filename.
+                database_path_result = await sandbox.exec(
+                    command="export PATH=$HOME/.opencode/bin:$PATH && opencode db path",
+                    env={"XDG_DATA_HOME": remote_data_home},
+                )
+                observations_remote_fpath = (database_path_result.stdout or "").strip()
+                if (
+                    database_path_result.return_code != 0
+                    or database_path_result.error_type is not None
+                    or not observations_remote_fpath
+                ):
+                    raise RuntimeError(f"OpenCode database path lookup failed: {database_path_result.stderr}")
                 snapshot_script = (
                     "import sqlite3,sys;"
                     "source=sqlite3.connect(f'file:{sys.argv[1]}?mode=ro',uri=True);"
@@ -908,7 +919,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     timeout_s=self.config.sandbox_timeout,
                 )
                 if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
-                    raise RuntimeError("OpenCode database snapshot failed")
+                    raise RuntimeError(f"OpenCode database snapshot failed: {snapshot_result.stderr}")
                 await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
                 observations = parse_opencode_observations(
                     observations_local_fpath, observation_invocation_id, trajectory, model_ref=self.config.model_server

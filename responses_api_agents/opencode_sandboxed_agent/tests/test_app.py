@@ -417,11 +417,24 @@ class TestOpenCodeSandboxedAgent:
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
 
+    @mark.parametrize(
+        "database_name,lookup_failure",
+        [
+            ("opencode.db", None),
+            ("opencode-gym-correlation.db", None),
+            ("custom database.sqlite", None),
+            ("opencode.db", "exit"),
+            ("opencode.db", "empty"),
+            ("opencode.db", "execution"),
+        ],
+    )
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,
         opencode_export_test_data: Dict[str, Any],
         monkeypatch: MonkeyPatch,
+        database_name: str,
+        lookup_failure: str | None,
     ) -> None:
         class Response:
             ok = True
@@ -446,7 +459,7 @@ class TestOpenCodeSandboxedAgent:
             def cookies(self) -> dict[str, str]:
                 return self._cookies
 
-        db_path = tmp_path / "source.db"
+        db_path = tmp_path / database_name
         connection = sqlite3.connect(db_path)
         connection.execute("pragma journal_mode=wal")
         connection.execute("create table session (id text, parent_id text, time_created integer)")
@@ -511,15 +524,19 @@ class TestOpenCodeSandboxedAgent:
                 ),
                 SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+                SimpleNamespace(
+                    stdout="" if lookup_failure == "empty" else f"{db_path}\n",
+                    stderr="path lookup failed" if lookup_failure else "",
+                    return_code=1 if lookup_failure == "exit" else 0,
+                    error_type="execution_failed" if lookup_failure == "execution" else None,
+                ),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
             ]
         )
         snapshot_path = tmp_path / "snapshot.db"
 
         def local_quote(value: str) -> str:
-            if value.endswith("/opencode/opencode.db"):
-                value = str(db_path)
-            elif value.endswith("/opencode/nemo-gym-observations.db"):
+            if value.endswith("/opencode/nemo-gym-observations.db"):
                 value = str(snapshot_path)
             return shlex.quote(value)
 
@@ -578,6 +595,17 @@ class TestOpenCodeSandboxedAgent:
             connection.close()
 
         assert result.ng_agent_observations is not None
+        lookup = sandbox.exec.await_args_list[3].kwargs
+        assert lookup["command"].endswith("opencode db path")
+        assert lookup["env"] == sandbox.exec.await_args_list[1].kwargs["env"]
+        if lookup_failure:
+            # Even a usable default-named database must not hide a failed lookup.
+            assert not TrajectoryRecord.model_validate(result.ng_trajectory).turns
+            assert "observation_capture_failed" in {gap.code for gap in result.ng_agent_observations.gaps}
+            assert result.opencode_export_found
+            assert sandbox.exec.await_count == 4
+            sandbox.download.assert_awaited_once()
+            return
         [turn] = TrajectoryRecord.model_validate(result.ng_trajectory).turns
         assert (turn.task_id, turn.rollout_id, turn.invocation_id) == ("7", "7-2", "root")
         assert turn.answer[0]["call_id"] == "call-1"
