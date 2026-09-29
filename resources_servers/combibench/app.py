@@ -137,10 +137,12 @@ class CombibenchResourcesServerConfig(BaseResourcesServerConfig):
     # declared type. False reproduces upstream's unascribed check.
     answer_check_ascription: bool = True
     # Bound on in-flight Lean calls *for the whole server*. Rollout fan-out is
-    # unbounded, and the Lean server can only run LEAN_SERVER_MAX_REPLS (8 by
-    # default) of them at once. The semaphore that enforces it lives on one
-    # client instance in one process, so it is divided by ``num_workers``; see
-    # ``_per_worker_concurrency``.
+    # unbounded, and the Lean server can only run LEAN_SERVER_MAX_REPLS of them at
+    # once — 8 in this repository's ``kimina_image``, which is what this default
+    # matches; Kimina's own default is one per CPU less one, so a differently
+    # configured server needs this set to its value. The semaphore that enforces
+    # it lives on one client instance in one process, so it is divided by
+    # ``num_workers``; see ``_per_worker_concurrency``.
     max_concurrent_lean_requests: int = DEFAULT_MAX_CONCURRENCY
 
 

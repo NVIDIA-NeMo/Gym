@@ -126,6 +126,8 @@ gate above is what keeps that failure from reaching a run.
 
 Keep the server's `LEAN_SERVER_MAX_REPLS` and the resources server's
 `max_concurrent_lean_requests` equal, so the two agree on how many proofs can be in flight.
+The 8 above is this image's choice, not a Kimina default — Kimina's is
+`max(cpu_count() - 1, 1)` — so changing one here means changing the other there.
 
 `LEAN_SERVER_LEAN_VERSION` is set from the `LEAN_VERSION` build arg. It selects nothing —
 the toolchain is the one baked into `/opt/lean` — but it is what the server announces in its

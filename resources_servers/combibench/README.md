@@ -379,7 +379,11 @@ isolation caveats. Point this server at a running instance with
 one).
 
 Keep `max_concurrent_lean_requests` equal to the server's
-`LEAN_SERVER_MAX_REPLS`. It is the bound for the whole resources server, not per
+`LEAN_SERVER_MAX_REPLS`. Both default to 8 here, but that is the value
+`kimina_image` sets, not a Kimina default — Kimina's own is
+`max(cpu_count() - 1, 1)`, a property of whichever host it runs on — so against
+any other server both numbers have to be set deliberately.
+It is the bound for the whole resources server, not per
 process: the `asyncio.Semaphore` that enforces it lives on one client instance,
 so under `num_workers: N` the configured value is divided by `N` and each worker
 holds its share (floored at 1). Rollout fan-out is otherwise unbounded, and a request

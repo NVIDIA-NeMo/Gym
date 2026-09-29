@@ -45,9 +45,13 @@ LOG = logging.getLogger(__name__)
 # than cut off by the client first.
 HTTP_TIMEOUT_MARGIN_SECONDS = 30.0
 
-# The Kimina default (``LEAN_SERVER_MAX_REPLS``). Rollout fan-out is unbounded,
-# so without a matching bound here every extra request is a connection queued
-# against a server that can only run this many REPLs anyway.
+# The ``LEAN_SERVER_MAX_REPLS`` this repository's own ``kimina_image`` sets, *not*
+# a Kimina default: Kimina's default is ``max((os.cpu_count() or 1) - 1, 1)``
+# (``server/settings.py``), which is a property of whatever host it lands on and
+# so cannot be matched from here. Rollout fan-out is unbounded, so without a bound
+# matching the server's every extra request is a connection queued against a
+# server that can only run that many REPLs anyway. Operators pointing this at a
+# differently configured server must set both sides to the same number.
 DEFAULT_MAX_CONCURRENCY = 8
 
 # "Try again": the server is out of REPLs (429) or not accepting work yet (503).
