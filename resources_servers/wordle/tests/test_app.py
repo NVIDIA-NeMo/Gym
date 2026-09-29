@@ -137,27 +137,23 @@ class TestReward:
     def test_repeated_guess_penalty(self):
         state = _state()
         state.guesses.append("light")
-        reward, breakdown = WordleGameLogic.calculate_turn_reward("light", [], state)
-        assert breakdown["repeated_guess_penalty"] == PENALTY_REPEATED_GUESS
-        assert reward == pytest.approx(PENALTY_REPEATED_GUESS)
+        assert WordleGameLogic.calculate_turn_reward("light", state) == pytest.approx(PENALTY_REPEATED_GUESS)
 
     def test_ignore_green_and_yellow_penalties(self):
         state = _state()
         state.known_greens = {0: "c", 1: "r"}
         state.known_yellows = {"e"}
-        reward, breakdown = WordleGameLogic.calculate_turn_reward("light", [], state)
-        assert breakdown["ignore_green_penalty"] == pytest.approx(2 * PENALTY_IGNORE_GREEN)
-        assert breakdown["ignore_yellow_penalty"] == PENALTY_IGNORE_YELLOW
+        reward = WordleGameLogic.calculate_turn_reward("light", state)
         assert reward == pytest.approx(2 * PENALTY_IGNORE_GREEN + PENALTY_IGNORE_YELLOW)
 
     def test_use_eliminated_penalty(self):
         state = _state()
         state.eliminated_letters = {"l", "t"}
-        reward, _ = WordleGameLogic.calculate_turn_reward("light", [], state)
+        reward = WordleGameLogic.calculate_turn_reward("light", state)
         assert reward == pytest.approx(2 * PENALTY_USE_ELIMINATED)
 
     def test_good_guess_has_no_penalty(self):
-        assert WordleGameLogic.calculate_turn_reward("crane", [], _state()) == (0.0, {})
+        assert WordleGameLogic.calculate_turn_reward("crane", _state()) == 0.0
 
 
 class TestWordLists:

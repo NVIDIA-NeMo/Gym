@@ -13,18 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Wordle NemoGym Resource Server.
-
-Implements a Wordle game environment for training LLMs with reinforcement learning.
-The model learns to play Wordle by making guesses and receiving feedback.
-Runs with gymnasium_agent, which stops the episode as soon as the game is over.
-
-Tools (dispatched from /step):
-- submit_guess: Submit a guess and receive feedback
-- check_word_validity: Check if a word is valid (soft constraint tool)
-- get_game_state: Query current game knowledge state
-"""
-
 import json
 from dataclasses import dataclass, field
 from typing import Dict, Optional
@@ -37,10 +25,6 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseFunctionToolCa
 from resources_servers.gymnasium import GymnasiumServer
 from resources_servers.wordle.wordle_words import WORDLE_VALID_GUESSES, is_valid_guess
 
-
-# =============================================================================
-# Reward Constants
-# =============================================================================
 
 WIN_REWARD_BASE = 2.0
 WIN_REWARD_PENALTY_PER_TURN = 0.2
@@ -56,25 +40,13 @@ LOSS_REWARD = 0.0
 
 
 def calculate_win_reward(turns_used: int) -> float:
-    """Calculate win reward based on number of turns used.
-
-    Formula: reward = 2.0 - 0.2 * (turns_used - 1), with a turn-1 win capped at the turn-3 level.
-    Turn 1: 1.6 (lucky, same as turn 3), Turn 2: 1.8, Turn 3: 1.6,
-    Turn 4: 1.4, Turn 5: 1.2, Turn 6: 1.0
-    """
+    # A turn-1 win is scored like turn 3 so lucky openers are not over-rewarded.
     effective_turns = 3 if turns_used == 1 else turns_used
     return WIN_REWARD_BASE - WIN_REWARD_PENALTY_PER_TURN * (effective_turns - 1)
 
 
-# =============================================================================
-# Game State
-# =============================================================================
-
-
 @dataclass
 class WordleGameState:
-    """Represents the complete state of a Wordle game."""
-
     target_word: str
     word_length: int
     max_turns: int
@@ -89,26 +61,10 @@ class WordleGameState:
     total_reward: float = 0.0
 
 
-# =============================================================================
-# Game Logic
-# =============================================================================
-
-
 class WordleGameLogic:
-    """Static methods for Wordle game rules and mechanics."""
-
     @staticmethod
     def get_feedback(guess: str, target: str) -> list[str]:
-        """Calculate feedback for a guess against the target word.
-
-        Returns a list of feedback characters:
-        - 'G' (Green): Correct letter in correct position
-        - 'Y' (Yellow): Correct letter in wrong position
-        - '_' (Gray): Letter not in the word
-
-        Uses standard Wordle rules where each target letter can only
-        match one guess letter (greens take priority over yellows).
-        """
+        # Each target letter matches at most one guess letter, and greens claim theirs first.
         guess = guess.lower()
         target = target.lower()
         word_length = len(target)
@@ -132,7 +88,6 @@ class WordleGameLogic:
 
     @staticmethod
     def is_valid_word(word: str, word_length: int = 5) -> tuple[bool, str]:
-        """Check if a word is valid for guessing."""
         word = word.lower()
         if len(word) != word_length:
             return False, f"Word must be {word_length} letters, got {len(word)}"
@@ -143,54 +98,33 @@ class WordleGameLogic:
         return True, "Valid word"
 
     @staticmethod
-    def calculate_turn_reward(guess: str, feedback: list[str], state: WordleGameState) -> tuple[float, dict]:
-        """Calculate the penalty for a turn based on strategic mistakes."""
+    def calculate_turn_reward(guess: str, state: WordleGameState) -> float:
         reward = 0.0
-        breakdown = {}
-
         if guess in state.guesses:
             reward += PENALTY_REPEATED_GUESS
-            breakdown["repeated_guess_penalty"] = PENALTY_REPEATED_GUESS
-
-        if state.known_greens:
-            for pos, letter in state.known_greens.items():
-                if pos < len(guess) and guess[pos] != letter:
-                    reward += PENALTY_IGNORE_GREEN
-                    breakdown["ignore_green_penalty"] = breakdown.get("ignore_green_penalty", 0) + PENALTY_IGNORE_GREEN
-
+        for pos, letter in state.known_greens.items():
+            if pos < len(guess) and guess[pos] != letter:
+                reward += PENALTY_IGNORE_GREEN
         if state.known_yellows and not any(letter in guess for letter in state.known_yellows):
             reward += PENALTY_IGNORE_YELLOW
-            breakdown["ignore_yellow_penalty"] = PENALTY_IGNORE_YELLOW
-
         for letter in guess:
             if letter in state.eliminated_letters:
                 reward += PENALTY_USE_ELIMINATED
-                breakdown["use_eliminated_penalty"] = (
-                    breakdown.get("use_eliminated_penalty", 0) + PENALTY_USE_ELIMINATED
-                )
-
-        return reward, breakdown
+        return reward
 
     @staticmethod
     def update_knowledge(guess: str, feedback: list[str], state: WordleGameState) -> None:
-        """Update the game state knowledge based on guess feedback."""
-        # First pass: record greens and yellows
         for i, (fb, letter) in enumerate(zip(feedback, guess)):
             if fb == "G":
                 state.known_greens[i] = letter
             elif fb == "Y":
                 state.known_yellows.add(letter)
 
-        # Second pass: eliminate grays (now all greens/yellows from this guess are known)
+        # Grays go last so a letter that is green or yellow elsewhere in this guess is not eliminated.
         for i, (fb, letter) in enumerate(zip(feedback, guess)):
             if fb == "_":
                 if letter not in state.known_greens.values() and letter not in state.known_yellows:
                     state.eliminated_letters.add(letter)
-
-
-# =============================================================================
-# Request/Response Models
-# =============================================================================
 
 
 class WordleResourcesServerConfig(BaseResourcesServerConfig):
@@ -233,14 +167,7 @@ class GetGameStateResponse(BaseModel):
     won: bool
 
 
-# =============================================================================
-# Resource Server
-# =============================================================================
-
-
 class WordleResourcesServer(GymnasiumServer):
-    """Wordle game resource server for NemoGym."""
-
     ray_enabled = False
     config: WordleResourcesServerConfig
 
@@ -315,8 +242,15 @@ class WordleResourcesServer(GymnasiumServer):
         # All guesses consume a turn, even invalid ones
         state.turn += 1
 
+        error = None
         if len(guess) != state.word_length:
-            state.total_reward += PENALTY_WRONG_LENGTH
+            penalty = PENALTY_WRONG_LENGTH
+            error = f"Guess must be {state.word_length} letters. Got {len(guess)} letters."
+        elif not is_valid_guess(guess, state.word_length):
+            penalty = PENALTY_NOT_A_WORD
+            error = f"'{guess}' is not a valid English word."
+        if error:
+            state.total_reward += penalty
             if state.turn >= state.max_turns:
                 state.game_over = True
                 state.total_reward = LOSS_REWARD
@@ -324,20 +258,7 @@ class WordleResourcesServer(GymnasiumServer):
                 valid=False,
                 turn=state.turn,
                 turns_remaining=max(0, state.max_turns - state.turn),
-                error=f"Guess must be {state.word_length} letters. Got {len(guess)} letters.",
-                game_over=state.game_over,
-            )
-
-        if not is_valid_guess(guess, state.word_length):
-            state.total_reward += PENALTY_NOT_A_WORD
-            if state.turn >= state.max_turns:
-                state.game_over = True
-                state.total_reward = LOSS_REWARD
-            return SubmitGuessResponse(
-                valid=False,
-                turn=state.turn,
-                turns_remaining=max(0, state.max_turns - state.turn),
-                error=f"'{guess}' is not a valid English word.",
+                error=error,
                 game_over=state.game_over,
             )
 
@@ -361,8 +282,7 @@ class WordleResourcesServer(GymnasiumServer):
         feedback = WordleGameLogic.get_feedback(guess, state.target_word)
         feedback_str = "".join(feedback)
 
-        turn_reward, _ = WordleGameLogic.calculate_turn_reward(guess, feedback, state)
-        state.total_reward += turn_reward
+        state.total_reward += WordleGameLogic.calculate_turn_reward(guess, state)
 
         WordleGameLogic.update_knowledge(guess, feedback, state)
         state.guesses.append(guess)
@@ -371,23 +291,13 @@ class WordleResourcesServer(GymnasiumServer):
         if state.turn >= state.max_turns:
             state.game_over = True
             state.total_reward = LOSS_REWARD
-            return SubmitGuessResponse(
-                valid=True,
-                feedback=feedback_str,
-                won=False,
-                game_over=True,
-                turn=state.turn,
-                turns_remaining=0,
-                target_word=state.target_word.upper(),
-            )
-
         return SubmitGuessResponse(
             valid=True,
             feedback=feedback_str,
-            won=False,
-            game_over=False,
+            game_over=state.game_over,
             turn=state.turn,
-            turns_remaining=state.max_turns - state.turn,
+            turns_remaining=max(0, state.max_turns - state.turn),
+            target_word=state.target_word.upper() if state.game_over else None,
         )
 
     def check_word_validity(self, state: WordleGameState, body: CheckWordValidityRequest) -> CheckWordValidityResponse:
