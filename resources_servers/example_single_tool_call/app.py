@@ -48,6 +48,7 @@ class SimpleWeatherVerifier:
 
 
 class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer):
+    ray_enabled = False
     config: SimpleWeatherResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

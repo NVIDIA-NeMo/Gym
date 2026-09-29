@@ -53,6 +53,7 @@ class StatefulCounterSeedSessionRequest(BaseSeedSessionRequest):
 
 
 class StatefulCounterResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: StatefulCounterResourcesServerConfig
     session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
 
