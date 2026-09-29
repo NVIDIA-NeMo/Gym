@@ -1,15 +1,16 @@
 wordle:
   resources_servers:
     wordle:
+      allowed_agents: [gymnasium_agent]
       entrypoint: app.py
       domain: games
       verified: false
       description: Wordle word-guessing game environment for training LLMs
       value: Improve strategic reasoning and letter pattern recognition
 
-wordle_simple_agent:
+wordle_gymnasium_agent:
   responses_api_agents:
-    wordle:
+    gymnasium_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers

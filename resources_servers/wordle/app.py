@@ -17,30 +17,24 @@
 
 Implements a Wordle game environment for training LLMs with reinforcement learning.
 The model learns to play Wordle by making guesses and receiving feedback.
+Runs with gymnasium_agent, which stops the episode as soon as the game is over.
 
-Endpoints:
-- POST /seed_session: Initialize a new game with a target word
-- POST /submit_guess: Submit a guess and receive feedback
-- POST /check_word_validity: Check if a word is valid (soft constraint tool)
-- POST /get_game_state: Query current game knowledge state
-- POST /verify: Calculate final reward for the game
+Tools (dispatched from /step):
+- submit_guess: Submit a guess and receive feedback
+- check_word_validity: Check if a word is valid (soft constraint tool)
+- get_game_state: Query current game knowledge state
 """
 
+import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field as PydanticField
+from fastapi import HTTPException
+from pydantic import BaseModel, ValidationError
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.base_resources_server import BaseResourcesServerConfig
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseFunctionToolCall
+from resources_servers.gymnasium import GymnasiumServer
 from resources_servers.wordle.wordle_words import WORDLE_VALID_GUESSES, is_valid_guess
 
 
@@ -171,7 +165,9 @@ class WordleGameLogic:
         for letter in guess:
             if letter in state.eliminated_letters:
                 reward += PENALTY_USE_ELIMINATED
-                breakdown["use_eliminated_penalty"] = breakdown.get("use_eliminated_penalty", 0) + PENALTY_USE_ELIMINATED
+                breakdown["use_eliminated_penalty"] = (
+                    breakdown.get("use_eliminated_penalty", 0) + PENALTY_USE_ELIMINATED
+                )
 
         return reward, breakdown
 
@@ -199,18 +195,6 @@ class WordleGameLogic:
 
 class WordleResourcesServerConfig(BaseResourcesServerConfig):
     pass
-
-
-class WordleSeedSessionRequest(BaseSeedSessionRequest):
-    word_length: int = 5
-    max_turns: int = 6
-    custom_target: Optional[str] = None
-
-
-class WordleSeedSessionResponse(BaseSeedSessionResponse):
-    word_length: int
-    max_turns: int
-    message: str
 
 
 class SubmitGuessRequest(BaseModel):
@@ -249,72 +233,81 @@ class GetGameStateResponse(BaseModel):
     won: bool
 
 
-class WordleVerifyRequest(BaseVerifyRequest):
-    word_length: int = 5
-    max_turns: int = 6
-    custom_target: Optional[str] = None
-
-
-class WordleVerifyResponse(BaseVerifyResponse):
-    reward_breakdown: Dict[str, Any] = PydanticField(default_factory=dict)
-    game_outcome: str = ""
-    turns_used: int = 0
-    won: float = 0.0
-    turns_if_won: float = 0.0
-
-
 # =============================================================================
 # Resource Server
 # =============================================================================
 
 
-class WordleResourcesServer(SimpleResourcesServer):
+class WordleResourcesServer(GymnasiumServer):
     """Wordle game resource server for NemoGym."""
 
+    ray_enabled = False
     config: WordleResourcesServerConfig
-    session_id_to_state: Dict[str, WordleGameState] = PydanticField(default_factory=dict)
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.post("/submit_guess")(self.submit_guess)
-        app.post("/check_word_validity")(self.check_word_validity)
-        app.post("/get_game_state")(self.get_game_state)
-        return app
-
-    async def seed_session(self, request: Request, body: WordleSeedSessionRequest) -> WordleSeedSessionResponse:
-        session_id = request.session[SESSION_ID_KEY]
+    async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
+        word_length = metadata.get("word_length", 5)
+        max_turns = metadata.get("max_turns", 6)
+        custom_target = metadata.get("custom_target")
 
         # A random fallback would give each rollout in a GRPO group a different word.
-        target_word = (body.custom_target or "").lower()
-        if not is_valid_guess(target_word, body.word_length):
-            raise HTTPException(status_code=400, detail=f"Invalid or missing custom_target: {body.custom_target!r}")
+        target_word = (custom_target or "").lower()
+        if not is_valid_guess(target_word, word_length):
+            raise HTTPException(status_code=400, detail=f"Invalid or missing custom_target: {custom_target!r}")
 
-        state = WordleGameState(
+        self.session_state[session_id] = WordleGameState(
             target_word=target_word,
-            word_length=body.word_length,
-            max_turns=body.max_turns,
+            word_length=word_length,
+            max_turns=max_turns,
         )
-        self.session_id_to_state[session_id] = state
+        return None, {}
 
-        return WordleSeedSessionResponse(
-            word_length=body.word_length,
-            max_turns=body.max_turns,
-            message=f"Wordle game started! Guess the {body.word_length}-letter word in {body.max_turns} attempts.",
-        )
+    async def step(
+        self, action: NeMoGymResponse, metadata: dict, session_id: Optional[str] = None
+    ) -> tuple[Optional[str], float, bool, bool, dict]:
+        state = self.session_state.get(session_id)
+        if state is None:
+            raise HTTPException(status_code=400, detail="Session not initialized. Call /reset first.")
 
-    async def submit_guess(self, request: Request, body: SubmitGuessRequest) -> SubmitGuessResponse:
-        session_id = request.session[SESSION_ID_KEY]
+        tool_outputs = [
+            self.tool_output(item, self._call_tool(state, item))
+            for item in action.output
+            if item.type == "function_call"
+        ]
+        info = {
+            "game_outcome": "win" if state.won else "loss" if state.game_over else "incomplete",
+            "turns_used": state.turn,
+            "won": 1.0 if state.won else 0.0,
+            "turns_if_won": float(state.turn) if state.won else 0.0,
+        }
+        if tool_outputs and not state.game_over:
+            return None, 0.0, False, False, {**info, "tool_outputs": tool_outputs}
 
-        if session_id not in self.session_id_to_state:
-            return SubmitGuessResponse(valid=False, error="Game not initialized. Session not found.")
+        # The game ended or the model stopped calling tools.
+        return None, max(state.total_reward, 0.0), True, False, info
 
-        state = self.session_id_to_state[session_id]
+    def _call_tool(self, state: WordleGameState, call: NeMoGymResponseFunctionToolCall) -> dict:
+        try:
+            args = json.loads(call.arguments or "{}")
+            if call.name == "submit_guess":
+                return self.submit_guess(state, SubmitGuessRequest.model_validate(args)).model_dump()
+            if call.name == "check_word_validity":
+                return self.check_word_validity(state, CheckWordValidityRequest.model_validate(args)).model_dump()
+            if call.name == "get_game_state":
+                return self.get_game_state(state).model_dump()
+        except (json.JSONDecodeError, ValidationError) as e:
+            return {"error": f"Invalid arguments for {call.name}: {e}"}
+        return {"error": f"Unknown tool: {call.name}"}
 
+    def submit_guess(self, state: WordleGameState, body: SubmitGuessRequest) -> SubmitGuessResponse:
         if state.game_over:
             return SubmitGuessResponse(
-                valid=False, game_over=True, won=state.won,
-                turn=state.turn, turns_remaining=0,
-                error="Game is already over.", target_word=state.target_word.upper(),
+                valid=False,
+                game_over=True,
+                won=state.won,
+                turn=state.turn,
+                turns_remaining=0,
+                error="Game is already over.",
+                target_word=state.target_word.upper(),
             )
 
         guess = body.guess.lower().strip()
@@ -328,7 +321,8 @@ class WordleResourcesServer(SimpleResourcesServer):
                 state.game_over = True
                 state.total_reward = LOSS_REWARD
             return SubmitGuessResponse(
-                valid=False, turn=state.turn,
+                valid=False,
+                turn=state.turn,
                 turns_remaining=max(0, state.max_turns - state.turn),
                 error=f"Guess must be {state.word_length} letters. Got {len(guess)} letters.",
                 game_over=state.game_over,
@@ -340,7 +334,8 @@ class WordleResourcesServer(SimpleResourcesServer):
                 state.game_over = True
                 state.total_reward = LOSS_REWARD
             return SubmitGuessResponse(
-                valid=False, turn=state.turn,
+                valid=False,
+                turn=state.turn,
                 turns_remaining=max(0, state.max_turns - state.turn),
                 error=f"'{guess}' is not a valid English word.",
                 game_over=state.game_over,
@@ -354,9 +349,12 @@ class WordleResourcesServer(SimpleResourcesServer):
             state.guesses.append(guess)
             state.feedback_history.append(["G"] * state.word_length)
             return SubmitGuessResponse(
-                valid=True, feedback="G" * state.word_length,
-                won=True, game_over=True,
-                turn=state.turn, turns_remaining=0,
+                valid=True,
+                feedback="G" * state.word_length,
+                won=True,
+                game_over=True,
+                turn=state.turn,
+                turns_remaining=0,
                 target_word=state.target_word.upper(),
             )
 
@@ -374,38 +372,30 @@ class WordleResourcesServer(SimpleResourcesServer):
             state.game_over = True
             state.total_reward = LOSS_REWARD
             return SubmitGuessResponse(
-                valid=True, feedback=feedback_str,
-                won=False, game_over=True,
-                turn=state.turn, turns_remaining=0,
+                valid=True,
+                feedback=feedback_str,
+                won=False,
+                game_over=True,
+                turn=state.turn,
+                turns_remaining=0,
                 target_word=state.target_word.upper(),
             )
 
         return SubmitGuessResponse(
-            valid=True, feedback=feedback_str,
-            won=False, game_over=False,
-            turn=state.turn, turns_remaining=state.max_turns - state.turn,
+            valid=True,
+            feedback=feedback_str,
+            won=False,
+            game_over=False,
+            turn=state.turn,
+            turns_remaining=state.max_turns - state.turn,
         )
 
-    async def check_word_validity(self, request: Request, body: CheckWordValidityRequest) -> CheckWordValidityResponse:
-        session_id = request.session[SESSION_ID_KEY]
-        word_length = 5
-        if session_id in self.session_id_to_state:
-            word_length = self.session_id_to_state[session_id].word_length
+    def check_word_validity(self, state: WordleGameState, body: CheckWordValidityRequest) -> CheckWordValidityResponse:
         word = body.word.lower().strip()
-        is_valid, reason = WordleGameLogic.is_valid_word(word, word_length)
+        is_valid, reason = WordleGameLogic.is_valid_word(word, state.word_length)
         return CheckWordValidityResponse(valid=is_valid, reason=reason)
 
-    async def get_game_state(self, request: Request) -> GetGameStateResponse:
-        session_id = request.session[SESSION_ID_KEY]
-
-        if session_id not in self.session_id_to_state:
-            return GetGameStateResponse(
-                turn=0, turns_remaining=6, guesses=[], feedback_history=[],
-                known_greens={}, known_yellows=[], eliminated_letters=[],
-                game_over=False, won=False,
-            )
-
-        state = self.session_id_to_state[session_id]
+    def get_game_state(self, state: WordleGameState) -> GetGameStateResponse:
         feedback_strings = ["".join(fb) for fb in state.feedback_history]
         greens_display = {str(pos + 1): letter.upper() for pos, letter in state.known_greens.items()}
 
@@ -415,42 +405,10 @@ class WordleResourcesServer(SimpleResourcesServer):
             guesses=[g.upper() for g in state.guesses],
             feedback_history=feedback_strings,
             known_greens=greens_display,
-            known_yellows=sorted([l.upper() for l in state.known_yellows]),
-            eliminated_letters=sorted([l.upper() for l in state.eliminated_letters]),
+            known_yellows=sorted([letter.upper() for letter in state.known_yellows]),
+            eliminated_letters=sorted([letter.upper() for letter in state.eliminated_letters]),
             game_over=state.game_over,
             won=state.won,
-        )
-
-    async def verify(self, request: Request, body: WordleVerifyRequest) -> WordleVerifyResponse:
-        session_id = request.session[SESSION_ID_KEY]
-
-        if session_id not in self.session_id_to_state:
-            return WordleVerifyResponse(
-                **body.model_dump(), reward=0.0,
-                reward_breakdown={"error": "No game state found"},
-                game_outcome="incomplete", turns_used=0, won=0.0, turns_if_won=0.0,
-            )
-
-        state = self.session_id_to_state[session_id]
-
-        if state.won:
-            outcome = "win"
-        elif state.game_over:
-            outcome = "loss"
-        else:
-            outcome = "incomplete"
-
-        breakdown = {"outcome": outcome, "turns_used": state.turn, "total_reward": state.total_reward}
-        if state.won:
-            breakdown["win_reward"] = calculate_win_reward(state.turn)
-
-        final_reward = max(state.total_reward, 0.0)
-
-        return WordleVerifyResponse(
-            **body.model_dump(), reward=final_reward, reward_breakdown=breakdown,
-            game_outcome=outcome, turns_used=state.turn,
-            won=1.0 if state.won else 0.0,
-            turns_if_won=float(state.turn) if state.won else 0.0,
         )
 
 

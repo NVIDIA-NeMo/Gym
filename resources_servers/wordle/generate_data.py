@@ -144,7 +144,7 @@ def create_wordle_entry(
         "max_turns": max_turns,
         "agent_ref": {
             "type": "responses_api_agents",
-            "name": "wordle_simple_agent"
+            "name": "wordle_gymnasium_agent"
         },
     }
 
