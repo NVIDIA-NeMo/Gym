@@ -527,7 +527,10 @@ no scoring decision on them at all, so counting them as "agreements" — which t
 script's `summary.agreements` of 1600 does, because upstream also called them
 not-a-success — would be counting a non-verdict as a match. They are excluded
 from the denominator in the table above and the summary counters in the JSON are
-left as the script wrote them.
+left as the script wrote them. That run predates "Who a failure is charged to"
+above, which narrowed what `sandbox_error` covers: a per-snippet 5xx is now a
+`lean_error` charged to the model rather than a masked non-verdict, so a rerun
+may place those two rows in the scored denominator instead.
 
 What the run does and does not establish about the departures. The two
 accepts-here-rejects-there departures produced no disagreement, but that is
