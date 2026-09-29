@@ -22,15 +22,15 @@ agent_server: gymnasium_agent
 datasets:
 - name: train
   type: train
-  jsonl_fpath: resources_servers/wordle/data/train.jsonl
+  jsonl_fpath: environments/wordle/data/train.jsonl
   num_repeats: 1
 - name: validation
   type: validation
-  jsonl_fpath: resources_servers/wordle/data/validation.jsonl
+  jsonl_fpath: environments/wordle/data/validation.jsonl
   num_repeats: 1
 - name: example
   type: example
-  jsonl_fpath: resources_servers/wordle/data/example.jsonl
+  jsonl_fpath: environments/wordle/data/example.jsonl
   num_repeats: 1
 model_server: policy_model
 session_model: episode
