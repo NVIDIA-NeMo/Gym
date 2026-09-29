@@ -41,7 +41,7 @@ tool_simulation_model:
       model: ${tool_simulation_model_name}
       return_token_id_information: false
 
-usersim:
+usersim_resources:
   resources_servers:
     usersim:
       entrypoint: app.py
@@ -83,7 +83,7 @@ usersim_user:
         name: user_policy_model
       resources_server:
         type: resources_servers
-        name: usersim
+        name: usersim_resources
       max_steps: 2
 
 usersim_assistant:
@@ -95,7 +95,7 @@ usersim_assistant:
         name: assistant_policy_model
       resources_server:
         type: resources_servers
-        name: usersim
+        name: usersim_resources
       max_steps: 10
       datasets:
         - name: example
@@ -115,7 +115,7 @@ usersim_environment:
         name: usersim_assistant
       resources_server:
         type: resources_servers
-        name: usersim
+        name: usersim_resources
       judge_model:
         type: responses_api_models
         name: tool_simulation_model
