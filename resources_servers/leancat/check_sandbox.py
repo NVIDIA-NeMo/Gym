@@ -84,9 +84,29 @@ def provider_config(args: argparse.Namespace) -> dict:
                 "api_key": os.environ.get("OPENSANDBOX_API_KEY"),
                 # The cells use self-signed certificates, as the shipped provider config does.
                 "tls_verify": False,
-            }
+                "use_server_proxy": True,
+                "request_timeout_s": 300,
+            },
+            # Creating a sandbox includes pulling the image and waiting for readiness. A
+            # multi-GB Lean image takes minutes on a cell that has not cached it, so these
+            # mirror the shipped provider config rather than the SDK's short defaults.
+            "create": {
+                "request_timeout_s": 1200,
+                "timeout_s": 1500,
+                "connect_attempt_timeout_s": 1500,
+                "retries": 10,
+                "retry_delay_s": 5.0,
+                "retry_max_delay_s": 90.0,
+            },
         }
     }
+
+
+def image_auth(args: argparse.Namespace) -> dict | None:
+    """Registry credentials for a private image, which the cell needs to pull it."""
+    if not args.image_username or not args.image_password:
+        return None
+    return {"username": args.image_username, "password": args.image_password}
 
 
 async def compile_in(lean: LeanSandbox, code: str, timeout: float) -> dict:
@@ -109,7 +129,10 @@ def build_sandbox(args: argparse.Namespace) -> LeanSandbox:
             "ttl_s": args.ttl,
             "ready_timeout_s": args.ready_timeout,
             "resources": {"cpu": args.cpu, "memory_mib": args.memory_mib},
-            "provider_options": {"snapshot_id": args.snapshot_id} if args.snapshot_id else {},
+            "provider_options": {
+                **({"snapshot_id": args.snapshot_id} if args.snapshot_id else {}),
+                **({"image_auth": auth} if (auth := image_auth(args)) else {}),
+            },
             "metadata": {"benchmark": "leancat", "purpose": "check-sandbox"},
         },
         project_dir=args.project_dir,
@@ -128,6 +151,16 @@ async def main() -> int:
     parser.add_argument("--snapshot-id", default=os.environ.get("LEANCAT_SANDBOX_SNAPSHOT_ID"))
     parser.add_argument("--image", default=None, help="Image URI, when there is no snapshot.")
     parser.add_argument(
+        "--image-username",
+        default=os.environ.get("LEAN_IMAGE_REGISTRY_USERNAME"),
+        help="Registry username, for an image in a private registry.",
+    )
+    parser.add_argument(
+        "--image-password",
+        default=os.environ.get("LEAN_IMAGE_REGISTRY_PASSWORD"),
+        help="Registry password or token; prefer $LEAN_IMAGE_REGISTRY_PASSWORD over the flag.",
+    )
+    parser.add_argument(
         "--project-dir",
         default=DEFAULT_LEAN_PROJECT_DIR,
         help="Lake project to compile in; the shipped image builds Mathlib there.",
@@ -140,6 +173,10 @@ async def main() -> int:
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--concurrency", type=int, default=8)
     args = parser.parse_args()
+    # Gym's global aiohttp client parses the CLI through Hydra the first time it is used,
+    # which happens inside the sandbox provider's first request. It would reject this
+    # script's own flags. They are consumed by now, so take them out of its way.
+    sys.argv = sys.argv[:1]
 
     if not args.snapshot_id and not args.image:
         print("FAIL: pass --snapshot-id or --image; there is no default Lean environment.", file=sys.stderr)
