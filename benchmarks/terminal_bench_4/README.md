@@ -108,15 +108,22 @@ without this benchmark's server. The dataset comes from Harbor's package store, 
 
 ```sh
 gym dataset validate harbor:terminal-bench/terminal-bench@4.0.0 --sandbox opensandbox
-cp benchmarks/terminal_bench_4/compose-images.json datasets/terminal-bench-4.0.0/
-gym eval run datasets/terminal-bench-4.0.0 --agent miniswe_sandboxed_agent --sandbox opensandbox \
+gym eval run harbor:terminal-bench/terminal-bench@4.0.0 --agent miniswe_sandboxed_agent --sandbox opensandbox \
   --model-type openai_model --model <model> --model-url <url>
 ```
 
-The first command fetches the packages into `datasets/terminal-bench-4.0.0/` and runs every reference
+Both commands resolve the same reference through the package store. The first fetch writes the task
+folders into `datasets/terminal-bench-4.0.0/` and every later fetch keeps each folder whose content hash
+still matches, so the model run reuses the validated tasks. `gym dataset validate` runs every reference
 solution through the separate verifier. `--agent terminus_2_sandboxed_agent` runs Terminus 2 instead.
 The 11 Compose tasks need `compose-images.json` (this benchmark's recorded image configurations) next to
-the task folders. The 3 H100 tasks run on a GPU deployment when the harbor server's
+the task folders. Until the fetch generates it, copy it once after the first fetch:
+
+```sh
+cp benchmarks/terminal_bench_4/compose-images.json datasets/terminal-bench-4.0.0/
+```
+
+The 3 H100 tasks run on a GPU deployment when the harbor server's
 `gpu_sandbox_provider` names its config block (for example `sandbox_gpu`); without one they run on the
 default provider and fail to schedule. `--exclude-tasks` and `--only-tasks` select subsets.
 
