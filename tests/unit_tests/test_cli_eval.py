@@ -78,11 +78,11 @@ class TestValidateSplitDatasetsDeclared:
         with pytest.raises(ConfigError) as exc_info:
             _validate_split_datasets_declared("train", configs)
         message = str(exc_info.value)
-        # The error must name the requested split, list what is declared, and give the
-        # copy-pasteable --no-serve recipe for the example file.
+        # The error must name the requested split, list what is declared, and identify
+        # the runnable example split.
         assert "No dataset of type `train`" in message
         assert "example_agent: example (type: example)" in message
-        assert "--no-serve --input resources_servers/x/data/example.jsonl" in message
+        assert "--split example" in message
 
     def test_fails_when_no_datasets_are_declared_at_all(self) -> None:
         configs = [_make_agent_instance_config("bare_agent", [])]
