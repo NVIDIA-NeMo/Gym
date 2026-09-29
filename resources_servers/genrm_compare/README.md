@@ -160,8 +160,8 @@ for the input format, explicit group IDs, and recovery limits.
 | `cohort_collection_timeout_s` | float | `1800` | Deadline to collect all group members |
 | `cohort_evaluation_timeout_s` | float | `1800` | Overall judging deadline after collection |
 | `judge_request_timeout_s` | float | `1800` | Per-request deadline, including connection retries |
-| `cohort_result_ttl_s` | float or null | `3600` | Terminal-record retention; null disables time expiry, but the count cap still applies |
-| `max_terminal_cohorts` | int | `4096` | Maximum number of retained terminal groups |
+| `cohort_result_ttl_s` | float or null | `3600` | Retention time for results and finished-group attempt records; null disables time expiry only |
+| `max_terminal_cohorts` | int | `4096` | Count limit applied separately to results and finished-group attempt records |
 
 ## Comparison Strategies
 

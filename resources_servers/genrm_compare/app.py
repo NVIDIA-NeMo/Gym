@@ -170,8 +170,8 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         cohort_collection_timeout_s: Deadline to collect every logical rollout index
         cohort_evaluation_timeout_s: Separate deadline for all comparisons and aggregation
         judge_request_timeout_s: Deadline for each judge HTTP request, including transport retries
-        cohort_result_ttl_s: Optional retention time for completed and failed cohort tombstones
-        max_terminal_cohorts: Separate count limits for completed/failed results and finished-group attempt records
+        cohort_result_ttl_s: Optional retention time for results and finished-group attempt records
+        max_terminal_cohorts: Count limit applied separately to results and finished-group attempt records
         use_principle: Enable principle-based comparison
         default_principle: Default principle when none provided in request
     """
@@ -328,7 +328,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     # Terminal records are ordered by completion.
     _terminal_cohorts: OrderedDict[str, _CohortState] = PrivateAttr(default_factory=OrderedDict)
     _latest_group_attempts: Dict[str, _GroupAttemptWatermark] = PrivateAttr(default_factory=dict)
-    # Only groups whose latest attempt is terminal can be evicted, ordered by completion or last replay.
+    # Only groups whose latest attempt is terminal can be evicted, ordered by completion or last retry.
     _idle_groups: OrderedDict[str, float] = PrivateAttr(default_factory=OrderedDict)
     # Never suspend while holding either lock, except to acquire a cohort lock.
     # In particular, model calls and timer waits must remain outside these sections.
@@ -557,7 +557,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 self._verify_cohorts[prompt_key] = cohort
                 self._idle_groups.pop(body.group_id, None)
             elif cohort.terminal_at is not None:
-                # A replay keeps the fence for this finished attempt alive.
+                # A retry keeps the record for this finished attempt alive.
                 self._idle_groups.pop(body.group_id, None)
                 self._idle_groups[body.group_id] = time.monotonic()
             return cohort
