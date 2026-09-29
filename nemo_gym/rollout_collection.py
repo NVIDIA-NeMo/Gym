@@ -45,6 +45,8 @@ from nemo_gym.base_responses_api_model import (
     observability_enabled_from_config,
 )
 from nemo_gym.config_types import (
+    AgentWithoutEnvironmentServerError,
+    AmbiguousEnvironmentServerError,
     BaseNeMoGymCLIConfig,
     BaseServerConfig,
     ConfigError,
@@ -54,9 +56,11 @@ from nemo_gym.config_types import (
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
+    AGENT_SERVER_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -149,7 +153,7 @@ def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) ->
 
 
 # ---------------------------------------------------------------------------
-# Failure-routing sentinels (set by agent servers, read by the dispatcher).
+# Failure-routing sentinels (set by environment servers, read by the dispatcher).
 #
 # Background:
 #   The historical contract was "every dispatched task produces one row in
@@ -164,7 +168,7 @@ def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) ->
 #   - Failures go to a sidecar (``<output_stem>_failures.jsonl``), one row
 #     per attempt, with ``_ng_failure_class`` set. An ``agent_run_error`` or
 #     ``agent_request_failed`` row holds no reward and no response: there was
-#     no rollout. The two differ in whether the agent answered at all.
+#     no rollout. The two differ in whether the environment server answered at all.
 #   - ``kill_shaped`` failures (Slurm SIGTERM, Ray actor died, OOM, ...) go
 #     NOWHERE: the absence of a row is the canonical signal. Resume's
 #     set-difference re-dispatches them naturally; per-task timeout bounds
@@ -187,6 +191,44 @@ NG_PERF_KEY = "ng_perf"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+
+def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, list[str]]:
+    """Map each agent name to the environment servers whose ``agent_server`` names it."""
+    servers_by_agent: dict[str, list[str]] = {}
+    for name, instance in global_config_dict.items():
+        if not isinstance(instance, DictConfig):
+            continue
+        servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+        if not isinstance(servers, DictConfig):
+            continue
+        for server in servers.values():
+            reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
+            agent_name = reference.get("name") if isinstance(reference, DictConfig) else None
+            if agent_name is not None:
+                servers_by_agent.setdefault(str(agent_name), []).append(str(name))
+    return servers_by_agent
+
+
+def _environment_server_for_agent(agent_name: str, servers_by_agent: Mapping[str, list[str]]) -> str:
+    """Return the one environment server that fronts an agent.
+
+    A row routed by its agent cannot choose between several environment servers.
+    Several servers may still front one agent when every row names its server directly.
+    """
+    servers = servers_by_agent.get(agent_name, [])
+    if len(servers) == 1:
+        return servers[0]
+    if not servers:
+        raise AgentWithoutEnvironmentServerError(
+            f"Agent '{agent_name}' has no environment server, so collection cannot reach it. "
+            "Config validation should have caught this before any server started."
+        )
+    raise AmbiguousEnvironmentServerError(
+        f"Agent '{agent_name}' is fronted by several environment servers: {sorted(servers)}. "
+        "Rows that route by agent cannot choose between them. "
+        "Remove all but one, or route these rows to an environment server by name."
+    )
 
 
 @dataclass(frozen=True)
@@ -884,8 +926,8 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
 
 # Request failures that are data, not bugs. Anything else still propagates.
 _RUN_FAILURE_ERRORS = (ClientError, orjson.JSONDecodeError, TimeoutError)
-# Statuses something in front of the agent answers with; the agent itself returns 500.
-_AGENT_DID_NOT_RUN_STATUSES = frozenset({429, 502, 503, 504})
+# Statuses something in front of the environment server answers with; it returns 500 itself.
+_SERVER_DID_NOT_RUN_STATUSES = frozenset({429, 502, 503, 504})
 _MAX_FAILURE_BODY_CHARS = 2000
 
 
@@ -894,16 +936,16 @@ def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dic
 
     No reward and no response: an infrastructure failure is not a verifier score of zero, and a
     placeholder would read as real generation data to token capture, aggregation and trainers.
-    The class says whether the rollout ran. A NeMo Gym agent answers 500 when its own handler
-    raises, so any status it answered with means the agent ran and broke, which is also how a
+    The class says whether the rollout ran. A NeMo Gym server answers 500 when its own handler
+    raises, so any status it answered with means the rollout ran and broke, which is also how a
     model server rejecting the model's own output arrives here. A gateway status, or no reply to
     take a status from, says nothing about the rollout. Neither class carries a reward; an evaluation that wants the
     first counted names it in ``count_failure_classes_as_zero``.
     """
-    agent_ran = status is not None and status not in _AGENT_DID_NOT_RUN_STATUSES
+    rollout_ran = status is not None and status not in _SERVER_DID_NOT_RUN_STATUSES
     body = getattr(exc, "response_content", None)
     return {
-        NG_FAILURE_CLASS_KEY: (AGENT_RUN_ERROR_FAILURE_CLASS if agent_ran else AGENT_REQUEST_FAILED_FAILURE_CLASS),
+        NG_FAILURE_CLASS_KEY: (AGENT_RUN_ERROR_FAILURE_CLASS if rollout_ran else AGENT_REQUEST_FAILED_FAILURE_CLASS),
         "_ng_failure_type": type(exc).__name__,
         "_ng_failure_message": str(exc) or repr(exc),
         "_ng_failure_http_status": status,
@@ -1738,7 +1780,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         rows: List[Dict],
         output_fpath: Path,
     ) -> Optional[Path]:
-        """Call /aggregate_metrics on each agent server after rollouts complete.
+        """Call /aggregate_metrics on each agent's environment server after rollouts complete.
 
         Writes a single _aggregate_metrics.json with one entry per agent (same shape
         as the old _agent_metrics.json). Returns the file path.
@@ -1755,6 +1797,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             agent_results.setdefault(agent_name, []).append(result)
 
         server_client = self.setup_server_client()
+        servers_by_agent = _environment_servers_by_agent(server_client.global_config_dict)
 
         async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
             # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.
@@ -1786,7 +1829,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
             agg_request = AggregateMetricsRequest(verify_responses=stripped)
             agg_response = await server_client.post(
-                server_name=agent_name,
+                server_name=_environment_server_for_agent(agent_name, servers_by_agent),
                 url_path="/aggregate_metrics",
                 json=agg_request,
             )
@@ -1931,7 +1974,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         hints = []
         for name in unknown:
             # Naming a non-agent instance (e.g. a resources server via agent_map) is as fatal as a
-            # typo: /run only exists on agent servers.
+            # typo: rows route by agent, and only an agent has an environment server in front of it.
             if name in global_config_dict:
                 hints.append(f"{name!r} (exists but is not an agent instance)")
                 continue
@@ -2001,6 +2044,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         self.resolve_task_sources(examples, server_client.global_config_dict)
         self._validate_agent_names(examples, server_client.global_config_dict)
         self._validate_agent_pairings(examples, server_client.global_config_dict)
+        # Resolve every agent before dispatch, so an unroutable agent fails the run instead of one future.
+        servers_by_agent = _environment_servers_by_agent(server_client.global_config_dict)
+        server_for_agent = {
+            agent_name: _environment_server_for_agent(agent_name, servers_by_agent)
+            for agent_name in {row[AGENT_REF_KEY_NAME]["name"] for row in examples}
+        }
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
@@ -2008,7 +2057,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started_at = time()
                 res = None
                 try:
-                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                    server_name = server_for_agent[row[AGENT_REF_KEY_NAME]["name"]]
+                    res = await server_client.post(server_name=server_name, url_path="/run", json=row)
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived

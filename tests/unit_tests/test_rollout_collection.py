@@ -35,7 +35,7 @@ from pydantic import ValidationError
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
+from nemo_gym.config_types import AmbiguousEnvironmentServerError, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -136,7 +136,12 @@ def install_fake_server_client(monkeypatch: pytest.MonkeyPatch, post: AsyncMock)
     """Route every dispatcher HTTP call through `post` and unwrap FakeResponse."""
     server_client = MagicMock()
     server_client.post = post
-    server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+    server_client.global_config_dict = OmegaConf.create(
+        {
+            "my_agent": {"responses_api_agents": {"impl": {}}},
+            "my_environment_server": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}},
+        }
+    )
     monkeypatch.setattr(
         nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: server_client
     )
@@ -765,7 +770,14 @@ class TestRolloutCollection:
 
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
-        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "my_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}
+                },
+            }
+        )
 
         monkeypatch.setattr(
             nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
@@ -1376,7 +1388,14 @@ class TestRolloutCollection:
 
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
-        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "my_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}
+                },
+            }
+        )
         monkeypatch.setattr(
             nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
         )
@@ -1389,6 +1408,64 @@ class TestRolloutCollection:
         assert result == {"response": {}}
         assert "_ng_rollout_latency_ms" not in result
 
+    async def test_run_examples_rejects_agent_fronted_by_several_environment_servers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A row routed by its agent fails before any dispatch when two environment servers name that agent."""
+        row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock()
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "my_legacy_server": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}},
+                "my_native_server": {
+                    "environment_servers": {"single_agent_turn": {"agent_server": {"name": "my_agent"}}}
+                },
+            }
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+
+        with pytest.raises(AmbiguousEnvironmentServerError, match="my_legacy_server.*my_native_server"):
+            next(RolloutCollectionHelper().run_examples([row]))
+        mock_server_client.post.assert_not_awaited()
+
+    async def test_run_examples_allows_several_servers_for_an_agent_no_row_routes_by(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Twin servers for one agent are valid; only rows that route by that agent need a single server."""
+        row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        response = MagicMock()
+        response.status = 200
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "other_agent": {"responses_api_agents": {"impl": {}}},
+                "my_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}
+                },
+                "other_legacy_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "other_agent"}}}
+                },
+                "other_native_server": {
+                    "environment_servers": {"single_agent_turn": {"agent_server": {"name": "other_agent"}}}
+                },
+            }
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
+
+        await next(RolloutCollectionHelper().run_examples([row]))
+
+        assert mock_server_client.post.await_args.kwargs["server_name"] == "my_environment_server"
+
     async def test_run_examples_with_metadata_carries_rollout_latency_alongside_result(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1399,7 +1476,14 @@ class TestRolloutCollection:
 
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
-        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "my_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}
+                },
+            }
+        )
         monkeypatch.setattr(
             nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
         )
@@ -2868,6 +2952,19 @@ class TestRolloutCollection:
 
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=mock_response)
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                name: block
+                for agent in ("agent_a", "agent_b", "my_agent")
+                for name, block in (
+                    (agent, {"responses_api_agents": {"impl": {}}}),
+                    (
+                        f"{agent}_environment_server",
+                        {"environment_servers": {"legacy_agent": {"agent_server": {"name": agent}}}},
+                    ),
+                )
+            }
+        )
 
         monkeypatch.setattr(
             nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
@@ -2946,6 +3043,19 @@ class TestRolloutCollection:
         mock_response.status = 200
 
         mock_server_client = MagicMock()
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                name: block
+                for agent in ("agent_a", "agent_b", "my_agent")
+                for name, block in (
+                    (agent, {"responses_api_agents": {"impl": {}}}),
+                    (
+                        f"{agent}_environment_server",
+                        {"environment_servers": {"legacy_agent": {"agent_server": {"name": agent}}}},
+                    ),
+                )
+            }
+        )
         mock_server_client.post = AsyncMock(return_value=mock_response)
         monkeypatch.setattr(
             nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
@@ -2971,6 +3081,19 @@ class TestRolloutCollection:
         mock_response.status = 200
 
         mock_server_client = MagicMock()
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                name: block
+                for agent in ("agent_a", "agent_b", "my_agent")
+                for name, block in (
+                    (agent, {"responses_api_agents": {"impl": {}}}),
+                    (
+                        f"{agent}_environment_server",
+                        {"environment_servers": {"legacy_agent": {"agent_server": {"name": agent}}}},
+                    ),
+                )
+            }
+        )
         mock_server_client.post = AsyncMock(return_value=mock_response)
         monkeypatch.setattr(
             nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
@@ -3003,7 +3126,7 @@ class TestRolloutCollection:
 
         # Return different responses per agent based on server_name
         async def mock_post(server_name, **kwargs):
-            agg = agg_a if server_name == "agent_a" else agg_b
+            agg = agg_a if server_name == "agent_a_environment_server" else agg_b
             resp = AsyncMock()
             resp.raise_for_status = MagicMock()
             resp.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
@@ -3011,6 +3134,19 @@ class TestRolloutCollection:
             return resp
 
         mock_server_client = MagicMock()
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                name: block
+                for agent in ("agent_a", "agent_b", "my_agent")
+                for name, block in (
+                    (agent, {"responses_api_agents": {"impl": {}}}),
+                    (
+                        f"{agent}_environment_server",
+                        {"environment_servers": {"legacy_agent": {"agent_server": {"name": agent}}}},
+                    ),
+                )
+            }
+        )
         mock_server_client.post = AsyncMock(side_effect=mock_post)
 
         monkeypatch.setattr(
@@ -3962,12 +4098,22 @@ class TestFanOut:
         mock_client = MagicMock()
         mock_client.post = fake_post
         mock_client.global_config_dict = OmegaConf.create(
-            {name: {"responses_api_agents": {"impl": {}}} for name in ("shared_agent_a", "shared_agent_b")}
+            {
+                name: block
+                for agent in ("shared_agent_a", "shared_agent_b")
+                for name, block in (
+                    (agent, {"responses_api_agents": {"impl": {}}}),
+                    (
+                        f"{agent}_environment_server",
+                        {"environment_servers": {"legacy_agent": {"agent_server": {"name": agent}}}},
+                    ),
+                )
+            }
         )
         monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *a, **k: mock_client)
         for fut in RolloutCollectionHelper().run_examples(rows):
             await fut
-        assert sorted(posted) == ["shared_agent_a", "shared_agent_b"]
+        assert sorted(posted) == ["shared_agent_a_environment_server", "shared_agent_b_environment_server"]
 
     def test_fan_out_keys_match_data_side_name_and_win_over_agent_map(self, tmp_path) -> None:
         """fan_out keys match the name the DATA carries (pre-override); its targets are final,
@@ -4084,6 +4230,9 @@ class TestTaskSourcePreprocess:
             {
                 "math_rs": {"resources_servers": {"impl": {}}},
                 "math_agent": {"responses_api_agents": {"impl": {"resources_server": {"name": "math_rs"}}}},
+                "math_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "math_agent"}}}
+                },
             }
         )
 
