@@ -10,6 +10,7 @@ from pydantic import ConfigDict
 from environment_servers.usersim.app import (
     UserSimEnvironmentServer,
     UserSimEnvironmentServerConfig,
+    _configured_model_name,
     _create_usersim_generator,
     _is_retryable_dependency_error,
 )
@@ -95,6 +96,7 @@ def _environment_server(*, token_capture: bool = False) -> tuple[UserSimEnvironm
                     "port": 8001,
                     "entrypoint": "app.py",
                     "token_id_capture": token_capture,
+                    "model_server": {"type": "responses_api_models", "name": "policy"},
                 }
             }
         },
@@ -105,6 +107,17 @@ def _environment_server(*, token_capture: bool = False) -> tuple[UserSimEnvironm
                     "port": 8002,
                     "entrypoint": "app.py",
                     "token_id_capture": token_capture,
+                    "model_server": {"type": "responses_api_models", "name": "policy"},
+                }
+            }
+        },
+        "policy": {
+            "responses_api_models": {
+                "vllm_model": {
+                    "host": "policy",
+                    "port": 8004,
+                    "entrypoint": "app.py",
+                    "model": "nvidia/example-assistant-model",
                 }
             }
         },
@@ -114,6 +127,7 @@ def _environment_server(*, token_capture: bool = False) -> tuple[UserSimEnvironm
                     "host": "support",
                     "port": 8003,
                     "entrypoint": "app.py",
+                    "model": "nvidia/example-support-model",
                 }
             }
         },
@@ -140,6 +154,15 @@ def _environment_server(*, token_capture: bool = False) -> tuple[UserSimEnvironm
         max_turns=2,
     )
     return UserSimEnvironmentServer(config=config, server_client=client), client
+
+
+def test_configured_model_name_resolves_agent_and_direct_model_targets() -> None:
+    server, _ = _environment_server()
+
+    assert _configured_model_name(server, "user_model") == "nvidia/example-assistant-model"
+    assert _configured_model_name(server, "assistant_model") == "nvidia/example-assistant-model"
+    assert _configured_model_name(server, "judge_model") == "nvidia/example-support-model"
+    assert _configured_model_name(server, "summary_model") == "nvidia/example-support-model"
 
 
 def _request() -> UserSimEpisodeRequest:
