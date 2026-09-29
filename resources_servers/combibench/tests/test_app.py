@@ -545,6 +545,55 @@ class TestShippedConfig:
         assert shipped["lean_server_url"].endswith(defaults["lean_server_url"].default + "}")
 
 
+class TestSyntheticSolutions:
+    """The gold-as-prediction control, which is the only positive one this benchmark has.
+
+    Upstream publishes no reference proofs, so every other control is negative — empty
+    output, an ``axiom`` proof and a weakened statement all score 0 — and a verifier that
+    rejected *everything* would pass all of them. These five hand-written proofs are the
+    only evidence that a correct answer earns 1.0 end to end.
+
+    ``scripts/harness_validation.py --solutions`` runs them against a real Lean server and
+    is what establishes that the proofs are *correct*. This runs the same fixture through
+    ``verify()`` with Lean stubbed, which is strictly weaker and worth being precise about:
+    it exercises extraction, the forbidden-substring test, the statement check and the
+    reward, and it fails if a solution stops reproducing its reference statement. It cannot
+    detect a wrong answer or a broken proof, because the stub compiles nothing — changing
+    an answer from 10 to 11 still passes here. Its job is to keep the fixture honest
+    between Lean runs, not to replace them.
+    """
+
+    FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+    def _load(self, name: str):
+        return json.loads((self.FIXTURES / name).read_text(encoding="utf-8"))
+
+    def test_every_problem_has_a_solution(self) -> None:
+        problems = self._load("synthetic_problems.json")
+        solutions = self._load("synthetic_solutions.json")
+        assert [row["theorem_name"] for row in problems] == list(solutions), (
+            "the two fixtures are used together by harness_validation.py --solutions and must not drift"
+        )
+
+    def test_each_solution_scores_one_through_verify(self) -> None:
+        problems = self._load("synthetic_problems.json")
+        solutions = self._load("synthetic_solutions.json")
+        for problem in problems:
+            name = problem["theorem_name"]
+            result = asyncio.run(
+                _make_server().verify(
+                    _request(
+                        solutions[name],
+                        formal_statement=problem["formal_statement"],
+                        answers=problem.get("answer"),
+                        theorem_name=name,
+                    )
+                )
+            )
+            assert result.reward == 1.0, f"{name}: {result.status} ({result.failure_reason})"
+            assert result.status == CombibenchStatus.SUCCESS.value
+
+
 class TestVerifierFixture:
     def test_fixture_cases_pass(self) -> None:
         asyncio.run(
