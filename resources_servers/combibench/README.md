@@ -35,20 +35,19 @@ results". A row that would need the second stage scores 0 here.
 
 ## Prompting
 
-Upstream's own prompt, byte-identical, from `evaluation/config/template.json5`:
-a system message ("You are an expert in mathematics and proving theorems in
-Lean 4.") and a user message that shows only the formal statement inside a
-```` ```lean4 ```` fence. The informal statement is carried in the data as
-`natural_language` but is not shown, matching upstream. The prompt strings are
-byte-identical; the rendered statement is not quite, and deliberately so —
-`prepare.py` stores each statement with a trailing newline where upstream strips
-it at render time, so the fence closes one blank line later here. It cannot
-affect a verdict (the statement check strips every chunk it compares) and the
-stored rows are what all the committed evidence was measured against, so the
-difference is recorded rather than removed; see `prepare.py`'s module docstring.
-Runs are comparable to
-the paper's protocol in prompt and endpoint style (chat); decoding parameters
-and the token budget are not published, so no run is a reproduction.
+Upstream's own prompt from `evaluation/config/template.json5`: a system message
+("You are an expert in mathematics and proving theorems in Lean 4.") and a user
+message that shows only the formal statement inside a ```` ```lean4 ```` fence.
+The informal statement is carried in the data as `natural_language` but is not
+shown, matching upstream. The prompt strings are byte-identical; the rendered
+statement is not quite, and deliberately so — `prepare.py` stores each statement
+with a trailing newline where upstream strips it at render time, so the fence
+closes one blank line later here. It cannot affect a verdict (the statement check
+strips every chunk it compares) and the stored rows are what all the committed
+evidence was measured against, so the difference is recorded rather than removed;
+see `prepare.py`'s module docstring. Runs are comparable to the paper's protocol
+in prompt and endpoint style (chat); decoding parameters and the token budget are
+not published, so no run is a reproduction.
 
 ## Dataset format
 
@@ -118,11 +117,10 @@ Fine-Eval distinguishes outcomes a whole-file benchmark has no equivalent for.
    `is_error` fails the submission on it too.
 
 `harness_failure` is 1.0 for the three outcomes the model cannot cause, and
-`failure_reason` is set only then. All three also set `mask_sample: true`, so
-the 0.0 reward is excluded from `mean/reward` and pass@k rather than averaged in
-as a model failure — a Lean-server outage would otherwise lower the score of
-whatever was being evaluated. The masked rollouts stay in the rollout file and
-are reported under `coverage/`:
+`failure_reason` is set only then. All three also set `mask_sample: true`, so the
+0.0 reward is excluded from `mean/reward` and pass@k rather than averaged in as a
+model failure. The masked rollouts stay in the rollout file and are reported
+under `coverage/`:
 
 | Status | `failure_kind` | Cause |
 | --- | --- | --- |
@@ -139,33 +137,32 @@ does not terminate is the model's output, and excusing it would make hanging
 reward-neutral.
 
 Every response carries `lean_version`, the Lean version the server reports for
-`#eval Lean.versionString`. A server built for another toolchain otherwise
-scores every row `compile_error` with nothing in the rollouts saying why. The
-probe is started as a **background task** on the first compile and never
-awaited: it goes through the same code path a submission does, so waiting for it
-would put its whole Lean timeout in front of the first rollouts whenever the
-server accepts connections without answering — the run would die of agent and
-eval timeouts rather than produce the masked `sandbox_error` that case is meant
-to produce. `lean_version` is null until the probe comes back, which is that
-field's documented meaning of "not known". A probe that returns no version is
-not cached as an answer — one dropped connection would otherwise switch the
-guard off for the whole run — it is started again by the next compile, up to
-three probes per process, after which the failure is logged at ERROR and
-`lean_version` stays null for the run. The probe's own Lean timeout is 30 s
-rather than the submission's 60 s: nothing waits on it, so it should not hold
-one of the `max_concurrent_lean_requests` slots any longer than it must.
+`#eval Lean.versionString`; a server built for another toolchain otherwise scores
+every row `compile_error` with nothing in the rollouts saying why. The probe runs
+as a **background task** on the first compile and is never awaited: it goes
+through the same code path a submission does, so waiting for it would put its
+whole Lean timeout in front of the first rollouts whenever the server accepts
+connections without answering — the run would die of agent and eval timeouts
+rather than produce the masked `sandbox_error` that case is meant to produce.
+`lean_version` is null until the probe comes back, which is that field's
+documented meaning of "not known". A probe that returns no version is not cached
+as an answer — one dropped connection would otherwise switch the guard off for
+the whole run — and is started again by the next compile, up to three probes per
+process, after which the failure is logged at ERROR and `lean_version` stays null
+for the run. Its Lean timeout is 30 s rather than the submission's 60 s: nothing
+waits on it, so it should not hold a `max_concurrent_lean_requests` slot longer
+than it must.
 
 `compute_metrics` emits the pooled `pass@k` / `pass@1[avg-of-k]` keys — the
 figures the tables below report — and adds `hackmath/`, `brualdi/`, `imo/` and
 `math_competitions/` pass rates keyed on `tag`. Upstream reports one pooled
 figure, so the pooled keys and the inherited `mean/reward` are the headline and
 the per-family keys are supplementary; they are not promoted to `key_metrics`.
-
-`get_key_metrics` promotes the `coverage/` block alongside `mean/*`. Because
-every harness fault masks its rollout, a Lean-server outage does not lower
-`mean/reward` — it shrinks the corpus the score was computed from, and a run
-that measured 3 rollouts out of 1600 would otherwise read like a healthy one
-with a slightly different number. `coverage/measured_rollouts`,
+`get_key_metrics` does promote the `coverage/` block alongside `mean/*`: because
+masking keeps a harness fault out of `mean/reward`, a Lean-server outage shrinks
+the corpus the score was computed from instead of lowering it, and a run that
+measured 3 rollouts out of 1600 would otherwise read like a healthy one with a
+slightly different number. `coverage/measured_rollouts`,
 `coverage/masked_rollouts`, `coverage/measured_tasks` and
 `coverage/fully_masked_tasks` are therefore in the headline set. They are empty
 unless something was masked, so a clean run publishes exactly the keys it did
@@ -278,15 +275,13 @@ occupy a REPL, not to decide any proof.
 ## Harness validation
 
 Model-free checks, all run against Mathlib v4.24.0 through this server's code
-path. The reports are not committed — a resources server's `data/` holds only
-the example trio, by repository convention — so the numbers below are stated
-here and regenerated by running `scripts/harness_validation.py`; the commands
-are under "Re-running the validation". Every report the script writes records
-the `dataset_source`, `dataset_revision`, `split` and `answer_check_ascription`
-it was produced with, so a number in this table can be traced to the corpus and
-the setting that produced it. All of them come from one job rather than being
-assembled from separate runs. Re-deriving them needs a running Lean server
-against Mathlib v4.24.0; without one they cannot be checked.
+path, in one job rather than assembled from separate runs. The reports are not
+committed (see "Re-running the validation" for the commands and why), so the
+numbers below are stated here and re-derived by running
+`scripts/harness_validation.py` against a live Lean server at Mathlib v4.24.0;
+without one they cannot be checked. Every report records the `dataset_source`,
+`dataset_revision`, `split` and `answer_check_ascription` it was produced with,
+so a number in this table traces to the corpus and the setting that produced it.
 
 | Check | GitHub source (default) | Hugging Face source |
 | --- | --- | --- |
@@ -386,68 +381,15 @@ answer lengthens the statement the model must reproduce verbatim, and
 
 ## Lean server
 
-Upstream verifies through [Kimina Lean Server](https://github.com/project-numina/kimina-lean-server)
-(MIT): a FastAPI service that pools Lean REPL processes keyed by import header,
-so `import Mathlib` is paid per pool member rather than per proof. The published
-image defaults to a different Lean version, so this server ships its own
-Dockerfile pinned to upstream CombiBench's toolchain —
-[`kimina_image/`](kimina_image/), with the Lean tarball checksummed and Mathlib,
-the REPL and the server each pinned by commit:
-
-```bash
-docker build \
-    --build-arg LEAN_VERSION=v4.24.0 \
-    --build-arg LEAN_SHA256=b14f5e5159219dd1a1956c3b806813319f5e94ccd5bdfd56f54520609a5bb5ec \
-    --build-arg MATHLIB_COMMIT=f897ebcf72cd16f89ab4577d0c826cd14afaafc7 \
-    --build-arg REPL_COMMIT=8fff8552292860d349b459d6a811e6915671dc0d \
-    --build-arg KIMINA_COMMIT=fb2393de3461db35eda4c714e3fd21187e92ec90 \
-    -t kimina-lean-server:v4.24.0 \
-    resources_servers/combibench/kimina_image
-docker run -d --name kimina-combibench \
-    -p 127.0.0.1:12332:8000 \
-    --cap-drop=ALL --security-opt=no-new-privileges \
-    --pids-limit 512 --memory 32g \
-    -e LEAN_SERVER_MAX_REPLS=8 \
-    kimina-lean-server:v4.24.0
-curl http://127.0.0.1:12332/health     # {"status":"ok"}
-```
-
-This container compiles untrusted model output, so the flags above are part of
-the documented command rather than an optional extra: the port is published to
-loopback only, every capability is dropped, and a runaway proof cannot fork or
-allocate the host to death. What is *not* there, and why:
-
-- **`--network=none`** cannot be used: the whole point of this container is to
-  answer HTTP on port 8000. Binding the published port to `127.0.0.1` is the
-  equivalent restriction; on a multi-tenant host put it on its own Docker
-  network with the Gym resources server instead of publishing a port at all.
-- **`--read-only`** is not documented because it is not tested here: the REPL
-  runs as `lake env` with its working directory inside the Mathlib project and
-  Lake writes there. If you need it, add `--read-only --tmpfs /tmp` plus a
-  writable mount over `/opt/mathlib/.lake` and confirm a real `/verify` still
-  succeeds before trusting a score from it.
-- **A non-root user** is built into the image rather than left to `--user`:
-  [`kimina_image/Dockerfile`](kimina_image/Dockerfile) creates `lean` (uid 1000),
-  gives it the three trees Lake writes into (`/opt/mathlib`, `/opt/repl`,
-  `/opt/kimina`) and switches to it before the build's own REPL probe, so a
-  build that succeeds has already started a REPL and loaded Mathlib as that
-  user. Nothing in the `docker run` line above needs to change.
-
-Lean itself is not a sandbox — `native_decide` is allowed by design here, which
-means model output can run compiled code inside this container — so the
-container boundary is the only isolation there is. Do not run it with
-`--privileged`, a Docker socket mount, or host networking.
-
-Leave `LEAN_SERVER_MAX_REPL_MEM` at the image's 12G. It becomes `RLIMIT_AS` on
-each REPL and a REPL holding Mathlib exceeds 8G, at which point every `/verify`
-returns `Failed to start REPL` — note that `/health` answers `ok` regardless,
-because FastAPI is up long before a REPL is. The image's build gate starts a
-REPL and requires it to load Mathlib, so that failure cannot reach a run.
-
-The build downloads the Mathlib cache and takes a few minutes; the first proof
-after start-up pays an `import Mathlib` load, later ones reuse the REPL. Point
-the server at it with `COMBIBENCH_LEAN_SERVER_URL` (and
-`COMBIBENCH_LEAN_SERVER_API_KEY` if the server has one).
+Scoring needs a [Kimina Lean Server](https://github.com/project-numina/kimina-lean-server)
+(MIT) — the REPL-pooling service upstream's own harness verifies through — at
+Lean and Mathlib `v4.24.0`, upstream CombiBench's toolchain. The published image
+defaults to a different Lean version, so this server ships its own Dockerfile:
+[`kimina_image/README.md`](kimina_image/README.md) has the build, the `docker
+run` line with the hardening it needs, the `LEAN_SERVER_*` settings and the
+isolation caveats. Point this server at a running instance with
+`COMBIBENCH_LEAN_SERVER_URL` (and `COMBIBENCH_LEAN_SERVER_API_KEY` if it has
+one).
 
 Keep `max_concurrent_lean_requests` equal to the server's
 `LEAN_SERVER_MAX_REPLS`. It is the bound for the whole resources server, not per
@@ -465,46 +407,27 @@ quietly shrinks the measured denominator.
 
 ### What is shared with the other Lean benchmarks, and what is not
 
-Reused from [`lean_proof/`](../lean_proof/):
-
-- **`status.py`** — the status vocabulary, as above.
-- **`toolchain.py`** — `TOOLCHAIN_PROBE` and `parse_lean_version`. The REPL
-  answers in structured messages rather than on stdout, so the client joins them
-  into the shape the parser expects rather than writing the version regex twice.
-
-Not reused, and deliberately:
+Reused from [`lean_proof/`](../lean_proof/): **`status.py`**, the status
+vocabulary as above, and **`toolchain.py`**'s `TOOLCHAIN_PROBE` and
+`parse_lean_version` — the REPL answers in structured messages rather than on
+stdout, so the client joins them into the shape the parser expects rather than
+writing the version regex twice. Not reused, and deliberately:
 
 - **`proof_utils.py`.** Its extraction strips thinking, accepts any fenced
-  block, and falls back to an unfenced Lean file. Upstream CombiBench takes the
-  last ```` ```lean4 ```` block (falling back to ```` ```lean ````), prepends a
-  default header, and calls anything else a format error. Its banned-token set
-  is `sorry`/`admit`/`axiom`/`unsafe`; CombiBench's is `axiom`/`local_instance`
-  as substrings. Its statement check is whole-file; CombiBench's is upstream's
-  paragraph-substring test. Sharing any of these would change scores relative to
-  the published numbers, which is the one thing this server exists not to do.
+  block, and falls back to an unfenced Lean file, where upstream CombiBench
+  takes the last ```` ```lean4 ```` block (falling back to ```` ```lean ````),
+  prepends a default header and calls anything else a format error; its
+  banned-token set is `sorry`/`admit`/`axiom`/`unsafe` against CombiBench's
+  `axiom`/`local_instance` substrings; its statement check is whole-file against
+  upstream's paragraph-substring test. Sharing any of these would change scores
+  relative to the published numbers, which is the one thing this server exists
+  not to do.
 - **`lean_sandbox.py`.** It shells `lake env lean` through `nemo_gym.sandbox`,
   one process per request. CombiBench needs Kimina's header-keyed REPL pool —
   both because it is what upstream's harness talks to, and because a fresh
   `import Mathlib` per proof is unaffordable at 100 problems × 16 repeats.
-
-| | `math_formal_lean` / `lean_proof` sandbox | Kimina Lean Server |
-| --- | --- | --- |
-| Lean/Mathlib | v4.12.0 and v4.19.0 images | pinned here to v4.24.0, upstream's toolchain |
-| REPL reuse | one process per request | header-keyed REPL pool, so `import Mathlib` is paid once |
-| Relation to upstream | none | the server upstream's own harness talks to |
-
-The toolchain is the blocking difference: these statements do not compile on
-v4.12.0 or v4.19.0, so reusing either image would have meant building one at
-v4.24.0 anyway. [`kimina_image/`](kimina_image/) does that, following
-`lean_proof/lean_image`'s Dockerfile rather than upstream Kimina's — same
-checksummed toolchain, pinned Mathlib commit, toolchain assertion and offline
-final build — with the REPL and the server added on top. The Kimina pin is a commit rather than a release because the
-project publishes no tags at all: `fb2393de` (2026-01-11) is the head of
-`main`, and still the latest commit. Its own default is Lean v4.26.0; the
-version is a build argument, so the image here is built with
-`LEAN_SERVER_LEAN_VERSION=v4.24.0` to match upstream CombiBench's toolchain.
-The consequence of the pin being head-of-branch is that it does not move on its
-own, and re-pinning it is a one-line change plus a rebuild.
+  [`kimina_image/README.md`](kimina_image/README.md#why-not-the-existing-lean-sandbox)
+  has the point-by-point comparison and why a new image had to be built.
 
 ## Quickstart
 
@@ -530,17 +453,13 @@ Regenerating the committed example is three stages — the tracked file is the
 output of the third, not the first:
 
 ```bash
-python benchmarks/combibench/prepare.py \
-    --source-file resources_servers/combibench/tests/fixtures/synthetic_problems.json \
-    --output resources_servers/combibench/data/example_prepare.jsonl
-gym dataset render \
-    --input resources_servers/combibench/data/example_prepare.jsonl \
-    --prompt-config benchmarks/combibench/prompt.yaml \
-    --output resources_servers/combibench/data/example.jsonl
-gym dataset collate \
-    --config resources_servers/combibench/configs/combibench.yaml \
-    --mode example_validation \
-    --output-dir resources_servers/combibench/data
+DATA=resources_servers/combibench/data
+python benchmarks/combibench/prepare.py --output $DATA/example_prepare.jsonl \
+    --source-file resources_servers/combibench/tests/fixtures/synthetic_problems.json
+gym dataset render --input $DATA/example_prepare.jsonl --output $DATA/example.jsonl \
+    --prompt-config benchmarks/combibench/prompt.yaml
+gym dataset collate --output-dir $DATA --mode example_validation \
+    --config resources_servers/combibench/configs/combibench.yaml
 ```
 
 ### Re-running the validation
@@ -553,29 +472,28 @@ not committed: a resources server's `data/` holds only `example.jsonl`,
 
 ```bash
 URL=http://127.0.0.1:12332
+V=resources_servers/combibench/scripts/harness_validation.py
+D=/tmp/combibench_validation && mkdir -p $D
+
+# six reports: one per (source, split), plus a --no-ascription rerun of each
+# plain `test` split for the upstream-check row. See `--help` for the flags.
 for SOURCE in github hf; do
   for SPLIT in test test_with_solution; do
     python benchmarks/combibench/prepare.py --source $SOURCE --split $SPLIT \
         --output /tmp/combibench_${SOURCE}_${SPLIT}.jsonl
+    python $V --lean-server-url $URL --input /tmp/combibench_${SOURCE}_${SPLIT}.jsonl \
+        --output $D/harness_validation_${SOURCE}_${SPLIT}.json
+    [ "$SPLIT" = test ] && python $V --lean-server-url $URL --no-ascription \
+        --input /tmp/combibench_${SOURCE}_${SPLIT}.jsonl \
+        --output $D/harness_validation_${SOURCE}_${SPLIT}_upstream_check.json
   done
 done
 
-V=resources_servers/combibench/scripts/harness_validation.py
-D=/tmp/combibench_validation && mkdir -p $D
-python $V --input /tmp/combibench_github_test.jsonl --output $D/harness_validation_github_test.json --lean-server-url $URL
-python $V --input /tmp/combibench_github_test.jsonl --output $D/harness_validation_github_test_upstream_check.json --lean-server-url $URL --no-ascription
-python $V --input /tmp/combibench_github_test_with_solution.jsonl --output $D/harness_validation_github_test_with_solution.json --lean-server-url $URL
-python $V --input /tmp/combibench_hf_test.jsonl --output $D/harness_validation_hf_test.json --lean-server-url $URL
-python $V --input /tmp/combibench_hf_test.jsonl --output $D/harness_validation_hf_test_upstream_check.json --lean-server-url $URL --no-ascription
-python $V --input /tmp/combibench_hf_test_with_solution.jsonl --output $D/harness_validation_hf_test_with_solution.json --lean-server-url $URL
-
-# the five synthetic example problems, with their reference proofs
-python benchmarks/combibench/prepare.py \
-    --source-file resources_servers/combibench/tests/fixtures/synthetic_problems.json \
-    --output /tmp/combibench_example_prepare.jsonl
-python $V --input /tmp/combibench_example_prepare.jsonl \
+# the five synthetic example problems, with their reference proofs; prepare them
+# as in the first stage above, with --output /tmp/combibench_example_prepare.jsonl
+python $V --input /tmp/combibench_example_prepare.jsonl --lean-server-url $URL \
     --solutions resources_servers/combibench/tests/fixtures/synthetic_solutions.json \
-    --output $D/harness_validation_example.json --lean-server-url $URL
+    --output $D/harness_validation_example.json
 ```
 
 Prepared rows go to a scratch path, not into `benchmarks/*/data/`: benchmark
@@ -592,10 +510,10 @@ at the pinned revision, imports `evaluation/verifier/one_stage_verify.py`
 unmodified, and re-scores collected rollouts through the same Lean server,
 reporting per-item agreement rather than a matching headline.
 
-Measured on the Goedel-Prover-V2-32B rollouts below; the reports are not
-committed (a resources server's `data/` holds only the example trio), so the
-numbers are stated here and reproduced by the `upstream_agreement.py` command at
-the end of this section, which needs both the rollouts and a Lean server:
+Measured on the Goedel-Prover-V2-32B rollouts above; the reports are not
+committed, so the numbers are stated here and reproduced by the
+`upstream_agreement.py` command at the end of this section, which needs both the
+rollouts and a Lean server:
 
 | Benchmark | Rollouts | Scored by both | This verifier | Upstream | Agreement |
 | --- | --- | --- | --- | --- | --- |
@@ -643,12 +561,12 @@ python resources_servers/combibench/scripts/upstream_agreement.py \
 ```
 
 The report keeps only the disagreeing rows under `rows`; pass `--full-rows` for
-the complete per-row map. A disagreement can come from any of the five
-departures above: the first two make Gym accept where upstream rejects, the
-`sorries` one makes Gym reject where upstream accepts, the error-payload guard
+the complete per-row map. A disagreement can come from any of the five departures
+above, each in the direction named there — except the error-payload guard, which
 takes the row out of the comparison entirely (it is `sandbox_error`, a
-non-verdict), and the `code_too_long` bound is unreachable on this corpus. To measure agreement with
-the two configurable ones removed, rescore the same rollouts with
+non-verdict), and the `code_too_long` bound, which is unreachable on this corpus.
+To measure agreement with the two configurable ones removed, rescore the same
+rollouts with
 `answer_check_ascription: false` and `normalize_trailing_whitespace: false` and
 pass that file as `--rescore-with`. It must carry a verdict for every rollout
 being compared: the script fails closed on a missing key exactly as it does on a
