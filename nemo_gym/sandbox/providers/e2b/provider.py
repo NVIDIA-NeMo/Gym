@@ -163,9 +163,12 @@ class E2BCreateConfig:
     # image references are not themselves valid aliases (registry refs contain
     # '/' and ':', which E2B rejects).
     template_map: dict[str, str] = field(default_factory=dict)
-    # Sandbox lifetime in seconds; E2B kills the sandbox when it elapses.
+    # Sandbox timeout in seconds; the lifecycle policy selects pause or kill.
     # ``SandboxSpec.ttl_s`` overrides it per sandbox.
     timeout_s: float | None = 3600.0
+    # None preserves the service/SDK default. True pauses on timeout and resumes
+    # on traffic; False explicitly kills on timeout so paused VMs are not orphaned.
+    auto_resume: bool | None = field(default=None, kw_only=True)
     allow_internet_access: bool = True
     secure: bool = True
     # Raise instead of warning when a spec requests resources E2B cannot apply
@@ -183,6 +186,8 @@ class E2BCreateConfig:
             if not isinstance(template, str) or not template.strip():
                 raise ValueError("create.template_map values must be non-empty template strings")
         _validate_optional_number("create.timeout_s", self.timeout_s, positive=True)
+        if self.auto_resume is not None and not isinstance(self.auto_resume, bool):
+            raise ValueError("create.auto_resume must be a boolean or None")
 
 
 @dataclass(frozen=True)
@@ -264,10 +269,10 @@ class E2BProvider:
     def _request_params(self) -> dict[str, Any]:
         """Per-request options for calls on an existing sandbox object.
 
-        ``commands.run``, ``files.*`` and ``is_running`` take ``request_timeout``
-        only -- the sandbox already carries the connection config, and handing
-        them the full ``ApiParams`` raises ``TypeError: unexpected keyword
-        argument 'api_key'``.
+        ``commands.run`` and ``files.*`` take ``request_timeout`` only.
+        The sandbox already carries the connection config, including for
+        ``get_info``; forwarding connection params to data-plane methods
+        raises ``TypeError: unexpected keyword argument 'api_key'``.
         """
         if self._connection.request_timeout_s is None:
             return {}
@@ -418,6 +423,11 @@ class E2BProvider:
             "secure": self._create.secure,
             **self._api_params(),
         }
+        if self._create.auto_resume is not None:
+            kwargs["lifecycle"] = {
+                "on_timeout": "pause" if self._create.auto_resume else "kill",
+                "auto_resume": self._create.auto_resume,
+            }
         if spec.ready_timeout_s is not None:
             # E2B retains this on the returned sandbox connection. Subsequent
             # provider calls explicitly reapply connection.request_timeout_s
@@ -465,12 +475,16 @@ class E2BProvider:
             if isinstance(exc, type)
         )
         try:
-            running = await sandbox.is_running(**self._request_params())
+            # Envd health checks are data-plane traffic and would wake a paused
+            # AgentENV sandbox. Read control-plane state without resuming it.
+            info = await sandbox.get_info(**self._request_params())
         except not_found:
             return SandboxStatus.STOPPED
         except Exception:  # noqa: BLE001 - status must not raise for transient issues
             return SandboxStatus.UNKNOWN
-        return SandboxStatus.RUNNING if running else SandboxStatus.STOPPED
+        return {"running": SandboxStatus.RUNNING, "paused": SandboxStatus.PAUSED}.get(
+            info.state, SandboxStatus.UNKNOWN
+        )
 
     async def close(self, handle: SandboxHandle) -> None:
         e2b = _require_e2b_sdk()
