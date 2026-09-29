@@ -194,6 +194,15 @@ async def run(
         "gold_answer_failures": sorted(
             n for n, r in per_row.items() if "gold_answer" in r and r["gold_answer"]["status"] != "has_sorry"
         ),
+        # Which rows a control could not be built for, and which one. The denominator below
+        # says how many were applicable; without the names, a reader cannot tell whether a
+        # denominator of 99 is one skipped row or a silently truncated run, and the per-row
+        # block no longer carries every row to work it out from.
+        "controls_not_constructed": {
+            control: sorted(n for n, r in per_row.items() if control not in r["controls"])
+            for control in ("empty", "echo_with_sorry", "axiom", "weakened")
+            if any(control not in r["controls"] for r in per_row.values())
+        },
         "controls": {},
     }
     for control in ("empty", "echo_with_sorry", "axiom", "weakened"):
@@ -228,16 +237,38 @@ async def run_solutions(rows: list[dict], verifier: CombibenchVerifier, solution
     }
 
 
+def interesting_rows(rows: dict) -> dict:
+    """The rows worth committing: everything that is not a clean pass.
+
+    A clean row states that its statement compiled to a ``sorry``, that its gold
+    answer did too, and that all four negative controls scored 0 with the
+    expected status -- which the summary already reports in aggregate, and whose
+    failures the summary already names. 95% of rows are clean, so committing
+    them costs hundreds of lines that say nothing and bury the handful that do.
+
+    What is kept is every row where a statement or gold answer did not end at
+    ``has_sorry``, any control earned a reward, or a control could not be built.
+    Rerun the script for the full per-row detail, including timings.
+    """
+    kept = {}
+    for name, row in rows.items():
+        controls = row.get("controls", {})
+        if (
+            row.get("statement", {}).get("status") != "has_sorry"
+            or ("gold_answer" in row and row["gold_answer"].get("status") != "has_sorry")
+            or any(c.get("reward", 0.0) != 0.0 for c in controls.values())
+            or len(controls) < 4
+        ):
+            kept[name] = row
+    return kept
+
+
 def render_report(report: dict) -> str:
     """Serialize the report with the per-row block at one row per line.
 
-    Every row is kept, because recomputing the summary from the rows is the only
-    check on it that does not have to trust this script -- a reviewer did exactly
-    that. But pretty-printing 100 twelve-field records costs ~2,800 lines per
-    report and ~17,000 across the committed set, for six files whose rows are
-    95% identical: the information is in which row differs, not in the
-    indentation. One row per line keeps every byte of data and makes a diff
-    between two runs readable, which the indented form is not.
+    Pretty-printing twelve-field records at ``indent=2`` costs ~28 lines each;
+    one row per line makes a diff between two runs readable, which the indented
+    form is not.
     """
     head = json.dumps({k: v for k, v in report.items() if k != "rows"}, indent=2, ensure_ascii=False)
     lines = [f"{head[:-2]},"] if head.endswith("\n}") else [head.rstrip()[:-1].rstrip() + ","]
@@ -309,6 +340,10 @@ def main() -> None:
     report["answer_check_ascription"] = not args.no_ascription
     report["lean_server_url"] = args.lean_server_url
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    report["rows"] = interesting_rows(report["rows"])
+    report["rows_note"] = (
+        "only rows that are not a clean pass are kept; rerun this script for every row and its timings"
+    )
     args.output.write_text(render_report(report), encoding="utf-8")
     print(json.dumps(report["summary"], indent=2, ensure_ascii=False))
 
