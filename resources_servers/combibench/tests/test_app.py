@@ -653,6 +653,7 @@ class TestShippedConfig:
             "normalize_trailing_whitespace",
             "answer_check_ascription",
             "max_concurrent_lean_requests",
+            "lean_server_max_wait",
         ):
             assert shipped[knob] == defaults[knob].default, knob
         assert shipped["lean_server_url"].endswith(defaults["lean_server_url"].default + "}")

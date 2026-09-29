@@ -124,12 +124,21 @@ def compat_client(lean4_client_cls, url: str, api_key: Optional[str]):
     compile cleanly. Upstream was written against an older server that always
     sent ``"error": null``.
 
-    Filling the absent key restores the reply shape upstream expects. This
-    touches the transport only: no scoring rule, regex, threshold or verdict of
-    upstream's is modified, and a genuine error still arrives as one. Without
-    it the comparison would measure that incompatibility rather than whether
-    the two harnesses agree. (This server's own client reads the field with
-    ``.get``, which is why it is unaffected.)
+    There are **two** absent keys, not one. The same expression also reads
+    ``res["response"]``, and ``BackwardResponse.response`` is ``NotRequired``
+    while ``/verify`` is declared ``response_model_exclude_none=True``
+    (``server/routers/backward.py``), so whenever a result carries an ``error``
+    -- which is every server-side timeout -- ``response`` is dropped too and the
+    second subscript raises in its turn. Filling only the first leaves the
+    timeout rows scored by upstream's ``except`` rather than by its ``is_error``,
+    which reaches the same verdict for a different reason and would hide a real
+    disagreement if one ever arose there.
+
+    Both are filled. This touches the transport only: no scoring rule, regex,
+    threshold or verdict of upstream's is modified, and a genuine error still
+    arrives as one. Without it the comparison would measure that
+    incompatibility rather than whether the two harnesses agree. (This server's
+    own client reads both fields with ``.get``, which is why it is unaffected.)
     """
 
     class ErrorKeyCompatClient(lean4_client_cls):
@@ -138,6 +147,10 @@ def compat_client(lean4_client_cls, url: str, api_key: Optional[str]):
             for result in (body or {}).get("results", []):
                 if isinstance(result, dict):
                     result.setdefault("error", None)
+                    # `is_error` treats a missing/empty payload as "no error",
+                    # so defaulting to {} preserves upstream's own verdict for a
+                    # timeout row rather than inventing one.
+                    result.setdefault("response", {})
             return body
 
     return ErrorKeyCompatClient(url, api_key=api_key)

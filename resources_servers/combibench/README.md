@@ -637,11 +637,22 @@ the ascription against the same run with `--no-ascription`, 45/45 answers
 elaborating with the ascription against 40/45 without it. The stricter
 `sorries` departure was not exercised either (see above).
 
-**Upstream's harness needs one transport-level fix to run at all**, applied in
-that script and nowhere else. It reads `res["error"]` by subscript; Kimina
-omits that key when there was no error, so the read raises `KeyError`,
-upstream's blanket `except Exception` turns it into "proof invalid", and every
-compiling proof is reported as failed — 0/1600 unpatched. Nor is it a dependency
+**Upstream's harness needs two transport-level fixes to run at all**, applied
+in that script and nowhere else. It reads `res["error"]` *and* `res["response"]`
+by subscript in one expression. Kimina omits `error` when there was no error, so
+the first read raises `KeyError`, upstream's blanket `except Exception` turns it
+into "proof invalid", and every compiling proof is reported as failed — 0/1600
+unpatched. It also omits `response` whenever a result carries an `error`
+(`BackwardResponse.response` is `NotRequired` and `/verify` is
+`response_model_exclude_none=True`), so the second subscript raises on every
+server-side timeout.
+
+> The figures in the table above were measured with only the first key filled.
+> That does not change them: a timeout row has `error` set, so upstream reaches
+> "not a success" either way, and this verifier scored those rows 0 as well. But
+> those rows agreed through upstream's exception path rather than through its
+> `is_error`, and the script now fills both keys so a rerun exercises upstream's
+> own logic on every row. Nor is it a dependency
 that could have been pinned better: upstream's harness does not use the `kimina`
 client package at all — it hand-rolls the HTTP calls with `aiohttp` — and its
 `pyproject.toml` carries only a floor, `kimina>=0.1.1` (0.1.1 is 2025-07-24,

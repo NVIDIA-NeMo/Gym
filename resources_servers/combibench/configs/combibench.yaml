@@ -19,6 +19,11 @@ combibench:
       # This is the bound for the whole server: it is enforced by a per-process
       # semaphore, so under num_workers > 1 it is divided across the workers.
       max_concurrent_lean_requests: 8
+      # Kimina's own LEAN_SERVER_MAX_WAIT, which it spends waiting for a free
+      # REPL before the header and body timeouts even start. The HTTP budget is
+      # derived from it, so a server configured differently needs this changed
+      # or a slow compile is cut off by the client and masked.
+      lean_server_max_wait: 60
 combibench_simple_agent:
   responses_api_agents:
     simple_agent:
