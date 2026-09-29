@@ -24,7 +24,7 @@ import yaml
 
 from nemo_gym import component_search_roots
 from nemo_gym.path_utils import failures_path_for
-from nemo_gym.tasks.harbor.hub import HubRef, datasets_dir, fetch_ref, is_hub_ref
+from nemo_gym.tasks.harbor.hub import datasets_dir, fetch_ref, is_hub_ref
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tasks
 
@@ -105,7 +105,6 @@ def prepare_target(
     ``PreparedTaskset.skipped``) so the rest of the dataset still prepares.
     """
     if is_hub_ref(target):
-        taskset = HubRef.parse(target).name
         folder = fetch_ref(target, refresh_registry=refresh_registry)
         print(f"Fetched {target} into {folder}")
     else:

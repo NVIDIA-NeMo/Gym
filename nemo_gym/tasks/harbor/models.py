@@ -9,6 +9,7 @@ this mirror does not know are ignored, as Harbor ignores them; :meth:`HarborSett
 lists them so the loader can say so.
 """
 
+from pathlib import PurePosixPath
 from typing import Any, ClassVar, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -149,12 +150,22 @@ class HarborAgent(HarborPhaseSettings):
     user: str | int | None = None
 
 
+class HarborCollectHook(HarborSettings):
+    """``[[verifier.collect]]``: a command run in a service before its artifacts are collected."""
+
+    command: str
+    service: str = "main"
+    timeout_sec: float = Field(default=60, gt=0)
+    user: str | int | None = None
+
+
 class HarborVerifier(HarborPhaseSettings):
     timeout_sec: float = Field(default=600, gt=0)
     user: str | int | None = None
     env: dict[str, str] = Field(default_factory=dict)
     environment_mode: Literal["separate", "shared"] | None = None
     environment: HarborEnvironment | None = None
+    collect: list[HarborCollectHook] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def shared_has_no_environment(self) -> "HarborVerifier":
@@ -165,6 +176,38 @@ class HarborVerifier(HarborPhaseSettings):
 
 class HarborSolution(HarborSettings):
     env: dict[str, str] = Field(default_factory=dict)
+
+
+class HarborArtifact(HarborSettings):
+    """One ``artifacts`` entry: a path copied out of the agent's sandbox after it finishes.
+
+    A bare string is the ``source``. ``destination`` is where it lands relative to the run's
+    artifacts folder (default: the source path without its leading slash). ``service`` names a
+    Compose sidecar; ``None`` or ``"main"`` is the agent's own container.
+    """
+
+    source: str
+    destination: str | None = None
+    service: str | None = None
+    exclude: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def from_string(cls, data: Any) -> Any:
+        return {"source": data} if isinstance(data, str) else data
+
+    @model_validator(mode="after")
+    def contained_paths(self) -> "HarborArtifact":
+        for path in (self.source, self.destination):
+            if path and (".." in PurePosixPath(path).parts or "\\" in path):
+                raise ValueError(f"Artifact paths must stay inside the sandbox and the artifacts folder: {path!r}")
+        if self.destination and PurePosixPath(self.destination).is_absolute():
+            raise ValueError(f"Artifact destination must be relative: {self.destination!r}")
+        return self
+
+    @property
+    def host_path(self) -> PurePosixPath:
+        return PurePosixPath(self.destination or self.source.lstrip("/"))
 
 
 class HarborTaskConfig(HarborSettings):
@@ -180,7 +223,7 @@ class HarborTaskConfig(HarborSettings):
     agent: HarborAgent = Field(default_factory=HarborAgent)
     environment: HarborEnvironment = Field(default_factory=HarborEnvironment)
     verifier: HarborVerifier = Field(default_factory=HarborVerifier)
-    artifacts: list[Any] = Field(default_factory=list)
+    artifacts: list[HarborArtifact] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
