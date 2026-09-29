@@ -27,14 +27,16 @@ from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from resources_servers.combibench import lean_client
 from resources_servers.combibench.app import (
+    MAX_ECHOED_MESSAGES,
+    MAX_MESSAGE_CHARACTERS,
     VERIFIER_FIXTURE,
     CombibenchResourcesServer,
     CombibenchResourcesServerConfig,
     CombibenchStatus,
     CombibenchVerifyRequest,
 )
-from resources_servers.combibench import lean_client
 from resources_servers.combibench.fine_eval import LeanResult
 from resources_servers.combibench.lean_client import KiminaLeanClient
 
@@ -249,6 +251,22 @@ class TestVerify:
     async def test_wrongly_typed_answers_are_a_bad_task(self) -> None:
         result = await _make_server().verify(_request(_fenced(SOLUTION), answers=[10]))
         assert result.status == CombibenchStatus.BAD_TASK.value
+
+    async def test_echoed_lean_diagnostics_are_bounded(self) -> None:
+        """Lean output is model-influenced, so what lands in every rollout row is capped.
+
+        Dropping the slice would put unbounded text into the rollout file with
+        nothing else failing, so both bounds are pinned here.
+        """
+        messages = [
+            {"severity": "info", "pos": {"line": i}, "data": "x" * 5000 if i == 0 else f"m{i}"} for i in range(25)
+        ]
+        result = await _make_server(FakeLeanClient(LeanResult(messages=messages))).verify(_request(_fenced(SOLUTION)))
+        assert len(result.lean_messages) == MAX_ECHOED_MESSAGES == 20
+        assert MAX_MESSAGE_CHARACTERS == 2000
+        first = result.lean_messages[0]["data"]
+        assert first == "x" * MAX_MESSAGE_CHARACTERS + "... [truncated]"
+        assert result.lean_messages[-1]["data"] == "m19"
 
     async def test_lone_surrogate_in_output_is_sanitized(self) -> None:
         result = await _make_server().verify(_request("bad \udcff text"))
