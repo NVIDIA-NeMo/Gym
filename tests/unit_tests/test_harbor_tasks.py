@@ -163,7 +163,7 @@ class TestLoadTask:
         assert task.workdir == "/app"
         assert task.user is None
         assert task.needs_sandbox and task.has_solution
-        assert task.instruction == "Create a file called hello.txt."
+        assert task.instruction == "Create a file called hello.txt.\n"
         assert task.digest == content_hash(task.path)
 
     def test_task_toml_wins_over_dockerfile(self, tmp_path):
@@ -224,7 +224,7 @@ class TestMaterialize:
         assert row["task_id"] == {"taskset": "hello", "task_id": "hello-world"}
         params = row["task_input"]["responses_create_params"]
         assert params["input"][0]["role"] == "user"
-        assert params["input"][0]["content"] == "Create a file called hello.txt."
+        assert params["input"][0]["content"] == "Create a file called hello.txt.\n"
         assert params["metadata"] == {"agent_timeout_sec": "120.0"}
         assert row["task_input"]["task_data"] == {DIGEST_KEY: task.digest}
 
@@ -521,6 +521,19 @@ class TestSeparateVerifierFields:
             HarborTaskConfig.model_validate({"artifacts": ["/app/../etc/passwd"]})
         with pytest.raises(ValueError, match="relative"):
             HarborTaskConfig.model_validate({"artifacts": [{"source": "/a", "destination": "/abs"}]})
+
+
+class TestInstruction:
+    def test_leading_canary_lines_are_dropped_and_the_rest_kept_verbatim(self, tmp_path):
+        from nemo_gym.tasks.harbor.task import read_instruction
+
+        path = tmp_path / "instruction.md"
+        path.write_text(
+            "<!-- harbor-canary GUID 26b5c67b -->\n# HARBOR-CANARY marker\n\nDo the thing.\n\nKeep  spacing.\n"
+        )
+        assert read_instruction(path) == "Do the thing.\n\nKeep  spacing.\n"
+        path.write_text("Plain task\n")
+        assert read_instruction(path) == "Plain task\n"
 
 
 class TestCli:

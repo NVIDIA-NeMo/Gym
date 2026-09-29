@@ -192,7 +192,7 @@ class TestSeed:
             "workdir": "/app",
         }
         assert created == [("hello", "/app")]
-        assert sandbox.execs[0]["command"] == "mkdir -p /app"
+        assert sandbox.execs[0]["command"].startswith("mkdir -p /app /logs/agent /logs/verifier /logs/artifacts")
 
         # Re-seeding the same session is idempotent.
         again = client.post("/seed_session", json=seed_body(task))
@@ -270,7 +270,7 @@ class TestSetupCommands:
         response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
         assert response.status_code == 200, response.text
         commands = [call["command"] for call in sandbox.execs]
-        assert commands[0] == "mkdir -p /app"
+        assert commands[0].startswith("mkdir -p /app /logs/agent")
         assert commands[1:3] == server.config.sandbox_setup_commands
         assert all(call["user"] == "root" for call in sandbox.execs[1:3])
 
@@ -290,6 +290,19 @@ class TestSetupCommands:
 
 
 class TestSeedWorkdirAndResources:
+    def test_seed_creates_the_logs_folders_and_per_task_env(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.config.sandbox_env_by_task = {"hello": {"CIRCLE_NODE_TOTAL": "3"}, "other": {"X": "1"}}
+        monkeypatch.setattr(
+            "resources_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        assert TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task)).status_code == 200
+        prepare = sandbox.execs[0]["command"]
+        assert "mkdir -p /app /logs/agent /logs/verifier /logs/artifacts" in prepare
+        assert "chmod 777 /logs/agent /logs/verifier /logs/artifacts" in prepare
+        spec = server._sandbox_spec(task, "/app")
+        assert spec.env["CIRCLE_NODE_TOTAL"] == "3" and "X" not in spec.env
+
     def test_image_workdir_used_when_task_sets_none(self, tmp_path, monkeypatch):
         server, task, sandbox, created = make_server(tmp_path, monkeypatch)
         # A task with a real Dockerfile and a prebuilt image declares no workdir; the image's WORKDIR is used.
