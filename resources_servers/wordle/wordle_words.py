@@ -27,7 +27,6 @@ Sources:
 """
 
 import random
-from typing import Optional
 
 
 # =============================================================================
@@ -1371,26 +1370,8 @@ __all__ = [
     "WORDLE_VALID_GUESSES",
     "TRAINING_WORDS",
     "VALIDATION_WORDS",
-    "get_random_target",
-    "get_validation_words",
     "is_valid_guess",
 ]
-
-
-def get_random_target(word_length: int = 5, seed: Optional[int] = None, use_training_set: bool = True) -> str:
-    """Get a random target word for training."""
-    if word_length != 5:
-        raise ValueError(f"Only 5-letter words are currently supported, got word_length={word_length}")
-    word_pool = TRAINING_WORDS if use_training_set else WORDLE_SOLUTIONS
-    if seed is not None:
-        rng = random.Random(seed)
-        return rng.choice(word_pool)
-    return random.choice(word_pool)
-
-
-def get_validation_words() -> list[str]:
-    """Get the fixed list of validation words."""
-    return VALIDATION_WORDS.copy()
 
 
 def is_valid_guess(word: str, word_length: int = 5) -> bool:

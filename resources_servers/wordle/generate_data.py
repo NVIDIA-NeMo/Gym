@@ -19,8 +19,8 @@
 This script generates JSONL files with Wordle game prompts for training.
 
 Key design decisions:
-- Training data: No target words specified. Server picks randomly from TRAINING_WORDS
-  (2,000 words) at runtime. This gives variety across training runs.
+- Training data: Fixed target words cycled from TRAINING_WORDS (2,000 words), so every
+  rollout of the same row plays the same word.
 - Validation data: Fixed target words from VALIDATION_WORDS (315 words, no overlap
   with training). This ensures reproducible evaluation across training steps.
 
@@ -118,17 +118,17 @@ TOOLS = [
 
 def create_wordle_entry(
     user_prompt: str,
+    custom_target: str,
     word_length: int = 5,
     max_turns: int = 6,
-    custom_target: str = None,
 ) -> dict:
     """Create a single Wordle data entry.
 
     Args:
         user_prompt: The user message to start the game
+        custom_target: Target word the server will use for this game
         word_length: Length of words (default 5)
         max_turns: Maximum guesses allowed (default 6)
-        custom_target: Optional specific target word. If None, server picks randomly.
     """
     entry = {
         "responses_create_params": {
@@ -148,31 +148,30 @@ def create_wordle_entry(
         },
     }
 
-    # Include custom_target if specified (for validation with fixed words)
-    if custom_target:
-        entry["custom_target"] = custom_target
+    entry["custom_target"] = custom_target
 
     return entry
 
 
 def generate_training_data(num_samples: int, seed: int = 42) -> list[dict]:
-    """Generate training data WITHOUT target words.
-
-    The server will pick random targets from TRAINING_WORDS (2,000 words)
-    at runtime. This ensures variety across training runs.
+    """Generate training data with fixed target words from TRAINING_WORDS.
 
     Args:
         num_samples: Number of entries to generate
-        seed: Random seed for prompt shuffling
+        seed: Random seed for target word order
     """
     import random
-    random.seed(seed)
+
+    from resources_servers.wordle.wordle_words import TRAINING_WORDS
+
+    words = list(TRAINING_WORDS)
+    random.Random(seed).shuffle(words)
 
     entries = []
     for i in range(num_samples):
         # Cycle through user prompts for variety
         user_prompt = USER_PROMPTS[i % len(USER_PROMPTS)]
-        entry = create_wordle_entry(user_prompt, custom_target=None)
+        entry = create_wordle_entry(user_prompt, custom_target=words[i % len(words)])
         entries.append(entry)
 
     return entries
@@ -218,7 +217,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Word Split:
-  - TRAINING_WORDS: 2,000 words (server picks randomly at runtime)
+  - TRAINING_WORDS: 2,000 words (fixed in JSONL, cycled if --train_samples exceeds 2,000)
   - VALIDATION_WORDS: 315 words (fixed in JSONL, no overlap with training)
 
 Examples:
@@ -236,9 +235,7 @@ Examples:
 
     output_dir = Path(args.output_dir)
 
-    # Generate training data (no target words - server picks from TRAINING_WORDS)
     print(f"Generating {args.train_samples} training samples...")
-    print("  - No target words in data (server picks randomly from 2,000 training words)")
     train_data = generate_training_data(args.train_samples, seed=args.seed)
     save_jsonl(train_data, output_dir / "train.jsonl")
 
@@ -252,12 +249,12 @@ Examples:
     print(f"\nGenerating example samples...")
     import random
     rng = random.Random(args.seed)
-    example_data = rng.sample(val_data, 20)
+    example_data = rng.sample(val_data, 5)
     save_jsonl(example_data, output_dir / "example.jsonl")
 
     print("\nDone!")
     print(f"\nSummary:")
-    print(f"  Training:   {len(train_data)} samples (targets picked at runtime from 2,000 words)")
+    print(f"  Training:   {len(train_data)} samples (fixed targets from 2,000 training words)")
     print(f"  Validation: {len(val_data)} samples (fixed targets, 315 unique words)")
     print(f"  Example:    {len(example_data)} samples")
 

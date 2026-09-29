@@ -29,7 +29,7 @@ Endpoints:
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field as PydanticField
 
 from nemo_gym.base_resources_server import (
@@ -41,7 +41,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
-from resources_servers.wordle.wordle_words import WORDLE_VALID_GUESSES, get_random_target, is_valid_guess
+from resources_servers.wordle.wordle_words import WORDLE_VALID_GUESSES, is_valid_guess
 
 
 # =============================================================================
@@ -284,12 +284,10 @@ class WordleResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: WordleSeedSessionRequest) -> WordleSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
 
-        if body.custom_target:
-            target_word = body.custom_target.lower()
-            if len(target_word) != body.word_length:
-                target_word = get_random_target(body.word_length, use_training_set=True)
-        else:
-            target_word = get_random_target(body.word_length, use_training_set=True)
+        # A random fallback would give each rollout in a GRPO group a different word.
+        target_word = (body.custom_target or "").lower()
+        if not is_valid_guess(target_word, body.word_length):
+            raise HTTPException(status_code=400, detail=f"Invalid or missing custom_target: {body.custom_target!r}")
 
         state = WordleGameState(
             target_word=target_word,
