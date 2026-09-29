@@ -53,7 +53,18 @@ from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 
-OFFICE_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
+# OOXML (zip) packages -- these are the ones the ns0 normalization below can
+# apply to.
+OOXML_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
+# Pre-2007 binary Office formats. LibreOffice converts them fine, but they were
+# previously omitted here, so a deliverable in one of these formats silently
+# never got a companion PDF and the judge scored the task as having produced
+# nothing. The ns0 pre-pass skips them harmlessly: they are OLE compound files,
+# so ``zipfile`` raises ``BadZipFile`` and ``_ooxml_has_ns0_prefix`` returns
+# False.
+LEGACY_OFFICE_EXTENSIONS = {".doc", ".ppt", ".xls"}
+
+OFFICE_EXTENSIONS = OOXML_EXTENSIONS | LEGACY_OFFICE_EXTENSIONS
 
 DEFAULT_MAX_CONCURRENT = 4
 
@@ -180,10 +191,30 @@ def convert_to_pdf(path: Path) -> tuple[Path, bool, str]:
 def find_convertible_files(root_dir: str | os.PathLike) -> list[Path]:
     files: list[Path] = []
     for dirpath, _, filenames in os.walk(root_dir):
+        # ``Report.docx`` and ``Report.pptx`` in one directory both convert to
+        # ``Report.pdf``. Whichever is seen first wins, and the other is either
+        # skipped (its sibling now exists) or races it for that one output name in
+        # the thread pool below. Neither is detectable afterwards -- the surviving
+        # PDF looks like a valid render of both. Leave these to the judging path,
+        # which renders an ambiguous file to a tempdir instead of guessing.
+        office_stems: dict[str, int] = {}
         for filename in filenames:
             path = Path(dirpath) / filename
-            if needs_conversion(path):
-                files.append(path)
+            if path.suffix.lower() in OFFICE_EXTENSIONS:
+                office_stems[path.stem] = office_stems.get(path.stem, 0) + 1
+
+        for filename in filenames:
+            path = Path(dirpath) / filename
+            if not needs_conversion(path):
+                continue
+            if office_stems.get(path.stem, 0) > 1:
+                LOGGER.warning(
+                    "Not preconverting %s: another Office file shares its stem, so '%s.pdf' is ambiguous",
+                    path,
+                    path.stem,
+                )
+                continue
+            files.append(path)
     return sorted(files)
 
 
