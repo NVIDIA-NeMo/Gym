@@ -178,6 +178,14 @@ Bypassing validation means invalid servers won't start. Use this only for debugg
 
 Errors where the config is valid but an endpoint it names cannot be reached.
 
+### Gym Server Startup Timeout
+
+Gym stops waiting when its managed servers have not become ready within `server_spinup_timeout_seconds` (default 600). The error names the server instances still waiting. This bound also catches a multi-worker Uvicorn manager that remains alive while repeatedly replacing workers that fail during application construction.
+
+The budget starts when Gym begins polling its servers for readiness, which happens after it has launched them and its head server is answering. Head-server startup does not count against it. The budget covers whatever each server still has to do before it opens its port. That includes installing the server's dependencies and, for a locally launched model such as `local_vllm_model`, downloading and loading the model weights: that server waits for its inference engine before the Gym port opens. `model_endpoint_readiness_timeout_seconds` is a separate, later check of the model endpoints named in the config, so raising it does not help at this stage.
+
+Raise the value for servers with legitimately long initialization with `++server_spinup_timeout_seconds=<seconds>`, or set it to `0` to preserve an unbounded wait while debugging. The value must be a number of seconds; anything else is reported as a configuration error before any server starts. A deterministic startup exception should be fixed rather than hidden behind a larger timeout.
+
 ### Model Endpoint Unreachable
 
 ```
