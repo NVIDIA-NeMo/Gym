@@ -51,6 +51,7 @@ def test_prepare_invokes_usersim_panel_and_records_manifest(tmp_path: Path, monk
     ]
     assert command[12] == "1"
     assert "env" not in kwargs
+    assert Path(str(kwargs["cwd"])).name.startswith("usersim-panel-")
     panel_path = tmp_path / "personas" / "0.0.2" / "panels" / "en_US.parquet"
     manifest = json.loads(panel_path.with_suffix(".manifest.json").read_text())
     assert manifest["panel_rows"] == 1
