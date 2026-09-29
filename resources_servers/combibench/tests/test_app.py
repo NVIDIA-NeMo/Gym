@@ -383,13 +383,19 @@ class TestMetrics:
         assert agent_metrics["pass@1/accuracy"] == pytest.approx(50.0)
         assert agent_metrics["pass@1[avg-of-1]/accuracy"] == pytest.approx(50.0)
 
-    def test_harness_failure_rate_is_a_metric_line(self) -> None:
-        """The rate is carried per response, and the masked rollout is reported as coverage."""
+    def test_harness_faults_are_carried_per_row_and_counted_as_coverage(self) -> None:
+        """``harness_failure`` is a per-row flag; the aggregate signal is coverage.
+
+        Masked rows are dropped before any mean, so ``mean/harness_failure`` is
+        pinned at 0.0 here rather than left implied: it cannot report anything
+        else, in this run or in one where the Lean server was down throughout.
+        """
         responses = self._responses()
         assert [r["harness_failure"] for r in responses] == [0.0, 0.0, 1.0]
         assert [r["mask_sample"] for r in responses] == [False, False, True]
-        coverage = self._aggregate().key_metrics
-        assert coverage["coverage/masked_rollouts"] == 1
+        aggregate = self._aggregate()
+        assert aggregate.key_metrics["coverage/masked_rollouts"] == 1
+        assert aggregate.agent_metrics.get("mean/harness_failure") == 0.0
 
     def test_per_family_rates_are_supplementary(self) -> None:
         aggregate = self._aggregate()

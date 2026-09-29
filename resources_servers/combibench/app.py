@@ -164,7 +164,12 @@ class CombibenchVerifyResponse(CombibenchRunRequest, BaseVerifyResponse):
     """Echoes the task fields so per-family metrics and post-hoc analysis can key on them."""
 
     status: str
-    # 1.0 when the outcome is a harness fault, so the rate is a metric line.
+    # 1.0 when the outcome is a harness fault. This is a per-row flag for reading
+    # the rollout file, not a rate: harness faults also set ``mask_sample``, and
+    # ``reward_profile.select_measured`` drops masked rows before any mean, so
+    # ``mean/harness_failure`` is identically 0.0 even in a run where the Lean
+    # server was down throughout. ``coverage/masked_rollouts`` is the aggregate
+    # signal for how much of the run was lost to the harness.
     harness_failure: float
     answer_tags: list[str] = Field(default_factory=list)
     lean_code: Optional[str] = None  # exactly what was compiled, answer checks included
