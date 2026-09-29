@@ -22,7 +22,13 @@ import pytest
 
 from resources_servers.combibench import lean_client
 from resources_servers.combibench.fine_eval import classify_lean_result
-from resources_servers.combibench.lean_client import HTTP_TIMEOUT_MARGIN_SECONDS, KiminaLeanClient
+from resources_servers.combibench.lean_client import (
+    HTTP_TIMEOUT_MARGIN_SECONDS,
+    MAX_SATURATION_ATTEMPTS,
+    SATURATION_BACKOFF_SECONDS,
+    SATURATION_STATUSES,
+    KiminaLeanClient,
+)
 from resources_servers.lean_proof.status import STATUS_COMPILE_ERROR, STATUS_SANDBOX_ERROR
 
 
@@ -74,7 +80,7 @@ class TestKiminaLeanClient:
         await KiminaLeanClient("http://lean:8000").verify("code", 10)
         assert "Authorization" not in calls[0]["headers"]
 
-    @pytest.mark.parametrize("status", [401, 429, 500])
+    @pytest.mark.parametrize("status", [401, 404, 500])
     async def test_non_200_is_a_transport_failure(self, monkeypatch, status) -> None:
         _patch_request(monkeypatch, _FakeResponse(status, text="nope"))
         result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
@@ -101,6 +107,52 @@ class TestKiminaLeanClient:
         calls = _patch_request(monkeypatch, _FakeResponse(200, {"results": [{"custom_id": "x", "response": {}}]}))
         await KiminaLeanClient("http://lean:8000").verify("code", 10)
         assert calls[0]["_max_connection_retries"] == 1
+
+
+class TestSaturationIsRetried:
+    """429/503 cost the server no REPL time, so the single-try rule does not apply to them."""
+
+    @pytest.fixture
+    def slept(self, monkeypatch) -> list[float]:
+        recorded: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            recorded.append(seconds)
+
+        monkeypatch.setattr(lean_client.asyncio, "sleep", fake_sleep)
+        return recorded
+
+    @pytest.mark.parametrize("status", SATURATION_STATUSES)
+    async def test_a_saturated_server_is_retried_and_then_succeeds(self, monkeypatch, slept, status) -> None:
+        ok = {"results": [{"custom_id": "x", "response": {"messages": [], "time": 0.1}}]}
+        replies = [_FakeResponse(status, text="busy"), _FakeResponse(200, ok)]
+        calls: list[dict] = []
+
+        async def fake_request(method, url, **kwargs):
+            calls.append(kwargs)
+            return replies[len(calls) - 1]
+
+        monkeypatch.setattr(lean_client, "request", fake_request)
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        # Retried, so the rollout is scored instead of being masked out of the denominator.
+        assert result.transport_failure is False and result.error is None
+        assert len(calls) == 2 and slept == [SATURATION_BACKOFF_SECONDS]
+
+    async def test_retries_are_bounded(self, monkeypatch, slept) -> None:
+        calls = _patch_request(monkeypatch, _FakeResponse(503, text="busy"))
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert len(calls) == MAX_SATURATION_ATTEMPTS
+        assert slept == [SATURATION_BACKOFF_SECONDS, SATURATION_BACKOFF_SECONDS * 2]
+        assert result.transport_failure is True and "HTTP 503" in result.error
+
+    async def test_a_timeout_is_still_tried_once(self, monkeypatch, slept) -> None:
+        """The timeout path is unchanged: it already cost a REPL its whole budget."""
+        body = {"results": [{"custom_id": "x", "error": "Lean REPL command timed out in 10 seconds"}]}
+        calls = _patch_request(monkeypatch, _FakeResponse(200, body))
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert len(calls) == 1 and slept == []
+        assert calls[0]["_max_connection_retries"] == 1
+        assert "timed out" in result.error
 
 
 class TestErrorPayloads:

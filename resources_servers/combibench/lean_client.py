@@ -50,6 +50,14 @@ HTTP_TIMEOUT_MARGIN_SECONDS = 30.0
 # against a server that can only run this many REPLs anyway.
 DEFAULT_MAX_CONCURRENCY = 8
 
+# "Try again": the server is out of REPLs (429) or not accepting work yet (503).
+# Unlike a timeout, these cost the server no REPL time, and they are what a
+# saturated server answers, so they are worth another try rather than becoming a
+# masked rollout that shrinks the denominator.
+SATURATION_STATUSES = (429, 503)
+MAX_SATURATION_ATTEMPTS = 3
+SATURATION_BACKOFF_SECONDS = 1.0  # doubled each attempt: 1s, then 2s
+
 # Kimina exposes no version endpoint, so the toolchain is read by compiling a
 # one-line program through the same path a submission takes. ``TOOLCHAIN_PROBE``
 # is the shared one, so every Lean benchmark asks the question the same way; its
@@ -77,6 +85,12 @@ class KiminaLeanClient:
 
         Any failure to obtain a well-formed reply is a transport failure: the
         model cannot cause it, so callers attribute it to the harness.
+
+        A saturation reply (``SATURATION_STATUSES``) is retried with backoff,
+        because it is the one failure that costs the server no REPL time and is
+        exactly what a busy server returns: left unretried it becomes a masked
+        ``sandbox_error`` and silently shrinks the measured denominator. Every
+        other failure, timeouts included, is returned on the first try.
         """
         payload = {
             "codes": [{"custom_id": uuid.uuid4().hex, "proof": code}],
@@ -84,6 +98,22 @@ class KiminaLeanClient:
             "infotree_type": None,
             "disable_cache": False,
         }
+        for attempt in range(MAX_SATURATION_ATTEMPTS):
+            result = await self._verify_once(payload, timeout_seconds)
+            if not isinstance(result, int):
+                return result
+            if attempt + 1 == MAX_SATURATION_ATTEMPTS:
+                LOG.warning("Lean server still saturated (HTTP %s) after %s tries", result, attempt + 1)
+                return LeanResult(error=f"HTTP {result}: Lean server saturated", transport_failure=True)
+            backoff = SATURATION_BACKOFF_SECONDS * 2**attempt
+            LOG.warning("Lean server is saturated (HTTP %s), retrying in %.1fs", result, backoff)
+            # Slept outside the semaphore, so the slot goes to a request that can
+            # use it rather than being held by this one while it waits.
+            await asyncio.sleep(backoff)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _verify_once(self, payload: dict[str, Any], timeout_seconds: int) -> "LeanResult | int":
+        """One ``/verify`` round trip: a ``LeanResult``, or the HTTP status to back off from."""
         try:
             async with self._semaphore:
                 response = await request(
@@ -95,9 +125,12 @@ class KiminaLeanClient:
                     # A compile that exhausts the client timeout has already cost
                     # the server a REPL for that long. Retrying it twice more
                     # triples the cost and cannot change the answer, so the shared
-                    # client's default of 3 tries is turned off here.
+                    # client's default of 3 tries is turned off here; the caller
+                    # retries saturation instead, which costs no REPL time.
                     _max_connection_retries=1,
                 )
+                if response.status in SATURATION_STATUSES:
+                    return response.status
                 if response.status != 200:
                     text = await response.text()
                     LOG.warning("Lean server returned HTTP %s: %s", response.status, text[:500])

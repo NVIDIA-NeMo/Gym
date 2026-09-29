@@ -390,7 +390,10 @@ beyond that number is a connection waiting for a REPL that does not exist yet;
 past the server's own queue it becomes a 429 charged to nobody. A compile that
 exhausts the client timeout is not retried (`_max_connection_retries=1`):
 Gym's shared client would otherwise spend three REPL jobs and three times the
-wall clock to reach the same verdict.
+wall clock to reach the same verdict. A 429 or 503 *is* retried, up to three
+attempts with a 1 s then 2 s backoff — saturation costs the server no REPL time,
+and giving up on it would turn a busy moment into a masked `sandbox_error` that
+quietly shrinks the measured denominator.
 
 ### What is shared with the other Lean benchmarks, and what is not
 
