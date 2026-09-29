@@ -49,6 +49,8 @@ def _fmt(hand: list[str]) -> str:
 
 
 class BlackjackEnv(GymnasiumServer):
+    ray_enabled = False
+
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
         rng = random.Random()
         player = [_deal(rng), _deal(rng)]

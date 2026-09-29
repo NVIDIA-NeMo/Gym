@@ -239,6 +239,7 @@ class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
 
 
 class SwebenchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: SwebenchResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
