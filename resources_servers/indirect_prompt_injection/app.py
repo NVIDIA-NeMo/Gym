@@ -16,6 +16,7 @@ import copy
 import json
 import logging
 from typing import Any, Dict, List, Literal, Optional
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -128,9 +129,16 @@ class IPIResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: IPISeedSessionRequest) -> BaseSeedSessionResponse:
         identity = self._current_identity()
-        session_id = (
-            f"checkpoint:{identity[0]}:a{identity[1]}" if identity is not None else request.session[SESSION_ID_KEY]
-        )
+        session_id = request.session[SESSION_ID_KEY]
+        if identity is not None and identity in self.execution_to_session:
+            session_id = self.execution_to_session[identity]
+        elif session_id in self.session_id_to_env and (
+            identity is not None or session_id in self.execution_to_session.values()
+        ):
+            # Reusing another execution's cookie must not overwrite its environment.
+            session_id = str(uuid4())
+        # Cookie-only callers and execution-aware callers must resolve the same state.
+        request.session[SESSION_ID_KEY] = session_id
         self.session_id_to_env[session_id] = copy.deepcopy(body.environment)
         if identity is not None:
             self.execution_to_session[identity] = session_id
@@ -162,6 +170,12 @@ class IPIResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: IPIVerifyRequest) -> IPIVerifyResponse:
         identity = self._current_identity()
         session_id = self._session_id(request)
+        if (
+            identity is None
+            and self._checkpoint_participant is not None
+            and session_id in self.execution_to_session.values()
+        ):
+            raise HTTPException(status_code=409, detail="Checkpoint-managed verification requires execution identity.")
         try:
             injection_followed, matched_tool, matched_args = check_injection_followed(
                 body.response.output, body.injection.model_dump()
@@ -205,6 +219,10 @@ class IPIResourcesServer(SimpleResourcesServer):
                 self.execution_to_session.pop(identity, None)
                 if self._checkpoint_participant is not None:
                     self.checkpoint_participant().mark_terminal_after_request(*identity)
+            else:
+                self.execution_to_session = {
+                    key: value for key, value in self.execution_to_session.items() if value != session_id
+                }
 
     @staticmethod
     def _current_identity() -> tuple[str, int] | None:

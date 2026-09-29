@@ -348,3 +348,147 @@ async def test_retire_is_idempotent_and_preserves_other_attempts(environment):
     assert participant.is_tombstoned("rollout-a", 0)
     assert _environment(server, attempt_index=1) == environment
     assert participant.status()["sessions"] == 1
+
+
+def _identity_headers(rollout_id="rollout-a", attempt_index=0):
+    return {ROLLOUT_ID_HEADER: rollout_id, ATTEMPT_INDEX_HEADER: str(attempt_index)}
+
+
+def _cookie_header(response):
+    return {"cookie": "; ".join(f"{name}={value}" for name, value in response.cookies.items())}
+
+
+def _patient_record(client, headers=None):
+    response = client.post("/get_patient_record", json={"patient_id": "P001"}, headers=headers)
+    assert response.status_code == 200, response.text
+    return json.loads(response.json()["output"])
+
+
+@pytest.mark.parametrize("verify_with_identity", [False, True], ids=["cookie-verify", "identity-verify"])
+def test_cookie_transport_after_identity_seed(environment, monkeypatch, verify_with_identity):
+    monkeypatch.delenv(CHECKPOINT_CONTROL_TOKEN_ENV, raising=False)
+    server = _server()
+    with TestClient(server.setup_webserver()) as client:
+        seeded = client.post("/seed_session", json={"environment": environment}, headers=_identity_headers())
+        assert seeded.status_code == 200, seeded.text
+        assert server._checkpoint_participant is None
+        updated = client.post("/update_patient_chart", json={"patient_id": "P001", "notes": "Cookie update."})
+        assert updated.status_code == 200, updated.text
+        expected_notes = "Initial notes.\nCookie update."
+        assert _patient_record(client)["chart_notes"] == expected_notes
+        assert _patient_record(client, _identity_headers())["chart_notes"] == expected_notes
+
+        verified = client.post(
+            "/verify",
+            json=_verify_request().model_dump(mode="json"),
+            headers=_identity_headers() if verify_with_identity else None,
+        )
+        assert verified.status_code == 200, verified.text
+        assert server.session_id_to_env == {}
+        assert server.execution_to_session == {}
+
+
+@pytest.mark.parametrize("second_identity", [("rollout-b", 0), ("rollout-a", 1)], ids=["new-rollout", "new-attempt"])
+def test_cookie_reuse_keeps_executions_isolated(environment, monkeypatch, second_identity):
+    monkeypatch.delenv(CHECKPOINT_CONTROL_TOKEN_ENV, raising=False)
+    server = _server()
+    other_environment = copy.deepcopy(environment)
+    other_environment["patients"]["P001"]["chart_notes"] = "Other execution."
+    with TestClient(server.setup_webserver()) as client:
+        first = client.post("/seed_session", json={"environment": environment}, headers=_identity_headers())
+        assert first.status_code == 200, first.text
+        first_cookie = _cookie_header(first)
+        second = client.post(
+            "/seed_session",
+            json={"environment": other_environment},
+            headers={**first_cookie, **_identity_headers(*second_identity)},
+        )
+        assert second.status_code == 200, second.text
+        second_cookie = _cookie_header(second)
+        assert server.execution_to_session[("rollout-a", 0)] != server.execution_to_session[second_identity]
+        assert _patient_record(client, first_cookie)["chart_notes"] == "Initial notes."
+        assert _patient_record(client, second_cookie)["chart_notes"] == "Other execution."
+        assert _patient_record(client, _identity_headers())["chart_notes"] == "Initial notes."
+        assert _patient_record(client, _identity_headers(*second_identity))["chart_notes"] == "Other execution."
+        assert len(server.session_id_to_env) == len(server.execution_to_session) == 2
+
+
+@pytest.mark.parametrize("changed_cookie", [False, True], ids=["missing-cookie", "other-session-cookie"])
+def test_identity_reseed_reuses_binding_and_updates_cookie(environment, monkeypatch, changed_cookie):
+    monkeypatch.delenv(CHECKPOINT_CONTROL_TOKEN_ENV, raising=False)
+    server = _server()
+    replacement = copy.deepcopy(environment)
+    replacement["patients"]["P001"]["chart_notes"] = "Reseeded execution."
+    with TestClient(server.setup_webserver()) as client:
+        first = client.post("/seed_session", json={"environment": environment}, headers=_identity_headers())
+        assert first.status_code == 200, first.text
+        original_session = server.execution_to_session[("rollout-a", 0)]
+        client.cookies.clear()
+        if changed_cookie:
+            other = client.post("/seed_session", json={"environment": environment})
+            assert other.status_code == 200, other.text
+            other_cookie = _cookie_header(other)
+        reseeded = client.post("/seed_session", json={"environment": replacement}, headers=_identity_headers())
+        assert reseeded.status_code == 200, reseeded.text
+        assert server.execution_to_session == {("rollout-a", 0): original_session}
+        assert len(server.session_id_to_env) == 1 + int(changed_cookie)
+        assert _patient_record(client)["chart_notes"] == "Reseeded execution."
+        assert _patient_record(client, _identity_headers())["chart_notes"] == "Reseeded execution."
+        if changed_cookie:
+            assert _patient_record(client, other_cookie)["chart_notes"] == "Initial notes."
+
+
+def test_cookie_only_seed_preserves_bound_execution_and_reseeds_legacy_session(environment, monkeypatch):
+    monkeypatch.delenv(CHECKPOINT_CONTROL_TOKEN_ENV, raising=False)
+    server = _server()
+    untracked = copy.deepcopy(environment)
+    untracked["patients"]["P001"]["chart_notes"] = "Untracked session."
+    with TestClient(server.setup_webserver()) as client:
+        tracked = client.post("/seed_session", json={"environment": environment}, headers=_identity_headers())
+        assert tracked.status_code == 200, tracked.text
+        tracked_cookie = _cookie_header(tracked)
+        binding = dict(server.execution_to_session)
+        seeded = client.post("/seed_session", json={"environment": untracked})
+        assert seeded.status_code == 200, seeded.text
+        untracked_cookie = _cookie_header(seeded)
+        assert _patient_record(client, tracked_cookie)["chart_notes"] == "Initial notes."
+        assert _patient_record(client, untracked_cookie)["chart_notes"] == "Untracked session."
+        untracked["patients"]["P001"]["chart_notes"] = "Legacy reseed."
+        reseeded = client.post("/seed_session", json={"environment": untracked}, headers=untracked_cookie)
+        assert reseeded.status_code == 200, reseeded.text
+        assert _patient_record(client)["chart_notes"] == "Legacy reseed."
+        assert _patient_record(client, tracked_cookie)["chart_notes"] == "Initial notes."
+        assert server.execution_to_session == binding
+        assert len(server.session_id_to_env) == 2
+
+
+def test_checkpoint_managed_verify_requires_identity_and_preserves_state(environment, monkeypatch):
+    monkeypatch.setenv(CHECKPOINT_CONTROL_TOKEN_ENV, "test-checkpoint-token")
+    server = _server()
+    with TestClient(server.setup_webserver()) as client:
+        seeded = client.post(
+            "/seed_session",
+            json={"environment": environment},
+            headers={**_identity_headers(), RESOURCE_REQUEST_ID_HEADER: "seed"},
+        )
+        assert seeded.status_code == 200, seeded.text
+        binding = dict(server.execution_to_session)
+        participant = server.checkpoint_participant()
+        assert participant.revision_for("rollout-a", 0) == 1
+
+        rejected = client.post("/verify", json=_verify_request().model_dump(mode="json"))
+        assert rejected.status_code == 409, rejected.text
+        assert server.execution_to_session == binding
+        assert _environment(server) == environment
+        assert participant.is_bound("rollout-a", 0)
+        assert participant.revision_for("rollout-a", 0) == 1
+
+        verified = client.post(
+            "/verify",
+            json=_verify_request().model_dump(mode="json"),
+            headers={**_identity_headers(), RESOURCE_REQUEST_ID_HEADER: "verify"},
+        )
+        assert verified.status_code == 200, verified.text
+        assert server.session_id_to_env == {}
+        assert server.execution_to_session == {}
+        assert participant.status()["sessions"] == 0
