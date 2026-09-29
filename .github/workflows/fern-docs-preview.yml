@@ -1,0 +1,185 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Runs after the PR head is mirrored to pull-request/<number> for CI. The approved
+# mirror provides documentation and Fern configuration. The CLI is pinned here.
+
+name: Preview Fern Docs
+
+on:
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed-files:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs: ${{ steps.changed-files.outputs.docs_any_changed }}
+      pr_number: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).number }}
+    steps:
+      - name: Checkout PR mirror
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Get PR info
+        id: get-pr-info
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
+        uses: nv-gha-runners/get-pr-info@090577647b8ddc4e06e809e264f7881650ecdccf # main
+
+      - name: Get changed files
+        id: changed-files
+        uses: step-security/changed-files@2e07db73e5ccdb319b9a6c7766bd46d39d304bad # v47.0.5
+        with:
+          base_sha: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).base.ref }}
+          files_yaml: |
+            docs:
+              - fern/**
+              - .github/workflows/fern-docs-ci.yml
+
+  preview:
+    needs: changed-files
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: needs.changed-files.outputs.docs == 'true'
+    steps:
+      - name: Checkout approved PR mirror
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read changed documentation files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.changed-files.outputs.pr_number }}
+        run: |
+          gh api --paginate "repos/${{ github.repository }}/pulls/${PR_NUMBER}/files" \
+            --jq '.[] | select(.filename | startswith("fern/") and (endswith(".md") or endswith(".mdx"))) | .filename' \
+            > changed_docs_files
+
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+
+      - name: Install Fern CLI
+        run: npm install -g fern-api@5.50.4
+
+      - name: Generate preview URL
+        id: generate-docs
+        working-directory: fern
+        env:
+          FERN_TOKEN: ${{ secrets.DOCS_FERN_TOKEN }}
+          PR_NUMBER: ${{ needs.changed-files.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          fern docs md generate
+          OUTPUT=$(fern generate --docs --preview --id "pull-request-${PR_NUMBER}" 2>&1)
+          echo "$OUTPUT"
+          URL=$(echo "$OUTPUT" | grep -oP 'Published docs to \K.*(?= \()' || true)
+          if [ -z "$URL" ]; then
+            echo "::error::Failed to generate preview URL. See fern output above."
+            exit 1
+          fi
+          python3 - "$URL" <<'PY'
+          import re
+          import sys
+          from urllib.parse import urlsplit
+
+          value = sys.argv[1]
+          url = urlsplit(value)
+          if (
+              value != value.strip() or "\n" in value or "\r" in value
+              or url.scheme != "https"
+              or not re.fullmatch(r"nvidia-preview-[a-z0-9-]+\.docs\.buildwithfern\.com", url.hostname or "")
+              or url.port is not None or url.username or url.password
+              or url.query or url.fragment
+          ):
+              raise SystemExit("Unexpected Fern preview URL")
+          PY
+          echo "preview_url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Build page links for changed files
+        id: page-links
+        env:
+          FERN_TOKEN: ${{ secrets.DOCS_FERN_TOKEN }}
+          PREVIEW_URL: ${{ steps.generate-docs.outputs.preview_url }}
+        run: |
+          CHANGED_FILES=$(cat changed_docs_files)
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "page_links=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          BASE_URL=$(echo "$PREVIEW_URL" | grep -oP 'https?://[^/]+')
+          FILES_PARAM=$(echo "$CHANGED_FILES" | tr '\n' ',' | sed 's/,$//' \
+            | python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip(), safe=',/'))")
+          RESPONSE=$(curl -sf -H "FERN_TOKEN: $FERN_TOKEN" "${PREVIEW_URL}/api/fern-docs/get-slug-for-file?files=${FILES_PARAM}" 2>/dev/null) || {
+            echo "page_links=" >> "$GITHUB_OUTPUT"; exit 0
+          }
+
+          PAGE_LINKS=$(echo "$RESPONSE" | jq -r --arg url "$BASE_URL" \
+            '.mappings[] | select(.slug != null) | "- [\(.slug)](\($url)/\(.slug))"')
+
+          if [ -n "$PAGE_LINKS" ]; then
+            { echo "page_links<<EOF"; echo "$PAGE_LINKS"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          else
+            echo "page_links=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post or update PR comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.changed-files.outputs.pr_number }}
+          PREVIEW_URL: ${{ steps.generate-docs.outputs.preview_url }}
+          PAGE_LINKS: ${{ steps.page-links.outputs.page_links }}
+        run: |
+          BODY=":herb: **Preview your docs:** <${PREVIEW_URL}>"
+          if [ -n "${PAGE_LINKS}" ]; then
+            BODY="${BODY}
+
+          Here are the markdown pages you've updated:
+          ${PAGE_LINKS}"
+          fi
+
+          MARKER="<!-- preview-docs -->"
+          BODY="${BODY}
+
+          ${MARKER}"
+
+          COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" | tr -d '\r' | head -1)
+
+          if [ -n "$COMMENT_ID" ]; then
+            gh api "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
+              -X PATCH -f body="$BODY"
+          else
+            gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              -f body="$BODY"
+          fi
