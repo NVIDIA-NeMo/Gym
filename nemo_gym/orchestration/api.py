@@ -228,6 +228,13 @@ class KubernetesComputeConfig(BaseComputeConfig):
     service_account: str | None = None
     # A pre-existing PVC, mounted at job.output_path in every container.
     pvc_name: str | None = None
+    # Memory *request* (Kubernetes quantity string, e.g. "32Gi") per requested GPU on a service
+    # container. Without a memory request a pod gets QoS class BestEffort, which the kubelet
+    # kills first under node memory pressure -- observed in practice as a GPU sidecar getting
+    # SIGKILLed (exit 137) mid-startup on a busy shared node, with no error of its own to explain
+    # it. Scaling by GPU count is a coarse proxy for what a service actually needs, but it beats
+    # leaving every GPU pod first-in-line for eviction by default.
+    memory_per_gpu: str = "32Gi"
     extra_args: dict[str, str] = {}  # Forwarded verbatim as pod labels/annotations.
 
 

@@ -45,6 +45,11 @@ GPU_RESOURCE_KEY = "nvidia.com/gpu"
 LOGS_DIRNAME = "logs"
 ARTIFACTS_DIRNAME = "artifacts"
 OUTPUT_VOLUME_NAME = "gym-output"
+# Flat memory request for the driver container, which does no GPU work of its own: enough that it
+# isn't QoS class BestEffort either (see `_gpu_resources`), without needing its own config knob.
+DRIVER_MEMORY_REQUEST = "2Gi"
+
+_QUANTITY_RE = re.compile(r"^(\d+)([A-Za-z]*)$")
 
 
 def _dns_label(value: str) -> str:
@@ -93,10 +98,26 @@ def _output_volume_mount(output_path: str) -> dict[str, Any]:
     return {"name": OUTPUT_VOLUME_NAME, "mountPath": output_path}
 
 
-def _gpu_resources(gpu_count: int) -> dict[str, Any]:
+def _scale_quantity(quantity: str, factor: int) -> str:
+    """Scale a Kubernetes memory quantity ("32Gi") by an integer factor ("64Gi" for factor=2)."""
+    match = _QUANTITY_RE.match(quantity)
+    if not match:
+        raise ValueError(f"{quantity!r} is not a supported memory quantity (expected e.g. '32Gi', '512Mi').")
+    number, unit = match.groups()
+    return f"{int(number) * factor}{unit}"
+
+
+def _gpu_resources(gpu_count: int, memory_per_gpu: str) -> dict[str, Any]:
     if gpu_count <= 0:
         return {}
-    return {"limits": {GPU_RESOURCE_KEY: gpu_count}}
+    memory = _scale_quantity(memory_per_gpu, gpu_count)
+    return {
+        "limits": {GPU_RESOURCE_KEY: gpu_count},
+        # A memory *request* (not just a GPU limit) so the pod isn't QoS class BestEffort --
+        # BestEffort pods are the kubelet's first choice to kill under node memory pressure, which
+        # otherwise silently SIGKILLs a GPU sidecar mid-startup on a busy shared node.
+        "requests": {"memory": memory},
+    }
 
 
 def _vllm_command(service: VllmServiceConfig, port: int) -> list[str]:
@@ -123,7 +144,7 @@ def _probe(path: str, port: int, timeout_seconds: int) -> dict[str, Any]:
     }
 
 
-def _sidecar_containers(config: SubmitConfig) -> list[dict[str, Any]]:
+def _sidecar_containers(config: SubmitConfig, compute: KubernetesComputeConfig) -> list[dict[str, Any]]:
     containers = []
     for name, service in config.services.items():
         if isinstance(service, RayServiceConfig):
@@ -144,7 +165,7 @@ def _sidecar_containers(config: SubmitConfig) -> list[dict[str, Any]]:
             # down after, the pod's regular (driver) container -- kubelet handles the ordering.
             "command": _vllm_command(service, service.port),
             "ports": [{"containerPort": service.port}],
-            "resources": _gpu_resources(gpu_count),
+            "resources": _gpu_resources(gpu_count, compute.memory_per_gpu),
         }
         if service.env:
             container["env"] = _env_list(service.env)
@@ -226,13 +247,14 @@ def build_job_manifest(
         "image": config.driver.container,
         "command": _driver_command(config, benchmark_name, benchmark, run_dir_str, manifest_writes),
         "volumeMounts": [_output_volume_mount(config.job.output_path)],
+        "resources": {"requests": {"memory": DRIVER_MEMORY_REQUEST}},
     }
     if config.driver.env:
         driver_container["env"] = _env_list(config.driver.env)
 
     pod_spec: dict[str, Any] = {
         "restartPolicy": "Never",
-        "initContainers": _sidecar_containers(config),
+        "initContainers": _sidecar_containers(config, compute),
         "containers": [driver_container],
         "volumes": volumes,
     }

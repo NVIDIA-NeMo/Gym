@@ -21,7 +21,7 @@ import pytest
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import kubernetes as kubernetes_module
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
-from nemo_gym.orchestration.executors.kubernetes_script import _dns_label, job_name
+from nemo_gym.orchestration.executors.kubernetes_script import _dns_label, _scale_quantity, job_name
 from nemo_gym.orchestration.jobs import SubmissionRecord
 
 
@@ -75,6 +75,49 @@ def test_dns_label_sanitizes_gym_names_for_kubernetes():
 def test_job_name_is_a_valid_dns_label():
     name = job_name("gym-job-20260101T000000Z-abcdef", "gpqa_diamond")
     assert name == "gym-gym-job-20260101t000000z-abcdef-gpqa-diamond"
+
+
+def test_scale_quantity_multiplies_the_numeric_part():
+    assert _scale_quantity("32Gi", 2) == "64Gi"
+    assert _scale_quantity("512Mi", 1) == "512Mi"
+
+
+def test_scale_quantity_rejects_an_unparseable_value():
+    with pytest.raises(ValueError, match="not a supported memory quantity"):
+        _scale_quantity("lots", 2)
+
+
+def test_gpu_sidecar_gets_a_memory_request_scaled_by_gpu_count(tmp_path):
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    services = {
+        "vllm_model": {
+            "type": "vllm",
+            "container": "vllm/vllm-openai:latest",
+            "model": "org/model",
+            "tensor_parallel_size": 2,
+        }
+    }
+    config = _submit_config(tmp_path, ["bench_a"], services=services)
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    sidecar = job["spec"]["template"]["spec"]["initContainers"][0]
+    assert sidecar["resources"]["requests"]["memory"] == "64Gi"
+    driver = job["spec"]["template"]["spec"]["containers"][0]
+    assert driver["resources"]["requests"]["memory"]
 
 
 def test_run_returns_a_record_naming_every_benchmark(tmp_path, monkeypatch):
