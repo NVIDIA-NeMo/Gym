@@ -118,7 +118,7 @@ class KiminaLeanClient:
             await asyncio.sleep(backoff)
         raise AssertionError("unreachable")  # pragma: no cover
 
-    async def _verify_once(self, payload: dict[str, Any], timeout_seconds: int) -> "LeanResult | int":
+    async def _verify_once(self, payload: dict[str, Any], timeout_seconds: int) -> LeanResult | int:
         """One ``/verify`` round trip: a ``LeanResult``, or the HTTP status to back off from."""
         try:
             async with self._semaphore:
