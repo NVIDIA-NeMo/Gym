@@ -127,8 +127,20 @@ gate above is what keeps that failure from reaching a run.
 Keep the server's `LEAN_SERVER_MAX_REPLS` and the resources server's
 `max_concurrent_lean_requests` equal, so the two agree on how many proofs can be in flight.
 
+`LEAN_SERVER_LEAN_VERSION` is set from the `LEAN_VERSION` build arg. It selects nothing —
+the toolchain is the one baked into `/opt/lean` — but it is what the server announces in its
+start-up banner, and left unset Kimina falls back to its own default (`v4.26.0`), so an
+image built at `v4.24.0` would introduce itself as a different one.
+
+`LEAN_SERVER_ENVIRONMENT` is left at Kimina's `dev` default rather than the `prod` upstream's
+own Dockerfile sets. In the pinned tree `prod` makes the server construct a Google Cloud
+Logging client (falling back to the console only on `DefaultCredentialsError`), and changes
+snippet rendering and uvicorn colorization; none of that belongs in an offline scoring
+container.
+
 Converting to squashfs for enroot drops image config, so `ENV` does not survive: pass the
-`LEAN_SERVER_*` values explicitly when launching that way. `lake` and `lean` are symlinked
+`LEAN_SERVER_*` values explicitly when launching that way, `LEAN_SERVER_LEAN_VERSION`
+included, or the banner reverts to Kimina's default again. `lake` and `lean` are symlinked
 into `/usr/local/bin` precisely because symlinks are filesystem and do survive.
 
 ## Provenance

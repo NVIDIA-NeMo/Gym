@@ -139,7 +139,19 @@ COPY --from=server /opt/image-provenance/ /opt/image-provenance/
 
 ENV HOME=/home/lean
 ENV PATH=/opt/venv/bin:/opt/lean/bin:$PATH
-ENV LEAN_SERVER_HOST=0.0.0.0 \
+# LEAN_SERVER_LEAN_VERSION is the version the server announces for itself. It is a label,
+# not a selector -- the toolchain actually used is the one under /opt/lean -- but leaving it
+# unset made Kimina fall back to its own default (server/settings.py, v4.26.0), so an image
+# built at v4.24.0 announced v4.26.0 in its start-up banner. Set from the build arg so the
+# banner and the image agree.
+#
+# LEAN_SERVER_ENVIRONMENT is deliberately left at Kimina's `dev` default. Upstream's own
+# Dockerfile sets `prod`, but in the pinned tree that is not only a log timer: `prod` makes
+# server/logger.py construct a Google Cloud Logging client and only fall back to console
+# logging on DefaultCredentialsError, and it changes how repl.py renders snippets and how
+# uvicorn colorizes. None of that is wanted in an offline, air-gapped scoring container.
+ENV LEAN_SERVER_LEAN_VERSION=${LEAN_VERSION} \
+    LEAN_SERVER_HOST=0.0.0.0 \
     LEAN_SERVER_PORT=8000 \
     LEAN_SERVER_REPL_PATH=/opt/repl/.lake/build/bin/repl \
     LEAN_SERVER_PROJECT_DIR=/opt/mathlib \
