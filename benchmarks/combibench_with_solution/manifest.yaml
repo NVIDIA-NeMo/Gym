@@ -7,7 +7,8 @@ domain: math
 description: 'CombiBench "with solution" setting: the 100 Lean 4 combinatorics problems with the
   published answers already substituted, so only the proof is missing. The model completes every sorry; a Lean 4.24 / Mathlib v4.24.0 Kimina server
   compiles the result and the verifier reproduces upstream one-stage Fine-Eval: statement-tamper
-  check, no axiom/sorry, answers compared to ground truth by rfl/norm_num.'
+  check, no axiom/sorry. No answer check applies here: the statements declare no abbrev
+  ..._solution, so there is nothing to compare against ground truth.'
 modality: text
 licensing: Apache-2.0 AND MIT
 authors:
