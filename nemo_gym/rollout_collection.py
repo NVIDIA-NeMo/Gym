@@ -17,7 +17,6 @@ import glob as glob_module
 import json
 import logging
 import os
-import sys
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
@@ -116,6 +115,38 @@ from nemo_gym.token_id_capture.delivery import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) -> Dict[str, float]:
+    """In-progress view of what a run is losing to its environment rather than its policy.
+
+    ``scored`` covers persisted rollouts only, split into the unmasked ones (``count``,
+    ``reward``) and the masked ones; ``dropped`` counts what never reached the main output
+    at all. ``reward_unmasked`` averages over the unmasked rollouts alone, so the gap
+    against the existing ``reward`` series is the score lost to infrastructure. Failed and
+    omitted attempts are reported as counts, never folded into a quality average.
+
+    Empty until something is actually masked or dropped, so a healthy run exports exactly
+    what it exported before. The final numbers come from ``/aggregate_metrics``; this is
+    the progress view while the run is still going.
+    """
+    masked, unmasked = int(scored["masked"]), int(scored["count"])
+    failed, omitted = int(dropped["failed"]), int(dropped["omitted"])
+    if not (masked or failed or omitted):
+        return {}
+
+    metrics: Dict[str, float] = {}
+    persisted = masked + unmasked
+    if masked and persisted:
+        metrics[f"progress/{agent_name}/masked_pct"] = round(100 * masked / persisted, 2)
+    if unmasked:
+        metrics[f"progress/{agent_name}/reward_unmasked"] = round(100 * scored["reward"] / unmasked, 2)
+    if failed:
+        metrics[f"progress/{agent_name}/failed"] = failed
+    if omitted:
+        metrics[f"progress/{agent_name}/omitted"] = omitted
+    return metrics
+
 
 # ---------------------------------------------------------------------------
 # Failure-routing sentinels (set by agent servers, read by the dispatcher).
@@ -575,7 +606,8 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
-        default=None, description="Limit the number of concurrent samples running at once."
+        default=None,
+        description="Limit concurrent requests. If max_resident_rollout_tasks is set, active requests cannot exceed either limit.",
     )
     max_resident_rollout_tasks: Optional[int] = Field(
         default=None,
@@ -925,7 +957,14 @@ def _failure_rows_counted_as_zero(
             continue
         # Diagnostics stay in the sidecar: an HTTP status is a number, and the aggregator
         # averages every number it is handed.
-        scored = {k: v for k, v in row.items() if not k.startswith("_ng_failure_")}
+        scored = {
+            k: v
+            for k, v in row.items()
+            if not k.startswith("_ng_failure_") and k not in ("failure_kind", "failure_reason")
+        }
+        # This metrics-only copy honors the explicit denominator policy. The original
+        # answer, failure diagnostics, and training mask remain untouched in the sidecar.
+        scored["mask_sample"] = False
         scored.setdefault("reward", 0.0)
         counted.append(scored)
     return counted
@@ -1300,6 +1339,7 @@ class RolloutCollectionHelper(BaseModel):
         config: RolloutCollectionConfig,
         *,
         retain_results_in_memory: bool = True,
+        success_keys: Optional[set] = None,
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[bytes]]]:
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
@@ -1308,7 +1348,7 @@ class RolloutCollectionHelper(BaseModel):
 
         results: List[Dict] = []
         result_strs: List[List[bytes]] = []
-        successes_seen: set = set()
+        successes_seen: set = success_keys if success_keys is not None else set()
 
         with Path(config.output_jsonl_fpath).open("rb") as f:
             for line in tqdm(f, desc="Reading existing output rows"):
@@ -1398,6 +1438,7 @@ class RolloutCollectionHelper(BaseModel):
         # outside a git clone.
         output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
+        persisted_success_keys: set = set()
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
                 input_rows,
@@ -1407,6 +1448,7 @@ class RolloutCollectionHelper(BaseModel):
             ) = self._load_from_cache(
                 config,
                 retain_results_in_memory=config.retain_results_in_memory,
+                success_keys=persisted_success_keys,
             )
             persisted_rows = list(rows)
             persisted_results = list(results)
@@ -1507,6 +1549,13 @@ class RolloutCollectionHelper(BaseModel):
         pcts_to_print = list(range(1, 100)) + [99.5, 100]
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
+        # Quality accounting restricted to persisted rollouts: `count`/`reward` over the
+        # unmasked ones, `masked` over the rest. Token capture already reports its own
+        # masking; this is the same accounting for what an environment declares on its
+        # verify response.
+        agent_name_to_scored = defaultdict(Counter)
+        # Rollouts that never reach the main output at all, kept apart from quality.
+        agent_name_to_dropped = defaultdict(Counter)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         dispatched_per_agent = Counter(counts_left)
         start_time = time()
@@ -1525,12 +1574,8 @@ class RolloutCollectionHelper(BaseModel):
         upload_spool = None
         failure_counts: Counter = Counter()
         completed_count = 0
-        if config.retain_results_in_memory:
-            persisted_count = len(persisted_results)
-        else:
-            persisted_count = (
-                sum(1 for line in output_fpath.open("rb") if line.strip()) if output_fpath.exists() else 0
-            )
+        persisted_count = len(persisted_success_keys)
+        collection_succeeded = False
 
         try:
             if (
@@ -1550,7 +1595,7 @@ class RolloutCollectionHelper(BaseModel):
                     with output_fpath.open("rb") as existing_results:
                         for line in existing_results:
                             if line.strip():
-                                upload_spool.write(orjson.dumps(_rollout_for_export(orjson.loads(line))) + bytes([10]))
+                                upload_spool.write(orjson.dumps(_rollout_for_export(orjson.loads(line))) + b"\n")
 
             completion_iterator = self._run_examples_with_metadata(
                 input_rows,
@@ -1670,6 +1715,7 @@ class RolloutCollectionHelper(BaseModel):
                     results_file.write(serialized + b"\n")
                     results_file.flush()
                     persisted_count += 1
+                    persisted_success_keys.add((result[TASK_INDEX_KEY_NAME], result[ROLLOUT_INDEX_KEY_NAME]))
                     if config.retain_results_in_memory:
                         persisted_rows.append(row)
                         persisted_results.append(result)
@@ -1702,6 +1748,17 @@ class RolloutCollectionHelper(BaseModel):
                     )
                     agent_name_to_counts[agent_name] += 1
 
+                # Quality accounting covers only what reaches the main rollout output, which is
+                # what /aggregate_metrics later scores. Broader than `no_result`: any failure
+                # class goes to the sidecar and a kill-shaped rollout is not stored at all, so
+                # both are counted as such rather than as a reward that happened to be zero.
+                if no_persist or failure_class is not None:
+                    agent_name_to_dropped[agent_name].update({"omitted" if no_persist else "failed": 1})
+                elif result.get(MASK_SAMPLE_KEY):
+                    agent_name_to_scored[agent_name].update({"masked": 1})
+                else:
+                    agent_name_to_scored[agent_name].update({"reward": float(result.get("reward") or 0.0), "count": 1})
+
                 current_pct = 100 * completed_count / len(input_rows)
                 if pcts_to_print and current_pct >= pcts_to_print[0]:
                     while pcts_to_print and current_pct >= pcts_to_print[0]:
@@ -1715,9 +1772,8 @@ class RolloutCollectionHelper(BaseModel):
                     top_left = counts_left.most_common()
                     top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
                     print_str += f"""Examples left:
-
-    {top_left_str}
-    """
+{top_left_str}
+"""
                     for agent_name in sorted(agent_name_to_metrics):
                         metrics = agent_name_to_metrics[agent_name]
                         agent_total_samples = dispatched_per_agent[agent_name]
@@ -1739,16 +1795,31 @@ class RolloutCollectionHelper(BaseModel):
                                 100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]),
                                 2,
                             )
+                        # The union, not just the scored agents: an agent whose every request
+                        # fails never lands in `agent_name_to_counts`, and reporting only the
+                        # agents that produced a result would hide exactly the total failure
+                        # this series exists to surface.
+                        for agent_name in sorted(agent_name_to_scored.keys() | agent_name_to_dropped.keys()):
+                            step_metrics.update(
+                                _masking_step_metrics(
+                                    agent_name,
+                                    agent_name_to_scored.get(agent_name, Counter()),
+                                    agent_name_to_dropped.get(agent_name, Counter()),
+                                )
+                            )
 
                         export_metrics(step_metrics, step=int(current_pct))
 
-            if input_rows and persisted_count == 0:
+            counted = _failure_rows_counted_as_zero(
+                [failures_fpath], config.count_failure_classes_as_zero, persisted_success_keys
+            )
+            if input_rows and persisted_count == 0 and not counted:
                 raise RuntimeError(
                     f"None of the {len(input_rows)} dispatched rollouts produced a result "
                     f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
                 )
+            collection_succeeded = True
         finally:
-            failed = sys.exc_info()[0] is not None
             try:
                 if isinstance(completion_iterator, _BoundedCompletionIterator):
                     await completion_iterator.aclose()
@@ -1756,7 +1827,7 @@ class RolloutCollectionHelper(BaseModel):
                 try:
                     resource_stack.close()
                 finally:
-                    if upload_spool is not None and failed:
+                    if upload_spool is not None and not collection_succeeded:
                         upload_spool_fpath.unlink(missing_ok=True)
                     if owned_token_source is not None:
                         await owned_token_source.close()
@@ -1772,6 +1843,7 @@ class RolloutCollectionHelper(BaseModel):
                     with upload_spool_fpath.open("rb") as upload_spool_reader:
                         upload_results = [orjson.loads(line) for line in upload_spool_reader if line.strip()]
                     export_rollouts(upload_results)
+                    del upload_results
                 finally:
                     upload_spool_fpath.unlink(missing_ok=True)
 
@@ -1785,10 +1857,8 @@ class RolloutCollectionHelper(BaseModel):
         persisted_rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         persisted_results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
-        # Compute and write aggregate metrics via /aggregate_metrics using only the
-        # rows written to the main rollouts jsonl so runtime aggregation matches
-        # `gym eval aggregate`.
-        counted: List[Dict] = []
+        # Aggregate persisted results plus explicitly counted metrics-only failures,
+        # matching `gym eval aggregate` without changing either rollout artifact.
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -1797,11 +1867,6 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            counted[:] = _failure_rows_counted_as_zero(
-                [failures_fpath],
-                config.count_failure_classes_as_zero,
-                {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in persisted_results},
-            )
             if config.count_failure_classes_as_zero:
                 print(
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
@@ -2114,6 +2179,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
+
+        When ``max_resident_tasks`` is set, at most that many rollout tasks are admitted
+        at once. When unset, all examples are scheduled as before. The collection
+        owner closes the bounded iterator on cancellation or error.
 
         Identical contract to ``run_examples``, but each future resolves to a ``_CompletedRollout``
         that carries ``rollout_latency_ms`` alongside the raw ``/run`` result instead of inside it,

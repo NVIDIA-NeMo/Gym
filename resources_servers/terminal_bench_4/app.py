@@ -1,36 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""One resource-owned runner for provisioning, mini-SWE execution, grading, and cleanup."""
+"""TB4 sandbox provisioning, verification, and resource cleanup."""
 
 import asyncio
 import hashlib
 import json
 import re
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from time import monotonic, time
 from typing import ClassVar, Literal
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field
+from pydantic import Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
-    BaseRunRequest,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
-    get_response_json,
     is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
-    rollout_path_prefix,
 )
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.environment import EnvironmentConfig
@@ -39,10 +33,10 @@ from resources_servers.terminal_bench_4.models import (
     AgentTermination,
     SandboxedVerifyRequest,
     SandboxedVerifyResponse,
-    SessionRequest,
+    SeedSessionResponse,
+    TerminalBench4RunRequest,
 )
 from resources_servers.terminal_bench_4.task import PackageLoader
-from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig, MiniSWEHarness
 
 
 BENCHMARK = Path(__file__).resolve().parents[2] / "benchmarks" / "terminal_bench_4"
@@ -54,38 +48,10 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     manifest_path: Path = BENCHMARK / "manifest.json"
     artifacts_dir: Path = Path("results/terminal_bench_4/resources")
     environment: EnvironmentConfig
-    model_server: ModelServerRef
-    harness: MiniSWEConfig = Field(default_factory=MiniSWEConfig)
-    agent_max_timeout_sec: float | None = Field(default=None, gt=0)
     max_concurrent_sessions: int = Field(default=8, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
+    seeded_session_timeout_sec: float = Field(default=10 * 60 * 60, gt=0)
     task_download_dir: Path | None = None
-
-
-class TerminalBench4RunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-
-    task_name: str
-    task_ref: str
-    dataset_ref: str
-    rollout_id: str = Field(min_length=1, max_length=256)
-    client_session_id: str | None = Field(default=None, min_length=1, max_length=256)
-    capture_model_calls: bool = False
-    capture_token_ids: bool = False
-    artifact_directory: str | None = Field(default=None, min_length=1)
-
-
-def empty_response(params, model):
-    return NeMoGymResponse(
-        id="resp_" + uuid4().hex,
-        created_at=int(time()),
-        model=model,
-        object="response",
-        output=[],
-        tool_choice=params.tool_choice,
-        tools=params.tools,
-        parallel_tool_calls=params.parallel_tool_calls,
-    )
 
 
 def atomic_json(path, value):
@@ -110,8 +76,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self):
         app = super().setup_webserver()
-        app.post("/run")(self.run)
-        app.post("/cancel_session")(self.cancel_session)
+        app.post("/seed_session")(self.seed_session)
         parent_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -149,7 +114,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         atomic_json(
             self._state_path(session.identity),
             {
-                "record_version": 2,
+                "record_version": 3,
                 "runtime": "gym-tb4-native",
                 "runtime_version": NATIVE_VERSION,
                 "session_id": session.session_id,
@@ -184,7 +149,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         session.persist = lambda: self._persist(session)
         return session
 
-    async def run(self, request: Request, body: TerminalBench4RunRequest) -> SandboxedVerifyResponse:
+    async def seed_session(self, request: Request, body: TerminalBench4RunRequest) -> SeedSessionResponse:
         if self._closing:
             raise HTTPException(503, "Resources server is shutting down")
         task = self._tasks.get(body.task_name)
@@ -205,116 +170,97 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 self._sessions[session_id] = session
                 self._by_identity[identity] = session_id
                 session.persist()
-                session.execution = asyncio.create_task(self._run_session(session, dict(request.cookies)))
+                session.execution = asyncio.create_task(self._prepare_session(session))
         else:
             session = self._sessions[session_id]
         if session.request != body:
             raise HTTPException(409, "Rollout identity is already bound to another request")
         if session.execution is not None:
-            # HTTP retries/disconnects share a single runner; they never start a second harness.
+            # Retried seed requests share provisioning, including before the first cookie response.
             await asyncio.shield(session.execution)
-        if session.verified_response is None:
-            raise HTTPException(409, "Episode has no recorded response")
-        return session.verified_response
+        self._check_expiry(session)
+        if session.verified_response is not None:
+            return SeedSessionResponse(session_id=session.session_id, verified_response=session.verified_response)
+        if session.seed_response is None:
+            raise HTTPException(409, "Episode has no recorded seed response")
+        return session.seed_response
 
-    async def _run_session(self, session, cookies):
+    async def _prepare_session(self, session: Session) -> None:
         session.started.set()
-        body = session.request.model_copy(deep=True)
-        response = empty_response(body.responses_create_params, self.config.model_server.name)
-        extra = {}
-        grade = False
-        session.termination = AgentTermination(reason="infrastructure_error", detail="Setup did not complete")
-        with rollout_context(body.capture_rollout_id):
+        with rollout_context(session.request.capture_rollout_id):
             try:
                 await lifecycle.prepare_session(session, self._loader)
-                session.phase = "agent_setup"
-                session.result["agent_setup"] = {"started_at": lifecycle.now()}
-                session.deadlines["setup_started_at"] = lifecycle.now()
+                session.seed_response = SeedSessionResponse(
+                    session_id=session.session_id,
+                    task_id=session.request.task_name,
+                    sandbox_descriptor=await session.environment.main.serialize(),
+                    sandbox_provider=session.environment.provider_config,
+                    instruction=session.task.instruction,
+                    user=session.task.config.agent.user,
+                    agent_timeout_sec=session.task.config.agent.timeout_sec,
+                    mcp_servers=[s.model_dump() for s in session.task.config.environment.mcp_servers],
+                    skills_dir=session.task.config.environment.skills_dir,
+                )
+                session.phase = "ready"
+                session.agent_deadline = asyncio.get_running_loop().time() + self.config.seeded_session_timeout_sec
+                session.deadlines["agent_expires_at"] = (
+                    datetime.now(timezone.utc) + timedelta(seconds=self.config.seeded_session_timeout_sec)
+                ).isoformat()
                 session.persist()
-                # Workdir discovery and harness setup share one budget; queueing/provisioning do not.
-                async with asyncio.timeout(lifecycle.SETUP_TIMEOUT_SEC):
-                    context = HarnessContext(
-                        session_id=session.session_id,
-                        instruction=session.task.instruction,
-                        user=session.task.config.agent.user,
-                        workdir=await session.environment.agent_workdir(),
-                        setup_timeout_sec=lifecycle.SETUP_TIMEOUT_SEC,
-                        mcp_servers=[s.model_dump() for s in session.task.config.environment.mcp_servers],
-                        skills_dir=session.task.config.environment.skills_dir,
-                    )
-                    body.responses_create_params.input = [
-                        NeMoGymEasyInputMessage(role="user", content=context.instruction)
-                    ]
-
-                    async def query(params):
-                        prefix = rollout_path_prefix(
-                            body.capture_rollout_id if body.capture_model_calls else None,
-                            token_capture=body.capture_token_ids,
-                        )
-                        model_response = await self.server_client.post(
-                            server_name=self.config.model_server.name,
-                            url_path=prefix + "/v1/responses",
-                            json=params,
-                            cookies=cookies,
-                        )
-                        await raise_for_status(model_response)
-                        return NeMoGymResponse.model_validate(await get_response_json(model_response))
-
-                    harness = MiniSWEHarness(
-                        sandbox=session.environment.main,
-                        context=context,
-                        config=self.config.harness,
-                        params=body.responses_create_params,
-                        query=query,
-                        model_name=self.config.model_server.name,
-                        directory=Path(body.artifact_directory)
-                        if body.artifact_directory
-                        else session.directory / "harness",
-                    )
-                    await harness.setup()
-                session.result["agent_setup"]["finished_at"] = lifecycle.now()
-                session.phase = "agent_running"
-                session.result["agent_execution"] = {"started_at": lifecycle.now()}
-                session.deadlines["agent_started_at"] = lifecycle.now()
-                budget = min(session.task.config.agent.timeout_sec, self.config.agent_max_timeout_sec or float("inf"))
-                deadline = monotonic() + budget
-                session.persist()
-                grade = True
-                response, outcome, extra = await harness.execute(max(0, deadline - monotonic()))
-                session.termination = AgentTermination.model_validate(outcome.model_dump())
-                if monotonic() >= deadline:
-                    session.termination.reason = "timeout"
-                if session.termination.reason == "infrastructure_error":
-                    lifecycle.exception(session, session.termination.detail, "AgentInfrastructureError")
-            except asyncio.CancelledError:
-                session.termination = AgentTermination(reason="cancelled")
-                lifecycle.exception(session, "Episode cancelled", "CancelledError")
-            except Exception as exc:
-                setup_timeout = isinstance(exc, TimeoutError) and session.phase == "agent_setup"
+                session.expiry_task = asyncio.create_task(self._watch_agent_deadline(session))
+            except (Exception, asyncio.CancelledError) as exc:
                 session.termination = AgentTermination(
-                    reason="timeout" if setup_timeout else "infrastructure_error",
+                    reason="cancelled" if isinstance(exc, asyncio.CancelledError) else "infrastructure_error",
                     detail=f"{type(exc).__name__}: {exc}",
                 )
-                lifecycle.exception(session, exc, "AgentSetupTimeoutError" if setup_timeout else None)
-            finally:
-                if grade:
-                    session.result["agent_execution"]["finished_at"] = lifecycle.now()
-                session.verify_body = SandboxedVerifyRequest(
-                    **body.model_dump(),
-                    session_id=session.session_id,
-                    response=response,
-                    termination=session.termination,
+                lifecycle.exception(session, exc)
+                await lifecycle.cleanup(session)
+                session.seed_response = SeedSessionResponse(
+                    session_id=session.session_id, termination=session.termination
                 )
-                try:
-                    session.directory.mkdir(parents=True, exist_ok=True)
-                    (session.directory / "gym-agent.json").write_text(session.verify_body.model_dump_json(indent=2))
-                except OSError as exc:
-                    lifecycle.exception(session, exc, "AgentRecordError")
-                session.phase = "verifying" if grade else "cleaning"
-                session.finalization = asyncio.create_task(lifecycle.finalize_session(session, grade=grade))
-                await asyncio.shield(session.finalization)
-                session.verified_response = self._verified_response(session, extra)
-                session.persist()
+
+    def _expire_seed(self, session: Session) -> None:
+        # No await between claiming expiry and installing the cleanup task: /verify
+        # either owns finalization already or must reject this expired session.
+        if session.phase != "ready" or session.finalization is not None:
+            return
+        session.phase = "expiring"
+        session.deadlines["agent_expired_at"] = lifecycle.now()
+        session.termination = AgentTermination(reason="timeout", detail="Seeded session deadline expired")
+        lifecycle.exception(session, session.termination.detail, "SeededSessionExpired")
+        session.persist()
+        session.finalization = asyncio.create_task(lifecycle.finalize_session(session, grade=False))
+
+    def _check_expiry(self, session: Session) -> None:
+        if session.agent_deadline is not None and asyncio.get_running_loop().time() >= session.agent_deadline:
+            self._expire_seed(session)
+        if "agent_expired_at" in session.deadlines:
+            raise HTTPException(410, "Seeded session deadline expired")
+
+    async def _watch_agent_deadline(self, session: Session) -> None:
+        await asyncio.sleep(max(0, session.agent_deadline - asyncio.get_running_loop().time()))
+        self._expire_seed(session)
+
+    async def _finalize_session(self, session: Session) -> None:
+        body = session.verify_body
+        with rollout_context(session.request.capture_rollout_id):
+            session.termination = session.termination or body.termination
+            session.result.update(body.agent_timings)
+            if body.termination.reason == "infrastructure_error":
+                lifecycle.exception(session, body.termination.detail, "AgentInfrastructureError")
+            elif not body.agent_started and body.termination.reason == "timeout":
+                lifecycle.exception(session, body.termination.detail, "AgentSetupTimeoutError")
+            try:
+                session.directory.mkdir(parents=True, exist_ok=True)
+                (session.directory / "gym-agent.json").write_text(body.model_dump_json(indent=2))
+            except OSError as exc:
+                lifecycle.exception(session, exc, "AgentRecordError")
+            session.phase = "verifying" if body.agent_started else "cleaning"
+            await lifecycle.finalize_session(
+                session, grade=body.agent_started and session.seed_response.termination is None
+            )
+            session.verified_response = self._verified_response(session, body.harness_metadata)
+            session.persist()
 
     def _verified_response(self, session, extra):
         result = session.result or {}
@@ -326,7 +272,13 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         elif session.termination.reason == "infrastructure_error":
             failure = session.termination.detail or "Agent infrastructure failure"
         return SandboxedVerifyResponse(
-            **(session.verify_body.model_dump(exclude={"termination"}) | extra),
+            **(
+                session.verify_body.model_dump(
+                    exclude={"termination", "agent_started", "agent_timings", "harness_metadata"}
+                )
+                | extra
+                | {"task_id": session.request.task_name}
+            ),
             reward=float(rewards.get("reward", 0)),
             evaluation_completed=completed,
             termination=session.termination,
@@ -356,7 +308,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     raise HTTPException(
                         409, "Resources process restarted; episode cannot resume; provider TTL applies"
                     )
-                if state.get("record_version", 0) != 2:
+                if state.get("record_version", 0) != 3:
                     raise HTTPException(409, "Unsupported recorded episode version")
                 session = self._new_session(
                     state["identity"],
@@ -380,19 +332,25 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             raise HTTPException(404, "Unknown session")
         return session
 
-    async def cancel_session(self, request: Request, body: SessionRequest) -> dict:
-        session = self._session(request, body.session_id)
-        if session.execution is not None and not session.execution.done():
-            await session.started.wait()
-            if session.finalization is None and not session.execution.cancelling():
-                session.execution.cancel()
-            await asyncio.shield(session.execution)
-        return {"session_id": body.session_id, "phase": session.phase}
-
     async def verify(self, request: Request, body: SandboxedVerifyRequest) -> SandboxedVerifyResponse:
         session = self._session(request, body.session_id)
-        if session.verified_response is None:
-            raise HTTPException(409, "Episode has no recorded response; the runner owns verification")
+        if session.execution is not None:
+            await asyncio.shield(session.execution)
+        self._check_expiry(session)
+        if session.verify_body is not None and session.verify_body != body:
+            raise HTTPException(409, "Session is already bound to another verification request")
+        if session.verified_response is not None:
+            return session.verified_response
+        if session.seed_response is None:
+            raise HTTPException(409, "Episode has no recorded seed response")
+        if session.finalization is None:
+            if session.expiry_task is not None:
+                session.expiry_task.cancel()
+            session.agent_deadline = None
+            session.deadlines["verification_started_at"] = lifecycle.now()
+            session.verify_body = body.model_copy(deep=True)
+            session.finalization = asyncio.create_task(self._finalize_session(session))
+        await asyncio.shield(session.finalization)
         return session.verified_response
 
 

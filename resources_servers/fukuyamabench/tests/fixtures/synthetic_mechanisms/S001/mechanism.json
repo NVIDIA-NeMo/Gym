@@ -1,0 +1,135 @@
+{
+    "reactions": [
+        {
+            "reaction_id": "1",
+            "reactants": [
+                {
+                    "smiles": "CC=O",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[OH-]",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "products": [
+                {
+                    "smiles": "CC(O)CC=O",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[OH-]",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "conditions": [
+                {
+                    "role": "reagent",
+                    "text": "NaOH",
+                    "reaction_step": "1"
+                },
+                {
+                    "role": "solvent",
+                    "text": "H2O",
+                    "reaction_step": "1"
+                },
+                {
+                    "role": "temperature",
+                    "text": "0 \u00b0C",
+                    "reaction_step": "1"
+                }
+            ]
+        }
+    ],
+    "mechanism": [
+        {
+            "mechanism_id": "1",
+            "reactants": [
+                {
+                    "smiles": "CC=O",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[OH-]",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "products": [
+                {
+                    "smiles": "C=C[O-]",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "O",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ]
+        },
+        {
+            "mechanism_id": "2",
+            "reactants": [
+                {
+                    "smiles": "C=C[O-]",
+                    "label": "intermediate",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "O",
+                    "label": "intermediate",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "products": [
+                {
+                    "smiles": "CC([O-])CC=O",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ]
+        },
+        {
+            "mechanism_id": "3",
+            "reactants": [
+                {
+                    "smiles": "CC([O-])CC=O",
+                    "label": "intermediate",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "products": [
+                {
+                    "smiles": "CC(O)CC=O",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[OH-]",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ]
+        }
+    ]
+}

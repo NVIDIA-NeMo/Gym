@@ -38,7 +38,7 @@ Configuration is loaded from multiple sources in order of priority (later source
 
 ### Phase 3: Initialize Ray
 
-The system initializes a Ray cluster for distributed coordination. If `ray_head_node_address` is specified in the config, it connects to an existing cluster; otherwise, it starts a new one.
+The system initializes a Ray cluster for distributed coordination. If `ray_head_node_address` is specified, Ray-enabled servers connect to that cluster; otherwise, Gym starts a cluster. Server implementations declaring `ray_enabled = False` do not import or connect to Ray.
 
 ### Phase 4: Start Servers
 

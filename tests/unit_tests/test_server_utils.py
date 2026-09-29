@@ -132,6 +132,33 @@ class TestServerUtils:
         assert restored_error.headers.getall("retry-after") == ["10", "20"]
         assert restored_error.headers.getall("SET-COOKIE") == ["session=abc", "preferences=dark"]
 
+    async def test_raise_for_status_accepts_prefetched_content(self) -> None:
+        request_info = RequestInfo(
+            url=URL("http://judge.test/v1/responses"),
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict()),
+            real_url=URL("http://judge.test/v1/responses"),
+        )
+        original_error = ClientResponseError(
+            request_info=request_info,
+            history=(),
+            status=429,
+            message="Too Many Requests",
+            headers=CIMultiDictProxy(CIMultiDict()),
+        )
+        response = MagicMock()
+        response.ok = False
+        response.content.read = AsyncMock(side_effect=AssertionError("body already consumed"))
+        response.request_info = request_info
+        response.raise_for_status.side_effect = original_error
+        content = b'{"error":"rate_limit_exceeded"}'
+
+        with raises(ClientResponseError) as exc_info:
+            await raise_for_status(response, content)
+
+        assert exc_info.value.response_content == content
+        response.content.read.assert_not_awaited()
+
     def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
         assert not nemo_gym.server_utils.is_global_aiohttp_client_request_debug_enabled()
@@ -417,15 +444,13 @@ class TestServerUtils:
             assert call.kwargs["url"].startswith("http://xyz:54321")
 
     def _mock_ray_return_value(self, monkeypatch: MonkeyPatch, return_value: bool) -> MagicMock:
-        ray_is_initialized_mock = MagicMock()
-        ray_is_initialized_mock.return_value = return_value
-        monkeypatch.setattr(nemo_gym.server_utils.ray, "is_initialized", ray_is_initialized_mock)
-        return ray_is_initialized_mock
+        ray_mock = MagicMock()
+        ray_mock.is_initialized.return_value = return_value
+        monkeypatch.setattr(nemo_gym.server_utils, "_get_ray", MagicMock(return_value=ray_mock))
+        return ray_mock.is_initialized
 
-    def _mock_ray_init(self, monkeypatch: MonkeyPatch) -> MagicMock:
-        ray_init_mock = MagicMock()
-        monkeypatch.setattr(nemo_gym.server_utils.ray, "init", ray_init_mock)
-        return ray_init_mock
+    def _mock_ray_init(self) -> MagicMock:
+        return nemo_gym.server_utils._get_ray().init
 
     def test_initialize_ray_already_initialized(self, monkeypatch: MonkeyPatch) -> None:
         ray_is_initialized_mock = self._mock_ray_return_value(monkeypatch, True)
@@ -441,7 +466,7 @@ class TestServerUtils:
     def test_initialize_ray_with_address(self, monkeypatch: MonkeyPatch) -> None:
         ray_is_initialized_mock = self._mock_ray_return_value(monkeypatch, False)
 
-        ray_init_mock = self._mock_ray_init(monkeypatch)
+        ray_init_mock = self._mock_ray_init()
 
         # Mock global config dict with ray_head_node_address
         global_config_dict = DictConfig({"ray_head_node_address": "ray://test-address:10001"})
@@ -458,13 +483,12 @@ class TestServerUtils:
     def test_initialize_ray_without_address(self, monkeypatch: MonkeyPatch) -> None:
         ray_is_initialized_mock = self._mock_ray_return_value(monkeypatch, False)
 
-        ray_init_mock = self._mock_ray_init(monkeypatch)
+        ray_init_mock = self._mock_ray_init()
 
         ray_runtime_context_mock = MagicMock()
         ray_runtime_context_mock.gcs_address = "ray://mock-address:10001"
-        ray_get_runtime_context_mock = MagicMock()
+        ray_get_runtime_context_mock = nemo_gym.server_utils._get_ray().get_runtime_context
         ray_get_runtime_context_mock.return_value = ray_runtime_context_mock
-        monkeypatch.setattr(nemo_gym.server_utils.ray, "get_runtime_context", ray_get_runtime_context_mock)
 
         # Mock global config dict without ray_head_node_address
         global_config_dict = DictConfig({"k": "v"})
@@ -1291,11 +1315,21 @@ class TestUvicornProxyHeadersBehavior:
 class TestRunWebserverProxyKwargs:
     """run_webserver must forward the proxy config into uvicorn on both launch paths."""
 
-    def _capture_uvicorn_kwargs(self, monkeypatch: MonkeyPatch, config_dict: dict, num_workers: int) -> dict:
+    def _capture_uvicorn_kwargs(
+        self,
+        monkeypatch: MonkeyPatch,
+        config_dict: dict,
+        num_workers: int,
+        ray_enabled: bool | None = None,
+        is_worker: bool = False,
+    ) -> dict:
         from fastapi import FastAPI
 
         global_config = DictConfig({DRY_RUN_KEY_NAME: False, "my_server": {"a": {"b": {}}}, **config_dict})
-        monkeypatch.setattr(nemo_gym.server_utils.ray, "is_initialized", MagicMock(return_value=True))
+        ray_mock = MagicMock()
+        ray_mock.is_initialized.return_value = True
+        self.ray_loader_mock = MagicMock(return_value=ray_mock)
+        monkeypatch.setattr(nemo_gym.server_utils, "_get_ray", self.ray_loader_mock)
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=global_config))
         server_client = ServerClient(
             head_server_config=BaseServerConfig(host="", port=0), global_config_dict=DictConfig({})
@@ -1303,7 +1337,11 @@ class TestRunWebserverProxyKwargs:
         server_client_mock = MagicMock(return_value=server_client)
         server_client_mock.load_head_server_config = MagicMock(return_value=BaseServerConfig(host="", port=0))
         monkeypatch.setattr(nemo_gym.server_utils, "ServerClient", server_client_mock)
-        monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_worker", MagicMock(return_value=False))
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "is_nemo_gym_fastapi_worker",
+            MagicMock(return_value=is_worker),
+        )
 
         captured: dict = {}
         monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "run", lambda **kwargs: captured.update(kwargs))
@@ -1311,8 +1349,11 @@ class TestRunWebserverProxyKwargs:
         server_config = BaseRunServerInstanceConfig(
             name="my_server", host="127.0.0.1", port=8000, entrypoint="app.py", num_workers=num_workers
         )
+        ray_setting = ray_enabled
 
         class TestSimpleServer(SimpleServer):
+            ray_enabled = ray_setting
+
             @classmethod
             def load_config_from_global_config(cls):
                 return server_config
@@ -1333,6 +1374,7 @@ class TestRunWebserverProxyKwargs:
     def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
 
+        self.ray_loader_mock.assert_called_once()
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
         # A single worker passes the app object itself rather than an import string.
@@ -1342,12 +1384,23 @@ class TestRunWebserverProxyKwargs:
     def test_proxy_headers_disabled_by_default_multi_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4)
 
+        self.ray_loader_mock.assert_called_once()
         # Multi-worker launches re-import the app, so uvicorn receives an import string.
         assert isinstance(kwargs["app"], str)
         assert kwargs["app"].endswith(":app")
         assert 4 == kwargs["workers"]
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
+
+    def test_ray_disabled_skips_initialization(self, monkeypatch: MonkeyPatch) -> None:
+        self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1, ray_enabled=False)
+
+        self.ray_loader_mock.assert_not_called()
+
+    def test_multi_worker_child_initializes_ray(self, monkeypatch: MonkeyPatch) -> None:
+        self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4, ray_enabled=True, is_worker=True)
+
+        self.ray_loader_mock.assert_called_once()
 
     def test_unrelated_uvicorn_settings_are_unchanged(self, monkeypatch: MonkeyPatch) -> None:
         """The issue calls out parser, keepalive, access-log, and graceful-shutdown as must-not-change."""

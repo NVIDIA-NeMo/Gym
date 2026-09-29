@@ -83,7 +83,8 @@ class TestCLISetupCommandSetupEnvCommand:
             actual_command
         )
 
-    def test_reuse_decision_is_deferred_until_execution(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("has_marker", [False, True])
+    def test_existing_venv_skips_setup(self, tmp_path: Path, has_marker: bool) -> None:
         server_dir = self._setup_server_dir(tmp_path)
         config = self._debug_global_config_dict(tmp_path) | {"skip_venv_if_present": True}
         before = setup_env_command(server_dir, config, "policy")
@@ -91,9 +92,12 @@ class TestCLISetupCommandSetupEnvCommand:
         (server_dir / ".venv/bin").mkdir(parents=True)
         (server_dir / ".venv/bin/python").touch()
         (server_dir / ".venv/bin/activate").touch()
-        (server_dir / ".venv" / SETUP_COMPLETE_MARKER).touch()
+        if has_marker:
+            (server_dir / ".venv" / SETUP_COMPLETE_MARKER).touch()
 
-        assert setup_env_command(server_dir, config, "policy") == before
+        assert setup_env_command(server_dir, config, "policy") == (
+            f"cd {server_dir} && source {server_dir}/.venv/bin/activate"
+        )
         assert "--skip-if-ready" in shlex.split(before)
         assert "uv pip install" in self._installation_command(before)
 
@@ -344,27 +348,39 @@ def test_failed_forced_setup_invalidates_marker_and_can_retry(setup_component, c
     assert marker.is_file()
 
 
-@pytest.mark.parametrize("ready", [True, False])
-def test_manifest_is_required_only_when_setup_is_needed(setup_component, ready: bool) -> None:
+@pytest.mark.parametrize("has_marker", [False, True])
+@pytest.mark.parametrize("manifest", ["missing", "conflicting"])
+def test_existing_venv_activates_without_setup_or_manifest_validation(setup_component, has_marker, manifest) -> None:
     server_dir, config, venv = setup_component
-    (server_dir / "requirements.txt").unlink()
+    if manifest == "missing":
+        (server_dir / "requirements.txt").unlink()
+    else:
+        (server_dir / "pyproject.toml").touch()
     marker = venv / SETUP_COMPLETE_MARKER
-    if ready:
+    if has_marker:
         marker.touch()
     command = setup_env_command(server_dir, config, "server") + ' && test "$SETUP_TEST_ACTIVATED" = 1 && echo STARTED'
     with _setup_process(command) as process:
         output, _ = process.communicate(timeout=10)
-        assert process.returncode == (0 if ready else 1), output
-        assert ("STARTED" in output) == ready
-        if not ready:
-            assert "Missing pyproject.toml or requirements.txt" in output
-    assert marker.exists() == ready
+        assert process.returncode == 0, output
+        assert "STARTED" in output
+    assert marker.exists() == has_marker
+    assert not venv.with_name(f"{venv.name}.setup.lock").exists()
 
 
-def test_generated_setup_installs_and_activates_before_starting_server(setup_component) -> None:
+@pytest.mark.parametrize("missing_file", [None, "python", "activate"])
+def test_generated_setup_installs_and_activates_before_starting_server(setup_component, missing_file) -> None:
     server_dir, config, venv = setup_component
+    if missing_file:
+        (venv / "bin" / missing_file).unlink()
+    else:
+        config["skip_venv_if_present"] = False
     # Substitute only the dependency installer; execute the generated setup and activation.
-    uv = f'uv() {{ if [ "$1" = pip ]; then {_install_command(venv)}; fi; }}; export -f uv; '
+    activate = shlex.quote(str(venv / "bin/activate"))
+    uv = (
+        f'uv() {{ if [ "$1" = venv ]; then echo "export SETUP_TEST_ACTIVATED=1" > {activate}; '
+        f"else {_install_command(venv)}; fi; }}; export -f uv; "
+    )
     command = uv + setup_env_command(server_dir, config, "server")
     command += f' && test "$SETUP_TEST_ACTIVATED" = 1 && test -f {shlex.quote(str(venv / "attempts"))} && echo STARTED'
     with _setup_process(command) as process:
