@@ -440,9 +440,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         session_dir = f"/tmp/nemo-gym-hermes-sessions/{agent_session_id}"
         try:
-            uv_path = shutil.which("uv")
-            if uv_path is None:
-                raise RuntimeError("Hermes agent server requires uv to install the sandbox runtime")
             prepare = await sandbox.exec(
                 f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(session_dir)}",
                 cwd=workdir,
@@ -450,21 +447,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
             )
             if prepare.return_code != 0:
                 raise RuntimeError(prepare.stderr or prepare.stdout or "Failed to prepare Hermes sandbox paths")
-            await sandbox.upload(uv_path, _SANDBOX_UV)
-            install = await sandbox.exec(
-                (
-                    f"chmod 755 {quote(_SANDBOX_UV)}; "
-                    f"if [ ! -x {quote(_SANDBOX_PYTHON)} ]; then "
-                    f"{quote(_SANDBOX_UV)} venv {quote(_SANDBOX_RUNTIME_DIR + '/venv')} --python 3.13; "
-                    f"{quote(_SANDBOX_UV)} pip install --python {quote(_SANDBOX_PYTHON)} "
-                    f"{quote(_HERMES_REQUIREMENT)}; "
-                    "fi"
-                ),
-                cwd=workdir,
-                timeout_s=self.config.sandbox_install_timeout_seconds,
-            )
-            if install.return_code != 0:
-                raise RuntimeError(install.stderr or install.stdout or "Hermes sandbox installation failed")
+            if not await self._sandbox_hermes_installed(sandbox, workdir):
+                await self._install_sandbox_hermes(sandbox, workdir)
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
             await sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
         except BaseException:
@@ -481,6 +465,37 @@ class HermesAgent(SimpleResponsesAPIAgent):
             session_dir=session_dir,
             owns_sandbox=owns_sandbox,
         )
+
+    @staticmethod
+    async def _sandbox_hermes_installed(sandbox: AsyncSandbox, workdir: str | None) -> bool:
+        """Whether the pinned Hermes imports from its runtime path.
+
+        The path is keyed by the pinned commit, so a runtime baked into the image or left by an earlier
+        session in this sandbox is reused.
+        """
+        check = await sandbox.exec(
+            f"{quote(_SANDBOX_PYTHON)} -c 'import run_agent'",
+            cwd=workdir,
+            timeout_s=120,
+        )
+        return check.return_code == 0
+
+    async def _install_sandbox_hermes(self, sandbox: AsyncSandbox, workdir: str | None) -> None:
+        uv_path = shutil.which("uv")
+        if uv_path is None:
+            raise RuntimeError("Hermes agent server requires uv to install the sandbox runtime")
+        await sandbox.upload(uv_path, _SANDBOX_UV)
+        venv = quote(_SANDBOX_RUNTIME_DIR + "/venv")
+        # A runtime that failed the import check is incomplete, so rebuild it rather than reuse it.
+        install = await sandbox.exec(
+            f"chmod 755 {quote(_SANDBOX_UV)} && rm -rf {venv} && "
+            f"{quote(_SANDBOX_UV)} venv {venv} --python 3.13 && "
+            f"{quote(_SANDBOX_UV)} pip install --python {quote(_SANDBOX_PYTHON)} {quote(_HERMES_REQUIREMENT)}",
+            cwd=workdir,
+            timeout_s=self.config.sandbox_install_timeout_seconds,
+        )
+        if install.return_code != 0 or not await self._sandbox_hermes_installed(sandbox, workdir):
+            raise RuntimeError(install.stderr or install.stdout or "Hermes sandbox installation failed")
 
     async def _stop_sandbox_runner(self, state: HermesAgentSessionState) -> None:
         """Stop the runner of an interrupted activation; tearing down the sandbox is the backstop."""
