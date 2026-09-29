@@ -162,6 +162,7 @@ class KubernetesExecutor(BaseExecutor):
                 compute,
                 run_dir,
                 name=name_in_cluster,
+                gym_job_id=gym_job_id,
                 resolved_config=resolved_config_yaml,
                 manifest=record_stub.dumps(),
             )

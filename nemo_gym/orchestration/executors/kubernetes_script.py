@@ -209,6 +209,7 @@ def build_job_manifest(
     run_dir: Path,
     *,
     name: str,
+    gym_job_id: str,
     resolved_config: str,
     manifest: str,
 ) -> dict[str, Any]:
@@ -240,16 +241,21 @@ def build_job_manifest(
     if compute.service_account:
         pod_spec["serviceAccountName"] = compute.service_account
 
+    # Set on both the Job and its pod template: the Job's own labels are what `kubectl get jobs
+    # -l ...` filters on, but the *pod* -- what `kubectl get pods -l ...`/`logs -l ...` see -- only
+    # gets labels declared here, not the Job's; Kubernetes does not copy them across.
+    labels = {
+        "app.kubernetes.io/managed-by": "nemo-gym",
+        "gym-job-id": _dns_label(gym_job_id),
+        "gym-benchmark": _dns_label(benchmark_name),
+    }
+
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
-        "metadata": {
-            "name": name,
-            "namespace": compute.namespace,
-            "labels": {"app.kubernetes.io/managed-by": "nemo-gym", "gym-benchmark": benchmark_name},
-        },
+        "metadata": {"name": name, "namespace": compute.namespace, "labels": labels},
         "spec": {
             "backoffLimit": 0,
-            "template": {"spec": pod_spec},
+            "template": {"metadata": {"labels": labels}, "spec": pod_spec},
         },
     }
