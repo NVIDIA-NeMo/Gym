@@ -32,14 +32,12 @@ from wandb import Histogram
 
 from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
-    ACROSS_REPEATS_MARKER,
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    PassMajorityStat,
-    Stat,
 )
-from nemo_gym.global_config import (
+from nemo_gym.metrics_config import ACROSS_REPEATS_MARKER, PassMajorityStat, Stat
+from nemo_gym.metrics_config import (
     is_primary_metric as is_repeat_aggregatable_metric,
 )
 

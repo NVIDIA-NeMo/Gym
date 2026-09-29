@@ -36,10 +36,8 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    PassMajorityStat,
-    Stat,
-    is_primary_metric,
 )
+from nemo_gym.metrics_config import PassMajorityStat, Stat, is_primary_metric
 
 
 # The per-task field flips are computed from. Every verify response carries `reward` at minimum.

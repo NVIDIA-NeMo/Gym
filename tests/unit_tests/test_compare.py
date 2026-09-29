@@ -469,6 +469,7 @@ class TestMetricRows:
                 "sample_count",
                 "missing_count",
                 "token_usage_version",
+                "mean/_ng_attempt_index",
             )
         }
         baseline = _load(tmp_path, "base", [_entry(agent_metrics=metrics, key_metrics={})])

@@ -25,11 +25,11 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.global_config import (
-    ACROSS_REPEATS_MARKER,
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
+from nemo_gym.metrics_config import ACROSS_REPEATS_MARKER
 from nemo_gym.reward_profile import (
     RewardProfiler,
     add_avg_sample_std_dev,
@@ -620,6 +620,9 @@ class TestRepeatMetricEligibility:
         assert not is_repeat_aggregatable_metric("win_rate_ci95_upper")
         assert not is_repeat_aggregatable_metric("pass@1/accuracy/std_err_across_runs")
         assert not is_repeat_aggregatable_metric(ROLLOUT_INDEX_KEY_NAME)
+        assert not is_repeat_aggregatable_metric("_ng_attempt_index")
+        assert not is_repeat_aggregatable_metric("mean/_ng_attempt_index")
+        assert is_repeat_aggregatable_metric("mean/sample_count")
         assert not is_repeat_aggregatable_metric("sample_count")
         assert not is_repeat_aggregatable_metric("missing_count")
         assert not is_repeat_aggregatable_metric("token_usage_version")

@@ -20,7 +20,6 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
-from enum import StrEnum
 from importlib import import_module
 from importlib.metadata import version as distribution_version
 from os import environ, getenv
@@ -207,95 +206,6 @@ AGENT_REF_KEY_NAME = "agent_ref"
 TASK_SOURCE_KEY_NAME = "task_source"
 SKILLS_REF_KEY_NAME = "skills_ref"
 REWARD_KEY_NAME = "reward"
-
-# Metric name components shared by producers and consumers.
-STAT_SEPARATOR = "/"
-ACROSS_REPEATS_MARKER = f"_across_repeats{STAT_SEPARATOR}"
-
-
-class Stat(StrEnum):
-    MEAN = "mean"
-    MAX = "max"
-    MIN = "min"
-    MEDIAN = "median"
-    STD = "std"
-    SEM = "sem"
-    SE = "se"
-    P25 = "p25"
-    P75 = "p75"
-    CI_LOW_95 = "ci_low_95"
-    CI_HIGH_95 = "ci_high_95"
-    HISTOGRAM = "histogram"
-
-    @property
-    def prefix(self) -> str:
-        return f"{self.value}{STAT_SEPARATOR}"
-
-    @property
-    def across_repeats_prefix(self) -> str:
-        return f"{self.value}{ACROSS_REPEATS_MARKER}"
-
-
-# Statistics that describe the spread of an underlying field rather than being an estimate of their own.
-DISPERSION_STATS: Tuple[Stat, ...] = tuple(stat for stat in Stat if stat not in (Stat.MEAN, Stat.HISTOGRAM))
-DISPERSION_PREFIXES: Tuple[str, ...] = tuple(stat.prefix for stat in DISPERSION_STATS)
-
-
-# Companion statistics `compute_pass_majority_metrics` appends to a pass@k metric name.
-# TODO: Merge this into Stat or remove it when working on https://github.com/NVIDIA-NeMo/Gym/issues/3471.
-class PassMajorityStat(StrEnum):
-    STD_DEV_ACROSS_RUNS = "std_dev_across_runs"
-    STD_ERR_ACROSS_RUNS = "std_err_across_runs"
-    AVG_SAMPLE_STD_DEV = "avg_sample_std_dev"
-
-    @property
-    def suffix(self) -> str:
-        return f"{STAT_SEPARATOR}{self.value}"
-
-
-PASS_MAJORITY_STAT_SUFFIXES: Tuple[str, ...] = tuple(stat.suffix for stat in PassMajorityStat)
-
-
-# Existing statistics, uncertainty estimates, and metadata are not primary metrics.
-METRIC_EXCLUDED_PREFIXES = DISPERSION_PREFIXES
-# Clean up custom suffix forms with https://github.com/NVIDIA-NeMo/Gym/issues/3471.
-METRIC_EXCLUDED_SUFFIXES = (
-    f"/{Stat.MAX}",
-    f"/{Stat.MIN}",
-    f"/{Stat.MEDIAN}",
-    "/p5",
-    f"/{Stat.P25}",
-    f"/{Stat.P75}",
-    "/p95",
-    f"/{Stat.CI_LOW_95}",
-    f"/{Stat.CI_HIGH_95}",
-    "/ci_lower",
-    "/ci_upper",
-    "_ci_lower",
-    "_ci_upper",
-    "_ci95_lower",
-    "_ci95_upper",
-) + PASS_MAJORITY_STAT_SUFFIXES
-METRIC_EXCLUDED_NAMES = (
-    TASK_INDEX_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    "sample_count",
-    "missing_count",
-    "num_repeats",
-    "token_usage_version",
-)
-
-
-def is_primary_metric(name: object) -> bool:
-    """Whether a metric name is a point estimate suitable for repeat aggregation and comparison."""
-    return (
-        isinstance(name, str)
-        and name not in METRIC_EXCLUDED_NAMES
-        and not name.startswith(METRIC_EXCLUDED_PREFIXES)
-        and not name.endswith(METRIC_EXCLUDED_SUFFIXES)
-        and ACROSS_REPEATS_MARKER not in name
-    )
-
 
 # Per-task keys in `group_level_metrics`.
 ROLLOUT_INFOS_KEY_NAME = "rollout_infos"

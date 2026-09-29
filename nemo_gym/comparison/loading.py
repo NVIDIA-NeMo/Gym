@@ -35,8 +35,8 @@ from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     EXPECTED_NUM_ROLLOUTS_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,
-    Stat,
 )
+from nemo_gym.metrics_config import Stat
 from nemo_gym.path_utils import aggregate_metrics_path_for
 
 
