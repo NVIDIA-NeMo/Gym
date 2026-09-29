@@ -58,7 +58,14 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.models import HarborArtifact, HarborEnvironment
 from nemo_gym.tasks.harbor.task import HarborTaskError
-from resources_servers.harbor.sandbox_io import _exec_as_root, download_dir, download_path, upload_dir, upload_path
+from resources_servers.harbor.sandbox_io import (
+    _exec_as_root,
+    download_dir,
+    download_path,
+    remote_kind,
+    upload_dir,
+    upload_path,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -722,7 +729,10 @@ class HarborResourcesServer(SimpleResourcesServer):
             )
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
-            await upload_dir(verifier, task.path / "tests", TESTS_DIR)
+            # A prebuilt verifier image usually ships /tests already, with the modes its tests expect.
+            # Only upload the package's tests when the image has none, as the old server did.
+            if await remote_kind(verifier, f"{TESTS_DIR}/test.sh") is None:
+                await upload_dir(verifier, task.path / "tests", TESTS_DIR)
             for host, source in restored:
                 await upload_path(verifier, host, source)
             budget = int(settings.timeout_sec)
