@@ -42,6 +42,12 @@ No additional turn is reserved for a final answer. Omit `turn_constraint` to kee
 the existing behavior. Native `steps`/`maxSteps` limits and provider/model overrides
 cannot be combined with the proxy constraint.
 
+When no cached installer and binary are configured, the agent downloads its
+pinned `opencode_version`. Task images with `curl` use the OpenCode installer;
+Linux images without `curl` use a Python 3 fallback that selects the matching
+architecture/libc build and verifies the installed version. The fallback script
+is uploaded under `/tmp`, outside the task repository.
+
 ## Prefetch OpenCode binary and upload to S3
 ```bash
 curl -L https://opencode.ai/install -o opencode_install.sh

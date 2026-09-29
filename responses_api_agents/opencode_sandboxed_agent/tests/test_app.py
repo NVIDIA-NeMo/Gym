@@ -266,6 +266,7 @@ class TestOpenCodeSandboxedAgent:
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
             ]
         )
+        sandbox_mock.upload = AsyncMock()
         sandbox_mock.download = AsyncMock()
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
@@ -373,7 +374,13 @@ class TestOpenCodeSandboxedAgent:
 
         assert expected_response == actual_response
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
-        assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        assert "XDG_DATA_HOME" not in command
+        subprocess.run(["bash", "-n"], input=command, text=True, check=True)
+        assert "if command -v curl" in command
+        assert "python3 /tmp/nemo-gym-install-opencode-" in command
+        sandbox_mock.upload.assert_awaited_once()
+        assert sandbox_mock.upload.await_args.args[0].name == "install_opencode.py"
 
     def test_agent_sandbox_observation_classifies_timeout_errors(self) -> None:
         server = OpenCodeSandboxedAgent(
@@ -571,6 +578,7 @@ class TestOpenCodeSandboxedAgent:
                 subprocess.run(shlex.split(sandbox.exec.await_args_list[-1].kwargs["command"]), check=True)
                 local_path.write_bytes(snapshot_path.read_bytes())
 
+        sandbox.upload = AsyncMock()
         sandbox.download = AsyncMock(side_effect=download)
         sandbox.stop = AsyncMock(side_effect=RuntimeError("resource server already stopped the sandbox"))
         server._start_sandbox = AsyncMock(return_value=sandbox)

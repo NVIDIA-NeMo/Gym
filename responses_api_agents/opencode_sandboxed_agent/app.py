@@ -708,9 +708,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 "Downloading and installing OpenCode in the sandbox. Please consider mounting or uploading the appropriate OpenCode binary instead!",
                 file=sys.stderr,
             )
-            install_str = f"""installer=$(mktemp) && curl -fL -o "$installer" https://opencode.ai/install \
-        && echo "Downloaded OpenCode installer to $installer" \
-        && VERSION={self.config.opencode_version} bash "$installer\""""
+            # Some benchmark images include Python but no curl or wget.
+            # Upload the small fallback outside the repository being solved.
+            installer_path = f"/tmp/nemo-gym-install-opencode-{uuid4().hex}.py"
+            await sandbox.upload(Path(__file__).with_name("install_opencode.py"), installer_path)
+            install_str = f"""{{ if command -v curl >/dev/null 2>&1; then
+                installer=$(mktemp) && curl -fL -o "$installer" https://opencode.ai/install \
+                    && VERSION={quote(self.config.opencode_version)} bash "$installer"
+            else
+                python3 {quote(installer_path)} {quote(self.config.opencode_version)}
+            fi; }}"""
 
         opencode_config_content = json.dumps(await self._create_opencode_config(request))
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
