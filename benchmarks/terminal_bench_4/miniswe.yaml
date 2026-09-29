@@ -22,5 +22,8 @@ terminal_bench_4_miniswe:
       harness:
         step_limit: ${oc.select:tb4_max_steps,500}
         step_timeout_sec: ${oc.select:tb4_step_timeout_sec,30}
+        # 10 minutes aligns with the likely default for mini-SWE's LiteLLM client
+        # for /v1/responses; this bounds one model call, independently of the task budget.
+        model_timeout_sec: ${oc.select:tb4_model_timeout_sec,600}
       agent_max_timeout_sec: ${oc.select:tb4_agent_max_timeout_sec,null}
       artifacts_dir: ${oc.select:tb4_agent_artifacts_dir,${oc.select:tb4_jobs_dir,results/terminal_bench_4}/agent}

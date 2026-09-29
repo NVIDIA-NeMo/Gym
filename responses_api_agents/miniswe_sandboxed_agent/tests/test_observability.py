@@ -114,7 +114,7 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         index = len(requests)
         if scenario == "http_error" and index == 2:
             return JSONResponse({"error": {"message": "controlled failure"}}, status_code=503)
-        command = "submit" if index == 2 else "inspect"
+        command = "submit" if index >= 2 else "inspect"
         output = [
             {
                 "type": "function_call",
@@ -213,9 +213,14 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
     assert len(trajectory["model_calls"]) == len(requests)
     assert trajectory["model_calls"][0]["request"]["input"] == requests[0]["input"]
     if scenario == "http_error":
-        assert outcome.reason == "infrastructure_error"
-        assert captured[-1]["response_id"] is None
-        assert captured[-1]["status_code"] == 503
+        assert outcome.reason == "completed"
+        assert len(captured) == 3
+        assert requests[1]["input"] == requests[2]["input"]
+        assert captured[1]["response_id"] is None
+        assert captured[1]["status_code"] == 503
+        assert captured[-1]["response_id"] == "response-3"
+        assert captured[-1]["status_code"] == 200
+        assert response.usage.total_tokens == 30
     elif scenario == "missing_usage":
         assert response.usage is None
         assert captured[0]["tokens_in"] is None

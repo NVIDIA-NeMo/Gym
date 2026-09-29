@@ -115,6 +115,7 @@ def project_native_trajectory(trajectory: dict) -> tuple[list[dict], list[dict]]
 class MiniSWEConfig(BaseModel):
     step_limit: int = Field(default=0, ge=0)
     step_timeout_sec: int = Field(default=600, gt=0)
+    model_timeout_sec: float = Field(default=600, gt=0)
 
 
 class HarnessOutcome(BaseModel):
@@ -310,8 +311,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
         model_kwargs.update(
             api_base=self.model_base_url,
             api_key="dummy_key",
-            timeout=max(1, budget),
-            max_retries=0,
+            timeout=self.config.model_timeout_sec,
             extra_headers={"x-session-id": self.context.session_id},
             extra_body={"tools": [{**BASH_TOOL_RESPONSE_API, "strict": False}]},
         )
@@ -324,7 +324,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             "agent": {
                 "agent_class": "default",
                 "step_limit": self.config.step_limit,
-                "cost_limit": 0,
+                "cost_limit": 0,  # Gym endpoints do not provide cost estimates.
             },
             "environment": {
                 "environment_class": "local",
@@ -334,7 +334,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             "model": {
                 "model_class": "litellm_response",
                 "model_name": "openai/" + self.model_name,
-                "cost_tracking": "ignore_errors",
+                "cost_tracking": "ignore_errors",  # Gym endpoints do not provide cost estimates.
                 "model_kwargs": model_kwargs,
             },
         }
@@ -343,8 +343,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
         command = (
             f"echo $$ >> {quote(remote + '/processes')}; "
             f"echo $$ >> {quote('/tmp/' + self.context.session_id + '.pids')}; "
-            "export MSWEA_CONFIGURED=true MSWEA_SILENT_STARTUP=true LITELLM_LOCAL_MODEL_COST_MAP=true "
-            "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT=1; "
+            "export MSWEA_CONFIGURED=true MSWEA_SILENT_STARTUP=true LITELLM_LOCAL_MODEL_COST_MAP=true; "
             f"export MSWEA_GLOBAL_CONFIG_DIR={quote(remote + '/config')}; "
             f"exec {quote(remote + '/venv/bin/python')} -m minisweagent.run.mini "
             f"-c mini.yaml -c {quote(remote + '/config.yaml')} -o {quote(remote + '/trajectory.json')} "

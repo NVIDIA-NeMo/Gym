@@ -77,7 +77,7 @@ async def test_runner_stops_before_verification_and_retains_partial_trajectory(t
         == {
             "cancel": "cancelled",
             "timeout": "timeout",
-            "model_failure": "infrastructure_error",
+            "model_failure": "timeout",
             "step_limit": "nonzero_exit",
             "tool_cancel": "cancelled",
         }[stop]
@@ -85,6 +85,7 @@ async def test_runner_stops_before_verification_and_retains_partial_trajectory(t
     assert len(response.output) == (0 if stop == "tool_cancel" else 2)
     if stop == "model_failure":
         assert exited.is_set()
+        assert calls > 2  # Transient failures are retried until the task budget expires.
     if stop != "tool_cancel":
         assert extra["mini_swe_trajectory"]["messages"]
         assert (harness.directory / "trajectory.json").exists()

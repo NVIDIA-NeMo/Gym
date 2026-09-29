@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ClientResponseError
+from omegaconf import OmegaConf
 
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
@@ -130,8 +133,11 @@ async def test_length_limit_recovery_and_terminal_classification(
     ],
 )
 async def test_context_overflow_stops_without_format_retries(
-    tmp_path, runner_factory, status, message, is_context_overflow
+    tmp_path, runner_factory, monkeypatch, status, message, is_context_overflow
 ):
+    # Exercise terminal-error classification without waiting through native backoff.
+    # Default retry recovery is covered separately below.
+    monkeypatch.setenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "1")
     error = ClientResponseError(MagicMock(real_url="http://model/v1/responses"), (), status=status)
     error.response_content = json.dumps({"error": {"message": message}}).encode()
     query = AsyncMock(side_effect=error)
@@ -150,3 +156,64 @@ async def test_context_overflow_stops_without_format_retries(
     assert json.loads((tmp_path / "trajectory.json").read_text())["info"]["exit_status"] == expected
     if is_context_overflow:
         assert outcome.detail == "ContextWindowExceededError"
+
+
+@pytest.mark.parametrize("failure", [400, 503, "timeout"])
+async def test_native_model_retries_and_independent_call_timeout(tmp_path, runner_factory, monkeypatch, failure):
+    monkeypatch.delenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", raising=False)
+    profile = OmegaConf.load(Path(__file__).resolve().parents[3] / "benchmarks/terminal_bench_4/miniswe.yaml")
+    if failure == "timeout":
+        profile.tb4_model_timeout_sec = 0.2
+    config = MiniSWEConfig.model_validate(
+        OmegaConf.to_container(
+            profile.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent.harness, resolve=True
+        )
+    )
+    requests = []
+
+    async def query(params):
+        requests.append(params)
+        if len(requests) == 1:
+            if failure == "timeout":
+                await asyncio.sleep(1)
+            else:
+                error = ClientResponseError(MagicMock(real_url="http://model/v1/responses"), (), status=failure)
+                error.response_content = json.dumps({"error": {"message": "temporary model failure"}}).encode()
+                raise error
+        return NeMoGymResponse(
+            id="submitted",
+            created_at=0,
+            object="response",
+            model="model",
+            tools=[],
+            tool_choice="auto",
+            parallel_tool_calls=False,
+            output=[
+                {
+                    "type": "function_call",
+                    "call_id": "submit",
+                    "name": "bash",
+                    "arguments": json.dumps({"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}),
+                }
+            ],
+        )
+
+    harness = await runner_factory(
+        context=HarnessContext(session_id="model-retry", instruction="Submit"),
+        config=config,
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        query=query,
+        model_name="model",
+        directory=tmp_path / "artifacts",
+    )
+    _, outcome, extra = await harness.execute(20)
+    assert outcome.reason == "completed", outcome
+    assert len(requests) == 2
+    assert requests[0]["input"] == requests[1]["input"]
+    assert extra["mini_swe_trajectory"]["info"]["exit_status"] == "Submitted"
+    native_config = json.loads((harness.directory / "config.yaml").read_text())
+    kwargs = native_config["model"]["model_kwargs"]
+    assert kwargs["timeout"] == (0.2 if failure == "timeout" else 600)
+    assert "max_retries" not in kwargs
+    assert native_config["agent"]["cost_limit"] == 0
+    assert native_config["model"]["cost_tracking"] == "ignore_errors"
