@@ -61,6 +61,7 @@ from nemo_gym.token_id_capture.lineage import (
 )
 from nemo_gym.token_id_capture.protocols import (
     CaptureLedger,
+    GenerationCutCaptureLedger,
     LineageMatch,
     LineageResolution,
     LineageResolver,
@@ -128,6 +129,7 @@ __all__ = [
     "TokenSink",
     "TokenSource",
     "CaptureLedger",
+    "GenerationCutCaptureLedger",
     "CaptureLedgerCommit",
     "CallRecord",
     "LineageMatch",

@@ -45,10 +45,14 @@ response can durably close that intent without creating a token record.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
 from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
+
+
+if TYPE_CHECKING:
+    from nemo_gym._checkpoint.model_control_contracts import GenerationCutReceipt
 
 
 @dataclass(frozen=True)
@@ -192,6 +196,15 @@ class CaptureLedger(LineageResolver, Protocol):
 
     async def has_committed_rows(self, rollout_id: str) -> bool:
         """Return whether at least one successfully captured model call exists."""
+        ...
+
+
+@runtime_checkable
+class GenerationCutCaptureLedger(Protocol):
+    """Optional capture-ledger extension for durable open-call coordinates."""
+
+    async def record_generation_cut(self, receipt: "GenerationCutReceipt") -> None:
+        """Publish one checkpoint's validated cut acknowledgements idempotently."""
         ...
 
 

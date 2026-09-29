@@ -53,7 +53,10 @@ from nemo_gym._checkpoint.admission import (
     bind_current_model_call,
     mark_current_generation_started,
 )
-from nemo_gym._checkpoint.artifacts import EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE
+from nemo_gym._checkpoint.artifacts import (
+    EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE,
+    GENERATION_CUT_LINEAGE_FEATURE,
+)
 from nemo_gym._checkpoint.control import (
     AdmissionState,
     ControlCapabilities,
@@ -82,11 +85,14 @@ from nemo_gym.responses_streaming import (
     validate_streaming_responses_params,
 )
 from nemo_gym.rollout_correlation import (
+    ATTEMPT_INDEX_HEADER,
     MODEL_CALL_CAPTURE_OUTCOME_HEADER,
     MODEL_CALL_ID_HEADER,
     PARENT_MODEL_CALL_ID_HEADER,
+    ROLLOUT_ID_HEADER,
     SOURCE_CAPTURE_KEY_HEADER,
     maybe_rollout_id_from_run_body,
+    split_transport_rollout_id,
 )
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
@@ -329,7 +335,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 AdmissionState.PAUSED,
             ]
             capabilities.checkpoint_mode = "export_restore"
-            capabilities.features = [EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE]
+            capabilities.features = [
+                EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE,
+                GENERATION_CUT_LINEAGE_FEATURE,
+            ]
         return capabilities
 
     @abstractmethod
@@ -341,6 +350,16 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     @abstractmethod
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
+
+    def _defer_generation_started_to_backend_dispatch(self) -> bool:
+        """Whether the implementation marks generation at its real backend call.
+
+        Most model servers enter generation as soon as their implementation is
+        invoked. Wrappers that perform asynchronous prefix claiming or can return
+        locally without generation must defer the transition until immediately
+        before they dispatch the backend request.
+        """
+        return False
 
     async def responses_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/responses`` entrypoint shared by every Gym model server.
@@ -437,11 +456,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await register_call_intent()
         else:
             request_messages = None
-        if "request" in inspect.signature(self.chat_completions).parameters:
+        if not self._defer_generation_started_to_backend_dispatch():
             mark_current_generation_started()
+        if "request" in inspect.signature(self.chat_completions).parameters:
             completion = await self.chat_completions(request=request, body=params)
         else:
-            mark_current_generation_started()
             completion = await self.chat_completions(body=params)
         await capture_tokens(
             completion,
@@ -485,11 +504,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await register_call_intent()
         else:
             request_messages = None
-        if "request" in inspect.signature(self.responses).parameters:
+        if not self._defer_generation_started_to_backend_dispatch():
             mark_current_generation_started()
+        if "request" in inspect.signature(self.responses).parameters:
             response = await self.responses(request=request, body=params)
         else:
-            mark_current_generation_started()
             response = await self.responses(body=params)
         # Capture before streaming dispatch wraps the response.
         # Anthropic mapping drops the token fields.
@@ -1493,9 +1512,17 @@ class _CaptureMiddleware:
         sink_token = None
         capture_context = None
         if capture_wanted:
+            logical_rollout_id = _scope_header(scope, ROLLOUT_ID_HEADER)
+            attempt_index_raw = _scope_header(scope, ATTEMPT_INDEX_HEADER)
+            if logical_rollout_id is None:
+                logical_rollout_id, attempt_index = split_transport_rollout_id(rollout_id)
+            else:
+                attempt_index = int(attempt_index_raw or "0")
             capture_context = CaptureContext(
                 rollout_id=rollout_id,
                 model_call_id=model_call_id,
+                logical_rollout_id=logical_rollout_id,
+                attempt_index=attempt_index,
                 token_sink=token_sink,
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
                 delta_records=self._delta_records,

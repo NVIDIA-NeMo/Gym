@@ -70,11 +70,17 @@ from nemo_gym._checkpoint.control import (
 from nemo_gym._checkpoint.model_admission import NotPolicyInstanceError
 from nemo_gym._checkpoint.model_control_contracts import (
     GenerationCutCoordinatorProof,
+    GenerationCutLineageRecord,
     GenerationCutReceipt,
+    GenerationCutReplacement,
 )
 from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN, capture_key_for
 from nemo_gym.token_id_capture.control_routes import require_control_auth
-from nemo_gym.token_id_capture.protocols import CaptureLedger
+from nemo_gym.token_id_capture.lineage import (
+    generation_cut_lineage_records,
+    generation_cut_receipts_from_lineage,
+)
+from nemo_gym.token_id_capture.protocols import CaptureLedger, GenerationCutCaptureLedger
 
 
 MODEL_CHECKPOINT_URL_PREFIX = f"{CONTROL_URL_PREFIX}/model-checkpoint"
@@ -166,8 +172,8 @@ class CaptureLedgerCommitResult(BaseModel):
     rows: int = Field(ge=0)
     excluded_tombstoned: int = Field(ge=0)
     excluded_inactive: int = Field(default=0, ge=0)
+    generation_cut_records: int = Field(default=0, ge=0)
     manifest_digest: str
-    generation_cut_receipt: GenerationCutReceipt | None = None
     generation_cut_proof: GenerationCutCoordinatorProof | None = None
     storage_reference_index: CheckpointArtifactReference
 
@@ -180,8 +186,8 @@ class CaptureLedgerRestoreResult(BaseModel):
     checkpoint_id: Optional[str] = None
     tombstones: list[AttemptIdentity] = Field(default_factory=list)
     source_attempts: list[AttemptIdentity] = Field(default_factory=list)
-    generation_cut_receipt: GenerationCutReceipt | None = None
     generation_cut_proof: GenerationCutCoordinatorProof | None = None
+    generation_cut_receipts: tuple[GenerationCutReceipt, ...] = ()
     storage_reference_index: CheckpointArtifactReference
 
 
@@ -204,6 +210,7 @@ class CheckpointableCaptureLedger(CaptureLedger, Protocol):
         tombstones: tuple[tuple[str, int], ...],
         source_attempts: tuple[tuple[str, int], ...],
         continuation_roots: tuple[AgentContinuationRoot, ...],
+        generation_cut_receipts: tuple[GenerationCutReceipt, ...],
     ) -> CaptureLedgerCommitResult: ...
 
     async def restore_capture_ledger(
@@ -256,8 +263,9 @@ def _parse_lineage_payload(source_name: str, payload: bytes) -> list[dict[str, A
 def _write_lineage_archive(
     ledger_dir: Path,
     *,
+    checkpoint_id: str,
     archive_index: int,
-    members: list[tuple[str, AgentContinuationRoot, Path]],
+    members: list[tuple[str, AgentContinuationRoot | None, Path]],
 ) -> tuple[
     _LineageArchiveReference,
     list[_LineageArchiveMember],
@@ -278,7 +286,8 @@ def _write_lineage_archive(
                     for reference in _external_references_for_rows(
                         capture_key,
                         records,
-                        root.last_committed_model_call_id,
+                        root.last_committed_model_call_id if root is not None else None,
+                        checkpoint_id=checkpoint_id,
                     ):
                         external_references.setdefault(reference.key, reference)
 
@@ -323,11 +332,11 @@ def _write_lineage_archive(
 
 
 def _partition_lineage_archives(
-    members: list[tuple[str, AgentContinuationRoot, Path]],
-) -> list[list[tuple[str, AgentContinuationRoot, Path]]]:
+    members: list[tuple[str, AgentContinuationRoot | None, Path]],
+) -> list[list[tuple[str, AgentContinuationRoot | None, Path]]]:
     """Partition sorted members by both file count and source payload bytes."""
-    partitions: list[list[tuple[str, AgentContinuationRoot, Path]]] = []
-    current: list[tuple[str, AgentContinuationRoot, Path]] = []
+    partitions: list[list[tuple[str, AgentContinuationRoot | None, Path]]] = []
+    current: list[tuple[str, AgentContinuationRoot | None, Path]] = []
     current_bytes = 0
     for member in members:
         member_bytes = member[2].stat().st_size
@@ -396,6 +405,17 @@ def _canonical_continuation_roots_digest(
     return hashlib.sha256(payload).hexdigest()
 
 
+def _canonical_generation_cuts_digest(
+    receipts: tuple[GenerationCutReceipt, ...],
+) -> tuple[str, int]:
+    records = [
+        record.model_dump(mode="json") for receipt in receipts for record in generation_cut_lineage_records(receipt)
+    ]
+    records.sort(key=lambda item: (item["capture_key"], item["ticket_id"]))
+    payload = json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest(), len(records)
+
+
 def _normalize_continuation_roots(
     continuation_roots: list[AgentContinuationRoot],
 ) -> dict[str, AgentContinuationRoot]:
@@ -412,14 +432,20 @@ def _normalize_continuation_roots(
 def _external_references_for_rows(
     capture_key: str,
     records: list[dict[str, Any]],
-    boundary_model_call_id: str,
+    boundary_model_call_id: str | None,
+    *,
+    checkpoint_id: str,
 ) -> list[ExternalStorageReference]:
-    selected_records = [
-        record
-        for record in records
-        if record.get("model_call_id") == boundary_model_call_id and record.get("failure_reason") is None
-    ]
-    if len(selected_records) != 1:
+    selected_records = []
+    if boundary_model_call_id is not None:
+        selected_records = [
+            record
+            for record in records
+            if record.get("event") != "generation_cut"
+            and record.get("model_call_id") == boundary_model_call_id
+            and record.get("failure_reason") is None
+        ]
+    if boundary_model_call_id is not None and len(selected_records) != 1:
         raise LedgerMismatchError(
             "continuation boundary is missing or ambiguous in model lineage: "
             f"capture_key={capture_key!r}, model_call_id={boundary_model_call_id!r}"
@@ -427,6 +453,13 @@ def _external_references_for_rows(
 
     references: list[ExternalStorageReference] = []
     seen_keys: set[str] = set()
+    committed_model_call_ids = {
+        record.get("model_call_id")
+        for record in records
+        if record.get("event") != "generation_cut"
+        and record.get("failure_reason") is None
+        and isinstance(record.get("staging_key"), str)
+    }
     for record in selected_records:
         model_call_id = record.get("model_call_id")
         if not isinstance(model_call_id, str) or not model_call_id:
@@ -452,6 +485,32 @@ def _external_references_for_rows(
                     capture_key=capture_key,
                     boundary_model_call_id=boundary_model_call_id,
                     key=key,
+                )
+            )
+
+    for row in records:
+        if row.get("event") != "generation_cut":
+            continue
+        try:
+            cut = GenerationCutLineageRecord.model_validate(row)
+        except ValueError as error:
+            raise LedgerMismatchError(
+                f"lineage for {capture_key!r} contains an invalid generation-cut record"
+            ) from error
+        if cut.checkpoint_id != checkpoint_id or cut.disposition != "durable_prefix":
+            continue
+        if cut.model_call_id in committed_model_call_ids:
+            continue
+        for staging_key in cut.staging_keys:
+            if staging_key in seen_keys:
+                continue
+            seen_keys.add(staging_key)
+            references.append(
+                ExternalStorageReference(
+                    capture_key=capture_key,
+                    boundary_model_call_id=cut.model_call_id,
+                    kind="generation_prefix_cut",
+                    key=staging_key,
                 )
             )
     return references
@@ -697,9 +756,9 @@ class CaptureLedgerCheckpointer:
         checkpoint_id: str,
         tombstones: list[tuple[str, int]],
         source_attempts: Optional[list[tuple[str, int]]] = None,
-        generation_cut_receipt: GenerationCutReceipt | None = None,
         generation_cut_proof: GenerationCutCoordinatorProof | None = None,
         continuation_roots: list[AgentContinuationRoot],
+        generation_cut_receipts: tuple[GenerationCutReceipt, ...] = (),
     ) -> dict[str, Any]:
         """Archive the ledger into ``checkpoint_dir``; the caller has drained.
 
@@ -707,8 +766,6 @@ class CaptureLedgerCheckpointer:
         copy takes no locks because nothing may be writing.
         """
         checkpoint_dir = Path(checkpoint_dir)
-        if generation_cut_receipt is not None and generation_cut_proof is not None:
-            raise ValueError("single-worker cut receipt and coordinator cut proof are mutually exclusive")
         if generation_cut_proof is not None:
             generation_cut_proof = GenerationCutCoordinatorProof.model_validate(
                 generation_cut_proof.model_dump(mode="json")
@@ -718,6 +775,12 @@ class CaptureLedgerCheckpointer:
         ledger_dir = self._ledger_dir(checkpoint_dir)
         normalized_roots = _normalize_continuation_roots(continuation_roots)
         roots_digest = _canonical_continuation_roots_digest(continuation_roots)
+        for receipt in generation_cut_receipts:
+            if receipt.checkpoint_id != checkpoint_id:
+                raise LedgerMismatchError("generation-cut receipt belongs to a different checkpoint")
+            if self.server_name is None or receipt.inventory.server_name != self.server_name:
+                raise LedgerMismatchError("generation-cut receipt belongs to a different model server")
+        cuts_digest, generation_cut_records = _canonical_generation_cuts_digest(generation_cut_receipts)
         if (ledger_dir / LEDGER_MANIFEST_NAME).exists():
             result = self._validate_committed(
                 ledger_dir,
@@ -726,9 +789,10 @@ class CaptureLedgerCheckpointer:
                 server_name=self.server_name,
                 tombstones=tombstones,
                 source_attempts=source_attempts or [],
-                generation_cut_receipt=generation_cut_receipt,
                 generation_cut_proof=generation_cut_proof,
                 continuation_roots_digest=roots_digest,
+                generation_cuts_digest=cuts_digest,
+                generation_cut_records=generation_cut_records,
             )
             # A previous attempt may have renamed the manifest and then
             # failed its final directory fsync. Retry that durability barrier.
@@ -740,7 +804,15 @@ class CaptureLedgerCheckpointer:
             raise LedgerMismatchError(
                 f"continuation roots refer to retired model attempts: capture_keys={fenced_roots!r}"
             )
-        sources = {capture_key: self.store_root / f"{capture_key}{_LEDGER_SUFFIX}" for capture_key in normalized_roots}
+        cut_capture_keys = {
+            capture_key_for(prefix.rollout_id, prefix.attempt_index)
+            for receipt in generation_cut_receipts
+            for prefix in receipt.prefixes
+        } - fenced
+        archived_capture_keys = set(normalized_roots) | cut_capture_keys
+        sources = {
+            capture_key: self.store_root / f"{capture_key}{_LEDGER_SUFFIX}" for capture_key in archived_capture_keys
+        }
         missing_roots = sorted(capture_key for capture_key, source in sources.items() if not source.is_file())
         if missing_roots:
             raise LedgerMismatchError(f"continuation roots have no model lineage: capture_keys={missing_roots!r}")
@@ -751,16 +823,18 @@ class CaptureLedgerCheckpointer:
         source_capture_keys = {
             capture_key_for(rollout_id, attempt_index) for rollout_id, attempt_index in source_attempts or []
         }
-        excluded_inactive = len(source_capture_keys - set(normalized_roots) - fenced)
+        excluded_inactive = len(source_capture_keys - archived_capture_keys - fenced)
         archive_references: list[_LineageArchiveReference] = []
         lineage_members: list[_LineageArchiveMember] = []
         external_references: dict[str, ExternalStorageReference] = {}
         ordered_sources = [
-            (capture_key, root, sources[capture_key]) for capture_key, root in sorted(normalized_roots.items())
+            (capture_key, normalized_roots.get(capture_key), sources[capture_key])
+            for capture_key in sorted(archived_capture_keys)
         ]
         for archive_index, archive_sources in enumerate(_partition_lineage_archives(ordered_sources)):
             archive_reference, archive_members, archive_external_references = _write_lineage_archive(
                 ledger_dir,
+                checkpoint_id=checkpoint_id,
                 archive_index=archive_index,
                 members=archive_sources,
             )
@@ -790,6 +864,8 @@ class CaptureLedgerCheckpointer:
             "row_count": sum(member.rows for member in lineage_members),
             "continuation_roots_sha256": roots_digest,
             "continuation_roots": len(normalized_roots),
+            "generation_cuts_sha256": cuts_digest,
+            "generation_cut_records": generation_cut_records,
             "excluded_inactive": excluded_inactive,
             "storage_reference_index": storage_reference_index.model_dump(mode="json"),
             "tombstones": [
@@ -800,8 +876,6 @@ class CaptureLedgerCheckpointer:
                 for rollout_id, attempt in sorted(source_attempts or [])
             ],
         }
-        if generation_cut_receipt is not None:
-            manifest["generation_cut_receipt"] = generation_cut_receipt.model_dump(mode="json")
         if generation_cut_proof is not None:
             manifest["generation_cut_proof"] = generation_cut_proof.model_dump(mode="json")
         payload = json.dumps(manifest, sort_keys=True, indent=1).encode()
@@ -822,11 +896,10 @@ class CaptureLedgerCheckpointer:
             "rows": sum(member.rows for member in lineage_members),
             "excluded_tombstoned": excluded,
             "excluded_inactive": excluded_inactive,
+            "generation_cut_records": generation_cut_records,
             "manifest_digest": hashlib.sha256(payload).hexdigest(),
             "storage_reference_index": storage_reference_index.model_dump(mode="json"),
         }
-        if generation_cut_receipt is not None:
-            result["generation_cut_receipt"] = generation_cut_receipt.model_dump(mode="json")
         if generation_cut_proof is not None:
             result["generation_cut_proof"] = generation_cut_proof.model_dump(mode="json")
         return result
@@ -840,9 +913,10 @@ class CaptureLedgerCheckpointer:
         server_name: Optional[str],
         tombstones: list[tuple[str, int]],
         source_attempts: list[tuple[str, int]],
-        generation_cut_receipt: GenerationCutReceipt | None,
         generation_cut_proof: GenerationCutCoordinatorProof | None,
         continuation_roots_digest: str,
+        generation_cuts_digest: str,
+        generation_cut_records: int,
     ) -> dict[str, Any]:
         manifest_path = ledger_dir / LEDGER_MANIFEST_NAME
         payload = manifest_path.read_bytes()
@@ -860,14 +934,15 @@ class CaptureLedgerCheckpointer:
             raise LedgerMismatchError("committed ledger abort exclusions changed before commit retry")
         if manifest.get("source_attempts", []) != expected_source_attempts:
             raise LedgerMismatchError("committed ledger source attempts changed before commit retry")
-        expected_cut = generation_cut_receipt.model_dump(mode="json") if generation_cut_receipt is not None else None
-        if manifest.get("generation_cut_receipt") != expected_cut:
-            raise LedgerMismatchError("committed ledger generation cut changed before commit retry")
         expected_proof = generation_cut_proof.model_dump(mode="json") if generation_cut_proof is not None else None
         if manifest.get("generation_cut_proof") != expected_proof:
             raise LedgerMismatchError("committed ledger worker generation-cut proof changed before commit retry")
         if manifest.get("continuation_roots_sha256") != continuation_roots_digest:
             raise LedgerMismatchError("committed ledger continuation roots changed before commit retry")
+        if manifest.get("generation_cuts_sha256") != generation_cuts_digest:
+            raise LedgerMismatchError("committed ledger generation cuts changed before commit retry")
+        if int(manifest.get("generation_cut_records", -1)) != generation_cut_records:
+            raise LedgerMismatchError("committed ledger generation-cut count changed before commit retry")
         storage_reference_index = _validate_storage_reference_index(checkpoint_root, manifest)
         schema_version = manifest["schema_version"]
         if schema_version >= 3:
@@ -889,11 +964,10 @@ class CaptureLedgerCheckpointer:
             "rows": total_rows,
             "excluded_tombstoned": len(manifest.get("tombstones", [])),
             "excluded_inactive": int(manifest.get("excluded_inactive", 0)),
+            "generation_cut_records": int(manifest.get("generation_cut_records", 0)),
             "manifest_digest": hashlib.sha256(payload).hexdigest(),
             "storage_reference_index": storage_reference_index.model_dump(mode="json"),
         }
-        if manifest.get("generation_cut_receipt") is not None:
-            result["generation_cut_receipt"] = manifest["generation_cut_receipt"]
         if manifest.get("generation_cut_proof") is not None:
             result["generation_cut_proof"] = manifest["generation_cut_proof"]
         return result
@@ -978,16 +1052,29 @@ class CaptureLedgerCheckpointer:
             total_rows = sum(int(meta.get("rows", 0)) for meta in manifest["rollouts"].values())
         _fsync_dir(self.store_root)
 
+        restored_cut_receipts: tuple[GenerationCutReceipt, ...] = ()
+        if self.server_name is not None and isinstance(manifest.get("checkpoint_id"), str):
+            rows_by_capture_key = {
+                member.capture_key: _parse_lineage_payload(
+                    member.member,
+                    (self.store_root / member.member).read_bytes(),
+                )
+                for member in archive_members
+            }
+            restored_cut_receipts = generation_cut_receipts_from_lineage(
+                rows_by_capture_key,
+                checkpoint_id=manifest["checkpoint_id"],
+                server_name=self.server_name,
+            )
+
         result: dict[str, Any] = {
             "rollouts": rollout_count,
             "rows": total_rows,
             "checkpoint_id": manifest.get("checkpoint_id"),
             "tombstones": list(manifest.get("tombstones", ())),
             "source_attempts": list(manifest.get("source_attempts", ())),
+            "generation_cut_receipts": [receipt.model_dump(mode="json") for receipt in restored_cut_receipts],
         }
-        if manifest.get("generation_cut_receipt") is not None:
-            receipt = GenerationCutReceipt.model_validate(manifest["generation_cut_receipt"])
-            result["generation_cut_receipt"] = receipt.model_dump(mode="json")
         if manifest.get("generation_cut_proof") is not None:
             proof = GenerationCutCoordinatorProof.model_validate(manifest["generation_cut_proof"])
             result["generation_cut_proof"] = proof.model_dump(mode="json")
@@ -1002,6 +1089,8 @@ class ModelCheckpointCommitRequest(CheckpointControlRequest):
 
 class ModelCheckpointRestoreRequest(CheckpointControlRequest):
     checkpoint_dir: str
+    generation_cut_receipts: tuple[GenerationCutReceipt, ...] = ()
+    generation_cut_exclusions: tuple[GenerationCutReplacement, ...] = ()
 
 
 def _validate_server_name(server_name: str) -> str:
@@ -1011,19 +1100,6 @@ def _validate_server_name(server_name: str) -> str:
             "and start with a letter or digit"
         )
     return server_name
-
-
-async def _restore_generation_cut(
-    backend: Any,
-    expected: GenerationCutReceipt | None,
-) -> None:
-    if expected is None:
-        return
-    if backend is None:
-        raise LedgerMismatchError("checkpoint contains a generation cut but no cut backend is configured")
-    restored = GenerationCutReceipt.model_validate(await backend.restore_generation_cut(expected))
-    if restored != expected:
-        raise LedgerMismatchError("restored generation cut does not match the model-ledger manifest")
 
 
 def _store_generation_cut_proof(directory: Path, proof: GenerationCutCoordinatorProof) -> None:
@@ -1116,12 +1192,20 @@ def install_model_checkpoint(
         checkpoint_id: str,
         generation_cut_proof: GenerationCutCoordinatorProof | None,
         continuation_roots: list[AgentContinuationRoot],
+        generation_cut_receipts: tuple[GenerationCutReceipt, ...],
     ) -> dict[str, Any]:
         ledger = ledger_provider()
-        cut_receipt = None if generation_cut_proof is not None else limiter.generation_cut_receipt
         participant_dir = checkpoint_dir / MODEL_LEDGER_SUBDIR / server_name
         if generation_cut_proof is not None:
             await _run_sync(lambda: _store_generation_cut_proof(participant_dir, generation_cut_proof))
+        if generation_cut_receipts:
+            if not isinstance(ledger, GenerationCutCaptureLedger):
+                raise LedgerNotCheckpointableError(
+                    "generation-prefix cuts require a capture ledger that can record cut coordinates"
+                )
+            for receipt in generation_cut_receipts:
+                await ledger.record_generation_cut(receipt)
+        expected_cut_records = sum(len(receipt.prefixes) for receipt in generation_cut_receipts)
         if isinstance(ledger, CheckpointableCaptureLedger):
             commit_result = await ledger.checkpoint_capture_ledger(
                 participant_dir,
@@ -1130,8 +1214,13 @@ def install_model_checkpoint(
                 tombstones=tuple(limiter.checkpoint_exclusions()),
                 source_attempts=tuple(limiter.seen_attempts()),
                 continuation_roots=tuple(continuation_roots),
+                generation_cut_receipts=generation_cut_receipts,
             )
             validated = CaptureLedgerCommitResult.model_validate(commit_result)
+            if validated.generation_cut_records != expected_cut_records:
+                raise LedgerMismatchError(
+                    "capture-ledger checkpoint did not commit the complete generation-cut inventory"
+                )
             _validate_storage_reference_artifact(
                 checkpoint_dir,
                 validated.storage_reference_index,
@@ -1139,9 +1228,6 @@ def install_model_checkpoint(
             if validated.generation_cut_proof is not None and validated.generation_cut_proof != generation_cut_proof:
                 raise LedgerMismatchError("capture ledger and coordinator generation-cut proof disagree")
             validated.generation_cut_proof = generation_cut_proof
-            if validated.generation_cut_receipt is not None and validated.generation_cut_receipt != cut_receipt:
-                raise LedgerMismatchError("capture ledger and generation-cut receipt disagree")
-            validated.generation_cut_receipt = cut_receipt
             return validated.model_dump(mode="json")
 
         file_root = file_ledger_root_provider()
@@ -1157,15 +1243,14 @@ def install_model_checkpoint(
                 checkpoint_id=checkpoint_id,
                 tombstones=limiter.checkpoint_exclusions(),
                 source_attempts=limiter.seen_attempts(),
-                generation_cut_receipt=cut_receipt,
                 generation_cut_proof=generation_cut_proof,
                 continuation_roots=continuation_roots,
+                generation_cut_receipts=generation_cut_receipts,
             )
         )
 
     async def _restore_ledger(checkpoint_dir: Path) -> dict[str, Any]:
         ledger = ledger_provider()
-        cut_backend = limiter.generation_cut_backend
         participant_dir = checkpoint_dir / MODEL_LEDGER_SUBDIR / server_name
         if isinstance(ledger, CheckpointableCaptureLedger):
             restore_result = await ledger.restore_capture_ledger(participant_dir, server_name=server_name)
@@ -1181,7 +1266,6 @@ def install_model_checkpoint(
             ):
                 raise LedgerMismatchError("capture ledger and coordinator generation-cut proof disagree")
             validated.generation_cut_proof = validated.generation_cut_proof or sidecar_proof
-            await _restore_generation_cut(cut_backend, validated.generation_cut_receipt)
             return validated.model_dump(mode="json")
 
         file_root = file_ledger_root_provider()
@@ -1202,12 +1286,6 @@ def install_model_checkpoint(
             raise LedgerMismatchError("model ledger and coordinator generation-cut proof disagree")
         if sidecar_proof is not None:
             result["generation_cut_proof"] = sidecar_proof.model_dump(mode="json")
-        expected_receipt = (
-            GenerationCutReceipt.model_validate(result["generation_cut_receipt"])
-            if result.get("generation_cut_receipt") is not None
-            else None
-        )
-        await _restore_generation_cut(cut_backend, expected_receipt)
         return result
 
     @app.post(f"{MODEL_CHECKPOINT_URL_PREFIX}/commit")
@@ -1220,6 +1298,15 @@ def install_model_checkpoint(
 
         async def run() -> dict[str, Any]:
             generation_cut_proof = _require_quiescent(body.checkpoint_id)
+            generation_cut_receipts = (
+                tuple(
+                    worker.generation_cut_receipt
+                    for worker in generation_cut_proof.workers
+                    if worker.generation_cut_receipt is not None
+                )
+                if generation_cut_proof is not None
+                else ((limiter.generation_cut_receipt,) if limiter.generation_cut_receipt is not None else ())
+            )
             continuation_roots = await asyncio.to_thread(
                 load_continuation_roots,
                 Path(body.checkpoint_dir),
@@ -1230,6 +1317,7 @@ def install_model_checkpoint(
                 checkpoint_id=body.checkpoint_id,
                 generation_cut_proof=generation_cut_proof,
                 continuation_roots=continuation_roots,
+                generation_cut_receipts=generation_cut_receipts,
             )
 
         return await fence.run_operation(
@@ -1253,12 +1341,58 @@ def install_model_checkpoint(
             # The restored server boots into the paused state: nothing may be
             # admitted until every component is restored and the coordinator
             # explicitly resumes.
-            limiter.close()
+            limiter.close(body.checkpoint_id)
             result = await _restore_ledger(Path(body.checkpoint_dir))
+            lineage_receipts = tuple(
+                GenerationCutReceipt.model_validate(receipt) for receipt in result.pop("generation_cut_receipts", ())
+            )
+            if lineage_receipts and body.generation_cut_receipts:
+                lineage_prefixes = sorted(
+                    json.dumps(prefix.model_dump(mode="json"), sort_keys=True)
+                    for receipt in lineage_receipts
+                    for prefix in receipt.prefixes
+                )
+                request_prefixes = sorted(
+                    json.dumps(prefix.model_dump(mode="json"), sort_keys=True)
+                    for receipt in body.generation_cut_receipts
+                    for prefix in receipt.prefixes
+                )
+                if lineage_prefixes != request_prefixes:
+                    raise LedgerMismatchError(
+                        "request-carried generation cuts disagree with the restored model lineage"
+                    )
+            generation_cut_receipts = lineage_receipts or body.generation_cut_receipts
+            backend = limiter.generation_cut_backend
+            if generation_cut_receipts and backend is None:
+                raise LedgerNotCheckpointableError(
+                    "checkpoint contains generation cuts but this model server has no restore backend"
+                )
+            restored_cuts = 0
+            exclusions = frozenset((item.rollout_id, item.attempt_index) for item in body.generation_cut_exclusions)
+            for receipt in generation_cut_receipts:
+                if receipt.inventory.server_name != server_name:
+                    raise LedgerMismatchError(
+                        "generation-cut receipt belongs to a different model server: "
+                        f"expected={server_name!r}, actual={receipt.inventory.server_name!r}"
+                    )
+                assert backend is not None
+                restored = await backend.restore_generation_cut(
+                    receipt,
+                    excluded_replacements=exclusions,
+                )
+                if restored != receipt:
+                    raise LedgerMismatchError("generation-cut restore did not acknowledge the persisted receipt")
+                restored_cuts += sum(
+                    prefix.disposition == "durable_prefix"
+                    and prefix.cut_kind == "active_prefix"
+                    and (prefix.rollout_id, prefix.attempt_index + 1) not in exclusions
+                    for prefix in receipt.prefixes
+                )
             for tombstone in result["tombstones"]:
                 limiter.install_tombstone(tombstone["rollout_id"], tombstone["attempt_index"])
             for source_attempt in result.get("source_attempts", []):
                 limiter.install_tombstone(source_attempt["rollout_id"], source_attempt["attempt_index"])
+            result["generation_cuts_restored"] = restored_cuts
             return result
 
         return await fence.run_operation(

@@ -41,6 +41,7 @@ CaptureDisposition = Literal["staged", "capture_failed"]
 CaptureMode = Literal["token_in", "text"]
 Identifier = Annotated[StrictStr, Field(min_length=1)]
 NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
+PositiveInt = Annotated[StrictInt, Field(gt=0)]
 DigestHex = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
@@ -93,6 +94,27 @@ class _DigestWireModel(_WireModel):
     extras_digest_version: Literal[EXTRAS_DIGEST_VERSION] = EXTRAS_DIGEST_VERSION
 
 
+class GenerationCutContinuation(_WireModel):
+    """Durable same-call prefix selected for one replacement attempt."""
+
+    source_capture_key: Identifier
+    source_model_call_id: Identifier
+    staging_keys: tuple[Identifier, ...] = Field(min_length=1)
+    generation_token_count: NonNegativeInt
+    digest: DigestHex
+    effective_output_limit: PositiveInt
+    terminal_finish_reason: Literal["stop", "length"] | None = None
+    terminal_stop_reason: str | int | None = None
+
+    @model_validator(mode="after")
+    def _validate_staging_keys(self) -> Self:
+        if len(self.staging_keys) != len(set(self.staging_keys)):
+            raise ValueError("generation-cut staging_keys must be unique")
+        if self.terminal_stop_reason is not None and self.terminal_finish_reason is None:
+            raise ValueError("terminal_stop_reason requires terminal_finish_reason")
+        return self
+
+
 class CaptureAdmission(_WireModel):
     """Gate-to-worker identity and exact-prefix contract for one model call.
 
@@ -111,6 +133,7 @@ class CaptureAdmission(_WireModel):
     required_prefix_token_ids: list[StrictInt] = Field(default_factory=list)
     staging_chain: list[str] = Field(default_factory=list)
     parent_chain_hash: DigestHex | None = None
+    generation_cut: GenerationCutContinuation | None = None
 
     @model_validator(mode="after")
     def _validate_prefix_contract(self) -> Self:

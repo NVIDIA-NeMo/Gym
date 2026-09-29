@@ -105,6 +105,7 @@ DELETE_KEY_KEY_NAME = "_delete_key"
 _MISSING_REF = object()
 NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
 VERBOSE_KEY_NAME = "verbose"
+LOG_LEVEL_KEY_NAME = "log_level"
 JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
@@ -148,6 +149,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
     VERBOSE_KEY_NAME,
+    LOG_LEVEL_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
@@ -1508,11 +1510,22 @@ def get_global_config_dict(
 
 
 def _apply_verbosity(global_config_dict: DictConfig) -> None:
-    """Set logging to DEBUG when `verbose` is in the config. Runs in the CLI process and, because the
-    config dict is forwarded to every spun-up server, in each server process too."""
+    """Apply `verbose` (DEBUG) or `log_level` (a standard level name) to the root logger.
+
+    Runs in the CLI process and, because the config dict is forwarded to every spun-up server, in each
+    server process too. `verbose` takes precedence.
+    """
     if global_config_dict.get(VERBOSE_KEY_NAME):
-        logging.basicConfig(level=logging.DEBUG)
-        logging.getLogger().setLevel(logging.DEBUG)
+        level = logging.DEBUG
+    else:
+        level_name = global_config_dict.get(LOG_LEVEL_KEY_NAME)
+        if level_name is None:
+            return
+        level = logging.getLevelName(str(level_name).upper())
+        if not isinstance(level, int):
+            raise ValueError(f"{LOG_LEVEL_KEY_NAME} must be a standard logging level name, got {level_name!r}")
+    logging.basicConfig(level=level)
+    logging.getLogger().setLevel(level)
 
 
 def set_global_config_dict(
