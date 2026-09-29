@@ -37,8 +37,14 @@ async def _exec_as_root(sandbox: AsyncSandbox, command: str, *, timeout_s: float
     return result
 
 
-async def upload_dir(sandbox: AsyncSandbox, source: Path, target: str, *, timeout_s: float = 600) -> None:
-    """Copy the contents of ``source`` into ``target`` inside the sandbox."""
+async def upload_dir(
+    sandbox: AsyncSandbox, source: Path, target: str, *, timeout_s: float = 600, make_readable: bool = False
+) -> None:
+    """Copy the contents of ``source`` into ``target`` inside the sandbox.
+
+    File modes travel with the archive. ``make_readable`` additionally opens the tree to every user, for a
+    solution the task user must read; a verifier tree keeps its modes because tests may check them.
+    """
     remote = f"/tmp/.nemo-gym-upload-{uuid4().hex}.tar.gz"
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "upload.tar.gz"
@@ -48,13 +54,14 @@ async def upload_dir(sandbox: AsyncSandbox, source: Path, target: str, *, timeou
             for child in sorted(Path(source).iterdir()):
                 tar.add(child, arcname=child.name)
         await sandbox.upload(archive, remote)
+    # --no-overwrite-dir keeps the target folder's own ownership and mode: it may be a root-owned
+    # world-writable folder the extracting user cannot chmod. The readability fix-up is best effort
+    # for the same reason.
+    fixup = f"chmod -R a+rX {shlex.quote(target)} 2>/dev/null || true; " if make_readable else ""
     result = await _exec_as_root(
         sandbox,
-        # --no-overwrite-dir keeps the target folder's own ownership and mode: it may be a root-owned
-        # world-writable folder the extracting user cannot chmod. The readability fix-up is best effort
-        # for the same reason.
         f"mkdir -p {shlex.quote(target)} && tar -xzf {remote} --no-same-owner --no-overwrite-dir -C {shlex.quote(target)}; "
-        f"status=$?; chmod -R a+rX {shlex.quote(target)} 2>/dev/null || true; rm -f {remote}; exit $status",
+        f"status=$?; {fixup}rm -f {remote}; exit $status",
         timeout_s=timeout_s,
     )
     if result.return_code:

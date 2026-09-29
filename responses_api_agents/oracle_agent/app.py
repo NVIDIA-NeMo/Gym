@@ -184,7 +184,7 @@ class OracleAgent(SimpleResponsesAPIAgent):
         settings = task.config
         timeout = min(settings.agent.timeout_sec, self.config.max_solve_timeout_s)
         try:
-            await upload_dir(session.sandbox, task.path / "solution", SOLUTION_DIR)
+            await upload_dir(session.sandbox, task.path / "solution", SOLUTION_DIR, make_readable=True)
             # The folder may already exist root-owned and world-writable (Harbor's /logs mount, or a
             # derived image); only its writability matters.
             prepared = await _exec_as_root(
