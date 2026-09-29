@@ -111,8 +111,8 @@ def prepare_target(
     lets a fetch replace task folders whose content differs from the Harbor store.
     ``PreparedTaskset.skipped``) so the rest of the dataset still prepares.
 
-    Tasks matching an ``exclude`` glob, and Compose tasks (which the harbor server cannot
-    run yet), are left out of the rows and listed on stdout.
+    Tasks matching an ``exclude`` glob, or not matching an ``only`` glob, are left out of the
+    rows and listed on stdout.
     """
     if is_hub_ref(target):
         folder = fetch_ref(target, refresh_registry=refresh_registry, force=force)
@@ -162,8 +162,6 @@ def select_tasks(
             skipped.append((task.task_id, "not in --only-tasks"))
         elif pattern is not None:
             skipped.append((task.task_id, f"excluded by --exclude-tasks {pattern!r}"))
-        elif task.needs_compose:
-            skipped.append((task.task_id, "Compose environments are not supported yet"))
         else:
             kept.append(task)
     return kept, skipped
