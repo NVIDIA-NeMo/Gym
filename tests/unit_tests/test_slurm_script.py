@@ -2184,3 +2184,24 @@ def test_an_unpinned_multi_node_service_is_probed_on_node_0(tmp_path):
     # It spans the allocation and serves its API from node 0, where the probe runs.
     script = _driver_on_aux(tmp_path, {"judge": {"type": "vllm", "container": "img", "model": "/j", "port": 9000}})
     assert "Waiting for judge at http://localhost:9000" in script
+
+
+def test_an_unpinned_service_is_probed_on_the_drivers_node(tmp_path):
+    # The probe runs on node 0, but an unpinned single-node service runs beside the
+    # driver, here on the decode pool's first node.
+    config = _pd_config(tmp_path)
+    config.driver.policy_model = "decode"
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
+    assert '--nodelist="${gym_nodes[4]}"' in script.split("# service: router")[1].split("\n\n")[0]
+    assert "Waiting for router at http://${gym_nodes[4]}:8000" in script
+
+
+def test_a_ray_head_on_node_0_is_probed_locally(tmp_path):
+    ray = {
+        "type": "ray",
+        "container": "img",
+        "node_pools": ["gpu", "aux"],
+        "health_check": {"port": 8011, "path": "/"},
+    }
+    script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": ray})
+    assert "Waiting for ray at http://localhost:8011" in script

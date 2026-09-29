@@ -822,7 +822,7 @@ def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> di
 
 def _probe_host(node: int) -> str:
     """How the batch script, which runs on the allocation's first node, reaches `node`."""
-    return "localhost" if node == 0 else f"${{gym_nodes[{node}]}}"
+    return "localhost" if node == 0 else _pool_head(node)
 
 
 def _health_check_host(
