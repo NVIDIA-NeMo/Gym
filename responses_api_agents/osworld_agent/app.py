@@ -60,6 +60,7 @@ from responses_api_agents.osworld_agent.agent_contract import (
     resolve_agent_contract,
 )
 from responses_api_agents.osworld_agent.exact_trace import build_exact_trace_envelope
+from responses_api_agents.osworld_agent.observability import build_gym_observability
 from responses_api_agents.osworld_agent.proxy import (
     inspect_proxy_config_file,
     parse_env_bool,
@@ -716,7 +717,7 @@ def _build_messages_model_fn(
         )
         model_io_enabled = bool(os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip())
         current_call = 0
-        started_ns = 0
+        started_ns = time.time_ns()
         if model_io_enabled:
             call_index += 1
             current_call = call_index
@@ -724,7 +725,6 @@ def _build_messages_model_fn(
             agent_payload = _jsonable(payload)
             request_json = json.dumps(request_value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             payload_json = json.dumps(agent_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            started_ns = time.time_ns()
             _append_model_io(
                 {
                     **call_log_context,
@@ -775,6 +775,11 @@ def _build_messages_model_fn(
                 f"Model response did not finish cleanly: finish_reason={choice.finish_reason!r}"
             )
         structured_response = bool(payload.get("_nemo_gym_return_message"))
+        observation = {
+            "response_id": getattr(resp, "id", None),
+            "started_at": started_ns / 1e9,
+            "usage": _jsonable(getattr(resp, "usage", None)),
+        }
         if not model_io_enabled:
             if finish_reason_error is not None and not structured_response:
                 raise finish_reason_error
@@ -784,6 +789,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                normalized["observation"] = observation
             return normalized
 
         normalization_error = None
@@ -796,6 +802,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                normalized["observation"] = observation
         except Exception as exc:  # noqa: BLE001 - log raw output before preserving the original error.
             normalization_exc = exc
             normalization_error = {"type": type(exc).__name__, "message": repr(exc)}
@@ -1603,6 +1610,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 max_trajectory_length=self.config.max_trajectory_length,
                 max_output_tokens=max_tokens,
                 exact_trace_transport_version=self.config.exact_trace_transport_version,
+                model_ref=self.config.model_server,
             )
 
 
@@ -1670,6 +1678,7 @@ def _build_response(
     max_trajectory_length: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
     exact_trace_transport_version: Literal[2, 3] = 2,
+    model_ref: Optional[ModelServerRef] = None,
 ) -> OSWorldVerifyResponse:
     """Pack one run without changing its prompt policy for training consumers."""
 
@@ -1809,6 +1818,19 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    if model_ref is not None:
+        incomplete_call_reasons = {"model_call_evidence_unavailable", "model_call_evidence_invalid"}
+        trace_reasons = trajectory_fields["trajectory_contract"]["exact_trace_admission"]["incomplete_reasons"]
+        trajectory, usage = build_gym_observability(
+            request=body,
+            model_calls=model_calls,
+            model_ref=model_ref,
+            evaluation_completed=runtime_admission["evaluation_completed"],
+            model_call_records_complete=not any(reason in incomplete_call_reasons for reason in trace_reasons),
+        )
+        if trajectory is not None:
+            response_fields["ng_trajectory"] = trajectory
+            response_dict["usage"] = usage
     return OSWorldVerifyResponse(**response_fields)
 
 

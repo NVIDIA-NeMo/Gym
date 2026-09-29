@@ -69,6 +69,14 @@ also separate model calls and are not collapsed into the environment step.
 NeMo-RL can therefore reconstruct prefix-contiguous physical traces while one
 logical rollout retains one reward and advantage.
 
+For benchmark rollouts, OSWorld also projects observed policy completions into
+Gym's `ng_trajectory` contract. Each turn refers to its captured model call by
+the actual completion response ID and model-server identity; parser retries
+remain separate turns. Measured token usage is summed across those calls, and
+missing call records, IDs, timestamps, or usage remain visible as observation
+gaps. Rollout token totals are omitted when call records are incomplete. The
+OSWorld step transitions and evaluator score remain in their existing fields.
+
 Training manifests should supply a model-independent caller-owned identity:
 
 ```json
