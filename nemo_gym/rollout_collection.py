@@ -2697,6 +2697,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         environment_server_name: str | None = None,
         *,
         max_resident_tasks: Optional[int] = None,
+        retry_requests: bool = True,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -2745,7 +2746,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 res = None
                 try:
                     request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
-                    res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
+                    res = await server_client.post(
+                        server_name=server_name, url_path="/run", json=request_body, _retry=retry_requests
+                    )
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
@@ -2805,6 +2808,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         environment_server_name: str | None = None,
         *,
         max_resident_tasks: Optional[int] = None,
+        retry_requests: bool = True,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -2825,6 +2829,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         Every future resolves to exactly the ``(row, result)`` pair Gym's own `/run` endpoint
         returned — no Gym-private fields are ever added to ``result``.
+
+        ``retry_requests=False`` disables automatic HTTP replay of a mutating `/run`.
+        It does not convert failures to successful result rows.
         """
 
         async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
@@ -2840,6 +2847,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 route_failures_to_sidecar=route_failures_to_sidecar,
                 environment_server_name=environment_server_name,
                 max_resident_tasks=max_resident_tasks,
+                **({"retry_requests": False} if not retry_requests else {}),
             ),
         )
 

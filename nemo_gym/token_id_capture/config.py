@@ -150,6 +150,9 @@ class TokenIdCaptureSettings(BaseModel):
     # Finalization does not retire the frozen snapshot.
     # Durable delivery permits retirement by snapshot id and version.
     rebuild_response: bool = True
+    # The framework compares source history and chooses physical capture roots.
+    # This is serving configuration, never a harness-provided segment decision.
+    framework_owned_context: bool = False
     # A custom sink normally needs a resolver over the same backend namespace.
     # Without one, every multi-call continuation is unresolved and masked.
     # This flag permits that degraded behavior explicitly.
@@ -201,6 +204,10 @@ class TokenIdCaptureConfig(BaseModel):
     @model_validator(mode="after")
     def _validate(self) -> "TokenIdCaptureConfig":
         block = self.token_id_capture
+        if block.framework_owned_context and (
+            not block.external_staging or block.external_staging_backend != "vllm_worker"
+        ):
+            raise ValueError("framework_owned_context requires external vLLM staging")
         if block.external_staging and not block.enabled:
             raise ValueError("token_id_capture.external_staging requires token_id_capture.enabled")
         if block.external_staging and block.rebuild_response:

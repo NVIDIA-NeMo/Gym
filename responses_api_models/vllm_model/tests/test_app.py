@@ -887,7 +887,7 @@ class TestApp:
                 "created": FIXED_TIME,
                 "model": "dummy_model",
                 "ng_commit_coords": {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "digest_version": 2,
                     "extras_digest_version": 1,
                     "rollout_id": "rollout-1",

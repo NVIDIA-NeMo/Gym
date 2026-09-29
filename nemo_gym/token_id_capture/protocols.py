@@ -42,10 +42,17 @@ That closes the window where the final call's entry is lost without a trace.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Protocol, runtime_checkable
 
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
 from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
+
+
+class ParentSelection(Enum):
+    """Distinguish an omitted candidate hint from no accepted predecessor."""
+
+    INFER = auto()
 
 
 @dataclass(frozen=True)

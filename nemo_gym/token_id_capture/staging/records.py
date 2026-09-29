@@ -93,6 +93,37 @@ class _DigestWireModel(_WireModel):
     extras_digest_version: Literal[EXTRAS_DIGEST_VERSION] = EXTRAS_DIGEST_VERSION
 
 
+class ReplayItem(_WireModel):
+    """Prompt-content identity before gateway conversion, without media payloads."""
+
+    role: Literal["system", "developer", "user", "assistant", "tool", "envelope"]
+    digest: DigestHex
+    empty_tool_content_digest: DigestHex | None = None
+
+
+class ReplayContext(_WireModel):
+    """Versioned comparison facts; only the framework decides compatibility."""
+
+    normalization_version: Literal[1] = 1
+    items: list[ReplayItem]
+    render_digest: DigestHex | None = None
+
+
+class ReplaySummary(_WireModel):
+    """Bounded evidence for an ordered source history, stored once per call.
+
+    The next request supplies its items transiently so the worker can compare
+    the corresponding prefix. Historical per-item arrays are not persisted.
+    """
+
+    normalization_version: Literal[1] = 1
+    item_count: NonNegativeInt
+    source_digest: DigestHex
+    # Alternate source identity only; RL must prove renderer equivalence.
+    empty_tool_content_digest: DigestHex | None = None
+    render_digest: DigestHex | None = None
+
+
 class CaptureAdmission(_WireModel):
     """Gate-to-worker identity and exact-prefix contract for one model call.
 
@@ -107,16 +138,22 @@ class CaptureAdmission(_WireModel):
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     prev_len: NonNegativeInt = 0
-    mode: CaptureMode
+    mode: Literal["token_in", "text", "candidate"]
     required_prefix_token_ids: list[StrictInt] = Field(default_factory=list)
     staging_chain: list[str] = Field(default_factory=list)
     parent_chain_hash: DigestHex | None = None
+    request_replay: ReplayContext | None = None
+    candidate_replay: ReplaySummary | None = None
 
     @model_validator(mode="after")
     def _validate_prefix_contract(self) -> Self:
         if any(token_id < 0 for token_id in self.required_prefix_token_ids):
             raise ValueError("required_prefix_token_ids must be non-negative")
-        if self.mode == "token_in":
+        if self.mode == "candidate" and self.request_replay is None:
+            raise ValueError("candidate admission requires source request evidence")
+        if self.mode == "candidate" and (self.parent_call_id is None) != (self.candidate_replay is None):
+            raise ValueError("candidate predecessor and its replay evidence must be supplied together")
+        if self.mode == "token_in" or (self.mode == "candidate" and self.parent_call_id is not None):
             if self.parent_call_id is None or self.prev_len == 0:
                 raise ValueError("token_in admission requires a parent_call_id and prev_len > 0")
             if self.parent_chain_hash is None:
@@ -283,6 +320,13 @@ class CommitCoords(_DigestWireModel):
         return self
 
 
+class OutputItemEvidence(_WireModel):
+    """Original served item identity and a content witness, without token arrays."""
+
+    id: str | None = None
+    fingerprint: DigestHex
+
+
 class CallRecord(_DigestWireModel):
     """One token-free call manifest row in a rollout's capture ledger."""
 
@@ -311,6 +355,11 @@ class CallRecord(_DigestWireModel):
     # Canonicalization version of the fingerprints above; 0 means none were
     # recorded. Attribution ignores fingerprints from a different version.
     fingerprint_version: NonNegativeInt = 0
+    replay: ReplaySummary | None = None
+    output_items: list[OutputItemEvidence] | None = None
+    response_status: str | None = None
+    finish_reason: str | None = None
+    last_output_item: dict | None = None
 
     @model_validator(mode="after")
     def _validate_lengths(self) -> Self:
@@ -354,6 +403,8 @@ class RolloutManifest(_WireModel):
     rollout_id: Identifier
     records: list[CallRecord] = Field(default_factory=list)
     failures: list[ManifestFailure] = Field(default_factory=list)
+    attempted_call_ids: list[Identifier] = Field(default_factory=list)
+    pending_call_ids: list[Identifier] = Field(default_factory=list)
 
 
 class RolloutReceipt(_DigestWireModel):
@@ -363,6 +414,8 @@ class RolloutReceipt(_DigestWireModel):
     reward: float | None = None
     terminal_model_call_id: Identifier | None = None
     manifest: list[CallRecord] = Field(default_factory=list)
+    attempted_call_ids: list[Identifier] = Field(default_factory=list)
+    pending_call_ids: list[Identifier] = Field(default_factory=list)
     capture_poisoned: bool = False
     failure_reason: str | None = None
     # How ``terminal_model_call_id`` was chosen: ``declared`` when the agent

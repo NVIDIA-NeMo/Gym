@@ -9,6 +9,12 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Protocol
 
+from nemo_gym.token_id_capture.completion import (
+    completion_items,
+    completion_metadata,
+    output_item_fingerprint,
+    output_validation_item,
+)
 from nemo_gym.token_id_capture.config import ExternalStagingBackend
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
 from nemo_gym.token_id_capture.protocols import CaptureLedger
@@ -17,6 +23,7 @@ from nemo_gym.token_id_capture.records import (
     response_to_output_items,
     strip_token_fields,
 )
+from nemo_gym.token_id_capture.replay import render_options_digest, replay_context, summarize_replay
 from nemo_gym.token_id_capture.sink import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
@@ -32,6 +39,7 @@ from nemo_gym.token_id_capture.staging.records import (
     CaptureAdmission,
     CaptureLedgerCommit,
     CommitCoords,
+    OutputItemEvidence,
 )
 
 
@@ -108,6 +116,24 @@ class _BaseExternalCaptureHandler(ABC):
         admission = context.capture_admission
         if admission is None:
             return request_payload
+        if admission.mode == "candidate":
+            if request_payload.get("truncate_prompt_tokens") is not None or request_payload.get(
+                "continue_final_message"
+            ):
+                raise ValueError("Framework context requires explicit history without truncation or assistant prefill")
+            if admission.request_replay is None:
+                raise ValueError("Candidate admission is missing source request evidence")
+            admission = admission.model_copy(
+                update={
+                    "request_replay": admission.request_replay.model_copy(
+                        update={
+                            "render_digest": render_options_digest(request_payload),
+                        }
+                    ),
+                }
+            )
+            context.capture_admission = admission
+            request_payload.pop("required_prefix_token_ids", None)
         return self._prepare_admitted_request(request_payload, admission)
 
     @abstractmethod
@@ -231,7 +257,10 @@ class _BaseExternalCaptureHandler(ABC):
                 WORKER_CAPTURE_FAILED_REASON,
             )
             return
-        if coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len:
+        worker_root = admission.mode == "candidate" and coords.parent_call_id is None and coords.prev_len == 0
+        if not worker_root and (
+            coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len
+        ):
             raise ValueError(f"coordinates for {coords.model_call_id} diverge from admission")
         # The served envelope id is the terminal-attribution join key: the
         # agent proves which response it kept by possessing it. Observe the
@@ -240,8 +269,12 @@ class _BaseExternalCaptureHandler(ABC):
         response_id = str(served_payload.get("id") or "")
         if not response_id:
             raise ValueError(f"served response for {coords.model_call_id} carries no envelope id")
-        child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
+        child_staging_chain = (list(context.parent_staging_chain) if coords.parent_call_id is not None else []) + [
+            str(coords.staging_key)
+        ]
         response_items, _ = strip_token_fields(response_to_output_items(served_payload))
+        response_status, finish_reason = completion_metadata(served_payload)
+        evidence_items = completion_items(served_payload)
         # Content-witness keys, hashed while the response is still
         # server-side: this call's own output, and request + output (the
         # cumulative reading). Unfingerprintable content abstains (None)
@@ -266,19 +299,38 @@ class _BaseExternalCaptureHandler(ABC):
             digest=coords.digest,
             extras_digest=coords.extras_digest,
             staging_key=coords.staging_key,
-            mode=admission.mode,
+            mode="text" if coords.parent_call_id is None else "token_in",
             admitted_at=context.admitted_at,
             chain_hash=coords.chain_hash,
             cumulative_hash=coords.cumulative_hash,
             response_id=response_id,
+            output_items=[
+                OutputItemEvidence(id=item.get("id"), fingerprint=output_item_fingerprint(item))
+                for item in evidence_items
+            ],
+            response_status=response_status,
+            finish_reason=finish_reason,
+            last_output_item=output_validation_item(evidence_items[-1]) if evidence_items else None,
             output_fingerprint=output_fingerprint,
             continuation_fingerprint=continuation_fingerprint,
             fingerprint_version=FINGERPRINT_VERSION,
+            replay=(
+                summarize_replay(
+                    replay_context(
+                        list(context.request_items or []) + list(response_items),
+                        render_digest=admission.request_replay.render_digest,
+                    )
+                )
+                if admission.mode == "candidate" and admission.request_replay is not None
+                else None
+            ),
         )
         commit = CaptureLedgerCommit(
             rollout_id=context.rollout_id,
             record=record,
-            staging_chain=tuple(child_staging_chain),
+            # Candidate admission reconstructs ancestry from CallRecord parents.
+            # Only ordinary capture uses this separately persisted lookup chain.
+            staging_chain=() if admission.mode == "candidate" else tuple(child_staging_chain),
             request_items=list(context.request_items or []),
             response_items=response_items,
         )
