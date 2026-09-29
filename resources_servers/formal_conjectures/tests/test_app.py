@@ -203,12 +203,32 @@ def test_added_axiom_is_rejected_but_axiom_in_a_name_is_not() -> None:
 
 
 @pytest.mark.parametrize(
-    "stdout,expected",
+    "stdout,expected,why",
     [
-        ("'thm' depends on axioms: [propext]", True),
-        ("'thm' depends on axioms: [sorryAx, propext]", False),
-        ("no axiom line here", None),
+        ("'thm' depends on axioms: [propext]", True, "ordinary classical proof"),
+        ("'thm' depends on axioms: [sorryAx, propext]", False, "still has a hole"),
+        ("no axiom line here", None, "declaration missing or renamed"),
+        # Verified against Lean 4.33.1 in the built image: a fully constructive proof reports
+        # this instead of an axiom list. Reading it as "no axiom line" scored the *strongest*
+        # possible result 0.
+        ("'thm' does not depend on any axioms", True, "constructive proof"),
     ],
 )
-def test_target_is_proved(stdout: str, expected: Optional[bool]) -> None:
-    assert target_is_proved({"stdout": stdout, "stderr": ""}) is expected
+def test_target_is_proved(stdout: str, expected: Optional[bool], why: str) -> None:
+    assert target_is_proved({"stdout": stdout, "stderr": ""}) is expected, why
+
+
+def test_target_is_proved_is_anchored_to_the_target() -> None:
+    """A `#print axioms` the model wrote itself must not stand in for the server's probe.
+
+    The submission is a whole file, so it can print the axioms of any proved Mathlib lemma.
+    The server appends its own probe last and anchors on the declaration name.
+    """
+    decoy = "'Nat.add_comm' depends on axioms: [propext, Classical.choice]\n'thm' depends on axioms: [sorryAx]"
+    assert target_is_proved({"stdout": decoy, "stderr": ""}, "thm") is False
+    # Unanchored, the first line wins and the sorry'd theorem reads as proved.
+    assert target_is_proved({"stdout": decoy, "stderr": ""}) is False, "last match should win"
+
+    # A file that never reports the target at all is a failure, not a pass.
+    only_decoy = "'Nat.add_comm' does not depend on any axioms"
+    assert target_is_proved({"stdout": only_decoy, "stderr": ""}, "thm") is None

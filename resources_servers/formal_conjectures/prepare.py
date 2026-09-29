@@ -98,6 +98,11 @@ def build_rows() -> List[Dict[str, Any]]:
         # and an over-broad version silently drops verified tasks. Membership is already
         # decided by `verified_tasks.json`, so re-screening here is redundant and harmful.
         for task in extract_file(path, text, fc_only_names=set()):
+            # Ids are namespace-qualified and therefore unique. Before they were, this
+            # assignment silently kept whichever of several same-named declarations came
+            # last -- not necessarily the one the validation sweep passed.
+            if task.task_id in by_id:
+                raise ValueError(f"duplicate task_id {task.task_id!r}; extraction is ambiguous")
             by_id[task.task_id] = task
 
     missing = wanted - by_id.keys()

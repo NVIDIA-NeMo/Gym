@@ -102,7 +102,15 @@ def _absorb_docstring(text: str, start: int) -> int:
     return open_idx
 
 
-THEOREM_RE = re.compile(r"^(theorem|lemma)\s+([A-Za-z_][A-Za-z0-9_.'!?]*)", re.M)
+# The name must be matched with a Unicode-aware class. Lean identifiers routinely carry
+# subscripts and Greek letters -- `not_lt₂`, `isIncreasing₂_nil`, `φ_comm` -- and an ASCII-only
+# class silently TRUNCATES them at the first such character rather than failing to match. The
+# damage is not cosmetic: `full_name` is what the verifier puts in `#print axioms <target>`, so
+# a truncated name probes a declaration that does not exist, Lean errors, and the task can
+# never be passed by any model. It also collides ids: the five `not_lt₂*` lemmas in
+# `sIncreasingrTuples.lean` all truncate to `not_lt`. Measured at the pin: 49 of 5,248.
+# `[^\W\d]` is "word character that is not a digit", i.e. a Unicode letter or underscore.
+THEOREM_RE = re.compile(r"^(theorem|lemma)\s+([^\W\d][\w.'!?]*)", re.M)
 IMPORT_RE = re.compile(r"^import\s+(\S+)\s*$", re.M)
 
 OPEN_PAIRS = {"(": ")", "[": "]", "{": "}", "⟨": "⟩"}
@@ -271,12 +279,18 @@ def extract_file(path: str, text: str, fc_only_names: Set[str]) -> List[Task]:
         if re.search(r"\banswer\b\s*\(", blob):
             continue  # FC's `answer(...)` syntax comes from Util
 
+        # Keyed on the namespace-qualified name, not the short one. A file may declare the
+        # same short name in several namespaces -- `sIncreasingrTuples.lean` has five `not_lt`
+        # -- and `path::not_lt` then names all of them. prepare.py builds a dict on this, so
+        # an ambiguous id silently collapses five distinct tasks into whichever one came last,
+        # which need not be the one the validation sweep passed.
+        full_name = ".".join(ns + [thm.group(2)])
         tasks.append(
             Task(
-                task_id=f"{path}::{thm.group(2)}",
+                task_id=f"{path}::{full_name}",
                 source_path=path,
                 declaration=thm.group(2),
-                full_name=".".join(ns + [thm.group(2)]),
+                full_name=full_name,
                 category=category,
                 ams=ams_match.group(1).strip() if ams_match else None,
                 target_statement=target_statement[target_thm.start() :].strip(),

@@ -9,13 +9,14 @@ Lean proofs**: `@[category test]` sanity checks, `@[category API]` supporting le
 `research solved` results that have been formalized. Those have ground truth, so "did the model prove it?" is a
 decidable question. `extract.py` strips such a proof off and hands back the file with a hole in it.
 
-The result is **1,527 tasks drawn from 323 upstream files**, against Lean/Mathlib **v4.33.1**:
+The result is **1,526 tasks drawn from 323 upstream files**, against Lean/Mathlib **v4.33.1** —
+1,526 of 1,788 extractable candidates, the rest dropped by the validation sweep below:
 
 | `category` | Tasks | What it is |
 |---|---:|---|
-| `test` | 1,290 | sanity checks pinning a definition to a known value |
-| `API` | 191 | supporting lemmas built around a new definition |
-| `textbook` | 26 | exercises |
+| `test` | 1,285 | sanity checks pinning a definition to a known value |
+| `API` | 196 | supporting lemmas built around a new definition |
+| `textbook` | 25 | exercises |
 | `research solved` | 20 | formalized results from the literature |
 
 The gradient is the point: `test` is near-solved and `research solved` is not, so the pooled number is the least
@@ -69,6 +70,19 @@ model was not asked to fill:
   textual scan cannot: a proof that leans on a sorry'd lemma earlier in the file. During dataset validation this
   rejected upstream "proofs" that were not actually proofs.
 
+`#print axioms` has **two** output forms, and both matter:
+
+```
+'thm' depends on axioms: [propext, Classical.choice, Quot.sound]   -- ordinary classical proof
+'thm' does not depend on any axioms                                -- fully constructive proof
+'thm' depends on axioms: [sorryAx]                                 -- not a proof
+```
+
+Reading only the first form makes the *strongest* possible result — a constructive proof, which cites no axioms at
+all — look like "no axiom line found", i.e. a missing declaration, and score 0. The parser handles both, and is
+anchored to the target's name: the submission is a whole file and can print the axioms of any proved Mathlib lemma
+it likes, so an unanchored scan lets a decoy line stand in for the server's probe.
+
 **Check 4 is textual, and its limits are worth stating.** It asks whether the target's recorded signature is still
 present, normalising away comments, indentation and `lemma`/`theorem` (which are interchangeable in Lean 4 —
 comparing them verbatim rejected 53 correct submissions in a 12k-rollout run). Because it is a containment check,
@@ -117,10 +131,20 @@ because the guard rejects everything is visible without opening rollouts.
 
 ## Data
 
-`verified_tasks.json` **is** the benchmark definition: the 1,527 task ids whose reference version was *observed to
+`verified_tasks.json` **is** the benchmark definition: the 1,526 task ids whose reference version was *observed to
 compile clean with the target free of `sorryAx`* inside a Mathlib v4.33.1 sandbox. Candidacy is not answerability —
 a statement can reference a definition that does not survive the rewrite to plain Mathlib, and some upstream
 "proofs" transitively depend on a `sorry` elsewhere in the file. Neither is detectable by reading the text.
+
+The 262 candidates the sweep rejected are not noise, and the two largest groups are worth knowing about: files
+whose syntax needs `FormalConjecturesUtil` after all (`unexpected token '('`), and proofs that are correct but
+exceed the kernel's budget (`(kernel) deterministic timeout`). Both would otherwise be unanswerable tasks scoring
+a flat 0 for every model.
+
+Task ids are `<path>::<namespace-qualified name>`. The qualified name is load-bearing: a file may declare the same
+short name in several namespaces, and an id built from the short name collides — `sIncreasingrTuples.lean` alone
+has five `not_lt₂*` lemmas. `prepare.py` and `check_sandbox.py` both raise on a duplicate id rather than letting
+one task silently displace another.
 
 `prepare.py` re-derives the rows for exactly those ids from the pinned upstream revision (`FC_COMMIT`), so the
 dataset is reproducible from the pin without a Lean install. It fails loudly if the pin and the verified list have

@@ -135,6 +135,14 @@ def load_candidates(check_all: bool, limit: int | None) -> list:
             continue
         tasks.extend(extract_file(path, text, fc_only_names=set()))
 
+    # Ids are namespace-qualified, so they are unique. Assert it rather than assume: a
+    # duplicate would mean the sweep verifies one declaration and prepare.py ships another.
+    seen = {}
+    for task in tasks:
+        if task.task_id in seen:
+            raise ValueError(f"duplicate task_id {task.task_id!r}; extraction is ambiguous")
+        seen[task.task_id] = task
+
     if not check_all:
         wanted = set(json.loads(VERIFIED_TASKS_FPATH.read_text(encoding="utf-8")))
         tasks = [t for t in tasks if t.task_id in wanted]
@@ -251,7 +259,7 @@ async def main() -> int:
         # rule literally the same function.
         from resources_servers.formal_conjectures.app import target_is_proved
 
-        proved = target_is_proved(result)
+        proved = target_is_proved(result, task.full_name)
         if proved is None:
             failures.append((task.task_id, f"`#print axioms {task.full_name}` produced no output"))
             print(f"  FAIL  {task.task_id}  no axiom line; declaration missing or renamed")

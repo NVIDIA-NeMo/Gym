@@ -93,7 +93,12 @@ logger = logging.getLogger(__name__)
 # produced valid Lean, it just did not produce a proof.
 STATUS_UNPROVED = "unproved"
 
-_AXIOMS_RE = re.compile(r"depends on axioms:\s*\[([^\]]*)\]")
+# The two forms `#print axioms` emits. The second is easy to miss and costly to miss: a fully
+# constructive proof reports "does not depend on any axioms", so matching only the first reads
+# the *strongest* possible result as "no axiom line found" and scores it 0.
+_AXIOM_LINE_RE = re.compile(
+    r"'(?P<name>[^']*)'\s+(?:depends on axioms:\s*\[(?P<axioms>[^\]]*)\]|does not depend on any axioms)"
+)
 
 
 def score_rollout(rollout: Dict[str, Any]) -> Dict[str, float]:
@@ -108,17 +113,31 @@ def score_rollout(rollout: Dict[str, Any]) -> Dict[str, float]:
     }
 
 
-def target_is_proved(compiler_output: Dict[str, Any]) -> Optional[bool]:
+def target_is_proved(compiler_output: Dict[str, Any], full_name: Optional[str] = None) -> Optional[bool]:
     """Whether ``#print axioms <target>`` reported a proof free of ``sorryAx``.
 
-    Returns None when no axiom line was found at all -- that means the declaration does not
+    Returns None when the target's axiom line was not found at all -- the declaration does not
     exist under the expected name, which is a failure, not a pass.
+
+    ``full_name`` anchors the answer to the declaration being scored. The submission is a whole
+    file and may contain ``#print axioms`` calls of its own; without the anchor a reply that
+    prints the axioms of some proved Mathlib lemma next to its own sorry'd theorem would be
+    read as a proof. The server's probe is appended last, so the last matching line wins.
     """
     combined = f"{compiler_output.get('stdout', '')}\n{compiler_output.get('stderr', '')}"
-    match = _AXIOMS_RE.search(combined)
-    if not match:
+    matches = list(_AXIOM_LINE_RE.finditer(combined))
+    if not matches:
         return None
-    return "sorryAx" not in match.group(1)
+
+    if full_name is not None:
+        matches = [m for m in matches if m.group("name") == full_name]
+        if not matches:
+            return None
+
+    axioms = matches[-1].group("axioms")
+    # `axioms is None` is the "does not depend on any axioms" branch: no axioms at all, which
+    # trivially includes no `sorryAx`.
+    return axioms is None or "sorryAx" not in axioms
 
 
 class FormalConjecturesResourcesServerConfig(BaseResourcesServerConfig):
@@ -287,7 +306,7 @@ class FormalConjecturesVerifier:
                 mask_sample=proof_status == STATUS_SANDBOX_ERROR,
             )
 
-        proved = target_is_proved(raw)
+        proved = target_is_proved(raw, body.full_name)
         if proved is None:
             return fail(
                 STATUS_COMPILE_ERROR,
