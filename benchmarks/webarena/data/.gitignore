@@ -1,0 +1,5 @@
+webarena.jsonl
+webarena_source.jsonl
+
+# Small committed smoke-test fixture; the full generated benchmark stays local.
+!example.jsonl
