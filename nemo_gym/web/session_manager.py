@@ -8,6 +8,7 @@ import asyncio
 import inspect
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from nemo_gym.web.api_models import (
@@ -51,6 +52,17 @@ BackendFactory = Callable[
 ]
 
 
+@dataclass
+class _PendingCleanup:
+    backend: WebEnvironmentBackend | None
+    runner: WebOperationRunner | None
+    browser: BrowserSessionHandle | None
+    site: SiteLease | None
+    lock: asyncio.Lock
+    healthy: bool
+    attempts: int = 0
+
+
 class WebSessionManager:
     """Bind a signed Gym session cookie to one live backend instance."""
 
@@ -62,9 +74,11 @@ class WebSessionManager:
         site_pool: SitePool | None = None,
         operation_runner: WebOperationRunner | None = None,
         browser_session_provider: BrowserSessionProvider | None = None,
+        prepare_runtime: Callable[[], None] | None = None,
     ) -> None:
         self.config = config
         self._backend_factory = backend_factory
+        self._prepare_runtime = prepare_runtime
         self._site_pool = site_pool or self._make_site_pool(config)
         self._browser_session_provider = browser_session_provider or create_browser_session_provider(
             config.browser_session_provider
@@ -79,8 +93,14 @@ class WebSessionManager:
         self._reaper_task: asyncio.Task[None] | None = None
         self._browser_heartbeat_task: asyncio.Task[None] | None = None
         self._late_browser_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._late_cleanup_owners: dict[asyncio.Task[None], str] = {}
         self._failed_seed_cleanup_tasks: set[asyncio.Task[None]] = set()
         self._session_cleanup_tasks: dict[str, asyncio.Task[bool]] = {}
+        self._pending_cleanup: dict[str, _PendingCleanup] = {}
+        self._late_release_handles: dict[int, BrowserSessionHandle] = {}
+        self._late_release_owners: dict[int, str] = {}
+        self._late_release_attempts: dict[int, int] = {}
+        self._late_release_tasks: dict[int, asyncio.Task[bool]] = {}
         self._browser_leases_acquired = 0
         self._browser_leases_released = 0
         self._browser_release_failures = 0
@@ -97,6 +117,8 @@ class WebSessionManager:
     async def start(self) -> None:
         if self._reaper_task is not None:
             return
+        if self._prepare_runtime is not None:
+            await asyncio.to_thread(self._prepare_runtime)
         await self._call_optional_provider_lifecycle("start")
         self._reaper_task = asyncio.create_task(
             self._reaper_loop(),
@@ -120,7 +142,7 @@ class WebSessionManager:
         self._reaper_task = None
         self._browser_heartbeat_task = None
         async with self._lock:
-            session_ids = list(self._sessions)
+            session_ids = list(self._sessions.keys() | self._pending_cleanup.keys())
         await asyncio.gather(
             *(self.close_session(session_id) for session_id in session_ids),
             return_exceptions=True,
@@ -155,9 +177,30 @@ class WebSessionManager:
                         type(self._browser_session_provider).__name__,
                     ),
                 )
+        await asyncio.gather(
+            *(self._retry_late_release(key) for key in tuple(self._late_release_handles)),
+            return_exceptions=True,
+        )
         if self._shared_operation_runner is not None:
             await self._shared_operation_runner.close()
         await self._call_optional_provider_lifecycle("close")
+
+    async def can_retry_seed(self, session_id: str) -> bool:
+        """A transient admission failure can retry only after prior cleanup."""
+
+        async with self._lock:
+            return not (
+                session_id in self._creating
+                or session_id in self._pending_cleanup
+                or self._late_browser_cleanup_tasks
+                or self._late_release_handles
+            )
+
+    async def is_live_session(self, session_id: str) -> bool:
+        """Check ownership without refreshing the session's idle timer."""
+
+        async with self._lock:
+            return session_id in self._sessions
 
     async def seed_session(self, session_id: str, body: WebSeedSessionRequest) -> WebSeedSessionResponse:
         self._validate_task(body.task)
@@ -188,9 +231,13 @@ class WebSessionManager:
                     existing.status,
                 )
                 return self._seed_response(existing)
+            if session_id in self._pending_cleanup:
+                raise SessionConflictError(f"session {session_id!r} is awaiting cleanup")
             if session_id in self._creating:
                 raise SessionConflictError(f"session {session_id!r} is already being created")
-            if len(self._sessions) + len(self._creating) >= self.config.max_sessions:
+            occupied = self._sessions.keys() | self._creating | self._pending_cleanup.keys()
+            occupied |= set(self._late_cleanup_owners.values()) | set(self._late_release_owners.values())
+            if len(occupied) >= self.config.max_sessions:
                 raise CapacityUnavailableError(
                     f"web session capacity is full (max_sessions={self.config.max_sessions})"
                 )
@@ -442,16 +489,32 @@ class WebSessionManager:
             cleanup_task = self._session_cleanup_tasks.get(session_id)
             if cleanup_task is None:
                 state = self._sessions.pop(session_id, None)
-                self._creating.discard(session_id)
                 if state is not None:
+                    state.status, healthy = "closing", state.status != "error"
+                    self._pending_cleanup[session_id] = _PendingCleanup(
+                        state.backend,
+                        state.operation_runner,
+                        state.browser_lease,
+                        state.site_lease,
+                        state.lock,
+                        healthy,
+                    )
+                if session_id in self._pending_cleanup:
                     cleanup_task = asyncio.create_task(
-                        self._close_state(state),
+                        self._close_pending(session_id),
                         name=f"web-session-close-{session_id}",
                     )
                     self._session_cleanup_tasks[session_id] = cleanup_task
                     created = True
         if cleanup_task is None:
-            return True
+            await asyncio.gather(
+                *(
+                    self._retry_late_release(key)
+                    for key, owner in tuple(self._late_release_owners.items())
+                    if owner == session_id
+                )
+            )
+            return not self._has_unfinished_acquire(session_id)
 
         if created:
 
@@ -462,45 +525,92 @@ class WebSessionManager:
             cleanup_task.add_done_callback(forget)
         # A rollout cancellation must not cancel browser/provider cleanup. The
         # task remains strongly referenced until its done callback executes.
-        return await asyncio.shield(cleanup_task)
+        closed = await asyncio.shield(cleanup_task)
+        return closed and not self._has_unfinished_acquire(session_id)
 
-    async def _close_state(self, state: WebSessionState) -> bool:
-        """Close one detached session while attempting every cleanup layer."""
-
-        healthy = state.status != "error"
-        state.status = "closing"
-        try:
-            async with state.lock:
-                await self._run_backend(state.operation_runner, state.backend.close)
-        except Exception:  # noqa: BLE001
-            healthy = False
-            LOG.exception("Web backend close failed for session=%s", state.session_id)
-        finally:
-            if state.operation_runner is not self._shared_operation_runner:
-                try:
-                    await state.operation_runner.close()
-                except Exception:  # noqa: BLE001
-                    healthy = False
-                    LOG.exception("Web operation runner close failed for session=%s", state.session_id)
-            browser_released = await self._release_browser_lease(state.browser_lease)
-            healthy = healthy and browser_released
-            try:
-                await self._site_pool.release(state.site_lease, healthy=healthy)
-            except Exception:  # noqa: BLE001
-                healthy = False
-                LOG.exception("Web site lease release failed for session=%s", state.session_id)
-        LOG.info(
-            "event=web_session_close session=%s benchmark=%s task=%s site_lease=%s "
-            "browser_lease=%s browser_provider=%s healthy=%s",
-            state.session_id,
-            state.task.benchmark.value,
-            state.task.task_id,
-            state.site_lease.lease_id,
-            state.browser_lease.session_id or state.session_id,
-            state.browser_lease.provider_name or type(self._browser_session_provider).__name__,
-            healthy,
+    def _has_unfinished_acquire(self, session_id: str) -> bool:
+        return (
+            session_id in self._creating
+            or session_id in self._late_cleanup_owners.values()
+            or session_id in self._late_release_owners.values()
         )
-        return True
+
+    async def _retry_late_release(self, key: int) -> bool:
+        task = self._late_release_tasks.get(key)
+        if task is None:
+            handle = self._late_release_handles.get(key)
+            if handle is None:
+                return True
+
+            async def release() -> bool:
+                try:
+                    self._late_release_attempts[key] = self._late_release_attempts.get(key, 0) + 1
+                    if not await self._release_browser_lease(handle):
+                        return False
+                    self._late_release_handles.pop(key, None)
+                    self._late_release_owners.pop(key, None)
+                    self._late_release_attempts.pop(key, None)
+                    return True
+                finally:
+                    self._late_release_tasks.pop(key, None)
+
+            task = asyncio.create_task(release(), name=f"web-late-release-{handle.session_id}")
+            self._late_release_tasks[key] = task
+        return await asyncio.shield(task)
+
+    async def _close_pending(self, session_id: str) -> bool:
+        """Retain failed handles; only successful layers are forgotten.
+
+        A failed backend close must not destroy its thread-affine executor or
+        release site locks while the browser could still mutate that site.
+        """
+
+        pending = self._pending_cleanup[session_id]
+        pending.attempts += 1
+        async with pending.lock:
+            if pending.backend is not None and pending.runner is not None:
+                try:
+                    await self._run_backend(pending.runner, pending.backend.close)
+                    pending.backend = None
+                except Exception:  # noqa: BLE001
+                    pending.healthy = False
+                    LOG.exception("Web backend close failed for session=%s", session_id)
+            if pending.backend is None and pending.runner is not None:
+                try:
+                    if pending.runner is not self._shared_operation_runner:
+                        await pending.runner.close()
+                    pending.runner = None
+                except Exception:  # noqa: BLE001
+                    pending.healthy = False
+                    LOG.exception("Web operation runner close failed for session=%s", session_id)
+            if pending.browser is not None:
+                if await self._release_browser_lease(pending.browser):
+                    pending.browser = None
+                else:
+                    pending.healthy = False
+            if (
+                pending.backend is None
+                and pending.runner is None
+                and pending.browser is None
+                and pending.site is not None
+            ):
+                try:
+                    await self._site_pool.release(pending.site, healthy=pending.healthy)
+                    pending.site = None
+                except Exception:  # noqa: BLE001
+                    pending.healthy = False
+                    LOG.exception("Web site lease release failed for session=%s", session_id)
+        closed = all(value is None for value in (pending.backend, pending.runner, pending.browser, pending.site))
+        if closed:
+            self._pending_cleanup.pop(session_id, None)
+        LOG.info(
+            "event=web_session_close session=%s closed=%s healthy=%s attempt=%d",
+            session_id,
+            closed,
+            pending.healthy,
+            pending.attempts,
+        )
+        return closed
 
     async def recording_artifacts(self, session_id: str) -> list[WebArtifactRef]:
         """Index recordings only after browser close has flushed them to disk."""
@@ -530,6 +640,8 @@ class WebSessionManager:
                 "uptime_seconds": max(0.0, time.time() - self._started_at),
                 "sessions": len(self._sessions),
                 "creating": len(self._creating),
+                "cleanup_pending": len(self._pending_cleanup),
+                "late_release_pending": len(self._late_release_handles),
                 "capacity": self.config.max_sessions,
                 "site_pool": site_pool,
                 "browser_provider": {
@@ -566,23 +678,14 @@ class WebSessionManager:
     ) -> None:
         """Attempt every cleanup layer after a failed or cancelled seed."""
 
-        if backend is not None and operation_runner is not None:
-            try:
-                await self._run_backend(operation_runner, backend.close)
-            except Exception:  # noqa: BLE001
-                LOG.exception("Web backend cleanup failed after seed error session=%s", session_id)
-        if operation_runner is not None and operation_runner is not self._shared_operation_runner:
-            try:
-                await operation_runner.close()
-            except Exception:  # noqa: BLE001
-                LOG.exception("Web operation runner cleanup failed after seed error session=%s", session_id)
-        if browser_lease is not None:
-            await self._release_browser_lease(browser_lease)
-        if site_lease is not None:
-            try:
-                await self._site_pool.release(site_lease, healthy=False)
-            except Exception:  # noqa: BLE001
-                LOG.exception("Web site lease cleanup failed after seed error session=%s", session_id)
+        self._pending_cleanup[session_id] = _PendingCleanup(
+            backend, operation_runner, browser_lease, site_lease, asyncio.Lock(), False
+        )
+        # A factory can fail before a runner exists; there is no constructed
+        # browser to close in that case.
+        if operation_runner is None:
+            self._pending_cleanup[session_id].backend = None
+        await self.close_session(session_id)
         async with self._lock:
             self._creating.discard(session_id)
 
@@ -695,7 +798,9 @@ class WebSessionManager:
             name=f"web-browser-late-cleanup-{session_id}",
         )
         self._late_browser_cleanup_tasks.add(cleanup_task)
+        self._late_cleanup_owners[cleanup_task] = session_id
         cleanup_task.add_done_callback(self._late_browser_cleanup_tasks.discard)
+        cleanup_task.add_done_callback(lambda task: self._late_cleanup_owners.pop(task, None))
 
     async def _release_late_acquire(
         self,
@@ -742,7 +847,9 @@ class WebSessionManager:
             handle.transport,
             time.monotonic() - started,
         )
-        await self._release_browser_lease(handle, count_acquire=True)
+        if not await self._release_browser_lease(handle, count_acquire=True):
+            self._late_release_handles[id(handle)] = handle
+            self._late_release_owners[id(handle)] = session_id
 
     async def _release_browser_lease(
         self,
@@ -927,10 +1034,25 @@ class WebSessionManager:
             await asyncio.sleep(self.config.reaper_interval_seconds)
             cutoff = time.time() - self.config.session_ttl_seconds
             async with self._lock:
-                stale = [session_id for session_id, state in self._sessions.items() if state.last_access_at < cutoff]
+                stale = [
+                    session_id
+                    for session_id, state in self._sessions.items()
+                    if state.last_access_at < cutoff and not state.lock.locked()
+                ]
             if stale:
                 LOG.warning("Reaping %d expired web session(s)", len(stale))
                 await asyncio.gather(
                     *(self.close_session(session_id) for session_id in stale),
                     return_exceptions=True,
                 )
+            # A finite number of automatic attempts; explicit close remains
+            # retryable after an operator repairs the provider. Keep evidence
+            # and capacity occupied instead of claiming a successful release.
+            await asyncio.gather(
+                *(self.close_session(sid) for sid, item in tuple(self._pending_cleanup.items()) if item.attempts < 3),
+                return_exceptions=True,
+            )
+            for key, handle in tuple(self._late_release_handles.items()):
+                if self._late_release_attempts.get(key, 0) >= 3:
+                    continue
+                await self._retry_late_release(key)

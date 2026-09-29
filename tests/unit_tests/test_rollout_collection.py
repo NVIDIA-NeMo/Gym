@@ -747,6 +747,73 @@ class TestRolloutCollection:
 
         assert NG_PERF_KEY not in result
 
+    @pytest.mark.parametrize("concurrency", [1, 3])
+    async def test_run_examples_dispatches_in_input_order(
+        self, monkeypatch: pytest.MonkeyPatch, concurrency: int
+    ) -> None:
+        """Serial site mutations must not inherit as_completed's set iteration order."""
+        rows = [failing_row(i) for i in range(119)]
+        started = []
+        active = 0
+        peak = 0
+
+        async def post(*, server_name, url_path, json):
+            nonlocal active, peak
+            task_index = json[TASK_INDEX_KEY_NAME]
+            started.append(task_index)
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return FakeResponse(200, {"task_index": task_index})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        results = [
+            await future
+            for future in RolloutCollectionHelper().run_examples(rows, semaphore=asyncio.Semaphore(concurrency))
+        ]
+
+        assert started == list(range(119))
+        assert peak == concurrency
+        assert len(results) == len(rows)
+        assert sorted(result["task_index"] for _, result in results) == list(range(119))
+        assert all(row[TASK_INDEX_KEY_NAME] == result["task_index"] for row, result in results)
+
+    async def test_run_examples_still_yields_in_completion_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An earlier slow rollout must not block delivery of a later completed rollout."""
+        release_first = asyncio.Event()
+        first_started = asyncio.Event()
+
+        async def post(*, server_name, url_path, json):
+            task_index = json[TASK_INDEX_KEY_NAME]
+            if task_index == 0:
+                first_started.set()
+                await release_first.wait()
+            else:
+                await first_started.wait()
+            return FakeResponse(200, {"task_index": task_index})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        pending = RolloutCollectionHelper().run_examples(
+            [failing_row(0), failing_row(1)], semaphore=asyncio.Semaphore(2)
+        )
+        try:
+            row, result = await asyncio.wait_for(next(pending), timeout=5)
+            assert row[TASK_INDEX_KEY_NAME] == result["task_index"] == 1
+        finally:
+            release_first.set()
+        row, result = await asyncio.wait_for(next(pending), timeout=5)
+        assert row[TASK_INDEX_KEY_NAME] == result["task_index"] == 0
+
+    async def test_run_examples_does_not_dispatch_until_iteration(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        post = AsyncMock(return_value=FakeResponse(200, {"reward": 1}))
+        install_fake_server_client(monkeypatch, post)
+        pending = RolloutCollectionHelper().run_examples([failing_row()])
+        await asyncio.sleep(0)
+        post.assert_not_awaited()
+        await next(pending)
+        post.assert_awaited_once()
+
     async def test_run_examples_logs_failed_run(
         self,
         monkeypatch: pytest.MonkeyPatch,

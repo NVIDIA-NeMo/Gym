@@ -480,7 +480,8 @@ def test_native_image_history_preserves_task_images_while_compacting_browser_scr
 
 @pytest.mark.parametrize("benchmark", [WebBenchmark.WEBARENA, WebBenchmark.VISUALWEBARENA])
 @pytest.mark.asyncio
-async def test_arena_family_rollout_uses_colocated_evaluator_and_closes_session(benchmark):
+@pytest.mark.parametrize("close_succeeds", [True, False])
+async def test_arena_family_rollout_uses_colocated_evaluator_and_closes_session(benchmark, close_succeeds):
     agent = _agent()
     calls = _wire(
         agent,
@@ -514,7 +515,9 @@ async def test_arena_family_rollout_uses_colocated_evaluator_and_closes_session(
                     "session_id": "session-a",
                     "recording_artifacts": [_recording()],
                 }
-            ],
+            ]
+            if close_succeeds
+            else [{"closed": False}] * 3,
         },
     )
     request = MagicMock()
@@ -531,11 +534,17 @@ async def test_arena_family_rollout_uses_colocated_evaluator_and_closes_session(
     assert result.environment_steps == 1
     assert result.mask_sample is False
     assert result.artifact_session_id == "session-a"
-    assert result.recording_artifacts[0].mime_type == "video/webm"
+    if close_succeeds:
+        assert result.recording_artifacts[0].mime_type == "video/webm"
+        assert result.cleanup_failure_kind is None
+    else:
+        assert result.cleanup_failure_kind == "session_release_failed"
+        assert result.recording_artifacts == []
     step_body = next(body for _server, path, body in calls if path == "/step")
     assert step_body["action"]["name"] == "terminate"
     assert step_body["action"]["answer"] == "answer"
-    assert [path for _server, path, _body in calls][-2:] == ["/evaluate", "/close"]
+    paths = [path for _server, path, _body in calls]
+    assert paths[paths.index("/evaluate") :] == ["/evaluate"] + ["/close"] * (1 if close_succeeds else 3)
     assert calls[-1][1] == "/close"
 
 
@@ -944,7 +953,7 @@ async def test_browser_request_timeout_is_retryable_and_cleanup_is_bounded():
 
     assert result.reward == 0.0
     assert result.mask_sample is True
-    assert result.failure_kind == "infrastructure_error:TimeoutError"
+    assert result.failure_kind == "transport_timeout"
     assert dumped["_ng_failure_class"] == "retryable_infrastructure"
     assert "_ng_no_persist" not in dumped
     assert result.artifact_session_id == "session-a"
@@ -1172,7 +1181,7 @@ async def test_context_overflow_does_not_turn_unrelated_errors_into_valid_scores
     )
 
     assert result.mask_sample is True
-    assert result.failure_kind == "infrastructure_error:TimeoutError"
+    assert result.failure_kind == "transport_timeout"
     assert result.model_dump()["_ng_failure_class"] == "retryable_infrastructure"
     assert calls[-1] == "/close"
     assert calls.count("/evaluate") == int(failed_path == "/evaluate")
@@ -1335,9 +1344,9 @@ async def test_run_classifies_seed_precondition_as_terminal_masked_failure():
     assert result.verifier_result.metadata["http_status"] == 422
     assert result.verifier_result.metadata["error_kind"] == "benchmark_precondition"
     assert "Could not download image" in dumped["error"]
-    assert result.artifact_session_id is None
+    assert result.artifact_session_id is not None  # known even when seed has no response
     assert result.recording_artifacts == []
-    agent._post_json.assert_awaited_once()
+    assert [call.kwargs["url_path"] for call in agent._post_json.await_args_list] == ["/seed_session", "/close"]
 
 
 @pytest.mark.asyncio
@@ -1372,7 +1381,52 @@ async def test_run_classifies_missing_evaluator_as_terminal_configuration_failur
     assert dumped["_ng_failure_class"] == "configuration_error"
     assert dumped["_ng_failure_terminal"] is True
     assert result.verifier_result.metadata["error_kind"] == "evaluator_configuration"
-    agent._post_json.assert_awaited_once()
+    assert [call.kwargs["url_path"] for call in agent._post_json.await_args_list] == ["/seed_session", "/close"]
+
+
+@pytest.mark.asyncio
+async def test_lost_seed_response_still_closes_same_identity_without_leaking_capability():
+    agent = _agent(seed_request_timeout_secs=0.01, close_request_timeout_secs=0.1)
+    requests = []
+
+    async def post_json(*, url_path, json, **kwargs):
+        requests.append((url_path, json))
+        if url_path == "/seed_session":
+            raise TimeoutError("seed response was lost")
+        assert url_path == "/close"
+        response = _FakeHttpResponse({"closed": True})
+        return response, await response.json()
+
+    agent._post_json = AsyncMock(side_effect=post_json)
+    result = await agent.run(
+        MagicMock(cookies={}),
+        WebAgentRunRequest(
+            responses_create_params={"input": "Solve"}, web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0")
+        ),
+    )
+    seed, close = requests[0][1], requests[1][1]
+    assert seed["_ng_session_id"] == close["_ng_session_id"] == result.artifact_session_id
+    assert seed["_ng_session_close_token"] == close["_ng_session_close_token"]
+    assert close["_ng_session_close_token"] not in result.model_dump_json()
+    assert result.mask_sample and result.failure_kind == "session_lost"
+    assert "seed response was lost" in result.failure_reason
+
+
+@pytest.mark.asyncio
+async def test_close_failure_is_a_separate_outcome_and_retry_keeps_identity():
+    from responses_api_agents.web_agent.app import _RunArtifacts
+
+    agent = _agent(close_request_timeout_secs=1)
+    identity = {"_ng_session_id": "test-session-00000000000000000000", "_ng_session_close_token": "x" * 32}
+    artifacts = _RunArtifacts(session_id=identity["_ng_session_id"])
+    agent._post_json = AsyncMock(return_value=(None, {"closed": False, "failure_reason": "provider offline"}))
+    await agent._close_browser(identity, {}, artifacts)
+    assert artifacts.cleanup_failure_kind == "session_release_failed"
+    assert agent._post_json.await_count == 3
+    assert all(call.kwargs["json"] == identity for call in agent._post_json.await_args_list)
+    agent._post_json = AsyncMock(return_value=(None, {"closed": True}))
+    await agent._close_browser(identity, {}, artifacts)
+    assert artifacts.cleanup_failure_kind is None
 
 
 @pytest.mark.asyncio

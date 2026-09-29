@@ -2005,13 +2005,21 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         row=row, result=_agent_request_failure_row(e, status), rollout_latency_ms=None
                     )
 
-        return tqdm.as_completed(
-            map(_post_subroutine, examples),
-            desc="Collecting rollouts",
-            miniters=10,
-            total=len(examples),
-            maxinterval=60,
-        )
+        def _dispatch_in_input_order() -> Iterator[Future]:
+            # as_completed deduplicates bare coroutines through a set before
+            # scheduling them. Schedule first so semaphore waiters enter in
+            # input order; concurrency=1 must preserve stateful task ordering.
+            # Keep this lazy, as callers may construct the iterator before use.
+            tasks = [asyncio.create_task(_post_subroutine(row)) for row in examples]
+            yield from tqdm.as_completed(
+                tasks,
+                desc="Collecting rollouts",
+                miniters=10,
+                total=len(examples),
+                maxinterval=60,
+            )
+
+        return _dispatch_in_input_order()
 
     def run_examples(
         self,
@@ -2026,6 +2034,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         Rows are dispatched as given: task_sources are resolved and agent names validated here,
         but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
         ``preprocess_examples`` first if you need them.
+
+        Dispatch follows input order, while results are yielded in completion
+        order. A semaphore of size one makes dispatch serial; it does not reset
+        state between tasks or coordinate separate collectors.
 
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
         that ends every rollout still in flight. It defaults off because those rollouts then leave

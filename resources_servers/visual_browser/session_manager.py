@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+from functools import partial
+
+from nemo_gym.web.chromium import ensure_chromium
 from nemo_gym.web.models import WebActionProfile, WebBenchmark, WebRuntimeProfile, WebTask
 from nemo_gym.web.session_manager import WebSessionManager
 from resources_servers.visual_browser.backend import visual_browser_backend_factory
@@ -12,7 +15,13 @@ from resources_servers.visual_browser.config import VisualBrowserResourcesServer
 
 class VisualBrowserSessionManager(WebSessionManager):
     def __init__(self, config: VisualBrowserResourcesServerConfig) -> None:
-        super().__init__(config, backend_factory=visual_browser_backend_factory)
+        super().__init__(
+            config,
+            backend_factory=visual_browser_backend_factory,
+            prepare_runtime=partial(
+                ensure_chromium, channel=config.browser_channel, allow_install=config.browser_auto_install
+            ),
+        )
 
     def _validate_task(self, task: WebTask) -> None:
         super()._validate_task(task)
