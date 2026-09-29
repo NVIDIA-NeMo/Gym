@@ -88,6 +88,14 @@ def test_manifest_selects_named_config_and_dataset_owner(tmp_path: Path) -> None
     selected_config = path.with_name("variant.yaml")
     raw_config = yaml.safe_load(selected_config.read_text())
     raw_config["other_agent"] = raw_config["demo_agent"]
+    raw_config["other_environment_server"] = {
+        "environment_servers": {
+            "legacy_agent": {
+                "entrypoint": "app.py",
+                "agent_server": {"type": "responses_api_agents", "name": "other_agent"},
+            }
+        }
+    }
     selected_config.write_text(yaml.safe_dump(raw_config))
     raw = yaml.safe_load(path.read_text())
     raw.update(config_path="variant.yaml", dataset_owner="demo_agent")
