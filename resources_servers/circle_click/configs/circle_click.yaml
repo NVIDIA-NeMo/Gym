@@ -21,3 +21,11 @@ circle_click_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/circle_click/data/example.jsonl
+
+circle_click_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: circle_click_simple_agent

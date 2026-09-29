@@ -36,6 +36,7 @@ from typing import Any, Iterable, Sequence
 
 TEST_OUTPUT_BEGIN = "___NEMO_GYM_SCALE_SWE_TEST_BEGIN___"
 TEST_OUTPUT_END = "___NEMO_GYM_SCALE_SWE_TEST_END___"
+TEST_PATCH_FAILED = "___NEMO_GYM_SCALE_SWE_TEST_PATCH_FAILED___"
 
 # Where f2p_script is written. The dataset's own FAIL_TO_PASS ids name this file, so the path
 # is part of the data contract rather than a choice.
@@ -136,6 +137,7 @@ class VerificationResult:
     test_results: dict[str, Any] | None
     test_output: str
     error: str | None = None
+    test_patch_failed: bool = False
 
 
 def clean_commands(value: str) -> str:
@@ -187,6 +189,11 @@ def drop_patch_sections(patch: str, paths: Iterable[str]) -> str:
     return "".join(kept)
 
 
+def drop_test_patch_files(patch: str, test_patch: str) -> str:
+    sections = re.split(r"(?=^diff --git )", test_patch, flags=re.MULTILINE)
+    return drop_patch_sections(patch, {patch_section_path(section) for section in sections if section.strip()})
+
+
 def build_eval_script(inputs: VerificationInputs) -> str:
     """The script run inside the sandbox.
 
@@ -203,7 +210,9 @@ def build_eval_script(inputs: VerificationInputs) -> str:
         else ""
     )
     apply_f2p_patch = (
-        "git apply --reject --recount --ignore-space-change --whitespace=nowarn /tmp/nemo_gym_f2p.diff || true"
+        "git apply --reject --recount --ignore-space-change --whitespace=nowarn "
+        "/tmp/nemo_gym_f2p.diff 2>&1 | tee /tmp/nemo_gym_f2p.log\n"
+        f"grep -q '^error: ' /tmp/nemo_gym_f2p.log && echo {TEST_PATCH_FAILED}"
         if inputs.f2p_patch.strip()
         else ""
     )
@@ -311,10 +320,13 @@ async def run_verification(
     target_ids = list(inputs.fail_to_pass) + list(inputs.pass_to_pass)
     statuses = await asyncio.to_thread(extract_statuses, slice_test_output(output), target_ids)
     report = grade(statuses, inputs.fail_to_pass, inputs.pass_to_pass)
+    test_patch_failed = TEST_PATCH_FAILED in output
     return VerificationResult(
-        completed=True,
-        resolved=bool(report["resolved"]),
+        completed=not test_patch_failed,
+        resolved=bool(report["resolved"]) and not test_patch_failed,
         patch_applied=True,
         test_results=report,
         test_output=output,
+        error="held-out test patch did not apply" if test_patch_failed else None,
+        test_patch_failed=test_patch_failed,
     )

@@ -46,3 +46,11 @@ reasoning_gym_claude_code_agent_model_server:
       - name: example
         type: example
         jsonl_fpath: resources_servers/reasoning_gym/data/example.jsonl
+
+reasoning_gym_claude_code_agent_model_server_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: reasoning_gym_claude_code_agent_model_server

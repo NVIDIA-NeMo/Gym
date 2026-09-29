@@ -72,3 +72,11 @@ harbor_agent:
 
       # Output root directory for Harbor job artifacts.
       harbor_jobs_dir: "/path/to/Gym/responses_api_agents/harbor_agent/jobs"
+
+harbor_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: harbor_agent
