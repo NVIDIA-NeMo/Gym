@@ -58,6 +58,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym import WORKING_DIR
+from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.config_types import (
     ROLLOUT_PATH_PREFIX,
     TOKEN_CAPTURE_PATH_SEGMENT,
@@ -86,6 +87,8 @@ from nemo_gym.telemetry.span_groups import GymSpanGroup
 logger = logging.getLogger(__name__)
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
+_GLOBAL_AIOHTTP_CLIENT_CONFIG: Optional["GlobalAIOHTTPAsyncClientConfig"] = None
+_GLOBAL_AIOHTTP_CONTROL_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
 # Bound both the raw request prefix and its escaped representation to 4 KiB.
@@ -239,6 +242,10 @@ class _PickleSafeRequestInfo(NamedTuple):
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit: int = 100 * 1024
     global_aiohttp_connector_limit_per_host: int = 1024
+    # Control calls (checkpoint coordination, generation cuts) use their own pool, so long-running data
+    # calls that hold every data connection to a host cannot starve them.
+    global_aiohttp_control_connector_limit: int = 256
+    global_aiohttp_control_connector_limit_per_host: int = 64
 
     global_aiohttp_client_request_debug: bool = False
 
@@ -317,13 +324,32 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         cookie_jar=DummyCookieJar(),
     )
 
-    global _GLOBAL_AIOHTTP_CLIENT
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_CONFIG
     _GLOBAL_AIOHTTP_CLIENT = client_session
+    _GLOBAL_AIOHTTP_CLIENT_CONFIG = cfg
 
     global _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
 
     return _GLOBAL_AIOHTTP_CLIENT
+
+
+def get_global_aiohttp_control_client() -> ClientSession:  # pragma: no cover
+    """The reserved pool for control calls, created on first use next to the data client."""
+    global _GLOBAL_AIOHTTP_CONTROL_CLIENT
+    if _GLOBAL_AIOHTTP_CONTROL_CLIENT is None or _GLOBAL_AIOHTTP_CONTROL_CLIENT.closed:
+        get_global_aiohttp_client()
+        cfg = _GLOBAL_AIOHTTP_CLIENT_CONFIG or GlobalAIOHTTPAsyncClientConfig()
+        _GLOBAL_AIOHTTP_CONTROL_CLIENT = ClientSession(
+            connector=TCPConnector(
+                limit=cfg.global_aiohttp_control_connector_limit,
+                limit_per_host=cfg.global_aiohttp_control_connector_limit_per_host,
+                keepalive_timeout=15.0,
+            ),
+            timeout=ClientTimeout(),
+            cookie_jar=DummyCookieJar(),
+        )
+    return _GLOBAL_AIOHTTP_CONTROL_CLIENT
 
 
 def is_global_aiohttp_client_setup() -> bool:  # pragma: no cover
@@ -338,10 +364,17 @@ def global_aiohttp_client_exit():  # pragma: no cover
     if not is_global_aiohttp_client_setup():
         return
 
-    global _GLOBAL_AIOHTTP_CLIENT
-    asyncio.run(_GLOBAL_AIOHTTP_CLIENT.close())
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CONTROL_CLIENT
+
+    async def close() -> None:
+        await _GLOBAL_AIOHTTP_CLIENT.close()
+        if _GLOBAL_AIOHTTP_CONTROL_CLIENT is not None:
+            await _GLOBAL_AIOHTTP_CONTROL_CLIENT.close()
+
+    asyncio.run(close())
 
     _GLOBAL_AIOHTTP_CLIENT = None
+    _GLOBAL_AIOHTTP_CONTROL_CLIENT = None
 
 
 atexit.register(global_aiohttp_client_exit)
@@ -367,6 +400,7 @@ async def request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _control: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -385,10 +419,20 @@ async def request(
     # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
     if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
         return await _traced_request(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_connection_retries=_max_connection_retries,
+            _control=_control,
+            **kwargs,
         )
     return await _request_with_retries(
-        method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        method,
+        url,
+        _internal=_internal,
+        _max_connection_retries=_max_connection_retries,
+        _control=_control,
+        **kwargs,
     )
 
 
@@ -397,6 +441,7 @@ async def _traced_request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _control: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -432,7 +477,12 @@ async def _traced_request(
             safe_set_span_attributes(span, attributes)
 
         response = await _request_with_retries(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_connection_retries=_max_connection_retries,
+            _control=_control,
+            **kwargs,
         )
 
         if span is not None:
@@ -481,9 +531,10 @@ async def _request_with_retries(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _control: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
-    client = get_global_aiohttp_client()
+    client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
     num_tries = 1
     retries = 0
     retry_start = time.monotonic()
@@ -589,6 +640,13 @@ class ServerClient(BaseModel):
 
     # Resolved base URLs, cached by server name.
     _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
+    _checkpoint_enabled: Optional[bool] = PrivateAttr(default=None)
+
+    def checkpoint_enabled(self) -> bool:
+        """Return whether the global ``checkpoint:`` block enables partial-rollout checkpointing."""
+        if self._checkpoint_enabled is None:
+            self._checkpoint_enabled = checkpoint_settings(self.global_config_dict) is not None
+        return self._checkpoint_enabled
 
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
@@ -630,8 +688,15 @@ class ServerClient(BaseModel):
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
     async def request(
-        self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
+        self,
+        server_name: str,
+        url_path: str,
+        method: str,
+        *,
+        _control: bool = False,
+        **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
+        """Call another server. ``_control`` sends the call over the reserved control pool."""
         model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
         model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
         if model_server_base_url and server_name == model_server_name:
@@ -648,10 +713,14 @@ class ServerClient(BaseModel):
                 json_obj = json_obj.model_dump(exclude_unset=True)
                 kwargs["json"] = json_obj
 
-        observability_enabled = self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
+        # Checkpointing needs every model and resources call attributed to its rollout attempt, so it
+        # carries the rollout prefix even when observability is off.
+        attribute_rollout = (
+            self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False) or self.checkpoint_enabled()
+        )
         server_entry = self.global_config_dict.get(server_name)
         rollout_id = current_rollout_id()
-        if observability_enabled and server_entry is not None and "resources_servers" in server_entry:
+        if attribute_rollout and server_entry is not None and "resources_servers" in server_entry:
             if url_path == "/verify":
                 rollout_id = rollout_id or maybe_rollout_id_from_run_body(json_obj)
             if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
@@ -659,7 +728,7 @@ class ServerClient(BaseModel):
 
         if (
             rollout_id is not None
-            and observability_enabled
+            and attribute_rollout
             and server_entry is not None
             and "responses_api_models" in server_entry
             and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}
@@ -667,7 +736,7 @@ class ServerClient(BaseModel):
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
-        return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
+        return await request(method=method, url=f"{base_url}{url_path}", _internal=True, _control=_control, **kwargs)
 
     async def get(
         self,

@@ -21,6 +21,7 @@ from typing import Any, Optional
 from pydantic import BaseModel
 
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -83,6 +84,12 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
 
 def current_rollout_id() -> Optional[str]:
     return _ROLLOUT_ID.get()
+
+
+def current_episode_id() -> Optional[EpisodeId]:
+    """Return the logical rollout and attempt carried by the current capture key."""
+    capture_key = _ROLLOUT_ID.get()
+    return EpisodeId.from_capture_key(capture_key) if capture_key is not None else None
 
 
 @contextmanager
