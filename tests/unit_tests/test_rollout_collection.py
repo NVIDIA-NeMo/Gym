@@ -5025,6 +5025,20 @@ class TestEnvironmentServerRouting:
         # The envelope is not stored twice: no nested result, no episode_id, no second reward.
         assert "result" not in record and "episode_id" not in record and "failure" not in record
 
+    def test_episode_result_is_scored_only_through_its_top_level_reward(self) -> None:
+        """Any Environment Server type is scored through top-level reward and reward_components."""
+        scored = nemo_gym.rollout_collection._episode_record(
+            self._native_identity("a") | {"result": {"reward": 0.5, "reward_components": {"quality": 0.5}}}
+        )
+        nested = nemo_gym.rollout_collection._episode_record(
+            self._native_identity("b") | {"result": {"verification": {"reward": 1.0}}}
+        )
+
+        assert (scored["reward"], scored["reward_components"]) == (0.5, {"quality": 0.5})
+        # A reward inside another field is stored as data and leaves the record unscored.
+        assert "reward" not in nested
+        assert nested["verification"] == {"reward": 1.0}
+
     def test_episode_result_may_not_use_collector_keys(self) -> None:
         reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": {}}}
 

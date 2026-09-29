@@ -326,6 +326,10 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     never a terminal one. A ``result`` is stored as the Environment Server returned it; the collector
     adds only its own ``_ng_*`` keys, so any Environment Server type can be collected without the
     collector knowing its result fields.
+
+    Every Environment Server type is scored the same way: through the result's top-level ``reward``,
+    with optional top-level ``reward_components``. A reward nested elsewhere in the result is stored as
+    data, and a result without a top-level ``reward`` is unscored.
     """
     task_id = response.get("task_id")
     failure = response.get("failure")
