@@ -273,7 +273,8 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             try:
                 # Never follow redirects: aiohttp re-issues 301/302/303 as a body-less GET and
                 # re-sends 307/308 to an address the user never configured; fail with the 3xx.
-                # One inner attempt: this loop owns retries, and replaying here could start a duplicate rollout.
+                # The loop owns the retries for this POST, and replaying the POST inside request() could start a
+                # second rollout on the remote service.
                 response = await http_request(
                     "POST",
                     remote_url,
