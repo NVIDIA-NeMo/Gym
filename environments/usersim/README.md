@@ -70,7 +70,7 @@ After preparation:
 ```bash
 gym eval run \
   --environment usersim \
-  --split benchmark \
+  --split example \
   --output results/usersim.jsonl \
   ++observability_enabled=true \
   ++model_call_capture_dir=/absolute/path/to/model-calls
