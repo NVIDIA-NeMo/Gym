@@ -1,0 +1,29 @@
+nl2repobench_resources_server:
+  resources_servers:
+    nl2repobench:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      tasks_dir: resources_servers/nl2repobench/data/cache/tasks
+      expected_task_count: 104
+
+      sandbox_provider: sandbox
+      enforce_agent_no_network: true
+      sandbox_model_server: null
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 8192
+          disk_gib: 20
+        metadata:
+          benchmark: nl2repobench-v1
+          istio.io/dataplane-mode: none
+
+      logs_dir: resources_servers/nl2repobench/logs
+      clear_verifier_logs: true
+      include_workspace_in_response: false
+      workspace_tar_max_bytes: 209715200
