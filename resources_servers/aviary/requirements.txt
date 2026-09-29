@@ -5,4 +5,4 @@ datasets
 huggingface-hub
 pillow==12.3.0
 
-hypotest[opensandbox] @ git+https://github.com/EdisonScientific/hypotest.git@afcc1324b87f7f57ee1a847aeec7a641af31bfa6
+hypotest[opensandbox] @ git+https://github.com/pjin-nvidia/hypotest.git@4ca8598cf55d668610e0b4ae601876003a70d280
