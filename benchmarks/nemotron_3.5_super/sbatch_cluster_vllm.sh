@@ -33,6 +33,7 @@ case "${1:-}" in
         source "$VLLM_CONFIG"
         gym eval prepare "$@" +use_cached_prepared_benchmarks=true
         exec gym eval run "$@" \
+            --config "$RUN_DIR/inference-metrics.json" \
             --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
             --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
             +uv_venv_dir=/opt/uv_venvs +skip_venv_if_present=true \
@@ -42,7 +43,8 @@ case "${1:-}" in
             ++use_absolute_ip=true ++reuse_existing_data_preparation=true \
             "++policy_base_url=http://$ROUTER_IP:8000/v1" \
             ++policy_api_key=dummy_api_key "++policy_model_name=${MODEL_NAME:-$MODEL}" \
-            ++upload_rollouts=false ++wandb_project=null \
+            ++upload_rollouts=false "++wandb_project=$WANDB_PROJECT" \
+            "++wandb_name=$EXPERIMENT_NAME/slurm_$SLURM_JOB_ID" \
             ++global_aiohttp_connector_limit_per_host=16384 \
             ++port_range_low=63000 ++port_range_high=64000 \
             ++num_samples_in_parallel=null \
@@ -135,7 +137,11 @@ bash benchmarks/nemotron_3.5_super/sbatch_cluster_vllm.sh
 Defaults: nemotron_3.5_super.sh, P2D2, DP1/TP4, SWE Verified/OpenCode 500x3,
 concurrency 1500, original 3-hour agent timeout. MODEL and CONTAINER are required.
 Optional positional arguments replace the two default Gym --config arguments.
-No W&B upload. Exact serving-option parity is checked before starting workers.
+W&B: WANDB_ENTITY defaults to nvidia; WANDB_PROJECT defaults to $USER-gym-eval.
+All worker/router metrics are sampled and retained locally; WANDB_MODE=offline is supported.
+Cache routing knobs: ROUTER_CACHE_THRESHOLD, ROUTER_BALANCE_ABS_THRESHOLD,
+ROUTER_BALANCE_REL_THRESHOLD, ROUTER_EVICTION_INTERVAL, ROUTER_MAX_TREE_SIZE.
+Unset knobs retain the original router defaults. Serving-option parity is checked before launch.
 EOF
         exit 0
         ;;
@@ -151,6 +157,7 @@ export MOUNTS=${MOUNTS:-/lustre:/lustre,$ROOT:/opt/Gym}
 export EXPERIMENT_NAME=${EXPERIMENT_NAME:-opencode_swe_verified/cluster-super35-BF16-conc1500-p2d2-dp1tp4}
 export RESULTS_ROOT="$ROOT/results/$EXPERIMENT_NAME"
 export NEMO_GYM_USER=${NEMO_GYM_USER:-$USER}
+export WANDB_ENTITY=${WANDB_ENTITY:-nvidia} WANDB_PROJECT=${WANDB_PROJECT:-$USER-gym-eval}
 [[ -f "$CONTAINER" && -f "$VLLM_CONFIG" && -x "$PYTHON" ]]
 if [[ -n "${BASELINE_JSONL:-}" ]]; then
     [[ -f "$BASELINE_JSONL" && -f "${BASELINE_JSONL%.jsonl}.timings.jsonl" ]]

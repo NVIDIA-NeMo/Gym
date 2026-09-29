@@ -50,6 +50,11 @@ class VLLMRouterConfig(VLLMSubprocessConfig):
     health_failure_threshold: int = Field(default=3, ge=1, strict=True)
     health_success_threshold: int = Field(default=2, ge=1, strict=True)
     metrics_port: int | None = Field(default=None, ge=1, le=65535)
+    cache_threshold: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    balance_abs_threshold: int | None = Field(default=None, ge=0, strict=True)
+    balance_rel_threshold: float | None = Field(default=None, ge=1, allow_inf_nan=False)
+    eviction_interval: int | None = Field(default=None, ge=1, strict=True)
+    max_tree_size: int | None = Field(default=None, ge=1, strict=True)
     log_dir: Path = Path("results/local_vllm_router")
 
     @model_validator(mode="after")
@@ -149,14 +154,24 @@ class VLLMRouterLauncher(VLLMSubprocessLauncher):
                 "intra-node-data-parallel-size": dp_size,
                 "request-timeout-secs": self.config.inference_timeout_seconds,
                 "worker-startup-timeout-secs": int(self.config.startup_timeout_seconds),
+                "prometheus-host": host,
+                "prometheus-port": metrics_port,
             }
+            for knob in (
+                "cache_threshold",
+                "balance_abs_threshold",
+                "balance_rel_threshold",
+                "eviction_interval",
+                "max_tree_size",
+            ):
+                value = getattr(self.config, knob)
+                if value is not None:
+                    args[knob.replace("_", "-")] = value
             if strict:
                 args.update(
                     {
                         "policy": self.config.policy,
                         "api-key": self.api_key,
-                        "prometheus-host": "127.0.0.1",
-                        "prometheus-port": metrics_port,
                         "worker-startup-check-interval": 1,
                         "health-check-interval-secs": self.config.health_check_interval_seconds,
                         "health-check-timeout-secs": self.config.health_check_timeout_seconds,
@@ -207,6 +222,7 @@ class VLLMRouterLauncher(VLLMSubprocessLauncher):
                 "executable_type": self.config.executable_type,
                 "argv_redacted": redacted_argv(argv),
                 "base_url": self.base_url,
+                "metrics_url": f"http://{host}:{metrics_port}/metrics",
                 "worker_urls": worker_urls,
                 "dp_size_per_worker": dp_size,
                 "routing_authority": "vllm_router",

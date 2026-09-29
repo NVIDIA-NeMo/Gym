@@ -158,6 +158,22 @@ def make_config(
                 "profile": "external_benchmark",
                 "host": router_host,
                 "port": 8000,
+                "metrics_port": int(os.environ.get("ROUTER_METRICS_PORT", 29000)),
+                **{
+                    name: (
+                        float(os.environ[f"ROUTER_{name.upper()}"])
+                        if name in {"cache_threshold", "balance_rel_threshold"}
+                        else int(os.environ[f"ROUTER_{name.upper()}"])
+                    )
+                    for name in (
+                        "cache_threshold",
+                        "balance_abs_threshold",
+                        "balance_rel_threshold",
+                        "eviction_interval",
+                        "max_tree_size",
+                    )
+                    if f"ROUTER_{name.upper()}" in os.environ
+                },
                 "policy": policy,
                 "inference_timeout_seconds": 86400,
                 "startup_timeout_seconds": 1200,
@@ -382,7 +398,23 @@ def main() -> None:
         cpus_per_node=int(os.environ.get("SLURM_CPUS_ON_NODE", 32)),
     )
     parity = check_parity(config, recipe, hosts, args.output)
+    metrics_config = {
+        "inference_metrics": {
+            "enabled": True,
+            "endpoints": {f"node{i}": f"http://{ip}:8001/metrics" for i, (_, ip) in enumerate(hosts)},
+            "router_endpoints": {"main": f"http://{hosts[0][1]}:{config.router.metrics_port}/metrics"},
+            "endpoint_groups": {
+                "prefill": [f"node{i}" for i in range(config.groups["prefill"].nodes)],
+                "decode": [f"node{i}" for i in range(config.groups["prefill"].nodes, len(hosts))],
+            },
+            "require_wandb": os.environ.get("WANDB_MODE") != "disabled",
+        }
+    }
+    if os.environ.get("WANDB_API_KEY"):
+        # Resolve inside Gym; never embed credentials in generated configs or process arguments.
+        metrics_config["wandb_api_key"] = "${oc.env:WANDB_API_KEY}"
     for name, value in (
+        ("inference-metrics.json", metrics_config),
         ("cluster-config.json", config.model_dump(mode="json")),
         ("setting-parity.json", parity),
         ("reference-recipe.json", recipe),
@@ -393,6 +425,9 @@ def main() -> None:
     files = [
         recipe_path,
         Path(__file__),
+        Path("benchmarks/inference_metrics.py"),
+        Path("benchmarks/rollout_timing.py"),
+        Path("nemo_gym/exporters/wandb.py"),
         Path(__file__).with_name("sbatch_cluster_vllm.sh"),
         *Path("responses_api_models/local_vllm_model").glob("*.py"),
     ]

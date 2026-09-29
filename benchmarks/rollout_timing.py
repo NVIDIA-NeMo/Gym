@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Iterator
 from pathlib import Path
 from typing import Any
 
+from benchmarks.inference_metrics import InferenceMetricsConfig, collect_inference_metrics
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.server_utils import BaseServerConfig
 
@@ -59,4 +60,7 @@ class TimedCollector(RolloutCollectionHelper):
 async def run(config: RolloutCollectionConfig, global_config: dict[str, Any]) -> None:
     """Gym eval driver entrypoint; write timing sidecars beside normal output."""
     collector = TimedCollector(timing_path=Path(config.output_jsonl_fpath).with_suffix(".timings.jsonl"))
-    await collector.run_from_config(config)
+    metrics = dict(global_config.get("inference_metrics") or {})
+    metrics["output_path"] = str(Path(config.output_jsonl_fpath).with_suffix(".inference-metrics.jsonl"))
+    async with collect_inference_metrics(InferenceMetricsConfig.model_validate(metrics)):
+        await collector.run_from_config(config)

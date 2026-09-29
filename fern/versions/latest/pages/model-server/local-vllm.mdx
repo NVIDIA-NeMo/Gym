@@ -385,8 +385,39 @@ allocation. Empty keys are rejected with the default strict profile. Results inc
 code hashes, startup timestamps, worker placement, timing sidecars, and
 `comparison.json`. Before creating sandboxes, a deterministic four-token
 request must return HTTP 200 and produce nonzero NIXL KV-transfer bytes. This
-probe is excluded from rollout scores and completion timing. No results are
-uploaded to W&B.
+probe is excluded from rollout scores and completion timing.
+
+W&B defaults to `WANDB_ENTITY=nvidia` and `WANDB_PROJECT=$USER-gym-eval`;
+set these explicitly for your destination and provide `WANDB_API_KEY` or
+`wandb_api_key` in your private `env.yaml`. `WANDB_MODE=offline` retains an
+uploadable offline run. The timing driver samples every vLLM `/metrics` and the
+router's Prometheus endpoint every five seconds. It preserves the reference
+`vllm/nodeN`, `vllm/mean`, `vllm/total`, and `router/main` metric paths, including
+latency histograms and available performance counters. Extra `vllm/prefill` and
+`vllm/decode` aggregates separate local prefix caching from KV-transfer effects.
+Startup fails if a promised endpoint or the required W&B exporter is missing.
+Check `inference/scrape_up/*` for gaps during the run. Parsed samples and gzip
+compressed raw Prometheus payloads are saved beside the rollouts for recovery.
+Metrics absent from the serving binary cannot be synthesized by the collector.
+
+Router metrics bind to the same approved address as its HTTP endpoint; local
+serving remains on loopback. The comparison uses port 29000 by default
+(`ROUTER_METRICS_PORT`). Cache routing knobs are `ROUTER_CACHE_THRESHOLD`,
+`ROUTER_BALANCE_ABS_THRESHOLD`, `ROUTER_BALANCE_REL_THRESHOLD`,
+`ROUTER_EVICTION_INTERVAL`, and `ROUTER_MAX_TREE_SIZE`. Their corresponding
+`router` fields use lowercase names without the `ROUTER_` prefix. Unset values
+retain the pinned router defaults. Compare configurations with the same model,
+worker recipe, workload, and cold-cache start; use prefill hit/query **counter
+deltas**, weighted by query tokens, alongside latency, throughput, and errors.
+Increasing affinity can raise queueing latency; no setting guarantees the
+highest hit rate for every workload.
+
+`tune_router.sh baseline`, `tune_router.sh affinity`, and `tune_router.sh selective`
+submit separate cold-start trials through the same launcher. The candidates
+change cache matching and load-balance thresholds; they do not change worker
+settings or disable load balancing. Pass identical Gym arguments to each trial
+and compare completed results before selecting a configuration. These are search
+candidates, not proven improvements or new production defaults.
 
 This comparison explicitly selects `router.profile: external_benchmark`,
 which uses the image's unpatched router, cache-aware policies, and upstream
