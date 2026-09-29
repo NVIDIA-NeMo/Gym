@@ -1,5 +1,5 @@
 # Cached OpenCode builds: 1.18.26 plus saved assistant-message ID headers.
-# Build provenance and checksums: opencode-correlation/manifest.json.
+# Build provenance and checksums: opencode-correlation/manifest.yaml.
 config_paths:
 - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
