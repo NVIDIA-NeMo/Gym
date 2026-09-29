@@ -77,6 +77,7 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     max_steps: int = None
+    execute_tools: bool = True
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -242,6 +243,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         rollout_id,
                         step,
                     )
+                break
+
+            if not self.config.execute_tools:
                 break
 
             for output_function_call in all_fn_calls:

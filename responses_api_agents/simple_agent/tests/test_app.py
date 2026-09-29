@@ -614,6 +614,48 @@ class TestApp:
         assert (tool.output, tool.status, tool.error_type) == ("bad input", "failed", "http_422")
         assert tool.started_at is not None and tool.completed_at is not None and tool.duration_ms is not None
 
+    async def test_non_executing_mode_returns_tool_calls_after_one_model_activation(self) -> None:
+        server, server_client = _make_agent(True)
+        server.config.execute_tools = False
+        server_client.post = AsyncMock(
+            return_value=_mock_response(
+                {
+                    "id": "resp-tool",
+                    "created_at": 1.0,
+                    "model": "model",
+                    "object": "response",
+                    "output": [
+                        {
+                            "id": "fc-1",
+                            "call_id": "call-1",
+                            "name": "lookup",
+                            "arguments": '{"q":"x"}',
+                            "type": "function_call",
+                            "status": "completed",
+                        }
+                    ],
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                }
+            )
+        )
+
+        response, trajectory, _, _ = await server._create_episode(
+            NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "question"}]),
+            model_url_path="/v1/responses",
+            collect_trajectory=True,
+            task_id="task",
+            rollout_id="rollout",
+            invocation_id="assistant-0",
+        )
+
+        assert server_client.post.await_count == 1
+        assert [item.type for item in response.output] == ["function_call"]
+        assert trajectory is not None
+        assert len(trajectory.turns) == 1
+        assert trajectory.tool_calls == []
+
     @pytest.mark.parametrize(("capture_enabled", "override_responses"), ((False, False), (True, False), (True, True)))
     async def test_run_preserves_self_dispatch(self, capture_enabled: bool, override_responses: bool) -> None:
         agent_type = SimpleAgent
