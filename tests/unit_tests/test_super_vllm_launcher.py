@@ -543,7 +543,6 @@ curl() {
         # Hide nsys regardless of what is installed on the test host.
         stubs = r"""
 command() { if [[ "$*" == '-v nsys' ]]; then return 1; else builtin command "$@"; fi; }
-id() { echo 1000; }
 vllm() { echo 'unexpected server launch'; }
 """
         for steps, expected in (
@@ -551,7 +550,7 @@ vllm() { echo 'unexpected server launch'; }
             ("-1", "must be a positive integer"),
             ("1.5", "must be a positive integer"),
             ("abc", "must be a positive integer"),
-            ("20", "Installing Nsight Systems requires root"),
+            ("20", "requires Nsight Systems"),
         ):
             with self.subTest(steps=steps):
                 status, stdout, stderr = self.run_shell(
@@ -561,68 +560,6 @@ vllm() { echo 'unexpected server launch'; }
                 self.assertNotEqual(status, 0)
                 self.assertNotIn("unexpected server launch", stdout)
                 self.assertIn(expected, stderr)
-
-    def test_prefill_profile_installs_nsys_for_container_architecture(self) -> None:
-        _, command = self.generate_commands()
-        setup = command.split('\nmooncake_pid=""', 1)[0]
-        # Stub every system mutation: installation must never touch the test host.
-        stubs = r"""
-command() {
-    if [[ "$*" == '-v nsys' ]]; then [[ -f installed ]]; else builtin command "$@"; fi
-}
-source() {
-    if [[ "$1" == /etc/os-release ]]; then ID=ubuntu; VERSION_ID=24.04; else builtin source "$@"; fi
-}
-id() { echo 0; }
-dpkg() { echo "$TEST_ARCH"; }
-apt-get() {
-    echo "$*" >> apt_calls
-    if [[ "$TEST_FAILURE" == apt ]]; then return 42; fi
-    if [[ " $* " == *' nsight-systems-cli '* && "$TEST_FAILURE" != missing ]]; then touch installed; fi
-}
-mkdir() { [[ "$*" == '-p /usr/share/keyrings' ]]; }
-wget() { echo public-key; }
-gpg() { cat > key; [[ "$TEST_FAILURE" != key ]]; }
-tee() { cat > repository; }
-nsys() { echo "$*" >> nsys_calls; }
-"""
-        for arch, failure in (
-            ("arm64", "none"),
-            ("amd64", "none"),
-            ("arm64", "apt"),
-            ("arm64", "key"),
-            ("arm64", "missing"),
-        ):
-            with self.subTest(arch=arch, failure=failure):
-                for name in ("installed", "apt_calls", "repository", "key", "nsys_calls"):
-                    (Path(self.workdir) / name).unlink(missing_ok=True)
-                status, _, stderr = self.run_shell(
-                    stubs + setup + "\nensure_nsys\nensure_nsys\n",
-                    env={"TEST_ARCH": arch, "TEST_FAILURE": failure},
-                )
-                apt_calls = (Path(self.workdir) / "apt_calls").read_text().splitlines()
-                if failure == "none":
-                    self.assertEqual(status, 0, stderr)
-                    self.assertEqual(
-                        apt_calls,
-                        [
-                            "update",
-                            "install -y --no-install-recommends wget gnupg ca-certificates",
-                            "update",
-                            "install -y --no-install-recommends nsight-systems-cli curl",
-                        ],
-                    )
-                    self.assertEqual(
-                        (Path(self.workdir) / "repository").read_text(),
-                        "deb [signed-by=/usr/share/keyrings/nvidia-devtools-keyring.gpg] "
-                        f"https://developer.download.nvidia.com/devtools/repos/ubuntu2404/{arch}/ /\n",
-                    )
-                    self.assertEqual((Path(self.workdir) / "nsys_calls").read_text(), "--version\n")
-                else:
-                    self.assertNotEqual(status, 0)
-                    self.assertFalse((Path(self.workdir) / "nsys_calls").exists())
-                    self.assertIn("installation completed" if failure == "missing" else "installation failed", stderr)
-                    self.assertEqual(len(apt_calls), {"apt": 1, "key": 2, "missing": 4}[failure])
 
     def test_prefill_profile_cancels_pending_trigger_when_server_exits(self) -> None:
         _, command = self.generate_commands()
