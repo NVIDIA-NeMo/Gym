@@ -13,6 +13,9 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 # @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
 export VLLM_USE_V2_MODEL_RUNNER=0
 
+# TODO @bxyu-nvidia: Remove
+export VLLM_LOGGING_LEVEL=DEBUG
+
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
@@ -35,6 +38,8 @@ VLLM_COMMON_ARGS=(
     --tensor-parallel-size 4
     --api-server-count 1
     --compilation-config '{"cudagraph_mm_encoder": true}'
+    --enable-log-outputs
+    --enable-log-requests
 )
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
