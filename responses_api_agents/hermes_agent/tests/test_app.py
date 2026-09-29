@@ -261,6 +261,23 @@ class TestSanity:
         await hermes.close_agent_session(request, close_body)
         hermes._close_agent_session_state.assert_awaited_once_with(state)
 
+    async def test_several_workers_serve_run_but_reject_sessions(self) -> None:
+        """/run keeps no session, so only session seeding needs a single worker."""
+        hermes = HermesAgent(config=_config(num_workers=2), server_client=MagicMock(spec=ServerClient))
+        hermes._initialize_agent_session_state = AsyncMock()
+
+        with pytest.raises(ValueError, match="sessions require num_workers=1"):
+            await hermes.seed_agent_session(
+                SimpleNamespace(session={}),
+                AgentSeedSessionRequest(
+                    agent_session_id="session",
+                    episode_id=EpisodeId(rollout_id="rollout"),
+                    task_id=TaskId(taskset="test", task_id="task"),
+                ),
+            )
+
+        hermes._initialize_agent_session_state.assert_not_awaited()
+
     async def test_seed_rejects_required_episode_tool_grants(self) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         body = AgentSeedSessionRequest(

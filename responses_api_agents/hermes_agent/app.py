@@ -287,6 +287,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: AgentSeedSessionRequest,
     ) -> AgentSeedSessionResponse:
+        # Sessions live in this worker's memory, so every call for a session must reach this worker.
+        # The legacy /run path keeps no session and still supports several workers.
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("Hermes Agent sessions require num_workers=1")
         required_tools = [access.name for access in body.tool_accesses if access.required]
         if required_tools:
             raise ValueError(
@@ -405,8 +409,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Process-local Hermes sessions require num_workers=1")
         self.sem = Semaphore(self.config.concurrency)
         self.active_agents = set()
         self.interrupted_agents = set()
