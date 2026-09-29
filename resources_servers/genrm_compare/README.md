@@ -398,17 +398,18 @@ restart the entire cohort.
 ### Replacement attempts and retention
 
 To replace a group, the caller increments `_ng_group_attempt` for **every** member and dispatches the entire
-group. Newer attempts retire active older ones and remove their obsolete saved results. An older judge task
-cannot publish rewards into a newer attempt. An individual rollout's retry counter does not advance this
-shared group attempt.
+group. Newer attempts retire active older ones. If Gym still remembers the prior attempt, it also removes
+that attempt's saved result. An older judge task cannot publish rewards into a newer attempt. An individual
+rollout's retry counter does not advance this shared group attempt.
 
 Run the resources server with one HTTP worker. State is process-local. Completed explicit-ID groups and
 failed groups retain compact response digests, rewards when completed, and failure/attempt information;
 full answer bodies and waiters are released. Retention is bounded by `cohort_result_ttl_s` and `max_terminal_cohorts`.
 
 Results expire from completion time. Time-based retention of the newest-attempt record also starts at
-completion; an exact replay refreshes that record without extending the result's lifetime. If Gym still remembers
-an attempt but its result has been evicted, another request for that attempt receives 409 immediately.
+completion. Retries for a retained, finished attempt with matching prompt and principle refresh its attempt
+record, even when the answer conflicts or the attempt failed. They do not extend the result's lifetime.
+If Gym still remembers an attempt but its result has been evicted, another request for that attempt receives 409 immediately.
 Recover by dispatching a complete group with a higher shared `_ng_group_attempt`.
 
 Cleanup visits finished groups only. Active groups keep their attempt records and do not count toward

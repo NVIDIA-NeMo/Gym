@@ -171,7 +171,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         cohort_evaluation_timeout_s: Separate deadline for all comparisons and aggregation
         judge_request_timeout_s: Deadline for each judge HTTP request, including transport retries
         cohort_result_ttl_s: Optional retention time for completed and failed cohort tombstones
-        max_terminal_cohorts: Maximum number of completed and failed cohort tombstones
+        max_terminal_cohorts: Separate count limits for completed/failed results and finished-group attempt records
         use_principle: Enable principle-based comparison
         default_principle: Default principle when none provided in request
     """
@@ -568,7 +568,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         group_id: str,
         new_attempt: int,
     ) -> None:
-        """Release waiters and payloads owned by older active attempts."""
+        """Retire the latest tracked attempt and remove its saved result."""
         watermark = self._latest_group_attempts.get(group_id)
         if watermark is None:
             return
@@ -583,8 +583,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 cohort,
                 f"GenRM group {group_id!r} attempt {cohort.group_attempt} was superseded by attempt {new_attempt}",
             )
-        # The new attempt record rejects old requests. Drop the obsolete result too,
-        # so losing that record later cannot make a superseded reward replayable.
+        # Drop this tracked attempt's result so it cannot replay after its record is evicted.
+        # Results whose attempt records were already evicted are outside this lookup.
         self._terminal_cohorts.pop(key, None)
         self._verify_cohorts.pop(key, None)
 

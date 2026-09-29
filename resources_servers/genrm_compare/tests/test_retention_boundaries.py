@@ -217,8 +217,8 @@ async def test_superseded_result_neither_uses_a_slot_nor_replays_after_eviction(
     assert "a" not in server._latest_group_attempts
     assert server._group_cohort_key("a", 0) not in server._verify_cohorts
     calls = judge.await_count
-    # Once the attempt record is gone, the caller owns stale-attempt detection;
-    # the server must still never replay a previously superseded result.
+    # Once the attempt record is gone, the caller owns stale-attempt detection.
+    # This result was removed while its attempt was still tracked and must not replay.
     with pytest.raises(HTTPException) as error:
         await server.verify(member(0, group="a"))
     assert error.value.status_code == 503
