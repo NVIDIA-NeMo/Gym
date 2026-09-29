@@ -241,69 +241,39 @@ def test_sessions_keep_independent_resolved_contexts(tmp_path: Path) -> None:
     assert second_seed["scenario"]["probe_type"] == "general_educational"
 
 
-def test_probe_tools_are_scoped_to_seeded_session(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Runtime:
-        assistant_tools = [
+def test_tool_probe_seed_preserves_native_probe_data_without_exposing_tools(tmp_path: Path) -> None:
+    _write_personas(tmp_path)
+    body = _seed_body(seed=1, probe_type="tool_calling")
+    body["task_data"]["probe_data"] = {
+        "tools": [
             {
                 "type": "function",
                 "function": {
-                    "name": "safe_action",
-                    "description": "Perform a simulated action.",
+                    "name": "get_weather",
+                    "description": "Look up weather.",
                     "parameters": {"type": "object", "properties": {}},
                 },
             }
         ]
-
-        async def simulate_tool_call(self, name, body):
-            if name != "safe_action":
-                raise ValueError(f"Tool {name!r} is not available")
-            return json.dumps({"session_seed": body["seed"]})
-
-    monkeypatch.setattr(
-        UserSimResourcesServer,
-        "_create_probe_runtime",
-        lambda *_args, **_kwargs: Runtime(),
-    )
-    _write_personas(tmp_path)
-    app = _app(tmp_path)
-    with TestClient(app) as first, TestClient(app) as second:
-        first_seed = first.post(
-            "/seed_session",
-            json=_seed_body(seed=1, probe_type="safety_agentic"),
-        )
-        second_seed = second.post(
-            "/seed_session",
-            json=_seed_body(seed=2, probe_type="safety_agentic"),
-        )
-        first_result = first.post("/safe_action", json={"seed": 1})
-        second_result = second.post("/safe_action", json={"seed": 2})
-        rejected = first.post("/other_action", json={})
-
-    assert first_seed.json()["assistant_tools"][0]["function"]["name"] == "safe_action"
-    assert second_seed.status_code == 200
-    assert first_result.json() == {"session_seed": 1}
-    assert second_result.json() == {"session_seed": 2}
-    assert rejected.status_code == 404
-
-
-def test_native_safety_probe_exposes_and_simulates_selected_tools(tmp_path: Path) -> None:
-    pytest.importorskip("usersim.engine.core.episode_runtime")
-    _write_personas(tmp_path)
+    }
     with TestClient(_app(tmp_path)) as client:
-        seed = client.post(
-            "/seed_session",
-            json=_seed_body(seed=42, probe_type="safety_agentic"),
-        )
-        tool_name = seed.json()["assistant_tools"][0]["function"]["name"]
-        result = client.post(f"/{tool_name}", json={})
-        verified = client.post("/verify", json=_verify_body(seed.json()))
+        seed = client.post("/seed_session", json=body)
+        tool_route = client.post("/get_weather", json={})
 
     assert seed.status_code == 200
-    assert result.status_code == 200
-    assert isinstance(result.json(), dict)
+    assert "assistant_tools" not in seed.json()
+    assert seed.json()["scenario"]["probe_data"] == body["task_data"]["probe_data"]
+    assert tool_route.status_code == 404
+
+
+def test_verify_uses_authoritative_native_tool_evidence(tmp_path: Path) -> None:
+    _write_personas(tmp_path)
+    with TestClient(_app(tmp_path)) as client:
+        seed = client.post("/seed_session", json=_seed_body(seed=42, probe_type="safety_agentic"))
+        verify_body = _verify_body(seed.json())
+        verify_body["verification_input"]["usersim_result"]["num_tool_calls"] = 1
+        verified = client.post("/verify", json=verify_body)
+
     assert verified.status_code == 200
     assert verified.json()["native_usersim_result"]["num_tool_calls"] == 1
     assert verified.json()["verifier_data"]["native_scores"] is not None
@@ -353,6 +323,34 @@ def test_verify_records_context_and_requires_both_participants(tmp_path: Path) -
     assert verified["verifier_data"]["usersim_context"]["seed"] == 7
     assert incomplete["reward"] == 0.0
     assert incomplete["scenario_completed"] is False
+
+
+@pytest.mark.parametrize(
+    ("attribution", "expected_mask"),
+    [("user_model", True), ("infrastructure", True), ("assistant_model", False)],
+)
+def test_verify_masks_failures_not_caused_by_assistant_policy(
+    tmp_path: Path,
+    attribution: str,
+    expected_mask: bool,
+) -> None:
+    _write_personas(tmp_path)
+    with TestClient(_app(tmp_path)) as client:
+        seed = client.post("/seed_session", json=_seed_body(seed=7)).json()
+        body = _verify_body(seed)
+        body["verification_input"]["usersim_result"]["conversation_status"] = False
+        body["verification_input"]["usersim_result"]["simulation_outcome"] = {
+            "status": "failed",
+            "failure_class": "infrastructure_error",
+            "failure_attribution": attribution,
+            "failure_detail": "dependency failed",
+        }
+        verified = client.post("/verify", json=body).json()
+
+    assert verified["reward"] == 0.0
+    assert verified["mask_sample"] is expected_mask
+    assert verified["failure_kind"] == "infrastructure_error"
+    assert verified["failure_reason"] == "dependency failed"
 
 
 def test_verify_uses_usersim_assistant_quality_as_reward(
@@ -428,6 +426,7 @@ def test_verify_applies_native_scorer_to_non_tool_probe(
     assert verified["reward_components"]["native_scorer_applied"] == 1.0
     assert verified["verifier_data"]["native_scorer_name"] == "safety_chat_pressure"
     assert verified["verifier_data"]["native_scores"]["error"] == error
+    assert verified["mask_sample"] is bool(error)
 
 
 def test_verify_skips_concealment_scorer_for_default_health_variant(
@@ -479,6 +478,8 @@ def test_verify_translates_native_scorer_exception_to_failed_evidence(
         "status_proposal": False,
         "error": "RuntimeError: scorer unavailable",
     }
+    assert verified["mask_sample"] is True
+    assert verified["failure_kind"] == "probe_scorer_error"
 
 
 def test_verify_rejects_context_from_another_seeded_episode(tmp_path: Path) -> None:

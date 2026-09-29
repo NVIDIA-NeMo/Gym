@@ -9,7 +9,7 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import Any
 from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientResponseError
@@ -46,16 +46,11 @@ from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_conf
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from nemo_gym.tool_access import (
-    DirectHTTPToolAccess,
-    MCPStreamableHTTPConnection,
-    MCPToolAccess,
-    ToolAccess,
-)
 from resources_servers.usersim.episode_contracts import (
     UserSimEpisodeFailure,
     UserSimEpisodeRequest,
@@ -63,7 +58,6 @@ from resources_servers.usersim.episode_contracts import (
     UserSimEpisodeResult,
     UserSimInvocation,
     UserSimProtocolConfig,
-    UserSimScenario,
     UserSimSeedResponse,
     UserSimSimulationResult,
     UserSimTaskInput,
@@ -79,6 +73,7 @@ _INVOCATION_ROLE_BY_ALIAS = {
     "assistant_model": "assistant",
     "judge_model": "judge",
     "summary_model": "summary",
+    "api_response_model": "tool_simulation",
 }
 _USERSIM_MODEL_ALIASES = tuple(_INVOCATION_ROLE_BY_ALIAS)
 _PARTICIPANT_ALIASES = ("user_model", "assistant_model")
@@ -94,8 +89,8 @@ class UserSimEnvironmentServerConfig(BaseEnvironmentServerConfig):
     assistant_agent: AgentServerRef
     judge_model: ModelServerRef
     summary_model: ModelServerRef
+    tool_simulation_model: ModelServerRef
     resources_server: ResourcesServerRef
-    resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
     max_turns: int = Field(5, ge=1)
     actor_call_timeout_seconds: float = Field(300.0, gt=0)
     protocol_config: UserSimProtocolConfig = Field(default_factory=UserSimProtocolConfig)
@@ -106,6 +101,7 @@ class UserSimEnvironmentServerConfig(BaseEnvironmentServerConfig):
             "assistant_model": self.assistant_agent,
             "judge_model": self.judge_model,
             "summary_model": self.summary_model,
+            "api_response_model": self.tool_simulation_model,
         }[alias]
 
 
@@ -166,18 +162,6 @@ def _configured_model_name(environment_server: "UserSimEnvironmentServer", alias
     return str(model_config.get("model") or model_server_name)
 
 
-class _ResourcesOwnedModelFacade:
-    """Placeholder for UserSim aliases that the Resources Server owns."""
-
-    model_name = "resources-server"
-
-    async def acompletion(self, _messages: Sequence[Any], **_kwargs: Any) -> SimpleNamespace:
-        raise RuntimeError(
-            "UserSim attempted to invoke api_response_model in the Environment Server; "
-            "API-response synthesis must run through the Resources Server tool endpoint"
-        )
-
-
 def _create_usersim_generator(
     generator_type: type[Any],
     config: Any,
@@ -206,14 +190,12 @@ class _ConversationBridge:
         task: UserSimTaskInput,
         resources_cookies: dict[str, str],
         agent_sessions: dict[str, _AgentSession],
-        assistant_tools: list[dict[str, Any]],
     ) -> None:
         self.environment_server = environment_server
         self.request = request
         self.task = task
         self.resources_cookies = resources_cookies
         self.agent_sessions = agent_sessions
-        self.assistant_tools = assistant_tools
         self.invocations: list[UserSimInvocation] = []
 
     async def invoke(
@@ -229,13 +211,13 @@ class _ConversationBridge:
         if base_params is None:
             base_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
         values = base_params.model_dump(mode="json", exclude_none=True)
-        values["input"] = [_to_responses_input(message) for message in messages]
+        values["input"] = [item for message in messages for item in _to_responses_input_items(message)]
         if max_tokens is not None:
             values["max_output_tokens"] = max_tokens
         if tools:
             if alias != "assistant_model":
                 raise ValueError(f"UserSim requested tools for non-Assistant alias {alias!r}")
-            values["tools"] = [_to_responses_tool(tool) for tool in self.assistant_tools]
+            values["tools"] = [_to_responses_tool(tool) for tool in tools]
         request_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(values)
 
         target = self.environment_server.config.target_for_alias(alias)
@@ -279,7 +261,7 @@ class _ConversationBridge:
             message=SimpleNamespace(
                 content=_response_text(gym_response),
                 reasoning_content=None,
-                tool_calls=None,
+                tool_calls=_response_tool_calls(gym_response),
             ),
             usage=(
                 SimpleNamespace(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
@@ -348,8 +330,6 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             ResourcesCloseSessionResponse.model_validate(await get_response_json(close_response))
 
         resources_cleanup = cleanup.register_cleanup("resources session", close_resources)
-        tool_accesses = self._resources_tool_accesses(seed, resources_cookies)
-
         agent_sessions: dict[str, _AgentSession] = {}
         agent_targets = {
             "user_model": self.config.user_agent,
@@ -362,7 +342,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                     agent_session_id=agent_session_id,
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
-                    tool_accesses=tool_accesses if alias == "assistant_model" else [],
+                    tool_accesses=[],
                     sandbox_access=seed.sandbox_access if alias in {"user_model", "assistant_model"} else None,
                 )
                 session_http_response = await self.server_client.post(
@@ -411,10 +391,9 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             task,
             resources_cookies,
             agent_sessions,
-            seed.assistant_tools,
         )
         try:
-            raw_result = await self._run_usersim(bridge, seed.scenario)
+            raw_result = await self._run_usersim(bridge, seed)
             result = UserSimSimulationResult.model_validate(raw_result)
             _finalize_termination(bridge.invocations, result)
             if not any(invocation.role == "assistant" for invocation in bridge.invocations):
@@ -473,21 +452,26 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             ),
         )
 
-    async def _run_usersim(self, bridge: _ConversationBridge, scenario: UserSimScenario) -> dict[str, Any]:
+    async def _run_usersim(self, bridge: _ConversationBridge, seed: UserSimSeedResponse) -> dict[str, Any]:
         from usersim.engine.config import ConversationSimulatorConfig
         from usersim.engine.core.llm import set_debug_log_path
         from usersim.engine.generator import ConversationSimulatorGenerator
 
         set_debug_log_path(None)
+        scenario = seed.scenario
         config_values = self.config.protocol_config.model_dump(mode="python", exclude_none=True)
         config_values.update(
-            {"name": "conversation_messages", "locale": scenario.locale, "max_turns": self.config.max_turns}
+            {
+                "name": "conversation_messages",
+                "locale": scenario.locale,
+                "max_turns": self.config.max_turns,
+                "random_seed": seed.usersim_context.seed,
+                "tools_column": "tools" if scenario.probe_type == "tool_calling" else None,
+                "finance_retrieval_mode": "golden",
+            }
         )
         config = ConversationSimulatorConfig.model_validate(config_values)
         models: dict[str, Any] = {alias: _GymModelFacade(alias, bridge) for alias in _USERSIM_MODEL_ALIASES}
-        # UserSim currently resolves all model aliases eagerly. This alias is used only by
-        # probe tool runtimes, which execute in the Resources Server.
-        models["api_response_model"] = _ResourcesOwnedModelFacade()
         generator = _create_usersim_generator(ConversationSimulatorGenerator, config, models)
         data = scenario.model_dump(mode="python", exclude={"locale", "probe_data"})
         data.update(scenario.probe_data)
@@ -501,47 +485,6 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
         return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"
-
-    def _resources_tool_accesses(
-        self,
-        seed: UserSimSeedResponse,
-        resources_cookies: dict[str, str],
-    ) -> list[ToolAccess]:
-        resources_base_url = self.server_client._resolve_base_url(self.config.resources_server.name).rstrip("/")
-        accesses: list[ToolAccess] = []
-        if "direct_http" in self.config.resources_tool_transports:
-            accesses.append(
-                DirectHTTPToolAccess(
-                    name=f"{self.config.resources_server.name}.direct_http",
-                    required=True,
-                    base_url=resources_base_url,
-                    cookies=resources_cookies,
-                )
-            )
-        if "mcp" in self.config.resources_tool_transports:
-            if seed.resources_tools is None:
-                raise self._failure(
-                    "seed",
-                    ValueError("Resources seed did not return requested MCP metadata"),
-                    terminal=True,
-                )
-            if seed.resources_tools.transport != "http":
-                raise self._failure(
-                    "seed",
-                    ValueError(f"Unsupported resources MCP transport: {seed.resources_tools.transport}"),
-                    terminal=True,
-                )
-            accesses.append(
-                MCPToolAccess(
-                    name=seed.resources_tools.server_name,
-                    required=True,
-                    connection=MCPStreamableHTTPConnection(
-                        url=f"{resources_base_url}/{seed.resources_tools.url_path.lstrip('/')}",
-                        headers=seed.resources_tools.headers,
-                    ),
-                )
-            )
-        return accesses
 
     @staticmethod
     def _failure(
@@ -573,17 +516,46 @@ def _agent_observations(source: str, trajectory_data: Any) -> AgentObservationBu
     )
 
 
-def _to_responses_input(message: Any) -> dict[str, Any]:
+def _to_responses_input_items(message: Any) -> list[dict[str, Any]]:
     if hasattr(message, "model_dump"):
         value = message.model_dump(mode="json", exclude_none=True)
     elif isinstance(message, Mapping):
         value = dict(message)
     else:
-        value = {"role": getattr(message, "role"), "content": getattr(message, "content", "")}
+        value = {
+            "role": getattr(message, "role"),
+            "content": getattr(message, "content", ""),
+            "tool_calls": getattr(message, "tool_calls", None),
+            "tool_call_id": getattr(message, "tool_call_id", None),
+        }
     role = getattr(value.get("role"), "value", value.get("role"))
+    if role == "tool":
+        call_id = value.get("tool_call_id")
+        if not call_id:
+            raise ValueError("UserSim tool message is missing tool_call_id")
+        return [{"type": "function_call_output", "call_id": call_id, "output": value.get("content", "")}]
     if role not in {"system", "developer", "user", "assistant"}:
         raise NotImplementedError(f"UserSim message role {role!r} is not supported")
-    return {"type": "message", "role": role, "content": value.get("content", "")}
+    items: list[dict[str, Any]] = []
+    content = value.get("content", "")
+    if content or not value.get("tool_calls"):
+        items.append({"type": "message", "role": role, "content": content})
+    for tool_call in value.get("tool_calls") or []:
+        tool_value = (
+            tool_call.model_dump(mode="json", exclude_none=True) if hasattr(tool_call, "model_dump") else tool_call
+        )
+        function = tool_value.get("function") if isinstance(tool_value, Mapping) else None
+        if not isinstance(function, Mapping):
+            raise ValueError(f"Invalid UserSim tool call: {tool_value!r}")
+        items.append(
+            {
+                "type": "function_call",
+                "call_id": tool_value["id"],
+                "name": function["name"],
+                "arguments": function.get("arguments", "{}"),
+            }
+        )
+    return items
 
 
 def _to_responses_tool(tool: Any) -> dict[str, Any]:
@@ -610,6 +582,15 @@ def _response_text(response: NeMoGymResponse) -> str:
             if text:
                 chunks.append(text)
     return "\n".join(chunks)
+
+
+def _response_tool_calls(response: NeMoGymResponse) -> list[SimpleNamespace] | None:
+    calls = [
+        SimpleNamespace(id=item.call_id, name=item.name, arguments_json=item.arguments)
+        for item in response.output
+        if isinstance(item, NeMoGymResponseFunctionToolCall)
+    ]
+    return calls or None
 
 
 def _finalize_termination(invocations: list[UserSimInvocation], result: UserSimSimulationResult) -> None:

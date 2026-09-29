@@ -17,7 +17,7 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.rollout_observability import AgentObservationBundle
 
 
-UserSimAgentRole = Literal["user", "assistant", "judge", "summary"]
+UserSimAgentRole = Literal["user", "assistant", "judge", "summary", "tool_simulation"]
 USERSIM_EPISODE_PROTOCOL = "usersim.ConversationLoop"
 
 
@@ -65,7 +65,7 @@ class UserSimProtocolConfig(BaseModel):
     user_language_min_letters: int = Field(8, ge=0)
     incremental_disclosure_ratio: float = Field(0.6, ge=0, le=1)
     persona_grounding_ratio: float = Field(1, ge=0, le=1)
-    context_compression: bool = True
+    context_compression: bool = False
     compression_window: int = Field(1, ge=1)
     store_reasoning: bool = True
     random_seed: int | None = None
@@ -101,7 +101,6 @@ class UserSimSeedResponse(ResourcesSeedSessionResponse):
 
     scenario: UserSimScenario
     usersim_context: ResolvedUserSimContext
-    assistant_tools: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class UserSimSimulationResult(BaseModel):
@@ -163,6 +162,9 @@ class UserSimVerification(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reward: float
+    mask_sample: bool = False
+    failure_kind: str | None = None
+    failure_reason: str | None = None
     reward_components: dict[str, float]
     scenario_completed: bool
     verifier_data: dict[str, Any] = Field(default_factory=dict)
