@@ -180,7 +180,7 @@ def _normalize_trailing_whitespace(text: str) -> str:
     return _TRAILING_WS_RE.sub("", text)
 
 
-def missing_chunks(code: str, chunks: list[str], normalize_trailing_whitespace: bool = True) -> list[str]:
+def missing_chunks(code: str, chunks: list[str], *, normalize_trailing_whitespace: bool = True) -> list[str]:
     """Return the statement paragraphs that do not appear verbatim in ``code``.
 
     Deliberate departure from upstream: with ``normalize_trailing_whitespace``
@@ -314,10 +314,12 @@ class LeanResult:
     # the documented JSON, saturation that outlasted the retries). Reported as a
     # harness fault rather than as a failed proof.
     transport_failure: bool = False
-    # True when the server answered 5xx for *this* snippet. Kimina raises that
-    # from executing the submission, so it is the model's, not the harness's;
-    # carried as its own flag rather than sniffed out of ``error`` so the
-    # attribution does not depend on the wording of a server message.
+    # True when the server answered 500 from *executing this snippet* — not
+    # every 5xx does: Kimina also raises 500 when it cannot start a REPL or run
+    # the import header on one, and a 502/504 comes from a proxy in front of a
+    # server that did not answer at all. Those are transport failures instead.
+    # ``lean_client.is_model_attributable_server_error`` draws the line and
+    # documents it; this flag only carries the answer.
     server_error: bool = False
 
 
@@ -347,8 +349,9 @@ def classify_lean_result(result: LeanResult) -> str:
     if result.transport_failure:
         return STATUS_SANDBOX_ERROR
     if result.server_error:
-        # Kimina's per-snippet 500. Executing this submission raised inside the
-        # server; upstream charges that to the model and so does this.
+        # Kimina's per-snippet 500 from executing *this submission* (the client
+        # has already excluded the REPL-lifecycle and gateway 5xx, which are
+        # transport failures). Upstream charges that to the model and so does this.
         return "lean_error"
     if result.error:
         if HEADER_TIMEOUT_MARKER in result.error:

@@ -45,7 +45,11 @@ from resources_servers.combibench.fine_eval import (
     missing_chunks,
     statement_chunks,
 )
-from resources_servers.combibench.lean_client import DEFAULT_MAX_CONCURRENCY, KiminaLeanClient
+from resources_servers.combibench.lean_client import (
+    DEFAULT_LEAN_SERVER_MAX_WAIT_SECONDS,
+    DEFAULT_MAX_CONCURRENCY,
+    KiminaLeanClient,
+)
 from resources_servers.lean_proof.status import (
     STATUS_BANNED_TOKENS,
     STATUS_COMPILE_ERROR,
@@ -128,6 +132,13 @@ class CombibenchResourcesServerConfig(BaseResourcesServerConfig):
     # Upstream's Lean4Client default. The value is sent to the server, which
     # kills the REPL command at that point and reports a timeout.
     lean_timeout_seconds: int = 60
+    # The server's ``LEAN_SERVER_MAX_WAIT``: how long it waits for a free REPL
+    # before answering 429. Not sent anywhere — the client's HTTP budget is
+    # derived from it (``lean_client.http_budget_seconds``) so the server always
+    # answers before the client gives up. Kimina's default and this
+    # repository's ``kimina_image`` both use 60; set it to the server's value if
+    # it was configured differently.
+    lean_server_max_wait: int = DEFAULT_LEAN_SERVER_MAX_WAIT_SECONDS
     # Bound on the extracted code before it is sent anywhere. The longest
     # pinned statement is 3,054 characters; this is a safety cap, not a measure.
     max_code_characters: int = 200_000
@@ -302,7 +313,7 @@ class CombibenchVerifier:
             return self._respond(body, CombibenchStatus.CODE_TOO_LONG, tags=tags)
         if has_forbidden_substring(code):
             return self._respond(body, CombibenchStatus.FORBIDDEN_KEYWORD, tags=tags, code=code)
-        if missing_chunks(code, chunks, self.config.normalize_trailing_whitespace):
+        if missing_chunks(code, chunks, normalize_trailing_whitespace=self.config.normalize_trailing_whitespace):
             return self._respond(body, CombibenchStatus.STATEMENT_MISMATCH, tags=tags, code=code)
 
         types = abbrev_types(chunks) if self.config.answer_check_ascription else None
@@ -412,6 +423,7 @@ class CombibenchResourcesServer(SimpleResourcesServer):
                 self.config.lean_server_url,
                 self.config.lean_server_api_key,
                 max_concurrency=_per_worker_concurrency(self.config),
+                lean_server_max_wait=self.config.lean_server_max_wait,
             ),
         )
 
