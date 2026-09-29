@@ -3,4 +3,4 @@
 
 # Preparation-only dependency. Keep this revision aligned with the UserSim
 # requirements used by the runtime servers.
-nemo-usersim @ git+ssh://git@github.com/NVIDIA-NeMo/UserSim.git@4864ee880d4992df0698904a120797751ecef354
+nemo-usersim @ git+ssh://git@github.com/NVIDIA-NeMo/UserSim.git@2f1f116bd03664ecf5668e9b58f665eda2ca051c
