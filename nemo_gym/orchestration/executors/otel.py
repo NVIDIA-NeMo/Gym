@@ -41,6 +41,30 @@ COLLECTOR_CONFIG_NAME = "collector.yaml"
 COLLECTOR_HEALTH_PORT = 13133
 OTLP_GRPC_PORT = 4317
 OTLP_HTTP_PORT = 4318
+# Gym's optional-dependency group that brings nemo-lens; installed in the driver when the collector
+# is active so Gym's own servers emit into the collector.
+GYM_TELEMETRY_EXTRA = "telemetry"
+
+
+def driver_telemetry_env(gym_job_id: str, span_groups: str, *, logs: bool = True) -> dict[str, str]:
+    """Environment that switches on Gym's Lens instrumentation and points it at the collector.
+
+    Gym reads these in every server process (`NEMO_GYM_OTEL_*` are Gym's own, the `OTEL_*` ones
+    are the SDK's); an explicit value in `driver.env` wins over these.
+    """
+    return {
+        "NEMO_GYM_OTEL_ENABLED": "1",
+        "NEMO_GYM_OTEL_RUN_ID": gym_job_id,
+        "NEMO_GYM_OTEL_SPAN_GROUPS": span_groups,
+        "NEMO_GYM_OTEL_LOGS_ENABLED": "1" if logs else "0",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://localhost:{OTLP_HTTP_PORT}",
+        "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+        # nemo-lens builds its log exporter over gRPC regardless of the protocol setting, so logs
+        # get the collector's gRPC port explicitly (the SDK's per-signal endpoint takes precedence).
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": f"http://localhost:{OTLP_GRPC_PORT}",
+    }
+
+
 # Seconds the collector keeps running after the driver exits, so one more scrape sees the final
 # counters before it is asked to flush and stop.
 FINAL_SCRAPE_GRACE_SECONDS = 20
@@ -55,8 +79,13 @@ def scrape_targets(config: SubmitConfig) -> dict[str, int]:
 
 
 def otel_active(config: SubmitConfig) -> bool:
-    """Whether a collector step is added to this job: enabled, and there is something to scrape."""
-    return config.otel.enabled and bool(scrape_targets(config))
+    """Whether a collector step is added to this job.
+
+    Enabled is enough: Gym's own servers push spans, metrics and logs through the collector whether
+    or not the job serves a model locally (a `type: api` policy, a CPU-only judge run), so a job
+    without anything to scrape still gets one.
+    """
+    return config.otel.enabled
 
 
 def validate_destination(config: SubmitConfig) -> None:
@@ -107,9 +136,11 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     token = f"${{env:{obs.token_env}}}"
     interval = f"{obs.scrape_interval_seconds}s"
 
+    # The scrape job name becomes the scraped data's `service.name`, which `transform/identity`
+    # below turns into its display name; Lens-instrumented Gym servers arrive with their own.
     scrape_configs = [
         {
-            "job_name": f"vllm-{name}",
+            "job_name": f"{obs.component}/{name}",
             "scrape_interval": interval,
             "static_configs": [{"targets": [f"localhost:{port}"], "labels": {"gym_service": name}}],
         }
@@ -126,6 +157,16 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
                     "static_configs": [{"targets": [f"localhost:{port}"]}],
                 }
             )
+    # Every producer's own `service.name` is kept as the display identity, then `service.name`
+    # itself is overwritten with the routing identity the backend expects (see `resource` below).
+    keep_display_name = (
+        'set(resource.attributes["service.name.override"], resource.attributes["service.name"]) '
+        'where resource.attributes["service.name.override"] == nil and resource.attributes["service.name"] != nil'
+    )
+    identity = {
+        f"{signal}_statements": [{"context": "resource", "statements": [keep_display_name]}]
+        for signal in ("metric", "trace", "log")
+    }
     # vLLM names its metrics `vllm:<name>`; the shared dashboards, and Prometheus convention, use
     # `vllm_<name>`, and the backend keeps whatever name arrives. Renamed after parsing so counters
     # and histograms keep their types (Prometheus relabelling would make them untyped). `$$` escapes
@@ -141,8 +182,6 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
 
     attributes = [
         ("service.name", obs.service_name, "upsert"),
-        # `insert` so a producer that already names its own component keeps it.
-        ("service.name.override", obs.component, "insert"),
         ("Authorization", token, "upsert"),
         ("user", getpass.getuser(), "upsert"),
         ("run_id", remote_bench_dir.parent.name, "upsert"),
@@ -158,10 +197,22 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     # dashboards match it as a label string.
     resource_actions.append({"key": "slurm_job_id", "action": "convert", "converted_type": "string"})
 
+    # Spans become latency/count series too, so operations that only exist as spans (Gym's
+    # sandbox start/exec, model calls) get dashboard panels without a metric of their own. The
+    # display identity is kept as a dimension because `service.name` is the routing name by then.
+    span_metrics = {
+        "histogram": {
+            "explicit": {"buckets": ["250ms", "1s", "2s", "5s", "10s", "30s", "60s", "120s", "300s", "600s", "1800s"]}
+        },
+        "dimensions": [{"name": "service.name.override"}, {"name": "nemo.gym.sandbox.provider"}],
+        "metrics_flush_interval": f"{obs.scrape_interval_seconds}s",
+    }
+
     doc = {
         "extensions": {"health_check": {"endpoint": f"0.0.0.0:{COLLECTOR_HEALTH_PORT}"}},
+        "connectors": {"span_metrics": span_metrics},
         "receivers": {
-            "prometheus": {"config": {"scrape_configs": scrape_configs}},
+            **({"prometheus": {"config": {"scrape_configs": scrape_configs}}} if scrape_configs else {}),
             "otlp": {
                 "protocols": {
                     "grpc": {"endpoint": f"0.0.0.0:{OTLP_GRPC_PORT}"},
@@ -172,6 +223,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         "processors": {
             "batch": {},
             "resource": {"attributes": resource_actions},
+            "transform/identity": identity,
             "transform/metric_names": rename_colon_metrics,
         },
         "exporters": {
@@ -187,18 +239,18 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
             "telemetry": {"logs": {"level": "debug"}},
             "pipelines": {
                 "metrics": {
-                    "receivers": ["prometheus"],
-                    "processors": ["transform/metric_names", "resource", "batch"],
+                    "receivers": (["prometheus"] if scrape_configs else []) + ["otlp", "span_metrics"],
+                    "processors": ["transform/metric_names", "transform/identity", "resource", "batch"],
                     "exporters": ["otlp_http/managed", "file/metrics"],
                 },
                 "traces": {
                     "receivers": ["otlp"],
-                    "processors": ["resource", "batch"],
-                    "exporters": ["otlp_http/managed", "file/traces"],
+                    "processors": ["transform/identity", "resource", "batch"],
+                    "exporters": ["otlp_http/managed", "file/traces", "span_metrics"],
                 },
                 "logs": {
                     "receivers": ["otlp"],
-                    "processors": ["resource", "batch"],
+                    "processors": ["transform/identity", "resource", "batch"],
                     "exporters": ["otlp_http/managed", "file/logs"],
                 },
             },
