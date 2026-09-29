@@ -56,6 +56,7 @@ class SeedSessionResponse(SessionRequest):
     sandbox_provider: dict[str, Any] = Field(default_factory=dict)
     instruction: str = ""
     user: str | int | None = None
+    execution_mode: Literal["miniswe", "oracle"] = "miniswe"
     agent_timeout_sec: float = Field(default=28800, gt=0)
     mcp_servers: list[dict[str, Any]] = Field(default_factory=list)
     skills_dir: str | None = None

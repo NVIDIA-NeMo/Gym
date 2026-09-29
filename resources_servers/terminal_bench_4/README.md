@@ -47,6 +47,174 @@ artifacts, including collected remote `/logs/agent` files, remain under the tria
 directory. The seed's connection configuration is used only for the internal
 agent/resource exchange and is not persisted in session records.
 
+Artifact transfer retains source numeric UID/GID and `0777` permission bits for
+files and directories, independently of the host's user and umask. Host-side
+metadata lives in the trial's `artifact-metadata/`, outside the collected tree.
+Restore uses root only to reapply this metadata; verifier execution still uses
+the configured verifier identity. Archive path/link checks remain enabled and
+set-ID/sticky bits are stripped. ACLs and extended attributes are not transferred.
+The EFS snapshot path follows the same rules. Missing metadata or failed archive
+restore is an infrastructure error, not a metadata-losing file-copy fallback.
+
+Local transfer packing, extraction, hashing and metadata I/O run in a bounded
+thread pool shared by all sessions of this resources process. Configure
+`max_concurrent_archive_operations` (positive integer, default **2**), or the
+benchmark override `tb4_archive_concurrency`, independently of
+`max_concurrent_sessions` / `tb4_concurrency`. Additional archive jobs wait
+asynchronously, leaving sandbox requests and status checks responsive. This is
+a per-process limit on local transfer I/O, not a limit on remote sandboxes or
+their archive commands; multiple resources processes have separate pools.
+
+Cancellation stops queued work, but Python cannot interrupt a running worker
+thread. An in-flight operation is joined before its slot or temporary files are
+released; shutdown joins the pool after session cleanup. Consequently, cleanup
+can exceed the normal grace period while slow filesystem work finishes. Archive
+filters, metadata, task identities and grading semantics remain unchanged. This
+does not accelerate a slow filesystem or qualify higher sandbox concurrency.
+
+## Optional local training packages and reference solutions
+
+The official public-package path remains the default. Set `local_task_packages:
+true` and `manifest_path` to a trusted host manifest to use prebuilt training
+images. The manifest has `format: "gym-tb4-local-v1"`, a dataset `ref`, and
+`tasks` entries containing `name`, content-pinned `ref` (`sha256:...`), and
+absolute host `path`. Names are used verbatim in this mode. Each package uses
+the same strict task schema and content-hash check as public packages; rows
+cannot supply arbitrary package paths. Shared-verifier tasks remain unsupported.
+
+Local packages follow the verifier build-layout convention: `tests/Dockerfile`
+or `tests/docker-compose.yaml` means the verifier image already contains its
+tests, so the runner does not replace them with the host's build context. With
+neither file, it stages the host-owned `tests/` tree into `/tests` in the fresh
+verifier, as root, after restoring the declared artifacts. The agent's
+`environment/Dockerfile` does not control this decision. No additional dataset
+field or configuration flag is required. Tests are never injected into the
+agent's working directory. The test command still runs as `verifier.user`; when
+absent, the current image default is preserved. Images must support the requested
+identities and root setup operations.
+
+### Task identities and root-default images
+
+Execution identities come from `agent.user` and `verifier.user`. An omitted
+field uses that environment's **current** image default; the runner does not
+retain or look up the image's former User. If preprocessing republishes an
+image with `USER root`, it must fill any missing task identity with the original
+default for the corresponding role. Preserve explicit task users; do not replace
+an explicit root verifier with the original agent-image user. OCI's empty User
+means root. Regenerate content-pinned packages and manifest/row hashes after
+changing task settings.
+
+The old `environment.root_bootstrap_image_users` option is removed and rejected
+as an unknown setting. Remove it (and the corresponding launcher option) from
+new runs after preprocessing the task identities. Historical runs remain tied
+to their original code/config pins. Startup OCI metadata is independent and
+remains supported; its User field is not an execution-identity fallback.
+
+Account names and numeric UIDs are supported. Group-qualified `user:group`
+execution settings are rejected rather than silently losing the group override.
+Unavailable users or failed switches are errors, never root fallbacks. This
+does not rebuild an image or make a non-root sandbox capable of root execution.
+
+| Operation | Execution identity |
+| --- | --- |
+| Stage trusted solution/tests | Root |
+| Golden solution | `agent.user`, otherwise selected golden-image default |
+| Live Mini-SWE commands | `agent.user`, otherwise current agent-image default |
+| Run verifier tests | `verifier.user`, otherwise current verifier-image default |
+| Healthcheck / collection hook without its own user | Current image default for that environment |
+
+The resolved agent identity is passed to both harnesses, not just resource-owned
+commands. Existing named-user switching remains. For a root-started main sandbox,
+log setup probes the role's UID/GID and prepares only
+`/logs`, `/logs/agent`, `/logs/verifier`, and `/logs/artifacts` for that role,
+including EFS mounts. No workspace ownership or permissions are repaired.
+For root-started sandboxes, `sandbox/<session-id>.identity.json` records the
+observed bootstrap UID, configured/execution user and execution UID/GID; it
+contains no historical image-user mapping. Non-root sandboxes retain their
+existing log-directory creation path, without a forced root switch. EFS log
+roots use the role's UID/GID in either case. Perform a live golden/model smoke
+before qualifying preprocessed task packages and images.
+
+### Reference solution checks
+
+An optional top-level `oracle_docker_image` in the pinned `task.toml` selects a
+different main image **only** for `execution_mode: oracle`:
+
+```toml
+oracle_docker_image = "registry.example/task-oracle@sha256:<digest>"
+
+[environment]
+docker_image = "registry.example/task-agent@sha256:<digest>"
+```
+
+Without this field, golden execution uses the verifier image. If there is no
+separate verifier image, the existing verifier-image fallback uses the task image.
+This supersedes the extension's earlier agent-image default. Live rollouts always use
+`environment.docker_image`, and grading still starts a fresh verifier using
+`verifier.environment.docker_image` (or its existing agent-image fallback).
+The override changes only the agent-side image, including the Compose `main`
+image when applicable. Agent workdir, healthcheck, Compose layout/sidecars,
+network/resources, artifact contract and `agent.user` remain unchanged. Trusted
+solution staging remains root; solution execution remains the agent identity.
+
+The selected oracle image must support that identity and the agent runtime.
+An omitted `agent.user` uses the selected image's default: when changing USER to
+root, preprocessing must explicitly preserve any intended non-root agent user
+in the pinned task. Supply verified OCI startup metadata for the oracle image
+just as for the agent and verifier images. No automatic permission repairs or
+fallback to root are performed. Changing this field requires regenerating the
+package and dataset content pins; a `/run` row cannot override the pinned image.
+
+Set the resources server's `execution_mode: oracle` for a reference-solution check.
+During `/seed_session`, resources stages the pinned `solution/` directory into
+`/solution` as root and makes these reference assets readable (bounded to 360 seconds).
+It returns `execution_mode: oracle` in the trusted seed response, alongside the
+agent identity and sandbox descriptor. Request-row extras cannot select this mode,
+image, or a host solution path. Live seeds never stage the solution.
+
+The agent server reconnects and executes `bash /solution/solve.sh` as `agent.user`
+(selected image default when absent), using its normal setup and task execution
+budgets. It neither reads host task packages nor uploads trusted files. It then
+submits the result to resources `/verify`; artifact collection, separate grading
+and cleanup use upstream's normal lifecycle. No workspace permissions change and
+no model is invoked. Under the agent's artifact directory, `oracle/identity.json`,
+stdout/stderr and the returned `oracle_exit_code` distinguish
+solution failures from verifier errors; reward 1 is still required for a golden
+pass. `execution_mode: miniswe` is the default for ordinary rollouts. The resources
+server no longer owns a `/run` loop; model/harness settings belong to the agent.
+
+## Image startup: Compose and standalone
+
+`environment.compose_image_configs` is the shared OCI metadata catalog for both
+Compose and standalone images. Despite its historical name, no Compose file or
+conversion is needed for a standalone image. The runner automatically uses its
+recorded `Entrypoint` followed by `sh -c "sleep infinity"`, matching Compose's
+default `main` service. It does **not** run the image's raw `Cmd`: an inherited
+`python3` or `bash` command can exit immediately. With no entrypoint, the startup
+is just the keepalive. Compose's explicit overrides and sidecar commands retain
+their existing behavior. Standalone agent and verifier roles each remain one
+ordinary sandbox, with unchanged users, workdirs, health checks and networking.
+
+The catalog maps image references to records with `image`, `os`, `architecture`,
+and the OCI `config`. Paths are absolute or relative to the Gym root. Acquire
+and digest-check the metadata upstream; the runner does not query a registry.
+Standalone records must match the effective image after `image_rewrites` (or
+pin the same SHA-256 image digest), describe Linux/amd64, and have string-list
+or null `Entrypoint`/`Cmd` fields. Shell-form entrypoints must already contain
+their image-recorded shell argv; they are not parsed again.
+
+The original official catalog contains only Compose images. A standalone image
+absent from that shared catalog retains the provider's old keepalive behavior,
+with a warning; the runner cannot infer an unrecorded entrypoint. No catalog
+also retains the old behavior. To preserve startup for new datasets, include
+**both** their agent and verifier images in the catalog.
+
+The previous `environment.single_container_image_configs` path remains accepted
+as a standalone-only compatibility override; when provided, it still requires
+every effective standalone image to be present and fails on missing records.
+Its startup semantics now also match Compose `main` (ENTRYPOINT + keepalive,
+not ENTRYPOINT + raw CMD). Neither metadata path is a boolean startup toggle.
+
 ## Non-root Compose services
 
 When loading agent Compose YAML, two task-specific adaptations use the
@@ -70,9 +238,11 @@ other services, and verifier environments retain their original configuration.
 
 The benchmark profile sets `environment.efs_logs_host_path` to
 `/mnt/efs/data/shared`. Each episode creates a unique EFS directory with separate
-agent and verifier subdirectories mounted read-write at `/logs`. The image's
-default UID/GID owns its log root with mode `755`; workloads keep their original
-execution user. This allows non-root images to initialize their log directories
+agent and verifier subdirectories mounted read-write at `/logs`. The task role's
+UID/GID owns its log root with mode `755`; when its user is omitted, the current
+image default owns it. Root-started main containers also prepare the fixed log
+subdirectories for that role, independently of any image-history metadata.
+This allows non-root images to initialize their log directories
 and keeps root verifier reward-directory protections effective. Compose mounts
 these logs in `main`; sidecar mounts and collection order remain unchanged.
 

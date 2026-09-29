@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import hashlib
 import os
 import shlex
 import shutil
 import sys
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -19,6 +21,7 @@ from resources_servers.terminal_bench_4.shared_logs import SharedLogs
 from resources_servers.terminal_bench_4.task import TaskSettings
 from resources_servers.terminal_bench_4.tests.test_collection_verifier import environment
 from resources_servers.terminal_bench_4.tests.test_environment import environment_config, make_environment
+from resources_servers.terminal_bench_4.tests.test_transfer_metadata import synthetic_archive
 from resources_servers.terminal_bench_4.verifier import restore, run_verifier
 
 
@@ -139,12 +142,37 @@ async def test_archive_tampering_uses_collected_host_fallback(tmp_path, monkeypa
     mount_role(agent, logs, "agent")
     mount_role(verifier, logs, "verifier")
     box.path("/logs/artifacts/result.txt").write_text("snapshot")
+    box.path("/logs/artifacts").chmod(0o775)
     await collect(agent, tmp_path / "artifacts", [])
     box.path("/logs/" + logs.archive_name).write_text("changed after collection")
     await logs.prepare_verifier()
     assert logs.restored_archive is None
     await restore(verifier, tmp_path / "artifacts")
     assert target.path("/logs/artifacts/result.txt").read_text() == "snapshot"
+    assert target.path("/logs/artifacts").stat().st_mode & 0o777 == 0o775
+    await logs.stop()
+
+
+@pytest.mark.parametrize("mask", [0o022, 0o077])
+async def test_efs_repack_preserves_numeric_owners_and_modes_not_helper_metadata(tmp_path, monkeypatch, mask):
+    logs, _, _ = shared(tmp_path, monkeypatch)
+    await logs.start()
+    archive = Path(logs.root) / "agent" / logs.archive_name
+    synthetic_archive(archive)
+    logs.retain_archive(hashlib.sha256(archive.read_bytes()).hexdigest())
+    old_mask = os.umask(mask)
+    try:
+        await logs.prepare_verifier()
+    finally:
+        os.umask(old_mask)
+    assert logs.restored_archive
+    with tarfile.open(Path(logs.root) / "verifier" / logs.archive_name) as tar:
+        members = {Path(info.name).as_posix(): info for info in tar.getmembers()}
+        for info in members.values():
+            assert (info.uid, info.gid, info.uname, info.gname) == (1001, 2002, "", "")
+        assert members["."].mode == 0o775
+        assert members["nested"].mode == 0o750
+        assert members["nested/tool"].mode == 0o775
     await logs.stop()
 
 
@@ -226,17 +254,32 @@ async def test_log_owner_uses_image_identity_and_protects_parent(tmp_path, monke
     await logs.start()
     env = SimpleNamespace(
         log_role="agent",
+        role_user=None,
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout=f"{os.getuid()}\n{os.getgid()}\n")),
     )
     await logs.initialize_role(env)
     root = Path(logs.root) / "agent"
     assert root.stat().st_uid == os.getuid() and root.stat().st_mode & 0o777 == 0o755
-    assert "user" not in env.exec.await_args.kwargs
+    assert env.exec.await_args.kwargs["user"] is None
     for result in (SimpleNamespace(return_code=0, stdout="invalid"), SimpleNamespace(return_code=1, stdout="0 0")):
         env.exec.return_value = result
         with pytest.raises(RuntimeError, match="task log owner"):
             await logs.initialize_role(env)
     await logs.prepare_verifier()  # No snapshot: normal host restore.
+    await logs.stop()
+
+
+async def test_log_mount_uses_task_identity_without_original_user_metadata(tmp_path, monkeypatch):
+    logs, _, _ = shared(tmp_path, monkeypatch)
+    await logs.start()
+    env = SimpleNamespace(
+        log_role="agent",
+        role_user="agent",
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout=f"{os.getuid()}\n{os.getgid()}\n")),
+    )
+    await logs.initialize_role(env)
+    env.exec.assert_awaited_once_with("id -u; id -g", timeout_sec=60, user="agent")
+    assert (Path(logs.root) / "agent").stat().st_mode & 0o777 == 0o755
     await logs.stop()
 
 

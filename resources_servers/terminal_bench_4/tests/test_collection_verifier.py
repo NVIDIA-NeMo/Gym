@@ -170,7 +170,8 @@ async def test_failed_convention_probe_preserves_directory_for_restore(tmp_path)
     assert manifest[0]["status"] == "failed"
     assert (artifacts / "logs/artifacts").is_dir()
     verifier, target, _ = environment(tmp_path / "verifier", cfg)
-    await restore(verifier, artifacts)
+    with pytest.raises(RuntimeError, match="metadata is missing"):
+        await restore(verifier, artifacts)
     assert target.path("/logs/artifacts").is_dir()
 
 

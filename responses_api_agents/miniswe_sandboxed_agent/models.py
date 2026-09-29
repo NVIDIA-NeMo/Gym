@@ -7,6 +7,8 @@ Resources servers validate their own models at the HTTP boundary. Keep this
 adapter local until Gym's shared agent/task session contracts are available.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
@@ -34,6 +36,7 @@ class SeedSessionResponse(BaseModel):
     sandbox_provider: dict[str, JsonValue] = Field(default_factory=dict)
     instruction: str = ""
     user: str | int | None = None
+    execution_mode: Literal["miniswe", "oracle"] = "miniswe"
     agent_timeout_sec: float = Field(default=28800, gt=0)
     mcp_servers: list[dict[str, JsonValue]] = Field(default_factory=list)
     skills_dir: str | None = None

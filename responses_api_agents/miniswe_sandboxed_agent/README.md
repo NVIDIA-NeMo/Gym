@@ -37,6 +37,23 @@ seed request, joining the harness, and requesting verification or cleanup. If th
 seed response remains unavailable, it cancels the local request and returns;
 the resources server's seeded-session deadline cleans up the abandoned sandbox.
 
+### Trusted reference execution
+
+The seed response may set `execution_mode: oracle` (default: `miniswe`). In this
+mode the resource server must already have staged a trusted reference solution at
+`/solution/solve.sh`. `OracleHarness` checks that it is readable and runs it using
+the seed's execution user and discovered working directory, with the same setup
+and execution budgets. It makes no model calls and never reads a host task path,
+stages files, or changes identities/permissions. Its identity, stdout and stderr
+records live in an `oracle/` subdirectory of the agent's artifact directory.
+Missing accounts or unreadable solutions fail setup; there is no root fallback.
+
+The agent submits the oracle termination and `oracle_exit_code` through the same
+`/verify` protocol. Nonzero/timeout outcomes still grade when execution started;
+setup failures only request cleanup. Resource configuration, not request-row
+extras, chooses this mode and the oracle image. Other resources can omit the field
+and keep ordinary Mini-SWE behavior. The agent imports no benchmark implementation.
+
 Agent configuration owns `model_server`, `harness`, `agent_max_timeout_sec`, and
 `artifacts_dir`. Harness setup (including reconnect and working-directory discovery)
 has a separate 360-second budget. Execution uses the smaller of the official task

@@ -114,7 +114,7 @@ async def test_run_with_unrelated_resource_schema(fixture):
     assert f.verification["session_id"] == "resource-session"
     assert f.verification["termination"]["reason"] == "completed"
     assert f.verification["agent_started"]
-    assert f.verification["harness_metadata"] == {"harness_version": "test"}
+    assert f.verification["harness_metadata"] == {"harness_version": "test", "execution_mode": "miniswe"}
     f.provider.aclose.assert_awaited_once()
     assert f.body.responses_create_params.input == []
 
