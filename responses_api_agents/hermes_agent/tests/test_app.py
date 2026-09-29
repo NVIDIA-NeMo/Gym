@@ -552,7 +552,7 @@ class TestSandboxHermesInstall:
         monkeypatch.setattr("importlib.metadata.distribution", lambda name: distribution)
 
     def test_git_install_becomes_a_github_archive_keyed_by_commit(self, monkeypatch) -> None:
-        commit = "26bb847a88493342ca1b194e0455b479073ae21d"
+        commit = "a" * 40
         self._installed(
             monkeypatch,
             version="0.6.0",
