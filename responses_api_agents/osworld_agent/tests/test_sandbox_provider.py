@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import http.server
+import shutil
+import ssl
+import subprocess
 import threading
 from typing import Any
 
@@ -477,7 +480,8 @@ def test_endpoint_contract_rejects_proxy_headers_and_paths() -> None:
         )
 
 
-def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> None:
+@pytest.mark.parametrize("ca_env", [None, "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"])
+def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(tmp_path, monkeypatch, ca_env) -> None:
     seen: dict[str, str] = {}
 
     class Upstream(http.server.BaseHTTPRequestHandler):
@@ -495,16 +499,59 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
             self.wfile.write(content)
 
     upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    scheme = "http"
+    if ca_env is not None:
+        openssl = shutil.which("openssl")
+        if openssl is None:
+            upstream.server_close()
+            pytest.skip("openssl is required for the HTTPS forwarder regression")
+        cert = tmp_path / "cert.pem"
+        key = tmp_path / "key.pem"
+        subprocess.run(
+            [
+                openssl,
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-keyout",
+                str(key),
+                "-out",
+                str(cert),
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=IP:127.0.0.1",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        upstream.socket = context.wrap_socket(upstream.socket, server_side=True)
+        scheme = "https"
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
     threading.Thread(target=upstream.serve_forever, daemon=True).start()
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
     monkeypatch.setenv("NO_PROXY", "")
     forwarder, port = start_forwarder(
-        f"http://127.0.0.1:{upstream.server_address[1]}/proxy/9222",
+        f"{scheme}://127.0.0.1:{upstream.server_address[1]}/proxy/9222",
         {"X-Route": "gateway"},
     )
     try:
         with requests.Session() as session:
             session.trust_env = False
+            if ca_env is not None:
+                untrusted = session.get(f"http://127.0.0.1:{port}/json/version", timeout=10)
+                assert untrusted.status_code == 502
+                assert "CERTIFICATE_VERIFY_FAILED" in untrusted.text
+                monkeypatch.setenv(ca_env, str(cert))
             response = session.get(
                 f"http://127.0.0.1:{port}/json/version",
                 timeout=10,
