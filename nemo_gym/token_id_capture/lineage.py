@@ -253,6 +253,34 @@ def stamp_continuation(entry: TokenEntry, request_items: list[dict]) -> TokenEnt
     return entry
 
 
+_RELAX_CONTEXT = os.environ.get("NEMO_GYM_LINEAGE_RELAX_CONTEXT") == "1"
+_DEBUG_DIR = os.environ.get("NEMO_GYM_LINEAGE_DEBUG_DIR")
+_DEBUG_COUNT = [0]
+
+
+def _debug_unresolved(messages: list[dict], fingerprint: str, nodes: list) -> None:
+    """Dump a bounded sample of unresolved requests when NEMO_GYM_LINEAGE_DEBUG_DIR is set."""
+    if not _DEBUG_DIR or _DEBUG_COUNT[0] >= 200:
+        return
+    _DEBUG_COUNT[0] += 1
+    try:
+        Path(_DEBUG_DIR).mkdir(parents=True, exist_ok=True)
+        info = {
+            "fingerprint_found": bool(nodes),
+            "n_messages": len(messages),
+            "candidates": [
+                {"context_len": n.context_len, "digest_match": n.context_len and len(messages) >= n.context_len
+                 and conversation_digest(messages[: n.context_len]) == n.context_digest}
+                for n in nodes
+            ],
+            "messages": messages,
+        }
+        path = Path(_DEBUG_DIR) / f"unresolved_{os.getpid()}_{_DEBUG_COUNT[0]}.json"
+        path.write_bytes(orjson.dumps(info, default=str))
+    except Exception:
+        pass
+
+
 @dataclass
 class RolloutLineage:
     """Keep an append-only per-rollout call index."""
@@ -273,11 +301,14 @@ class RolloutLineage:
             return ParentResolutionStatus.ROOT, None, ""
         # dict.fromkeys: a call id indexed twice (e.g. by racing refreshes) is one candidate.
         call_ids = list(dict.fromkeys(self.by_fingerprint.get(fingerprint) or []))
-        candidates = [
-            node
-            for call_id in call_ids
-            if (node := self.by_call_id.get(call_id)) is not None and self._continues(node, messages)
-        ]
+        nodes = [node for call_id in call_ids if (node := self.by_call_id.get(call_id)) is not None]
+        candidates = [node for node in nodes if self._continues(node, messages)]
+        if not candidates and nodes and _RELAX_CONTEXT:
+            # Harnesses re-render earlier turns; prefix supply feeds the recorded tokens, so a unique
+            # output match is enough when the context only differs in re-rendered content.
+            candidates = [node for node in nodes if node.context_len and len(messages) >= node.context_len]
+        if not candidates:
+            _debug_unresolved(messages, fingerprint, nodes)
         if len(candidates) > 1:
             # Calls with identical cumulative tokens are interchangeable.
             # Keep different token sequences unresolved.
