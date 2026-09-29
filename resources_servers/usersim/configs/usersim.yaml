@@ -3,10 +3,25 @@ environment_server_routes:
   "usersim:example": usersim_environment
   "usersim:benchmark": usersim_environment
 
-support_model_base_url: ${policy_base_url}
-support_model_api_key: ${policy_api_key}
-support_model_name: ${policy_model_name}
+user_model_base_url: ???
+user_model_api_key: ???
+user_model_name: ???
+user_model_uses_reasoning_parser: false
+
+support_model_base_url: ???
+support_model_api_key: ???
+support_model_name: ???
 support_model_uses_reasoning_parser: false
+
+user_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${user_model_base_url}
+      api_key: ${user_model_api_key}
+      model: ${user_model_name}
+      uses_reasoning_parser: ${user_model_uses_reasoning_parser}
+      return_token_id_information: false
 
 policy_model:
   responses_api_models:
@@ -34,32 +49,17 @@ usersim_resources:
       entrypoint: app.py
       domain: agent
       verified: false
-      description: Deterministic NeMo UserSim persona and general-probe initialization.
-      personas_cache_dir: ~/.cache/nemo-gym/usersim/personas
-      personas_dataset_version: 0.0.2
+      description: Prepared-row validation and native verification for Environment-owned UserSim.
       usersim_revision: a5f676bf6dc5a73914c8a0860f97c10dd2c214ee  # pragma: allowlist secret
-      tool_simulation_model:
-        type: responses_api_models
-        name: support_model
       probe_scorer_model:
         type: responses_api_models
         name: support_model
-      personas_locales:
-      - en_US
-      probe_mix:
-        general_open_ended: 0.5
-        general_educational: 0.5
-      probe_themes:
-        general_open_ended:
-        - topic: local food and dining
-          goal: Seek a practical recommendation about local food and dining.
-        - topic: travel planning
-          goal: Ask for practical advice about planning a trip.
-        general_educational:
-        - topic: local ecology
-          goal: Learn about local ecology by asking focused follow-up questions.
-        - topic: personal finance fundamentals
-          goal: Learn the fundamentals of personal finance through clear explanations.
+      datasets:
+        - name: usersim
+          type: benchmark
+          jsonl_fpath: environments/usersim/data/usersim.jsonl
+          prepare_script: environments/usersim/prepare.py
+          license: Apache 2.0
 
 usersim_user:
   responses_api_agents:
@@ -67,11 +67,11 @@ usersim_user:
       entrypoint: app.py
       model_server:
         type: responses_api_models
-        name: policy_model
+        name: user_model
       resources_server:
         type: resources_servers
         name: usersim_resources
-      max_steps: 2
+      max_steps: 1
 
 usersim_assistant:
   responses_api_agents:
@@ -83,13 +83,8 @@ usersim_assistant:
       resources_server:
         type: resources_servers
         name: usersim_resources
-      max_steps: 10
-      datasets:
-        - name: usersim
-          type: benchmark
-          jsonl_fpath: environments/usersim/data/usersim.jsonl
-          prepare_script: environments/usersim/prepare.py
-          license: Apache 2.0
+      max_steps: 1
+      execute_tools: false
 
 usersim_environment:
   environment_servers:
@@ -107,24 +102,11 @@ usersim_environment:
       summary_model:
         type: responses_api_models
         name: support_model
+      tool_simulation_model:
+        type: responses_api_models
+        name: support_model
       resources_server:
         type: resources_servers
         name: usersim_resources
-      resources_tool_transports:
-        - direct_http
-      max_turns: 6
       default_episode_timeout_seconds: 1800
       cleanup_timeout_seconds: 180
-      protocol_config:
-        max_query_attempts: 3
-        max_assistant_attempts: 1
-        enforce_user_language: true
-        user_language_min_script_compliance: 0.6
-        user_language_min_letters: 8
-        incremental_disclosure_ratio: 0.6
-        persona_grounding_ratio: 1.0
-        context_compression: true
-        compression_window: 1
-        store_reasoning: true
-        random_seed: 42
-        verbosity: 1
