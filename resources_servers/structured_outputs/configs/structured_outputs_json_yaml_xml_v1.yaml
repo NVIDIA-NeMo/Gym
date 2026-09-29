@@ -36,3 +36,11 @@ structured_outputs_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_260309_nano_v3_sdg_json_yaml_xml_example.jsonl
+
+structured_outputs_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: structured_outputs_simple_agent
