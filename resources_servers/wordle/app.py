@@ -58,11 +58,11 @@ LOSS_REWARD = 0.0
 def calculate_win_reward(turns_used: int) -> float:
     """Calculate win reward based on number of turns used.
 
-    Formula: reward = 2.0 - 0.2 * (turns_used - 1), capped at turn-3 level.
+    Formula: reward = 2.0 - 0.2 * (turns_used - 1), with a turn-1 win capped at the turn-3 level.
     Turn 1: 1.6 (lucky, same as turn 3), Turn 2: 1.8, Turn 3: 1.6,
     Turn 4: 1.4, Turn 5: 1.2, Turn 6: 1.0
     """
-    effective_turns = max(turns_used, 3)
+    effective_turns = 3 if turns_used == 1 else turns_used
     return WIN_REWARD_BASE - WIN_REWARD_PENALTY_PER_TURN * (effective_turns - 1)
 
 

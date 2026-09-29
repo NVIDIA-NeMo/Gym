@@ -6,7 +6,7 @@ The model guesses a secret 5-letter word in 6 attempts using three tools: `submi
 
 ## Reward
 
-- Win: `2.0 - 0.2 * (turns - 1)`, with turns 1 and 2 scored like turn 3 so lucky openers are not over-rewarded. Floor of 0.1.
+- Win: `2.0 - 0.2 * (turns - 1)`, so turn 2 scores 1.8 and turn 6 scores 1.0. A turn-1 win is scored like turn 3 (1.6) so lucky openers are not over-rewarded. Floor of 0.1.
 - Loss or incomplete game: 0.0.
 - Penalties accumulate over the game and only reduce a win: repeated guess (-0.2), ignoring a known green (-0.05 per position), ignoring all known yellows (-0.03), reusing an eliminated letter (-0.02 per letter), wrong length or unknown word (-0.02). Invalid guesses still use a turn.
 

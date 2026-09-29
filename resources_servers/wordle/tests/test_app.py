@@ -129,6 +129,7 @@ class TestGameLogic:
 class TestReward:
     def test_win_reward_by_turn(self):
         assert calculate_win_reward(1) == pytest.approx(1.6)
+        assert calculate_win_reward(2) == pytest.approx(1.8)
         assert calculate_win_reward(3) == pytest.approx(1.6)
         assert calculate_win_reward(4) == pytest.approx(1.4)
         assert calculate_win_reward(6) == pytest.approx(1.0)
