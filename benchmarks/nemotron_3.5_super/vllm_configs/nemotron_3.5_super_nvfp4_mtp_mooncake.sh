@@ -47,14 +47,6 @@ VLLM_COMMON_ARGS=(
     --tensor-parallel-size 4
     --api-server-count 1
 )
-DECODE_CUDAGRAPH_SIZES=(
-    1 2 4
-    {8..248..8}
-    {256..1024..16}
-    {1056..2048..32}
-    {2112..4096..64}
-    {4224..6144..128}
-)
 VLLM_PREFILL_ARGS=(
     --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":5,\"num_speculative_tokens_per_batch_size\":[[1,1024,0]]}"
     --kv-transfer-config '{
@@ -81,8 +73,7 @@ VLLM_PREFILL_ARGS=(
             ]
         }
     }'
-    --max-cudagraph-capture-size 6144
-    --cudagraph-capture-sizes "${DECODE_CUDAGRAPH_SIZES[@]}"
+    --max-cudagraph-capture-size 1200
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
 )
@@ -114,8 +105,7 @@ VLLM_DECODE_ARGS=(
         }
     }'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-    --max-cudagraph-capture-size 6144
-    --cudagraph-capture-sizes "${DECODE_CUDAGRAPH_SIZES[@]}"
+    --max-cudagraph-capture-size 1536
     --max-num-batched-tokens 33920
-    --max-num-seqs 1024
+    --max-num-seqs 256
 )
