@@ -125,11 +125,10 @@ from nemo_gym.server_utils import (
 # Training-specific
 ########################################
 
-# Per-token routed expert indices with shape [tokens, num_moe_layers, topk], either as
-# nested int lists or as an opaque string envelope produced by the training framework
-# (e.g. NeMo-RL's "nrlre1:<dtype>:<SxLxK>:<base64>"). Gym never inspects the value; the
-# string form keeps multi-MB payloads cheap to validate and re-serialize at every hop.
-RoutedExperts: TypeAlias = Union[str, List[List[List[int]]]]
+# Per-token routed expert indices with shape [tokens, num_moe_layers, topk], an
+# opaque string envelope, or an opaque object-store reference tag. Gym never
+# interprets any representation; it only carries it alongside token metadata.
+RoutedExperts: TypeAlias = Union[str, List[List[List[int]]], Dict[str, Any]]
 
 
 class TokenIDLogProbMixin(BaseModel):
@@ -763,6 +762,8 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
     tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallUnionParam]] = None
+    # Allow incoming responses with reasoning_content=None. This field should not be used.
+    reasoning_content: Annotated[None, Field(exclude=True)]
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(

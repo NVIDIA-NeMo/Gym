@@ -412,14 +412,24 @@ class RunHelper:  # pragma: no cover
             assert not entrypoint_fpath.is_absolute()
 
             # Resolve cwd-first (a local server), else the install location for built-ins.
-            dir_path = _resolve_server_dir(Path(first_key, second_key))
+            server_rel_path = Path(first_key, second_key)
+            dir_path = _resolve_server_dir(server_rel_path)
+
+            # TODO: Move the conversational tool use simulation server to Gym's standard two-level
+            # ``<server_type>/<server_name>`` hierarchy, then remove this variable-depth path handling.
+            # Child apps may import through their top-level component package (for example,
+            # ``responses_api_agents.conversational_tool_use``). Derive the component root from
+            # the full relative path rather than assuming every server is exactly two levels deep.
+            project_root = dir_path
+            for _ in server_rel_path.parts:
+                project_root = project_root.parent
 
             command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = run_command(command, dir_path, server_name=top_level_path)
+            process = run_command(command, dir_path, server_name=top_level_path, project_root=project_root)
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv

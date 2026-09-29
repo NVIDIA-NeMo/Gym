@@ -9,7 +9,7 @@ competitive_coding_challenges_resources_server:
       test_batch_size: 32
       num_parallel_requests: 16
       time_scale: 2.0
-      shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
+      shared_dir: ${oc.env:CCC_SHARED_TEMP_DIR,/tmp}
       reward_mode: binary
       verified: false
 competitive_coding_challenges_simple_agent:

@@ -21,6 +21,12 @@ from pytest import MonkeyPatch, mark, raises
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
+from nemo_gym.global_config import (
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TARGET_WEIGHT_VERSION_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
@@ -66,6 +72,32 @@ from responses_api_models.vllm_model.app import (
 # Used for mocking created_at timestamp generation
 FIXED_TIME = 1691418000
 FIXED_UUID = "123"
+
+
+def test_strip_hosted_only_tool_fields_pops_strict() -> None:
+    body_dict = {
+        "tools": [
+            {"type": "function", "function": {"name": "get_weather", "strict": True}},
+            {"type": "custom", "custom": {"name": "not_a_function"}},
+        ]
+    }
+    VLLMModel._strip_hosted_only_tool_fields(body_dict)
+    assert "strict" not in body_dict["tools"][0]["function"]
+    assert body_dict["tools"][0]["function"]["name"] == "get_weather"
+    assert body_dict["tools"][1] == {"type": "custom", "custom": {"name": "not_a_function"}}
+
+    # Tolerates absent tools.
+    VLLMModel._strip_hosted_only_tool_fields({})
+
+
+def test_preprocess_chat_completion_create_params_strips_strict(monkeypatch: MonkeyPatch) -> None:
+    server = TestApp()._setup_server(monkeypatch)
+    body_dict = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"type": "function", "function": {"name": "get_weather", "strict": True}}],
+    }
+    body_dict = server._preprocess_chat_completion_create_params(MagicMock(), body_dict)
+    assert "strict" not in body_dict["tools"][0]["function"]
 
 
 def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
@@ -3313,7 +3345,8 @@ class TestVLLMConverter:
         assert captured_kwargs["chat_template_kwargs"]["some_other_param"] == "value2"
         assert captured_kwargs["chat_template_kwargs"]["new_param"] == "new"
 
-    def test_metadata_extra_body_override(self, monkeypatch: MonkeyPatch):
+    @mark.parametrize("attempt_index", [0, 2])
+    def test_metadata_extra_body_override(self, monkeypatch: MonkeyPatch, attempt_index: int) -> None:
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -3324,7 +3357,7 @@ class TestVLLMConverter:
             name="",
             return_token_id_information=False,
             uses_reasoning_parser=False,
-            extra_body={"guided_json": '{"type": "object"}', "min_tokens": 10},
+            extra_body={"guided_json": '{"type": "object"}', "min_tokens": 10, ATTEMPT_INDEX_KEY_NAME: 99},
         )
         server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         app = server.setup_webserver()
@@ -3365,7 +3398,18 @@ class TestVLLMConverter:
                     content="hello",
                 )
             ],
-            metadata={"extra_body": json.dumps({"min_tokens": 20, "new_param": "value"})},
+            metadata={
+                "extra_body": json.dumps(
+                    {
+                        "min_tokens": 20,
+                        "new_param": "value",
+                        TASK_INDEX_KEY_NAME: 12,
+                        ROLLOUT_INDEX_KEY_NAME: 3,
+                        ATTEMPT_INDEX_KEY_NAME: attempt_index,
+                        TARGET_WEIGHT_VERSION_KEY_NAME: 19,
+                    }
+                )
+            },
         )
 
         client = TestClient(app)
@@ -3378,6 +3422,10 @@ class TestVLLMConverter:
         assert captured_kwargs["guided_json"] == '{"type": "object"}'
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
+        assert captured_kwargs[TASK_INDEX_KEY_NAME] == 12
+        assert captured_kwargs[ROLLOUT_INDEX_KEY_NAME] == 3
+        assert captured_kwargs[ATTEMPT_INDEX_KEY_NAME] == attempt_index
+        assert captured_kwargs[TARGET_WEIGHT_VERSION_KEY_NAME] == 19
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,25 @@
+citation_if:
+  resources_servers:
+    citation_if:
+      entrypoint: app.py
+      domain: instruction_following
+      description: Citation instruction-following reward checker
+      value: Train models to follow citation format instructions in search-grounded synthesis tasks
+      # Maintainer-granted flag; new contributions default to false.
+      verified: false
+
+citation_if_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: citation_if
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/citation_if/data/example.jsonl

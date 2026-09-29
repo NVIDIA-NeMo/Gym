@@ -46,6 +46,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_s
 
 TRAJECTORY_COMPLETE_INDICATOR = "###STOP###"
 AGENT_TRANSFER_INDICATOR = "###TRANSFER###"
+DEFAULT_FIRST_USER_MESSAGE = "I need help with my account."
 
 
 class JudgeProviderError(Exception):
@@ -129,6 +130,12 @@ class ConversationalToolUseSimulationConfig(BaseResourcesServerConfig):
     enable_termination: bool = True
     verification_type: VerificationType = VerificationType.MESSAGE
     enforce_transfer_ground_truth: bool = False
+    # When the simulator cannot produce a usable opening user message (generation
+    # error, or a first message that already carries a stop/transfer indicator), fall
+    # back to the scenario's reason_for_contact instead of ending the trajectory before
+    # the agent has spoken. A trajectory with no agent turn has no trainable tokens,
+    # so downstream trainers cannot represent it.
+    fallback_first_user_message: bool = True
 
 
 class CustomerScenario(BaseModel):
@@ -1069,6 +1076,10 @@ Return type in JSON Schema format: {return_type}
         if state.terminal_state:
             return NextUserMessageResponse(message="", should_continue=False, terminal_state=state.terminal_state)
 
+        use_first_message_fallback = self.config.fallback_first_user_message and not any(
+            existing.source == Source.USER for existing in state.messages
+        )
+
         user_message = ""
         message = None
         invalid = None
@@ -1085,19 +1096,29 @@ Return type in JSON Schema format: {return_type}
                 if invalid is None:
                     break
         except Exception as exc:
-            self._record_generation_failure(
-                state,
-                TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR,
-                VerificationFailureLabel.USER_FAILURE,
-                f"{exc}",
-            )
-            return NextUserMessageResponse(
-                message="",
-                should_continue=False,
-                terminal_state=state.terminal_state,
-            )
+            if use_first_message_fallback:
+                user_message, message = self._fallback_first_user_message(
+                    state, f"{TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR}: {exc}"
+                )
+                invalid = None
+            else:
+                self._record_generation_failure(
+                    state,
+                    TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR,
+                    VerificationFailureLabel.USER_FAILURE,
+                    f"{exc}",
+                )
+                return NextUserMessageResponse(
+                    message="",
+                    should_continue=False,
+                    terminal_state=state.terminal_state,
+                )
 
         assert message is not None
+        if invalid is not None and use_first_message_fallback:
+            invalid_reason, error = invalid
+            user_message, message = self._fallback_first_user_message(state, f"{invalid_reason}: {error}")
+            invalid = None
         state.messages.append(message)
         if invalid is not None:
             invalid_reason, error = invalid
@@ -1418,6 +1439,26 @@ Return type in JSON Schema format: {return_type}
     def _next_tool_call_index(self, state: ConversationSessionState) -> int:
         return 1 + sum(1 for message in state.messages if message.type == MessageType.TOOL_CALL)
 
+    def _fallback_first_user_message(
+        self, state: ConversationSessionState, reason: str
+    ) -> tuple[str, ConversationMessage]:
+        """Return a usable opening user message when the simulator could not produce one.
+
+        Prefers the scenario's ``reason_for_contact`` and falls back to a generic
+        request. The reason is recorded in ``source_artifacts`` so the rate of
+        simulator failures stays visible without invalidating the trajectory.
+        """
+        text = (state.customer_scenario.reason_for_contact or "").strip()
+        if not text or TRAJECTORY_COMPLETE_INDICATOR in text or AGENT_TRANSFER_INDICATOR in text:
+            text = DEFAULT_FIRST_USER_MESSAGE
+        state.source_artifacts.setdefault("first_user_message_fallbacks", []).append(reason)
+        print(
+            f"[conversational-tool-use-simulation] rollout={state.rollout_id} first user message fallback: {reason}",
+            flush=True,
+        )
+        message = ConversationMessage(type=MessageType.TEXT, source=Source.USER, content=text)
+        return text, message
+
     def _record_generation_failure(
         self,
         state: ConversationSessionState,
@@ -1478,7 +1519,7 @@ Return type in JSON Schema format: {return_type}
         model_server = self.config.user_model_server or self.config.simulator_model_server
         if model_server is None:
             if not any(message.source == Source.USER for message in state.messages):
-                return state.customer_scenario.reason_for_contact or "I need help with my account.", None
+                return state.customer_scenario.reason_for_contact or DEFAULT_FIRST_USER_MESSAGE, None
             return "Thanks. Please continue helping me with this request.", None
 
         response = await self._call_model(
