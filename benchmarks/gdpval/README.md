@@ -160,11 +160,24 @@ balanced before dispatch. When the policy is added while resuming an existing
 strict run, the recorded assignment remains authoritative so the successful
 rows are reused exactly as collected.
 
-Partial completion is deliberately unavailable on the final stage. Its accepted
-row set and omitted keys are frozen in the stage journal, so resume cannot absorb
-late rows and silently change downstream reference selection. Enabling this
-policy while resuming an incomplete stage reuses its successful rollout evidence
-instead of invalidating the rollout cache.
+A stage's accepted row set and omitted keys are frozen in the stage journal, so
+resume cannot absorb late rows and silently change downstream reference
+selection. Enabling this policy while resuming an incomplete stage reuses its
+successful rollout evidence instead of invalidating the rollout cache.
+
+### Accepting a partial final stage
+
+The same `partial_completion` block may be set on the final stage. There it sets
+the coverage floor for the headline: a final stage the policy accepts reports
+`comparison/final_stage_partial_accepted: 1` and `comparison/final_stage_degraded: 0`,
+and emits the flat `comparison/eval_elo` / `comparison/normalized_elo`, even when
+`comparison/observed_final_stage_row_count` is below the expected count.
+`comparison/final_stage_complete` stays exact. A final stage below the floor is
+still scored, but reports `final_stage_degraded: 1` and no flat headline.
+
+```bash
+++multistage.stages='[{num_tasks: 45, partial_completion: {...}}, {num_tasks: 220, num_models: 4, partial_completion: {min_success_fraction: 0.95, min_per_reference_success_fraction: 0.5, min_successful_rows_per_reference: 1}}]'
+```
 
 ### Fresh vs. cached deliverables
 
@@ -208,7 +221,7 @@ full run:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `stages` | *(required)* | List of `{num_tasks?, num_models?, seed?, partial_completion?}` (or `"[num_tasks]:[num_models]:seed"` strings). `num_tasks` omitted ⇒ full task set; `num_models` omitted ⇒ all references. `partial_completion` is an opt-in non-final calibration policy with overall/per-reference success floors. |
+| `stages` | *(required)* | List of `{num_tasks?, num_models?, seed?, partial_completion?}` (or `"[num_tasks]:[num_models]:seed"` strings). `num_tasks` omitted ⇒ full task set; `num_models` omitted ⇒ all references. `partial_completion` is an opt-in policy with overall/per-reference success floors; on the final stage it sets the floor below which the headline is reported as degraded. |
 | `column` | `[occupation]` | Dataset column(s) the task sample is drawn proportionally over. |
 | `distribution_path` | *(auto)* | Reuse/write the task-distribution JSON here; built from the dataset when absent. |
 | `dataset_path` | *(prepared dataset)* | Dataset the distribution is built from. |

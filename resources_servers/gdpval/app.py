@@ -1429,6 +1429,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # appears once per stage — distinguished only by ``stage_index``.
         staged: Dict[int, List[Dict[str, Any]]] = {}
         expected_stage_row_counts: Dict[int, Set[int]] = {}
+        accepted_stage_row_counts: Dict[int, Set[Optional[int]]] = {}
         expected_final_stage_values: Set[int] = set()
         expected_final_stage_rows = 0
         for vr in body.verify_responses:
@@ -1441,6 +1442,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     expected_stage_row_counts.setdefault(normalized_stage_index, set()).add(
                         int(expected_stage_row_count)
                     )
+                accepted_stage_row_count = vr.get("accepted_stage_row_count")
+                accepted_stage_row_counts.setdefault(normalized_stage_index, set()).add(
+                    int(accepted_stage_row_count) if accepted_stage_row_count is not None else None
+                )
             expected_final_stage_index = vr.get("expected_final_stage_index")
             if expected_final_stage_index is not None:
                 expected_final_stage_values.add(int(expected_final_stage_index))
@@ -1563,15 +1568,27 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     and expected_final_stage_count is not None
                     and observed_final_stage_count == expected_final_stage_count
                 )
+                # A final stage the orchestrator accepted under its
+                # partial-completion policy stamps the accepted row count on
+                # every row it kept; the count must match what is observed.
+                accepted_count_values = accepted_stage_row_counts.get(expected_final_stage_index, set())
+                final_stage_partial_accepted = (
+                    final_stage_present
+                    and not final_stage_complete
+                    and len(accepted_count_values) == 1
+                    and next(iter(accepted_count_values)) == observed_final_stage_count
+                )
+                final_stage_accepted = final_stage_complete or final_stage_partial_accepted
                 candidate = stage_fits.get(expected_final_stage_index)
                 final_stage_fit = candidate is not None and candidate[0] is not None
-                if final_stage_complete and final_stage_fit:
+                if final_stage_accepted and final_stage_fit:
                     headline_stage_index = expected_final_stage_index
                     headline = candidate
                 extra["comparison/final_stage_present"] = int(final_stage_present)
                 extra["comparison/final_stage_complete"] = int(final_stage_complete)
+                extra["comparison/final_stage_partial_accepted"] = int(final_stage_partial_accepted)
                 extra["comparison/final_stage_fit"] = int(final_stage_fit)
-                extra["comparison/final_stage_degraded"] = int(not (final_stage_complete and final_stage_fit))
+                extra["comparison/final_stage_degraded"] = int(not (final_stage_accepted and final_stage_fit))
                 extra["comparison/observed_final_stage_row_count"] = observed_final_stage_count
                 extra["comparison/expected_final_stage_row_count_consistent"] = int(expected_count_consistent)
                 if expected_final_stage_count is not None:

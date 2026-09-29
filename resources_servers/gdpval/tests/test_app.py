@@ -1879,6 +1879,54 @@ class TestMultiReference:
         assert metrics["comparison/observed_final_stage_row_count"] == 1
         assert metrics["comparison/expected_final_stage_row_count"] == 2
 
+    @pytest.mark.parametrize(
+        ("accepted_count", "accepted"),
+        [
+            (1, True),
+            (None, False),
+            (2, False),
+        ],
+    )
+    def test_policy_accepted_partial_final_stage_emits_headline(
+        self, accepted_count: int | None, accepted: bool
+    ) -> None:
+        """A final stage accepted by its partial-completion policy is not degraded."""
+        import asyncio as _asyncio
+
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={"low": {"deliverables_dir": "/tmp/low", "elo": 1000.0}},
+        )
+        final_row: dict = {
+            "_ng_task_index": 1,
+            "_ng_rollout_index": 0,
+            "stage_index": 1,
+            "expected_final_stage_index": 1,
+            "expected_stage_row_count": 2,
+            "task_id": "t1",
+            "reward": 1.0,
+            "total_wins": 8,
+            "total_losses": 2,
+            "total_ties": 0,
+            "per_reference": {
+                "low": {"wins": 8, "losses": 2, "ties": 0, "reference_elo": 1000.0},
+            },
+            "response": {},
+        }
+        if accepted_count is not None:
+            final_row["accepted_stage_row_count"] = accepted_count
+
+        metrics = _asyncio.run(
+            server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[final_row]))
+        ).agent_metrics
+
+        assert metrics["comparison/final_stage_complete"] == 0
+        assert metrics["comparison/final_stage_partial_accepted"] == int(accepted)
+        assert metrics["comparison/final_stage_degraded"] == int(not accepted)
+        assert ("comparison/eval_elo" in metrics) is accepted
+
     def test_aggregate_metrics_handles_repeated_task_across_stages(self) -> None:
         """The same ``(task_index, rollout_index)`` may recur across stages (one
         rollout judged against a different reference subset per stage). The

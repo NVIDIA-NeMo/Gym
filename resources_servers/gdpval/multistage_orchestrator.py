@@ -178,6 +178,10 @@ class StageResume:
 # rather than reproducing the same outcome at full rollout cost.
 _IN_PROCESS_RETRYABLE_CLASSES = frozenset({"timeout_exceeded", "transient"})
 
+# Stamped on every row of a stage accepted by its partial-completion policy, so
+# aggregation can tell an accepted partial final stage from a degraded one.
+ACCEPTED_STAGE_ROW_COUNT_KEY = "accepted_stage_row_count"
+
 
 def _is_in_process_retryable(row: Mapping[str, Any]) -> bool:
     return (
@@ -729,8 +733,6 @@ def parse_multistage_config(raw: Mapping[str, Any]) -> MultiStageRunConfig:
             "multistage.enabled=true but no stages were configured. Set "
             "multistage.stages, e.g. ++multistage.stages='[{num_tasks: 110, num_models: 12}, {num_models: 4}]'."
         )
-    if stages[-1].partial_completion is not None:
-        raise ValueError("partial_completion is allowed only on non-final calibration stages")
 
     column = raw.get("column") or raw.get("columns") or ["occupation"]
     if isinstance(column, str):
@@ -934,8 +936,6 @@ async def run_multistage_stages(
     for stage in multistage_config.stages:
         if stage.partial_completion is not None:
             _validate_partial_stage_policy(stage.partial_completion)
-    if total_stages and multistage_config.stages[-1].partial_completion is not None:
-        raise ValueError("partial_completion is allowed only on non-final calibration stages")
 
     def _emit(name: str, **data: object) -> None:
         if on_event is not None:
@@ -1107,7 +1107,7 @@ async def run_multistage_stages(
         # persisted timeouts.  Evaluate that frozen evidence before dispatch so
         # the already-timed-out rows are not forced through another long attempt.
         pre_dispatch_partial_outcome: Optional[Dict[str, Any]] = None
-        if resume is not None and index < total_stages - 1 and stage.partial_completion is not None and pending_rows:
+        if resume is not None and stage.partial_completion is not None and pending_rows:
             pending_keys_for_policy = {(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in pending_rows}
             latest_failures = resume.latest_failures_by_stage.get(index, {})
             latest_dispositions = resume.latest_attempt_dispositions_by_stage.get(index, {})
@@ -1277,7 +1277,7 @@ async def run_multistage_stages(
 
         # Outcomes contain no authoritative ELO; it is re-fit from rows on
         # resume. A retryable failure or drained row leaves the stage open unless
-        # an explicit non-final partial-completion policy accepts its evidence.
+        # an explicit partial-completion policy accepts its evidence.
         returned_keys: set[Tuple[Any, Any]] = set()
         prior_attempts = resume.attempts_by_stage.get(index, {}) if resume is not None else {}
         for result in new_tagged:
@@ -1300,43 +1300,46 @@ async def run_multistage_stages(
         successful_keys = {_stage_key(row) for row in tagged}
         planned_keys = {_stage_key(row) for row in stage_rows}
         missing_success_keys = planned_keys - successful_keys
-        if index < total_stages - 1:
-            if stage.partial_completion is not None:
-                coverage_outcome = partial_outcome or _partial_stage_outcome(
-                    stage.partial_completion,
-                    stage_rows,
-                    tagged,
-                    new_tagged,
-                    unresolved_keys,
-                    reference_ids,
-                    stage_elo,
-                    num_references,
-                )
-                if missing_success_keys:
-                    partial_outcome = coverage_outcome
-                    if partial_outcome is not None:
-                        if "stage_index" not in partial_outcome:
-                            partial_outcome = {"stage_index": index, **partial_outcome}
-                        stage_complete = True
-                    else:
-                        stage_complete = False
-                        coverage_rejected = not unresolved_keys
-                elif coverage_outcome is None:
-                    # Even a persisted "success" must contain usable battle
-                    # evidence for every configured coverage gate.
-                    stage_complete = False
-                    coverage_rejected = True
-            else:
-                # Terminal/max-attempt means "do not retry", not "safe adaptive
-                # calibration".  Without an explicit partial policy every
-                # planned non-final row must contribute usable battle evidence.
-                if (
-                    stage_elo is None
-                    or not math.isfinite(stage_elo)
-                    or _fit_eligible_stage_keys(stage_rows, tagged) != planned_keys
-                ):
+        is_final_stage = index == total_stages - 1
+        if stage.partial_completion is not None:
+            coverage_outcome = partial_outcome or _partial_stage_outcome(
+                stage.partial_completion,
+                stage_rows,
+                tagged,
+                new_tagged,
+                unresolved_keys,
+                reference_ids,
+                stage_elo,
+                num_references,
+            )
+            if missing_success_keys:
+                partial_outcome = coverage_outcome
+                if partial_outcome is not None:
+                    if "stage_index" not in partial_outcome:
+                        partial_outcome = {"stage_index": index, **partial_outcome}
+                    stage_complete = True
+                elif not is_final_stage:
                     stage_complete = False
                     coverage_rejected = not unresolved_keys
+            elif coverage_outcome is None and not is_final_stage:
+                # Even a persisted "success" must contain usable battle
+                # evidence for every configured coverage gate.
+                stage_complete = False
+                coverage_rejected = True
+        elif not is_final_stage:
+            # Terminal/max-attempt means "do not retry", not "safe adaptive
+            # calibration".  Without an explicit partial policy every
+            # planned non-final row must contribute usable battle evidence.
+            if (
+                stage_elo is None
+                or not math.isfinite(stage_elo)
+                or _fit_eligible_stage_keys(stage_rows, tagged) != planned_keys
+            ):
+                stage_complete = False
+                coverage_rejected = not unresolved_keys
+        if partial_outcome is not None:
+            for row in tagged:
+                row[ACCEPTED_STAGE_ROW_COUNT_KEY] = len(partial_outcome["included_keys"])
         if resume is not None and stage_complete:
             resume.on_outcome(
                 index,
@@ -1534,6 +1537,9 @@ def _resume_complete_stage(
         for r in resume.rows_by_stage.get(index, [])
         if included_keys is None or _stage_key(r) in included_keys
     ]
+    if included_keys is not None:
+        for row in cached_rows:
+            row[ACCEPTED_STAGE_ROW_COUNT_KEY] = len(included_keys)
     plan = resume.plans.get(index, {})
     reference_ids = list(plan.get("reference_ids", []))
     task_ids = list(plan.get("task_ids", []))

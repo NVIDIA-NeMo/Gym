@@ -39,6 +39,7 @@ from nemo_gym.rollout_collection import (
 )
 from resources_servers.gdpval.multistage_elo import PartialStagePolicy
 from resources_servers.gdpval.multistage_orchestrator import (
+    ACCEPTED_STAGE_ROW_COUNT_KEY,
     MultiStageRunConfig,
     StageResume,
     _cached_partial_snapshot_is_valid,
@@ -194,17 +195,18 @@ class TestParseConfig:
                 }
             )
 
-    def test_rejects_partial_completion_on_final_stage(self) -> None:
-        with pytest.raises(ValueError, match="non-final calibration stages"):
-            parse_multistage_config(
-                {
-                    "enabled": True,
-                    "stages": [
-                        {"num_tasks": 5},
-                        {"num_tasks": 10, "partial_completion": {"min_success_fraction": 0.9}},
-                    ],
-                }
-            )
+    def test_accepts_partial_completion_on_final_stage(self) -> None:
+        cfg = parse_multistage_config(
+            {
+                "enabled": True,
+                "stages": [
+                    {"num_tasks": 5},
+                    {"num_tasks": 10, "partial_completion": {"min_success_fraction": 0.9}},
+                ],
+            }
+        )
+        assert cfg.stages[0].partial_completion is None
+        assert cfg.stages[-1].partial_completion == PartialStagePolicy(min_success_fraction=0.9)
 
 
 class TestFindReferenceElos:
@@ -2112,19 +2114,83 @@ class TestPartialStageCompletion:
         assert len(summaries) == 1
         assert resume.completed == []
 
-    async def test_direct_final_stage_policy_is_rejected(self) -> None:
-        task_ids = ["t0"]
-        cfg = self._config(enabled=True)
-        cfg.stages[-1].partial_completion = cfg.stages[0].partial_completion
+    @staticmethod
+    def _final_stage_only_config(min_success_fraction: float) -> MultiStageRunConfig:
+        return MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config(
+                {
+                    "enabled": True,
+                    "stages": [
+                        {
+                            "num_tasks": 10,
+                            "partial_completion": {
+                                "min_success_fraction": min_success_fraction,
+                                "min_per_reference_success_fraction": 0.5,
+                            },
+                        }
+                    ],
+                }
+            ).stages,
+            seed=0,
+        )
 
-        with pytest.raises(ValueError, match="non-final calibration stages"):
-            await run_multistage_stages(
-                cfg,
-                {"a": 1000.0},
-                _distribution(task_ids),
-                _materialized_rows(task_ids),
-                _fake_run_rollouts_factory(),
-            )
+    async def test_final_stage_policy_stamps_accepted_row_count(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = self._balanced_resume(task_ids)
+
+        results, summaries = await run_multistage_stages(
+            self._final_stage_only_config(0.9),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner({0}, failure_class="skipped", terminal=True),
+            resume=resume,
+        )
+
+        assert len(results) == 9
+        assert {row[ACCEPTED_STAGE_ROW_COUNT_KEY] for row in results} == {9}
+        assert summaries[0]["partial"] is True
+        [(index, outcome)] = resume.completed
+        assert index == 0
+        assert outcome["status"] == "partial_complete"
+        assert len(outcome["omitted_keys"]) == 1
+
+        cached = RecordingResume(
+            plans=resume.plans,
+            outcomes={0: outcome},
+            rows_by_stage={0: [row for row in resume.appended[0] if NG_FAILURE_CLASS_KEY not in row]},
+            gated_keys={0: {(i, 0) for i in range(10)}},
+        )
+        dispatched: List[int] = []
+        resumed, _ = await run_multistage_stages(
+            self._final_stage_only_config(0.9),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner(set(), dispatched_stages=dispatched),
+            resume=cached,
+        )
+        assert dispatched == []
+        assert {row[ACCEPTED_STAGE_ROW_COUNT_KEY] for row in resumed} == {9}
+
+    async def test_final_stage_below_policy_floor_is_not_stamped(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = self._balanced_resume(task_ids)
+
+        results, summaries = await run_multistage_stages(
+            self._final_stage_only_config(0.9),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner({0, 1}, failure_class="skipped", terminal=True),
+            resume=resume,
+        )
+
+        assert len(results) == 8
+        assert all(ACCEPTED_STAGE_ROW_COUNT_KEY not in row for row in results)
+        assert "incomplete" not in summaries[0]
+        assert resume.completed == [(0, {"stage_index": 0, "status": "complete"})]
 
     async def test_invalid_directly_constructed_policy_is_rejected(self) -> None:
         task_ids = ["t0"]
