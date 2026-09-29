@@ -28,6 +28,7 @@ from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
 from fastapi import Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
+from nemo_gym._checkpoint.model import note_generation_backend
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
@@ -1767,6 +1768,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if client is None:
             client = self._assign_client(session_id)
         self._session_id_to_client[session_id] = client
+        note_generation_backend(getattr(client, "base_url", None))
 
         return client
 
