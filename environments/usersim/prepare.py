@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -55,7 +56,7 @@ def _prepare_panel(
     uv_executable: str,
     timeout_seconds: float,
 ) -> Path:
-    destination = _panel_path(cache_dir, version, locale)
+    destination = _panel_path(cache_dir, version, locale).resolve()
     manifest_path = destination.with_suffix(".manifest.json")
     destination.parent.mkdir(parents=True, exist_ok=True)
 
@@ -109,14 +110,16 @@ def _prepare_panel(
         ]
     )
     try:
-        subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=timeout_seconds,
-        )
+        with tempfile.TemporaryDirectory(prefix="usersim-panel-") as working_dir:
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=timeout_seconds,
+                cwd=working_dir,
+            )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         stderr = getattr(exc, "stderr", "") or ""
         raise RuntimeError(f"Failed to prepare NeMo UserSim panel for {locale}: {stderr.strip() or exc}") from exc
