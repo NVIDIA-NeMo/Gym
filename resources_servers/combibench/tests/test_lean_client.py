@@ -171,6 +171,26 @@ class TestErrorPayloads:
         assert result.transport_failure is True
         assert classify_lean_result(result) == STATUS_SANDBOX_ERROR
 
+    @pytest.mark.parametrize(
+        "payload",
+        [{"error": None}, {"stderr": ""}],
+        ids=["error-null", "stderr-empty"],
+    )
+    async def test_a_falsy_error_key_still_fails_closed(self, monkeypatch, payload: dict) -> None:
+        """Upstream's ``is_error`` tests ``"error" in feedback``, not its truth.
+
+        A reply carrying the key with a falsy value is one upstream fails; a
+        truthiness test here would score it a clean compile, which is the one
+        outcome this guard exists to prevent.
+        """
+        body = {"results": [{"custom_id": "x", "response": {**payload, "time": 0.1}}]}
+        _patch_request(monkeypatch, _FakeResponse(200, body))
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert result.transport_failure is True
+        assert classify_lean_result(result) == STATUS_SANDBOX_ERROR
+        # The message still names the value rather than trailing off after the colon.
+        assert result.error.endswith(repr(next(iter(payload.values()))))
+
     async def test_a_command_response_is_still_a_verdict(self, monkeypatch) -> None:
         """The guard must not swallow ordinary compiler diagnostics, which live in ``messages``."""
         body = {

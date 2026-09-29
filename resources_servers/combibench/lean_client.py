@@ -223,10 +223,21 @@ def _payload_failure(payload: dict[str, Any]) -> Optional[str]:
     the submission on ``error``/``stderr`` instead, which reaches the same reward
     of 0.0 by a different route; the difference only shows up in whether the
     rollout is counted in the denominator, and a non-verdict should not be.
+
+    The test is key *presence*, not truthiness, because that is what upstream's
+    ``is_error`` does: ``if "error" in feedback`` / ``if "stderr" in feedback``
+    (``evaluation/client/lean_client.py``). A payload carrying ``{"error": None}``
+    or ``{"stderr": ""}`` is one upstream fails, so a truthiness test here would
+    reward precisely the reply upstream rejects. A genuine command response
+    carries neither key, so nothing legitimate is caught by this.
     """
     for key in PAYLOAD_ERROR_KEYS:
-        if payload.get(key):
-            return f"Lean server reported {key}: {str(payload[key])[:500]}"
+        if key in payload:
+            # ``repr`` when the value is falsy, so ``{"error": None}`` and
+            # ``{"stderr": ""}`` read as themselves rather than as a blank message.
+            value = payload[key]
+            shown = str(value)[:500] if value else repr(value)
+            return f"Lean server reported {key}: {shown}"
     return None
 
 

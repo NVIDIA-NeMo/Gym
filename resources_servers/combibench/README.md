@@ -196,10 +196,11 @@ maps a `{"message": ...}` body to `ExtendedError`, so `/verify` can answer with
 an Error object in `response` and no top-level `error` at all. Such a reply has
 no messages and no sorries, which is exactly what a clean compile looks like, so
 `parse_verify_response` treats a payload carrying `message`, `error` or `stderr`
-as a failure and fails closed. Guarding `error` and `stderr` restores parity with
-upstream, whose `is_error` checks both before it reads `messages`; guarding
-`message` is an *addition* — upstream has no case for it and would score that
-reply 1.0. The outcome is `sandbox_error` (masked), not a model-attributable
+as a failure and fails closed. The test is key *presence*, matching upstream's
+`is_error` (`if "error" in feedback` / `if "stderr" in feedback`), so a payload
+carrying `{"error": null}` or `{"stderr": ""}` fails here exactly as it does
+there; guarding `message` is an *addition* — upstream has no case for it and
+would score that reply 1.0. The outcome is `sandbox_error` (masked), not a model-attributable
 status: a REPL that returned an Error object instead of a command response never
 evaluated the proof, so there is no verdict to charge to the model. Upstream
 reaches the same 0.0 by failing the submission; the only difference is whether
