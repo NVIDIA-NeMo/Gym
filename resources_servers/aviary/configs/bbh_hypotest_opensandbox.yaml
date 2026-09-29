@@ -69,11 +69,16 @@ bbh_hypotest_aviary_resources_server:
         pull_capsule_in_pod: true
         opensandbox_spec:
           image: ${oc.env:BBH_OPEN_SANDBOX_IMAGE,akomaragiri89904/hypotest-kernel:opensandbox-rlimit-20260731a}
-          # Null delegates connection discovery and defaults to the
-          # OpenSandbox SDK.
-          domain: null
-          api_key: null
-          protocol: null
+          # Connection settings follow Gym's OPENSANDBOX_* convention, falling
+          # back to the SDK's own OPEN_SANDBOX_* variables. Unset (null) values
+          # delegate to OpenSandbox SDK discovery/defaults. A scheme in the
+          # domain (e.g. https://host) also selects the kernel endpoint scheme.
+          domain: ${oc.env:OPENSANDBOX_DOMAIN,${oc.env:OPEN_SANDBOX_DOMAIN,null}}
+          api_key: ${oc.env:OPENSANDBOX_API_KEY,${oc.env:OPEN_SANDBOX_API_KEY,null}}
+          protocol: ${oc.env:OPENSANDBOX_PROTOCOL,${oc.env:OPEN_SANDBOX_PROTOCOL,null}}
+          # Optional extra PEM CA bundle for servers with a self-signed
+          # certificate; added to (not replacing) the default trust store.
+          tls_ca_path: ${oc.env:OPENSANDBOX_TLS_CA_PATH,${oc.env:OPEN_SANDBOX_TLS_CA_PATH,null}}
           use_server_proxy: true
           capsule_mode: mounted_volume
           mounted_capsule_root: ???
