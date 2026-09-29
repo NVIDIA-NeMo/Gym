@@ -545,6 +545,9 @@ class TestCli:
         assert len((prepared.rows_path).read_text().splitlines()) == 1
         with pytest.raises(ValueError, match="No runnable task"):
             prepare_target(str(folder), output_root=tmp_path / "out2", exclude=["*"])
+        only = prepare_target(str(folder), output_root=tmp_path / "out3", only=["gpu-*"])
+        assert [task.task_id for task in only.tasks] == ["gpu-task"]
+        assert "Skipping keep: not in --only-tasks" in capsys.readouterr().out
 
     def test_resolve_agent_accepts_short_name(self):
         selection = resolve_agent("simple")
