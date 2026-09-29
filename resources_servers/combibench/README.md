@@ -119,8 +119,9 @@ Fine-Eval distinguishes outcomes a whole-file benchmark has no equivalent for.
 7. **Compile** through the Lean server with a 60 s timeout. Any error message →
    `compile_error`; a `sorry` warning or REPL `sorries` entry → `has_sorry`;
    the REPL timing out on the submission → `timeout`; any other REPL error
-   string, and a 5xx for this snippet → `lean_error`, which is charged to the
-   model because upstream's `is_error` fails the submission on it too.
+   string, and a 500 raised from executing this snippet → `lean_error`, which is
+   charged to the model because upstream's `is_error` fails the submission on it
+   too.
 
 ### Who a failure is charged to
 
@@ -135,26 +136,43 @@ Charged to the model (reward 0.0, `mask_sample: false`, in the denominator):
 | Status | When |
 | --- | --- |
 | `timeout` | the REPL hit the budget on the submission body — a proof that does not terminate is the model's output, and excusing it would make hanging reward-neutral |
-| `lean_error` | the REPL reported an error string, **or** `/verify` answered 5xx for this snippet |
+| `lean_error` | the REPL reported an error string, **or** `/verify` answered 500 from executing this snippet |
 | `model_header_timeout` | the header that would not load inside the budget is one the model wrote itself |
 
-The 5xx case is the one worth spelling out. Kimina's
-`server/routers/check.py` turns every non-timeout exception raised while getting
-a REPL, running the header or running the body into `HTTPException(500, str(e))`
-*for that snippet*, and `server/repl.py` raises `LeanError` whenever the REPL
-wrote anything to stderr. Model output reaches that path — `native_decide` is
-allowed by design, and the model's own `import` lines become the pooled REPL's
-header — so treating a 5xx as a provider fault would let a model delete its own
-attempt from the denominator instead of scoring 0. It is charged on the status
-code, not on the wording of the server's message, so a 500 whose body happens to
-say "timed out" is still a `lean_error`.
+The 500 case is the one worth spelling out, because not every 500 is the
+model's. Kimina raises `HTTPException(500, str(e))` at exactly three sites, all
+in `run_one` (`server/routers/check.py`; nothing else under `server/` answers
+5xx):
+
+| Site | Raised when | Charged to |
+| --- | --- | --- |
+| `check.py:159` | executing the **body** raised — `server/repl.py` raises `LeanError` whenever the REPL wrote anything to stderr, and `native_decide` is allowed by design | the model → `lean_error` |
+| `check.py:118` | `manager.prep` raised, which `server/manager.py:197-215` normalises to `ReplError("Failed to start REPL")` or `ReplError("Failed to run header on REPL")` | the harness → `sandbox_error` |
+| `check.py:84` | `manager.get_repl` raised something other than `NoAvailableReplError`, i.e. the server could not spawn a Lean process at all | the harness in principle; see below |
+
+FastAPI serialises the exception as `{"detail": str(e)}`, so the two
+`manager.prep` cases arrive as those two fixed strings and are told apart by
+them (`lean_client.is_model_attributable_server_error`). This does key on the
+wording of a server message, deliberately — it is the only thing distinguishing
+three sites that share one status code, and `fine_eval.HEADER_TIMEOUT_MARKER`
+already keys `header_timeout` on Kimina's literal "header command timed out".
+The `check.py:84` detail is whatever the spawn failure said, so it cannot be
+matched; it falls through to `lean_error`. That is the safe direction of the
+two: the rule above is that a failure the model *could* have caused is never
+masked, and if upstream reworded either marker these cases would likewise become
+charged rather than silently masked.
+
+A 5xx Kimina does not emit at all — 502, 504 and friends — is a proxy or load
+balancer in front of the server answering for a server that did not, which no
+model can cause, so it is masked. (503 never reaches that decision: it is
+retried as saturation.)
 
 Charged to the harness (reward 0.0, `harness_failure: 1.0`, `mask_sample: true`,
 `failure_reason` set, out of the denominator and reported under `coverage/`):
 
 | Status | `failure_kind` | When |
 | --- | --- | --- |
-| `sandbox_error` | `provider_unavailable` | the connection was refused or timed out client-side; `/verify` answered a non-5xx HTTP error (401, 404, 422 — this client or its credentials, not the model); saturation (429/503) survived all three retries; the reply was not JSON, had no `results`, or carried an error object instead of a verdict |
+| `sandbox_error` | `provider_unavailable` | the connection was refused or timed out client-side; `/verify` answered a non-5xx HTTP error (401, 404, 422 — this client or its credentials, not the model); it answered 500 from REPL lifecycle ("Failed to start REPL" / "Failed to run header on REPL") or a 5xx Kimina never emits (502, 504 — a proxy, not the server); saturation (429/503) survived all three retries; the reply was not JSON, had no `results`, carried a result with neither an `error` nor a `response`, or carried an error object instead of a verdict |
 | `header_timeout` | `provider_unavailable` | a cold REPL could not finish `import Mathlib` inside the timeout, **and** the header was the reference statement's own or the default one `extract_lean_code` prepends — Kimina reports this as `Lean REPL header command timed out`, distinct from the submission timing out |
 | `bad_task` | `combibench:bad_task` | the row cannot be scored: no `formal_statement`, malformed `answers`, or an answer count that disagrees with the number of `_solution` abbrevs the statement declares |
 
@@ -265,6 +283,29 @@ status: a REPL that returned an Error object instead of a command response never
 evaluated the proof, so there is no verdict to charge to the model. Upstream
 reaches the same 0.0 by failing the submission; the only difference is whether
 the rollout stays in the denominator, and a non-verdict should not.
+
+One thing that guard does *not* settle, recorded rather than guessed at: whether
+a **model-authored** bad import (`import Foo`, which Kimina's split turns into
+the pooled REPL's header) can produce an Error payload rather than a command
+response carrying an error message. If it can, masking it puts a model-caused
+failure outside the denominator — the opposite of the rule above. Settling it
+needs the Lean REPL's own behaviour on an unknown module, and
+`leanprover-community/repl` is not vendored in the pinned Kimina tree, only
+referenced by URL from its `Dockerfile`/`setup.sh`, so it is left open here.
+What would settle it: one `/verify` call carrying `import Foo` against a live
+server at the pinned image, recorded here. In either direction this is strictly
+better than upstream, which reads only the outer `error` key and scores such a
+reply 1.0.
+
+**A result carrying neither an `error` nor a `response` is not a verdict
+either.** `{"results": [{"custom_id": "x"}]}` and the same with
+`"response": null` have no error, no messages and no sorries — indistinguishable
+from a clean compile — and both are reachable: `/verify` is declared
+`response_model_exclude_none=True`, so a `ReplResponse` with both fields None
+serialises to neither key, and the client's `extend()` returns None when the
+REPL's stdout parsed to JSON `null`. `parse_verify_response` fails closed on
+both, to the masked `sandbox_error`, for the same reason as the error payload
+above: this is the same under-specified-reply-read-as-success bug one level up.
 
 **Extracted code longer than `max_code_characters` is rejected unsent.**
 Upstream's extraction has no length bound at all, so this is a departure, but it
@@ -403,6 +444,20 @@ attempts with a 1 s then 2 s backoff — saturation costs the server no REPL tim
 and giving up on it would turn a busy moment into a masked `sandbox_error` that
 quietly shrinks the measured denominator.
 
+The client's HTTP budget for one `/verify` is derived from the server's own
+worst case rather than set as a flat margin, so the server always answers first:
+`lean_server_max_wait + 2 * lean_timeout_seconds + 30 s`
+(`lean_client.http_budget_seconds`). Kimina spends, for one snippet, up to
+`max_wait` waiting for a free REPL (`manager.get_repl`; `LEAN_SERVER_MAX_WAIT`,
+60 both in Kimina's defaults and in `kimina_image`), then up to the request
+timeout running the import header on a cold REPL, then up to it again running
+the body — 180 s at the defaults. A shorter budget would matter for attribution
+and not only for latency: a client-side timeout is a masked `sandbox_error`, so
+a non-terminating proof the server would have returned as its own timeout, and
+charged to the model, would instead be deleted from the denominator whenever the
+client blinked first. `lean_server_max_wait` is configurable for a server set to
+something other than 60.
+
 ### What is shared with the other Lean benchmarks, and what is not
 
 Reused from [`lean_proof/`](../lean_proof/): **`status.py`**, the status
@@ -528,9 +583,10 @@ script's `summary.agreements` of 1600 does, because upstream also called them
 not-a-success — would be counting a non-verdict as a match. They are excluded
 from the denominator in the table above and the summary counters in the JSON are
 left as the script wrote them. That run predates "Who a failure is charged to"
-above, which narrowed what `sandbox_error` covers: a per-snippet 5xx is now a
-`lean_error` charged to the model rather than a masked non-verdict, so a rerun
-may place those two rows in the scored denominator instead.
+above, which narrowed what `sandbox_error` covers: a 500 raised from executing
+the snippet is now a `lean_error` charged to the model rather than a masked
+non-verdict, so a rerun may place those two rows in the scored denominator
+instead — unless they were REPL-lifecycle or gateway 5xx, which stay masked.
 
 What the run does and does not establish about the departures. The two
 accepts-here-rejects-there departures produced no disagreement, but that is
@@ -548,12 +604,13 @@ elaborating with the ascription against 40/45 without it. The stricter
 that script and nowhere else. It reads `res["error"]` by subscript; Kimina
 omits that key when there was no error, so the read raises `KeyError`,
 upstream's blanket `except Exception` turns it into "proof invalid", and every
-compiling proof is reported as failed — 0/1600 unpatched. This is not a pin
-that could have been chosen better: upstream pins the `kimina` client at 0.1.1
-(2025-07-24), three months before Lean v4.24.0 was released (2025-10-14), while
-its own statements are now on v4.24.0. No server is both contemporary with that
-client and able to compile the current statements. It is also why this server
-talks to Kimina through its own client, which reads that field with `.get`.
+compiling proof is reported as failed — 0/1600 unpatched. Nor is it a dependency
+that could have been pinned better: upstream's harness does not use the `kimina`
+client package at all — it hand-rolls the HTTP calls with `aiohttp` — and its
+`pyproject.toml` carries only a floor, `kimina>=0.1.1` (0.1.1 is 2025-07-24,
+three months before Lean v4.24.0 was released on 2025-10-14), while its own
+statements are now on v4.24.0. It is also why this server talks to Kimina
+through its own client, which reads that field with `.get`.
 
 ```bash
 uv pip install loguru strenum tenacity tqdm   # upstream's imports, which Gym does not ship

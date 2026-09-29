@@ -23,12 +23,15 @@ import pytest
 from resources_servers.combibench import lean_client
 from resources_servers.combibench.fine_eval import classify_lean_result
 from resources_servers.combibench.lean_client import (
+    DEFAULT_LEAN_SERVER_MAX_WAIT_SECONDS,
     HTTP_TIMEOUT_MARGIN_SECONDS,
     MAX_SATURATION_ATTEMPTS,
     MAX_VERSION_PROBES,
+    REPL_LIFECYCLE_DETAILS,
     SATURATION_BACKOFF_SECONDS,
     SATURATION_STATUSES,
     KiminaLeanClient,
+    http_budget_seconds,
 )
 from resources_servers.lean_proof.status import STATUS_COMPILE_ERROR, STATUS_SANDBOX_ERROR
 
@@ -78,7 +81,7 @@ class TestKiminaLeanClient:
         assert call["json"]["timeout"] == 45 and call["json"]["disable_cache"] is False
         assert call["json"]["codes"][0]["proof"].startswith("import Mathlib")
         assert call["headers"]["Authorization"] == "Bearer secret"
-        assert call["timeout"].total == 45 + HTTP_TIMEOUT_MARGIN_SECONDS
+        assert call["timeout"].total == http_budget_seconds(45)
 
     async def test_no_api_key_sends_no_authorization_header(self, monkeypatch) -> None:
         calls = _patch_request(monkeypatch, _FakeResponse(200, {"results": [{"custom_id": "x", "response": {}}]}))
@@ -94,28 +97,59 @@ class TestKiminaLeanClient:
         assert f"HTTP {status}" in result.error
         assert classify_lean_result(result) == STATUS_SANDBOX_ERROR
 
-    @pytest.mark.parametrize("status", [500, 502, 504])
-    async def test_a_server_error_is_charged_to_the_model(self, monkeypatch, status) -> None:
-        """Kimina raises 5xx per snippet, from executing this submission.
+    async def test_a_snippet_execution_500_is_charged_to_the_model(self, monkeypatch) -> None:
+        """Kimina raises 500 per snippet when executing *this submission* blew up.
 
-        ``server/routers/check.py`` wraps every non-timeout exception from
-        getting a REPL, running the header or running the body into
-        ``HTTPException(500, str(e))`` for that snippet alone, and
-        ``server/repl.py`` raises ``LeanError`` whenever the REPL wrote anything
-        to stderr. Model output reaches that path — ``native_decide`` is allowed
-        by design — so a masked ``sandbox_error`` here would delete the attempt
-        from the denominator instead of scoring it 0, which upstream never does.
+        ``server/routers/check.py:159`` wraps every non-timeout exception from
+        running the body into ``HTTPException(500, str(e))`` for that snippet
+        alone, and ``server/repl.py`` raises ``LeanError`` whenever the REPL
+        wrote anything to stderr. Model output reaches that path —
+        ``native_decide`` is allowed by design — so a masked ``sandbox_error``
+        here would delete the attempt from the denominator instead of scoring it
+        0, which upstream never does.
         """
-        _patch_request(monkeypatch, _FakeResponse(status, text="Snippet execution failed"))
+        _patch_request(monkeypatch, _FakeResponse(500, text='{"detail":"Lean process broken pipe"}'))
         result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
         assert result.transport_failure is False and result.server_error is True
-        assert f"HTTP {status}" in result.error
+        assert "HTTP 500" in result.error
         assert classify_lean_result(result) == "lean_error"
 
-    async def test_a_server_error_saying_timed_out_is_still_a_lean_error(self, monkeypatch) -> None:
-        """The attribution is the status code, not the wording of the server's message."""
-        _patch_request(monkeypatch, _FakeResponse(500, text="worker timed out"))
+    @pytest.mark.parametrize("detail", list(REPL_LIFECYCLE_DETAILS))
+    async def test_a_repl_lifecycle_500_is_a_transport_failure(self, monkeypatch, detail: str) -> None:
+        """Not every 500 is the model's: ``manager.prep`` raises these two before the body ever runs.
+
+        ``server/manager.py:197-215`` normalises a REPL that would not start, or
+        an import header that would not run on it, to
+        ``ReplError("Failed to start REPL")`` / ``ReplError("Failed to run
+        header on REPL")``, which ``check.py:118`` turns into
+        ``HTTPException(500, str(e))`` and FastAPI serialises as ``{"detail":
+        ...}``. Charging that to the model would score a proof Lean never saw.
+        """
+        _patch_request(monkeypatch, _FakeResponse(500, text=f'{{"detail":"{detail}"}}'))
         result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert result.transport_failure is True and result.server_error is False
+        assert classify_lean_result(result) == STATUS_SANDBOX_ERROR
+
+    @pytest.mark.parametrize("status", [502, 504])
+    async def test_a_gateway_5xx_is_a_transport_failure(self, monkeypatch, status) -> None:
+        """No Kimina path emits 502/504; they come from a proxy in front of it, which the model cannot cause."""
+        _patch_request(monkeypatch, _FakeResponse(status, text="<html>Bad Gateway</html>"))
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert result.transport_failure is True and result.server_error is False
+        assert f"HTTP {status}" in result.error
+        assert classify_lean_result(result) == STATUS_SANDBOX_ERROR
+
+    async def test_a_500_saying_timed_out_is_still_a_lean_error(self, monkeypatch) -> None:
+        """Only the two REPL-lifecycle details are excused; other wordings stay charged."""
+        _patch_request(monkeypatch, _FakeResponse(500, text='{"detail":"worker timed out"}'))
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert classify_lean_result(result) == "lean_error"
+
+    async def test_a_500_whose_body_is_not_json_is_still_a_lean_error(self, monkeypatch) -> None:
+        """A body that is not FastAPI's ``{"detail": ...}`` cannot be excused, so it stays charged."""
+        _patch_request(monkeypatch, _FakeResponse(500, text="Internal Server Error"))
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert result.server_error is True
         assert classify_lean_result(result) == "lean_error"
 
     async def test_connection_error_is_a_transport_failure(self, monkeypatch) -> None:
@@ -197,6 +231,26 @@ class TestSaturationIsRetried:
         assert "timed out" in result.error
 
 
+class TestHttpBudget:
+    """The client must not give up before the server has had its own worst case."""
+
+    @pytest.mark.parametrize("timeout_seconds", [10, 60, 120])
+    async def test_the_budget_covers_the_servers_worst_case(self, timeout_seconds: int) -> None:
+        """``max_wait`` for a free REPL, then the header command, then the body command.
+
+        Below that sum a non-terminating proof — the model's own output — is cut
+        off by the client and masked as a ``sandbox_error`` instead of coming
+        back as the server's timeout and being charged.
+        """
+        assert http_budget_seconds(timeout_seconds) > DEFAULT_LEAN_SERVER_MAX_WAIT_SECONDS + 2 * timeout_seconds
+
+    async def test_the_budget_follows_the_configured_server_max_wait(self, monkeypatch) -> None:
+        calls = _patch_request(monkeypatch, _FakeResponse(200, {"results": [{"custom_id": "x", "response": {}}]}))
+        client = KiminaLeanClient("http://lean:8000", lean_server_max_wait=300)
+        await client.verify("code", 60)
+        assert calls[0]["timeout"].total == 300 + 2 * 60 + HTTP_TIMEOUT_MARGIN_SECONDS
+
+
 class TestErrorPayloads:
     """The per-item ``response`` can itself be an error object, with no outer ``error``."""
 
@@ -231,6 +285,33 @@ class TestErrorPayloads:
         assert classify_lean_result(result) == STATUS_SANDBOX_ERROR
         # The message still names the value rather than trailing off after the colon.
         assert result.error.endswith(repr(next(iter(payload.values()))))
+
+    @pytest.mark.parametrize(
+        "result",
+        [{"custom_id": "x"}, {"custom_id": "x", "response": None}],
+        ids=["no-keys", "response-null"],
+    )
+    async def test_a_result_with_neither_error_nor_response_fails_closed(self, monkeypatch, result: dict) -> None:
+        """Both shapes used to read as a clean compile and score 1.0.
+
+        ``/verify`` is declared ``response_model_exclude_none=True``, so a
+        ``ReplResponse`` whose ``error`` and ``response`` are both None
+        serialises to neither key; and the client's ``extend()`` yields None
+        when the REPL's stdout parsed to JSON ``null``. Same class as the error
+        payload guard above, one level up.
+        """
+        _patch_request(monkeypatch, _FakeResponse(200, {"results": [result]}))
+        parsed = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert parsed.transport_failure is True
+        assert classify_lean_result(parsed) == STATUS_SANDBOX_ERROR
+
+    async def test_an_outer_error_with_no_response_is_still_a_verdict(self, monkeypatch) -> None:
+        """The server's own timeout carries ``error`` and no ``response``; it must stay charged."""
+        body = {"results": [{"custom_id": "x", "error": "Lean REPL command timed out in 10 seconds"}]}
+        _patch_request(monkeypatch, _FakeResponse(200, body))
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert result.transport_failure is False
+        assert classify_lean_result(result) == "timeout"
 
     async def test_a_command_response_is_still_a_verdict(self, monkeypatch) -> None:
         """The guard must not swallow ordinary compiler diagnostics, which live in ``messages``."""
