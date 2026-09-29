@@ -14,11 +14,16 @@ The model guesses a secret 5-letter word in 6 attempts using three tools: `submi
 
 Every row pins its target word in `custom_target`, so all rollouts of a row play the same word. `reset()` rejects rows without a valid target.
 
-Train and validation targets come from disjoint splits of the 2,315 Wordle solution words in `wordle_words.py` (2,000 train, 315 validation). Generate `train.jsonl`, `validation.jsonl`, and `example.jsonl`:
+Train and validation targets come from disjoint splits of the 3,088 target words in `wordle_words.py` (2,625 train, 463 validation). `validation.jsonl` uses the first 100 validation words. Generate `train.jsonl`, `validation.jsonl`, and `example.jsonl`:
 
 ```bash
 python resources_servers/wordle/generate_data.py --output_dir resources_servers/wordle/data
 ```
+
+### Word lists
+
+- Valid guesses (8,636): 5-letter words from [ENABLE](https://raw.githubusercontent.com/dolph/dictionary/master/enable1.txt) (`enable1.txt`), public domain.
+- Targets (3,088): common words from the SCOWL/ESDB hunspell `en_US` dictionary ([en-wl/wordlist](https://github.com/en-wl/wordlist) release 2026.02.25) that are also in ENABLE, minus one word the dictionary flags as taboo. Copyright 2000-2026 by Kevin Atkinson, used under the SCOWL/ESDB permissive license. The full notice is in `wordle_words.py`.
 
 ## Run
 

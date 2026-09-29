@@ -19,14 +19,14 @@
 This script generates JSONL files with Wordle game prompts for training.
 
 Key design decisions:
-- Training data: Fixed target words cycled from TRAINING_WORDS (2,000 words), so every
+- Training data: Fixed target words cycled from TRAINING_WORDS (2,625 words), so every
   rollout of the same row plays the same word.
-- Validation data: Fixed target words from VALIDATION_WORDS (315 words, no overlap
+- Validation data: Fixed target words from VALIDATION_WORDS (463 words, no overlap
   with training). This ensures reproducible evaluation across training steps.
 
 Usage:
     python generate_data.py --output_dir data/
-    python generate_data.py --train_samples 2000 --output_dir data/
+    python generate_data.py --train_samples 2625 --output_dir data/
 """
 
 import argparse
@@ -160,7 +160,7 @@ def generate_training_data(num_samples: int, seed: int = 42) -> list[dict]:
 def generate_validation_data(seed: int = 43) -> list[dict]:
     """Generate validation data WITH fixed target words.
 
-    Uses all 315 words from VALIDATION_WORDS (no overlap with training).
+    Uses the first 100 of the 463 VALIDATION_WORDS (no overlap with training).
     Each validation entry has a specific target word for reproducible evaluation.
 
     Args:
@@ -198,12 +198,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Word Split:
-  - TRAINING_WORDS: 2,000 words (fixed in JSONL, cycled if --train_samples exceeds 2,000)
-  - VALIDATION_WORDS: 315 words (fixed in JSONL, no overlap with training)
+  - TRAINING_WORDS: 2,625 words (fixed in JSONL, cycled if --train_samples exceeds 2,625)
+  - VALIDATION_WORDS: 463 words, first 100 used (fixed in JSONL, no overlap with training)
 
 Examples:
-  python generate_data.py                          # Default: 1000 train, all 315 val
-  python generate_data.py --train_samples 2000     # More training samples
+  python generate_data.py                          # Default: 1000 train, 100 val
+  python generate_data.py --train_samples 2625     # More training samples
         """,
     )
     parser.add_argument("--train_samples", type=int, default=1000, help="Number of training samples (default: 1000)")
@@ -221,7 +221,7 @@ Examples:
 
     # Generate validation data (fixed target words from VALIDATION_WORDS)
     print("\nGenerating validation samples...")
-    print("  - Fixed target words from 315 validation words (no overlap with training)")
+    print("  - Fixed target words from 463 validation words (no overlap with training)")
     val_data = generate_validation_data(seed=args.seed + 1)
     save_jsonl(val_data, output_dir / "validation.jsonl")
 
@@ -235,8 +235,8 @@ Examples:
 
     print("\nDone!")
     print("\nSummary:")
-    print(f"  Training:   {len(train_data)} samples (fixed targets from 2,000 training words)")
-    print(f"  Validation: {len(val_data)} samples (fixed targets, 315 unique words)")
+    print(f"  Training:   {len(train_data)} samples (fixed targets from 2,625 training words)")
+    print(f"  Validation: {len(val_data)} samples (fixed targets, unique words)")
     print(f"  Example:    {len(example_data)} samples")
 
 
