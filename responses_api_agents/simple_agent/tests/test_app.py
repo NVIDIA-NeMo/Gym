@@ -508,6 +508,83 @@ class TestApp:
         # JSONDecodeError starts with the class name.
         assert "JSONDecodeError" in error_payload["error"]
 
+    @pytest.mark.parametrize(
+        "name, arguments, declared, expected_error",
+        [
+            ("verify", "{}", [], "Unknown tool: 'verify'"),
+            ("seed_session", "{}", ["seed_session"], "Unknown tool: 'seed_session'"),
+            ("../verify", "{}", [], "Unknown tool: '../verify'"),
+            ("other_tool", "{}", ["my_tool"], "Unknown tool: 'other_tool'"),
+            ("my_tool", "[1, 2]", ["my_tool"], "Invalid tool call arguments: expected a JSON object"),
+            ("my_tool", '{"a": 1}', ["my_tool"], None),
+            # Datasets that declare no function tools keep dispatching any well-formed name.
+            ("any_tool", '{"a": 1}', [], None),
+        ],
+    )
+    async def test_tool_call_dispatch_policy(
+        self, name: str, arguments: str, declared: list[str], expected_error: str | None
+    ) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver())
+
+        def model_response(output: dict) -> dict:
+            return {
+                "id": "r",
+                "created_at": 1.0,
+                "model": "m",
+                "object": "response",
+                "output": [output],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+
+        model_outputs = [
+            model_response(
+                {"id": "fc", "call_id": "c1", "name": name, "arguments": arguments, "type": "function_call"}
+            ),
+            model_response(
+                {
+                    "id": "msg",
+                    "role": "assistant",
+                    "type": "message",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                }
+            ),
+        ]
+
+        async def post(*, server_name, url_path, **kwargs):
+            response = AsyncMock()
+            response.cookies = {}
+            response.status = 200
+            payload = model_outputs.pop(0) if server_name == "model" else {"tool": "ok"}
+            response.read.return_value = json.dumps(payload)
+            response.content.read.return_value = json.dumps(payload).encode()
+            return response
+
+        server.server_client.post = AsyncMock(side_effect=post)
+        tools = [{"type": "function", "name": tool, "parameters": {}, "strict": False} for tool in declared]
+        res = client.post("/v1/responses", json={"input": "hi", "tools": tools})
+        assert res.status_code == 200
+
+        calls = [(c.kwargs["server_name"], c.kwargs["url_path"]) for c in server.server_client.post.await_args_list]
+        tool_output = next(o for o in res.json()["output"] if o["type"] == "function_call_output")
+        if expected_error is None:
+            assert calls == [("model", "/v1/responses"), ("resources", f"/{name}"), ("model", "/v1/responses")]
+            assert json.loads(tool_output["output"]) == {"tool": "ok"}
+        else:
+            assert calls == [("model", "/v1/responses"), ("model", "/v1/responses")]
+            assert json.loads(tool_output["output"]) == {"error": expected_error}
+
     @pytest.mark.parametrize("empty_output", [False, True])
     async def test_responses_stops_without_message_or_tool_calls(self, caplog, empty_output) -> None:
         config = SimpleAgentConfig(
@@ -965,3 +1042,108 @@ class TestApp:
         assert post_call_kwargs[0]["server_name"] == "my resources server"
         assert post_call_kwargs[1]["server_name"] == "simple_agent"
         assert post_call_kwargs[1]["cookies"] == {"session": "seeded"}
+
+
+def _echo_agent(tmp_path, *, global_config: dict | None = None, **config) -> SimpleAgent:
+    """An agent whose model calls one tool, then answers; the tool returns a long string."""
+    agent = SimpleAgent(
+        config=SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+            **config,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    agent.server_client.global_config_dict = global_config or {}
+
+    def model_response(output: dict) -> dict:
+        return {
+            "id": "r",
+            "created_at": 1.0,
+            "model": "m",
+            "object": "response",
+            "output": [output],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+    outputs = [
+        model_response(
+            {"id": "fc", "call_id": "c1", "name": "run", "arguments": '{"cmd": "ls"}', "type": "function_call"}
+        ),
+        model_response(
+            {
+                "id": "msg",
+                "role": "assistant",
+                "type": "message",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "All done.", "annotations": []}],
+            }
+        ),
+    ]
+
+    async def post(*, server_name, url_path, **kwargs):
+        response = AsyncMock()
+        response.cookies = {}
+        response.status = 200
+        payload = json.dumps(outputs.pop(0)) if server_name == "model" else "x" * 50
+        response.read.return_value = payload
+        response.content.read.return_value = payload.encode()
+        return response
+
+    agent.server_client.post = AsyncMock(side_effect=post)
+    return agent
+
+
+def _run_echo_episode(agent: SimpleAgent) -> None:
+    body = {"input": [{"role": "user", "content": "List files.\nThen stop."}]}
+    assert TestClient(agent.setup_webserver()).post("/v1/responses", json=body).status_code == 200
+
+
+def test_echo_is_off_by_default(tmp_path, capsys) -> None:
+    _run_echo_episode(_echo_agent(tmp_path))
+    assert capsys.readouterr().out == ""
+
+
+def test_echo_pretty_to_file(tmp_path) -> None:
+    echo_file = tmp_path / "items.log"
+    _run_echo_episode(_echo_agent(tmp_path, echo_items="pretty", echo_file=str(echo_file), echo_max_chars=30))
+
+    # Each item: a header line, its text unindented, then one blank line.
+    assert echo_file.read_text() == (
+        "[simple_agent:0] user\nList files.\nThen stop.\n\n"
+        '[simple_agent:1] function_call run (c1)\n{"cmd": "ls"}\n\n'
+        f"[simple_agent:1] function_call_output (c1)\n{'x' * 30}… (20 more chars)\n\n"
+        "[simple_agent:2] assistant\nAll done.\n\n"
+        "[simple_agent] episode completed after 2 step(s)\n\n"
+    )
+
+
+def test_echo_json_prints_items_as_they_arrive(tmp_path, capsys) -> None:
+    _run_echo_episode(_echo_agent(tmp_path, echo_items="json"))
+
+    items = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [item.get("type") for item in items] == ["message", "function_call", "function_call_output", "message"]
+    assert items[0]["content"] == "List files.\nThen stop." and items[0]["role"] == "user"
+    assert items[1]["arguments"] == '{"cmd": "ls"}'
+    assert items[2] == {"type": "function_call_output", "call_id": "c1", "output": "x" * 50}
+    assert items[3]["content"][0]["text"] == "All done."
+
+
+def test_echo_global_overrides_win(tmp_path, capsys) -> None:
+    echo_file = tmp_path / "items.jsonl"
+    overrides = {"simple_agent_echo_items": "json", "simple_agent_echo_file": str(echo_file)}
+    _run_echo_episode(_echo_agent(tmp_path, global_config=overrides, echo_items="pretty"))
+
+    assert capsys.readouterr().out == ""
+    assert len(echo_file.read_text().splitlines()) == 4
+
+
+def test_echo_unknown_format_is_ignored(tmp_path, capsys, caplog) -> None:
+    _run_echo_episode(_echo_agent(tmp_path, global_config={"simple_agent_echo_items": "loud"}))
+    assert capsys.readouterr().out == "" and "Ignoring unknown simple_agent_echo_items='loud'" in caplog.text
