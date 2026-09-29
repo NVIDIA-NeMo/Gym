@@ -39,8 +39,8 @@ in a newline, while upstream ``.strip()``s the statement at render time. The
 rendered prompt therefore carries one more blank line before the closing fence
 than upstream's does. It cannot affect a verdict — the statement check strips
 every chunk it compares (``fine_eval.statement_chunks``) — and the stored rows
-are left as they are because every committed ``harness_validation_*.json`` and
-the 3,200-rollout agreement evidence were produced against them.
+are left as they are because every harness-validation report behind the README's
+numbers and the 3,200-rollout agreement evidence were produced against them.
 """
 
 import argparse

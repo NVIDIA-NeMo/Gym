@@ -32,10 +32,12 @@ Run from the repository root with a Lean server up:
 
     python resources_servers/combibench/scripts/harness_validation.py \
         --input benchmarks/combibench/data/combibench_test.jsonl \
-        --output resources_servers/combibench/data/harness_validation_test.json
+        --output /tmp/combibench_validation/harness_validation_test.json
 
-The report is committed next to the example data so the numbers in the README
-can be re-derived.
+The report is not committed — a resources server's ``data/`` holds only the
+example rows, rollouts and metrics — so the harness-validation numbers in the
+README are reproduced by running this script, with the commands listed there
+under "Re-running the validation".
 """
 
 import argparse

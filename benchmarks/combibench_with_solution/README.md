@@ -26,6 +26,10 @@ gym eval run --no-serve \
 ```
 
 Against Mathlib v4.24.0 all 100 substituted statements compile with only
-`sorry` warnings (`resources_servers/combibench/data/harness_validation_github_test_with_solution.json`);
-the Hugging Face copy of this split has the same six non-compiling statements as
-its `test` split.
+`sorry` warnings; the Hugging Face copy of this split has the same six
+non-compiling statements as its `test` split. That measurement is not committed
+as an artifact — reproduce it with
+`resources_servers/combibench/scripts/harness_validation.py` on the
+`test_with_solution` split against a running Lean server, as
+`resources_servers/combibench/README.md` describes under "Re-running the
+validation".

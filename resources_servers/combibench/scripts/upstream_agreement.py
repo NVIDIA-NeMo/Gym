@@ -50,8 +50,12 @@ Needs the dependencies upstream's modules import that Gym does not ship:
 
     python resources_servers/combibench/scripts/upstream_agreement.py \
         --rollouts results/combibench/rollouts.jsonl \
-        --output resources_servers/combibench/data/upstream_agreement.json \
+        --output /tmp/combibench_validation/upstream_agreement.json \
         --lean-server-url http://127.0.0.1:12332
+
+The report is not committed — a resources server's ``data/`` holds only the
+example rows, rollouts and metrics — so the agreement numbers in the README are
+reproduced by running this script.
 """
 
 import argparse
@@ -194,6 +198,42 @@ def require_every_key(keys: list[str], keyed: dict[str, dict], what: str) -> Non
         )
 
 
+def build_report(
+    per_row: dict[str, dict[str, Any]], *, rollouts: str, lean_server_url: str, full_rows: bool
+) -> dict[str, Any]:
+    """The report this script writes, given one record per compared rollout.
+
+    Only the disagreements are written by default: the agreeing rows are 1600
+    copies of the same two fields, and the report is read for what did not
+    match. ``--full-rows`` keeps the complete map for an ad-hoc comparison.
+    """
+    disagreements = {k: v for k, v in per_row.items() if not v["agree"]}
+    summary = {
+        "rows": len(per_row),
+        "gym_successes": sum(1 for v in per_row.values() if v["gym_success"]),
+        "upstream_successes": sum(1 for v in per_row.values() if v["upstream_success"]),
+        "agreements": sum(1 for v in per_row.values() if v["agree"]),
+        "disagreements": len(disagreements),
+        # Which way each disagreement goes, and under which Gym status. The two
+        # documented departures can only produce gym_only entries.
+        "gym_only": sorted(k for k, v in disagreements.items() if v["gym_success"]),
+        "upstream_only": sorted(k for k, v in disagreements.items() if v["upstream_success"]),
+        "disagreement_by_gym_status": dict(Counter(v["gym_status"] for v in disagreements.values())),
+        "gym_status_counts": dict(Counter(v["gym_status"] for v in per_row.values())),
+        "upstream_error_type_counts": dict(Counter(v["upstream_error_type"] for v in per_row.values())),
+    }
+    report: dict[str, Any] = {
+        "summary": summary,
+        "rollouts": rollouts,
+        "upstream_revision": GITHUB_REVISION,
+        "lean_server_url": lean_server_url,
+        "rows": per_row if full_rows else disagreements,
+    }
+    if not full_rows:
+        report["rows_note"] = "only disagreements are kept; pass --full-rows for every row"
+    return report
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Paired agreement between this verifier and upstream's")
     parser.add_argument("--rollouts", type=Path, required=True, help="rollouts.jsonl from a Gym eval run")
@@ -261,36 +301,15 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         per_row = index_by_key(list(pool.map(one, enumerate(rows))), "rollouts")
 
-    disagreements = {k: v for k, v in per_row.items() if not v["agree"]}
-    summary = {
-        "rows": len(per_row),
-        "gym_successes": sum(1 for v in per_row.values() if v["gym_success"]),
-        "upstream_successes": sum(1 for v in per_row.values() if v["upstream_success"]),
-        "agreements": sum(1 for v in per_row.values() if v["agree"]),
-        "disagreements": len(disagreements),
-        # Which way each disagreement goes, and under which Gym status. The two
-        # documented departures can only produce gym_only entries.
-        "gym_only": sorted(k for k, v in disagreements.items() if v["gym_success"]),
-        "upstream_only": sorted(k for k, v in disagreements.items() if v["upstream_success"]),
-        "disagreement_by_gym_status": dict(Counter(v["gym_status"] for v in disagreements.values())),
-        "gym_status_counts": dict(Counter(v["gym_status"] for v in per_row.values())),
-        "upstream_error_type_counts": dict(Counter(v["upstream_error_type"] for v in per_row.values())),
-    }
-    # Only the disagreements are written: the agreeing rows are 1600 copies of the same
-    # two fields, and a committed report is read for what did not match. ``--full-rows``
-    # keeps the complete map for an ad-hoc comparison.
-    report = {
-        "summary": summary,
-        "rollouts": str(args.rollouts),
-        "upstream_revision": GITHUB_REVISION,
-        "lean_server_url": args.lean_server_url,
-        "rows": per_row if args.full_rows else disagreements,
-    }
-    if not args.full_rows:
-        report["rows_note"] = "only disagreements are kept; pass --full-rows for every row"
+    report = build_report(
+        per_row,
+        rollouts=str(args.rollouts),
+        lean_server_url=args.lean_server_url,
+        full_rows=args.full_rows,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    print(json.dumps(report["summary"], indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
