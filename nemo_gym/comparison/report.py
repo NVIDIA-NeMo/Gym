@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
 
 import orjson
 
+from nemo_gym.comparison.diff import _comparison_value
 from nemo_gym.comparison.schema import (
     MAX_FLIPS_SHOWN,
     AgentComparison,
@@ -45,8 +46,8 @@ JSON_REPORT_NAME = "compare_report.json"
 MISSING = "—"
 
 CI_FOOTNOTE = (
-    "For each delta, comparison uses `mean_across_repeats/<metric>` when recorded and otherwise uses "
-    "the metric value. "
+    "Displayed baseline/candidate values and each delta use `mean_across_repeats/<metric>` when recorded, "
+    "otherwise the metric value. "
     "Delta CI = two-sided independent-sample 95% Welch t-interval for candidate minus baseline, "
     "computed from the named metric's values in each run's `repeat_level_metrics`. "
     f"`{MISSING}` means the required interval data was unavailable: "
@@ -60,6 +61,10 @@ def _fmt(value: Optional[float]) -> str:
     if value is None:
         return MISSING
     return f"{value:.4f}" if abs(value) < 10 else f"{value:.2f}"
+
+
+def _fmt_point(value: Optional[MetricValue]) -> str:
+    return _fmt(_comparison_value(value)) if value is not None else MISSING
 
 
 def _fmt_signed(value: Optional[float]) -> str:
@@ -164,9 +169,9 @@ def _metric_table(rows: Sequence[MetricRow], candidate_labels: Sequence[str]) ->
             " / ".join(_fmt_delta_cell(candidate) for candidate in row.candidates),
             " / ".join(_fmt_delta_ci(candidate) for candidate in row.candidates),
         ]
-        cells += [_fmt(row.baseline.value if row.baseline else None), _fmt_ci(row.baseline)]
+        cells += [_fmt_point(row.baseline), _fmt_ci(row.baseline)]
         for candidate in row.candidates:
-            cells += [_fmt(candidate.value if candidate else None), _fmt_ci(candidate)]
+            cells += [_fmt_point(candidate), _fmt_ci(candidate)]
         table_rows.append(cells)
     return _table(header, alignments, table_rows)
 
@@ -362,9 +367,9 @@ def render_key_metrics_tables(result: ComparisonResult) -> List["Table"]:
                 escape(row.metric),
                 _fmt_delta_cell(candidate),
                 _fmt_delta_ci(candidate),
-                _fmt(row.baseline.value if row.baseline else None),
+                _fmt_point(row.baseline),
                 _fmt_ci(row.baseline),
-                _fmt(candidate.value if candidate else None),
+                _fmt_point(candidate),
                 _fmt_ci(candidate),
             )
         tables.append(table)

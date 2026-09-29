@@ -33,7 +33,7 @@ from nemo_gym.comparison.loading import (
     load_agg_metrics_file,
     resolve_agent_selections,
 )
-from nemo_gym.comparison.report import render_markdown, summary_lines, write_reports
+from nemo_gym.comparison.report import render_key_metrics_tables, render_markdown, summary_lines, write_reports
 from nemo_gym.comparison.runner import build_comparison_result, resolve_output_dir
 from nemo_gym.comparison.schema import ComparisonConfig
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
@@ -201,7 +201,7 @@ class TestLoadRunFile:
             load_agg_metrics_file(str(rollouts), role="baseline")
 
 
-class TestLegacyRepeatMetricsCache:
+class TestLegacyRepeatMetrics:
     @staticmethod
     def _legacy_entry() -> Dict[str, Any]:
         entry = _entry(
@@ -215,9 +215,11 @@ class TestLegacyRepeatMetricsCache:
         del entry["repeat_level_metrics"]
         return entry
 
-    def test_missing_repeat_metrics_are_calculated_and_cached_as_an_aggregate_file(self, tmp_path):
+    def test_missing_repeat_metrics_are_calculated_without_writing_a_cache(self, tmp_path):
         rollouts = _write_run(tmp_path, "legacy", [self._legacy_entry()])
-        run_file = load_agg_metrics_file(str(rollouts), role="baseline")
+        existing_files = set(rollouts.parent.iterdir())
+        with pytest.warns(UserWarning, match="Repeat-level metrics are missing.*calculating"):
+            run_file = load_agg_metrics_file(str(rollouts), role="baseline")
         run = build_loaded_run(run_file, AGENT)
 
         assert [repeat["mean/reward"] for repeat in run.repeat_level_metrics] == [1.0, 0.0]
@@ -227,35 +229,45 @@ class TestLegacyRepeatMetricsCache:
         assert run.num_repeats == 2
         assert run.has_repeat_cis
 
-        cache = orjson.loads(
-            comparison_loading._repeat_metrics_cache_path(run_file.aggregate_metrics_fpath).read_bytes()
-        )
-        assert isinstance(cache, list)
-        assert cache[0]["agent_metrics"]["num_repeats"] == 2
-        assert cache[0]["repeat_level_metrics"] == run.repeat_level_metrics
+        assert set(rollouts.parent.iterdir()) == existing_files
 
-    def test_present_repeat_metrics_ignore_even_an_invalid_cache(self, tmp_path):
+    def test_present_repeat_metrics_are_not_recomputed(self, tmp_path, monkeypatch):
         entry = self._legacy_entry()
         entry["repeat_level_metrics"] = []
         rollouts = _write_run(tmp_path, "modern", [entry])
-        comparison_loading._repeat_metrics_cache_path(aggregate_metrics_path_for(rollouts)).write_text("{invalid")
+
+        def fail_if_called(_entry):
+            raise AssertionError("repeat metrics are already present")
+
+        monkeypatch.setattr(comparison_loading, "_compute_repeat_metrics", fail_if_called)
 
         run = build_loaded_run(load_agg_metrics_file(str(rollouts), role="baseline"), AGENT)
 
         assert run.repeat_level_metrics == []
 
-    def test_plain_cache_is_reused_without_recomputing(self, tmp_path, monkeypatch):
-        rollouts = _write_run(tmp_path, "cached", [self._legacy_entry()])
-        first = build_loaded_run(load_agg_metrics_file(str(rollouts), role="baseline"), AGENT)
+    def test_existing_corrupt_sidecar_is_ignored(self, tmp_path):
+        rollouts = _write_run(tmp_path, "legacy", [self._legacy_entry()])
+        sidecar = aggregate_metrics_path_for(rollouts).with_stem("rollouts_aggregate_metrics_repeat_metrics_cache")
+        sidecar.write_text("{invalid")
 
-        def fail_if_called(_entry):
-            raise AssertionError("cache should avoid repeat aggregation")
+        with pytest.warns(UserWarning, match="calculating"):
+            run = build_loaded_run(load_agg_metrics_file(str(rollouts), role="baseline"), AGENT)
 
-        monkeypatch.setattr(comparison_loading, "_compute_repeat_metrics", fail_if_called)
-        second = build_loaded_run(load_agg_metrics_file(str(rollouts), role="baseline"), AGENT)
+        assert [repeat["mean/reward"] for repeat in run.repeat_level_metrics] == [1.0, 0.0]
+        assert sidecar.read_text() == "{invalid"
 
-        assert second.repeat_level_metrics == first.repeat_level_metrics
-        assert second.agent_metrics == first.agent_metrics
+    def test_legacy_metrics_are_recomputed_after_source_changes(self, tmp_path):
+        rollouts = _write_run(tmp_path, "legacy", [self._legacy_entry()])
+        with pytest.warns(UserWarning, match="calculating"):
+            first = build_loaded_run(load_agg_metrics_file(str(rollouts), role="baseline"), AGENT)
+
+        changed = self._legacy_entry()
+        changed["group_level_metrics"][0]["rollout_infos"][0]["reward"] = 0.0
+        aggregate_metrics_path_for(rollouts).write_bytes(orjson.dumps([changed]))
+        with pytest.warns(UserWarning, match="calculating"):
+            second = build_loaded_run(load_agg_metrics_file(str(rollouts), role="baseline"), AGENT)
+
+        assert second.repeat_level_metrics[0]["mean/reward"] < first.repeat_level_metrics[0]["mean/reward"]
 
     def test_legacy_files_flow_through_comparison_to_a_welch_interval(self, tmp_path):
         baseline_entry = _entry(
@@ -286,20 +298,26 @@ class TestLegacyRepeatMetricsCache:
         assert row.candidates[0].delta_ci_low is not None
         assert row.candidates[0].delta_ci_high is not None
 
-    def test_cache_follows_an_explicit_aggregate_override(self, tmp_path):
+    def test_read_only_aggregate_override_is_not_written_to(self, tmp_path):
         rollout_identity = tmp_path / "identity" / "rollouts.jsonl"
         override = tmp_path / "elsewhere" / "legacy_metrics.json"
         override.parent.mkdir()
         override.write_bytes(orjson.dumps([self._legacy_entry()]))
+        existing_files = set(override.parent.iterdir())
+        override.parent.chmod(0o555)
 
-        load_agg_metrics_file(
-            str(rollout_identity),
-            role="baseline",
-            aggregate_metrics_fpath_override=str(override),
-        )
+        try:
+            with pytest.warns(UserWarning, match="calculating"):
+                run_file = load_agg_metrics_file(
+                    str(rollout_identity),
+                    role="baseline",
+                    aggregate_metrics_fpath_override=str(override),
+                )
+        finally:
+            override.parent.chmod(0o755)
 
-        assert comparison_loading._repeat_metrics_cache_path(override).exists()
-        assert not comparison_loading._repeat_metrics_cache_path(aggregate_metrics_path_for(rollout_identity)).exists()
+        assert build_loaded_run(run_file, AGENT).repeat_level_metrics
+        assert set(override.parent.iterdir()) == existing_files
 
 
 class TestNumRepeatsDerivation:
@@ -1213,8 +1231,6 @@ class TestEndToEnd:
         assert "++some.nested.hf_token=****" in command
 
     def test_key_metrics_table_is_rendered_per_agent(self, tmp_path):
-        from nemo_gym.comparison.report import render_key_metrics_tables
-
         _, result = self._result(tmp_path)
         (table,) = render_key_metrics_tables(result)
         assert table.title == f"Key metrics — {AGENT}"
@@ -1313,6 +1329,41 @@ class TestReportEdgeCases:
             }
         )
         return build_comparison_result(config, "gym compare ...")
+
+    @pytest.mark.parametrize(
+        "candidate_mean, expected_delta, expected_candidate",
+        [
+            (1.0, "+0.5000 (+100.0%)", "1.0000"),
+            (None, "+0.1000 (+20.0%)", "0.6000"),
+            (0.0, "-0.5000 (-100.0%)", "0.0000"),
+        ],
+    )
+    def test_displayed_values_match_delta_estimates(
+        self, tmp_path, candidate_mean, expected_delta, expected_candidate
+    ):
+        baseline = _entry(
+            agent_metrics={"mean/reward": 0.4, "mean_across_repeats/mean/reward": 0.5},
+            key_metrics={"mean/reward": 0.4},
+        )
+        candidate_metrics = {"mean/reward": 0.6}
+        if candidate_mean is not None:
+            candidate_metrics["mean_across_repeats/mean/reward"] = candidate_mean
+        candidate = _entry(agent_metrics=candidate_metrics, key_metrics={"mean/reward": 0.6})
+        result = self._result(tmp_path, baseline, candidate)
+
+        row = next(row for row in result.comparisons[0].metrics if row.metric == "mean/reward")
+        assert row.baseline.value == 0.4
+        assert row.candidates[0].value == 0.6
+
+        markdown = render_markdown(result)
+        metric_line = next(line for line in markdown.splitlines() if line.startswith("| `mean/reward` |"))
+        cells = [cell.strip() for cell in metric_line.strip("|").split("|")]
+        assert [cells[1], cells[3], cells[5]] == [expected_delta, "0.5000", expected_candidate]
+
+        (table,) = render_key_metrics_tables(result)
+        assert list(table.columns[1].cells) == [expected_delta]
+        assert list(table.columns[3].cells) == ["0.5000"]
+        assert list(table.columns[5].cells) == [expected_candidate]
 
     def test_missing_values_and_zero_baseline_render_placeholders(self, tmp_path):
         baseline = _entry(
