@@ -58,7 +58,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.models import HarborArtifact, HarborEnvironment
 from nemo_gym.tasks.harbor.task import HarborTaskError
-from resources_servers.harbor.sandbox_io import download_dir, download_path, upload_dir, upload_path
+from resources_servers.harbor.sandbox_io import _exec_as_root, download_dir, download_path, upload_dir, upload_path
 
 
 LOGGER = logging.getLogger(__name__)
@@ -140,6 +140,10 @@ class HarborResourcesServerConfig(BaseResourcesServerConfig):
     gpu_sandbox_provider: str | None = None
     # Pass a task's `gpu_types` to the provider. Off: deployments without that filter reject it.
     request_gpu_type: bool = False
+    # Replace a task's image reference with another (for example a mirror, or a derived image that adds
+    # the world-writable `/solution` and `/logs` folders Harbor provides through mounts). Keys and values
+    # are full image references; task folders stay untouched.
+    image_rewrites: dict[str, str] = Field(default_factory=dict)
     # Recorded OCI configuration for Compose images (`{image_ref: {os, architecture, image, config}}`).
     # None looks for `compose-images.json` next to the taskset's task folders.
     compose_image_configs: Path | None = None
@@ -384,7 +388,7 @@ class HarborResourcesServer(SimpleResourcesServer):
         if self.config.derive_cpu_env:
             env = cpu_cap_env(resources.get("cpu")) | env
         return SandboxSpec(
-            image=image or task.image,
+            image=self._rewrite_image(image or task.image),
             ttl_s=ttl,
             ready_timeout_s=self.config.sandbox_ready_timeout_s,
             workdir=workdir,
@@ -393,6 +397,9 @@ class HarborResourcesServer(SimpleResourcesServer):
             resources=resources,
             provider_options=dict(self.config.sandbox_provider_options),
         )
+
+    def _rewrite_image(self, image: str | None) -> str | None:
+        return self.config.image_rewrites.get(image, image) if image else image
 
     def _provider_ref(self, task: HarborTask) -> str:
         """Which top-level sandbox block runs this task: the GPU one when the task declares GPUs."""
@@ -525,16 +532,25 @@ class HarborResourcesServer(SimpleResourcesServer):
             if result.return_code != 0 or not (result.stdout or "").strip():
                 raise RuntimeError(f"Could not resolve the image working directory: {result.stderr or result.stdout}")
             workdir = (result.stdout or "").strip().splitlines()[-1]
-        # Harbor mounts /logs into the agent's container; tasks may write to /logs/artifacts during the episode.
-        commands = [
-            f"mkdir -p {shlex.quote(workdir)} {AGENT_LOGS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR}",
-            f"chmod 777 {AGENT_LOGS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR}",
-        ]
+        commands = [f"mkdir -p {shlex.quote(workdir)}"]
         if task.user:
             commands.append(f"chown {shlex.quote(task.user)} {shlex.quote(workdir)}")
         result = await _exec_as_root_user(sandbox, " && ".join(commands), configured_user=task.user)
         if result.return_code != 0:
             raise RuntimeError(f"Could not prepare {workdir}: {result.stderr or result.stdout}")
+        # Harbor mounts /logs into the agent's container; tasks may write to /logs/artifacts during the
+        # episode. Best effort: an image that runs as a non-root user without the capability to switch
+        # to root cannot create top-level folders, and the agent may still not need them.
+        logs = await _exec_as_root(
+            sandbox,
+            f"mkdir -p {AGENT_LOGS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR} "
+            f"&& chmod 777 {AGENT_LOGS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR}",
+            timeout_s=60,
+        )
+        if logs.return_code != 0:
+            LOGGER.warning(
+                f"{task.task_id}: could not create /logs folders in the agent sandbox: {logs.stderr or logs.stdout}"
+            )
         return workdir
 
     async def _run_setup_commands(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
