@@ -95,9 +95,12 @@ class CombibenchStatus(str, Enum):
     LEAN_ERROR = "lean_error"  # Lean server reported a non-timeout REPL error, or a 5xx for this snippet
     # The model chose an import header that would not load inside the timeout.
     MODEL_HEADER_TIMEOUT = "model_header_timeout"
-    # The model chose an import header that failed to load for some other reason
-    # (``import Foo``, a module that does not build): Kimina answers 500 with
-    # "Failed to run header on REPL" and says nothing more about why.
+    # The model's import header did not merely fail to load — the REPL running it
+    # died or answered with something that is not JSON, so Kimina answers 500 with
+    # "Failed to run header on REPL" and says nothing more about why. Narrower than
+    # "a bad import": an unresolvable module is *not* this case, because the REPL
+    # reports it in parseable JSON and it lands in the body diagnostics as
+    # ``compile_error``. See ``lean_client.is_header_run_failure``.
     MODEL_HEADER_ERROR = "model_header_error"
     # Harness faults: the model did not cause these.
     LEAN_SERVER_ERROR = STATUS_SANDBOX_ERROR
@@ -337,9 +340,13 @@ class CombibenchVerifier:
             # ``ReplError("Failed to run header on REPL")`` and answers 500, so
             # the reply says nothing about what went wrong -- but the header it
             # ran is the submission's own leading ``import`` block, which the
-            # model may well have written, and ``import Foo`` is a failure the
-            # model caused. Excusing it unconditionally (which this did until the
-            # third review round) deletes such a rollout from the denominator.
+            # model may well have written. The model-attributable route is
+            # narrow: every raise that reaches here is the REPL dying or writing
+            # non-JSON while loading the header, not a module failing to resolve
+            # (see ``lean_client.is_header_run_failure``). Narrow is not empty --
+            # the REPL runs under an ``RLIMIT_AS`` cap and ``native_decide`` is
+            # allowed -- and excusing it unconditionally (which this did until
+            # the third review round) deletes such a rollout from the denominator.
             if header_is_harness_supplied(submission, body.formal_statement):
                 failure_reason = f"Lean server could not run the reference import header: {result.error}"
             else:
