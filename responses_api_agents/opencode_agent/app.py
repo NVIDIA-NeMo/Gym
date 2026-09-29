@@ -405,6 +405,7 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
+    reasoning_tokens = 0
     if not db_path.is_file():
         return output_items, {"input_tokens": 0, "output_tokens": 0}
 
@@ -427,7 +428,8 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
             tokens = part.get("tokens") or {}
             cache = tokens.get("cache") or {}
             input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0)
-            output_tokens += int(tokens.get("output") or 0)
+            output_tokens += int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
+            reasoning_tokens += int(tokens.get("reasoning") or 0)
         elif roles.get(row["message_id"]) == "assistant" and ptype == "text" and (part.get("text") or "").strip():
             output_items.append(
                 NeMoGymResponseOutputMessage(
@@ -467,7 +469,11 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
                     )
                 )
 
-    return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    return output_items, {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": reasoning_tokens,
+    }
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -793,7 +799,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 input_tokens=input_tokens,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(
+                    reasoning_tokens=usage.get("reasoning_tokens", 0)
+                ),
                 total_tokens=input_tokens + output_tokens,
             ),
         )
