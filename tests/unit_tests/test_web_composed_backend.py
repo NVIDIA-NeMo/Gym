@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -156,6 +157,23 @@ def test_close_attempts_both_roles_when_driver_cleanup_fails() -> None:
         backend.close()
     assert driver.closed
     assert evaluator.closed
+
+
+@pytest.mark.parametrize("failing_component", ["driver", "evaluator"])
+def test_close_retries_only_the_failed_component(failing_component) -> None:
+    driver = _Driver()
+    evaluator = _Evaluator()
+    driver.close = Mock(side_effect=[RuntimeError("driver failed"), None] if failing_component == "driver" else None)
+    evaluator.close = Mock(
+        side_effect=[RuntimeError("evaluator failed"), None] if failing_component == "evaluator" else None
+    )
+    backend = ComposedWebBackend(driver, evaluator)
+    with pytest.raises(RuntimeError, match="failed"):
+        backend.close()
+    backend.close()
+    backend.close()
+    assert driver.close.call_count == (2 if failing_component == "driver" else 1)
+    assert evaluator.close.call_count == (2 if failing_component == "evaluator" else 1)
 
 
 def test_close_propagates_evaluator_cleanup_failure_and_clears_state() -> None:

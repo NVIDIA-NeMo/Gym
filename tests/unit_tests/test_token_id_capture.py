@@ -482,6 +482,17 @@ def test_external_staging_requires_framework_owned_rebuild_and_active_capture():
     assert config.token_id_capture.external_staging is True
 
 
+def test_megatron_worker_backend_requires_external_staging():
+    with pytest.raises(ValueError, match="requires external_staging=true"):
+        TokenIdCaptureConfig.model_validate(
+            {
+                "token_id_capture": {
+                    "external_staging_backend": "megatron_worker",
+                }
+            }
+        )
+
+
 def test_agent_capture_selection_uses_static_agent_config_or_all_agents():
     config = {
         "token_id_capture": {"enabled": True, "rebuild_response": False, "allow_unresolved_continuations": True},
@@ -1189,6 +1200,16 @@ def test_fingerprint_ignores_non_assistant_turns():
     assert a == b != ""
     # A request without an assistant turn starts a new conversation.
     assert assistant_fingerprint([{"role": "user", "content": "q"}]) == ""
+
+
+@pytest.mark.parametrize("fingerprint", [assistant_fingerprint, conversation_digest])
+def test_fingerprint_preserves_namespaced_tool_identity(fingerprint):
+    call = {"type": "function_call", "call_id": "call-1", "name": "weather", "arguments": '{"city":"Paris"}'}
+    served = {**call, "namespace": "functions"}
+    backend = {**call, "name": "functions__weather"}
+    assert fingerprint([served]) == fingerprint([backend])
+    assert fingerprint([served]) != fingerprint([{**served, "namespace": "other"}])
+    assert fingerprint([served]) != fingerprint([call])
 
 
 def test_fingerprint_survives_tool_argument_reserialization():

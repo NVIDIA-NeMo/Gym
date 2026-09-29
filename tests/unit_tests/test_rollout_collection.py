@@ -17,7 +17,7 @@ import json
 import pickle
 import warnings
 from asyncio import Future
-from collections import Counter
+from collections import Counter, defaultdict
 from copy import deepcopy
 from pathlib import Path
 from threading import get_ident
@@ -66,6 +66,7 @@ from nemo_gym.rollout_collection import (
     _failure_rows_counted_as_zero,
     _failures_path_for,
     _get_max_rollout_attempts,
+    _masking_step_metrics,
     _rollout_for_export,
     _rollout_request_debug_summary,
     loads_jsonl_line,
@@ -745,6 +746,73 @@ class TestRolloutCollection:
         _attach_ng_perf(result, observability_enabled=True, rollout_latency_ms=42.0)
 
         assert NG_PERF_KEY not in result
+
+    @pytest.mark.parametrize("concurrency", [1, 3])
+    async def test_run_examples_dispatches_in_input_order(
+        self, monkeypatch: pytest.MonkeyPatch, concurrency: int
+    ) -> None:
+        """Serial site mutations must not inherit as_completed's set iteration order."""
+        rows = [failing_row(i) for i in range(119)]
+        started = []
+        active = 0
+        peak = 0
+
+        async def post(*, server_name, url_path, json):
+            nonlocal active, peak
+            task_index = json[TASK_INDEX_KEY_NAME]
+            started.append(task_index)
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return FakeResponse(200, {"task_index": task_index})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        results = [
+            await future
+            for future in RolloutCollectionHelper().run_examples(rows, semaphore=asyncio.Semaphore(concurrency))
+        ]
+
+        assert started == list(range(119))
+        assert peak == concurrency
+        assert len(results) == len(rows)
+        assert sorted(result["task_index"] for _, result in results) == list(range(119))
+        assert all(row[TASK_INDEX_KEY_NAME] == result["task_index"] for row, result in results)
+
+    async def test_run_examples_still_yields_in_completion_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An earlier slow rollout must not block delivery of a later completed rollout."""
+        release_first = asyncio.Event()
+        first_started = asyncio.Event()
+
+        async def post(*, server_name, url_path, json):
+            task_index = json[TASK_INDEX_KEY_NAME]
+            if task_index == 0:
+                first_started.set()
+                await release_first.wait()
+            else:
+                await first_started.wait()
+            return FakeResponse(200, {"task_index": task_index})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        pending = RolloutCollectionHelper().run_examples(
+            [failing_row(0), failing_row(1)], semaphore=asyncio.Semaphore(2)
+        )
+        try:
+            row, result = await asyncio.wait_for(next(pending), timeout=5)
+            assert row[TASK_INDEX_KEY_NAME] == result["task_index"] == 1
+        finally:
+            release_first.set()
+        row, result = await asyncio.wait_for(next(pending), timeout=5)
+        assert row[TASK_INDEX_KEY_NAME] == result["task_index"] == 0
+
+    async def test_run_examples_does_not_dispatch_until_iteration(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        post = AsyncMock(return_value=FakeResponse(200, {"reward": 1}))
+        install_fake_server_client(monkeypatch, post)
+        pending = RolloutCollectionHelper().run_examples([failing_row()])
+        await asyncio.sleep(0)
+        post.assert_not_awaited()
+        await next(pending)
+        post.assert_awaited_once()
 
     async def test_run_examples_logs_failed_run(
         self,
@@ -4045,3 +4113,99 @@ class TestPreprocessExamples:
     def test_validates_knobs_like_the_cli(self) -> None:
         with pytest.raises(ValueError, match="empty list"):
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
+
+
+class TestMaskingStepMetrics:
+    """Progress accounting covers persisted rollouts; dropped attempts are counted apart."""
+
+    def test_a_healthy_run_adds_no_keys(self) -> None:
+        assert _masking_step_metrics("my_agent", Counter({"reward": 2.0, "count": 4}), Counter()) == {}
+
+    def test_masked_rollouts_report_their_share_and_the_score_without_them(self) -> None:
+        # 10 persisted, 2 masked; the 8 unmasked ones scored 4.0 in total.
+        metrics = _masking_step_metrics("my_agent", Counter({"reward": 4.0, "count": 8, "masked": 2}), Counter())
+
+        assert metrics == {
+            "progress/my_agent/masked_pct": 20.0,
+            "progress/my_agent/reward_unmasked": 50.0,
+        }
+
+    def test_every_persisted_rollout_masked_publishes_no_score(self) -> None:
+        """No unmasked rollout means no honest average to publish."""
+        assert _masking_step_metrics("my_agent", Counter({"masked": 6}), Counter()) == {
+            "progress/my_agent/masked_pct": 100.0
+        }
+
+    def test_failed_and_omitted_attempts_do_not_enter_the_quality_average(self) -> None:
+        """A sidecar row and a kill-shaped one are counted, never averaged as a zero."""
+        metrics = _masking_step_metrics(
+            "my_agent",
+            Counter({"reward": 4.0, "count": 4}),
+            Counter({"failed": 3, "omitted": 2}),
+        )
+
+        assert metrics == {
+            "progress/my_agent/reward_unmasked": 100.0,
+            "progress/my_agent/failed": 3,
+            "progress/my_agent/omitted": 2,
+        }
+
+
+class TestAnAgentThatOnlyEverFails:
+    """The wiring case: a total failure must not fall out of the export.
+
+    `_masking_step_metrics` is correct on its own Counters; what this covers is the loop
+    that feeds it. An agent whose every request returns no result never lands in
+    `agent_name_to_counts`, so iterating that dict would drop exactly the agent whose
+    failure the series exists to surface.
+    """
+
+    def _exported_agents(self, scored: dict, dropped: dict) -> set:
+        """Reproduce the export loop's selection over the two counter dicts."""
+        agent_name_to_scored = defaultdict(Counter, {k: Counter(v) for k, v in scored.items()})
+        agent_name_to_dropped = defaultdict(Counter, {k: Counter(v) for k, v in dropped.items()})
+
+        step_metrics: dict = {}
+        for agent_name in sorted(agent_name_to_scored.keys() | agent_name_to_dropped.keys()):
+            step_metrics.update(
+                _masking_step_metrics(
+                    agent_name,
+                    agent_name_to_scored.get(agent_name, Counter()),
+                    agent_name_to_dropped.get(agent_name, Counter()),
+                )
+            )
+        return {key.split("/")[1] for key in step_metrics}
+
+    def test_an_agent_with_no_successful_result_still_reports_its_failures(self) -> None:
+        exported = self._exported_agents(
+            scored={"healthy_agent": {"reward": 3.0, "count": 4}},
+            dropped={"broken_agent": {"failed": 4}},
+        )
+
+        assert "broken_agent" in exported
+
+    def test_the_healthy_agent_is_not_lost_in_the_process(self) -> None:
+        exported = self._exported_agents(
+            scored={"healthy_agent": {"reward": 3.0, "count": 4, "masked": 1}},
+            dropped={"broken_agent": {"failed": 4}},
+        )
+
+        assert exported == {"healthy_agent", "broken_agent"}
+
+    def test_a_run_with_nothing_wrong_still_exports_nothing(self) -> None:
+        """The series stays empty on a healthy run, as before."""
+        assert self._exported_agents(scored={"healthy_agent": {"reward": 3.0, "count": 4}}, dropped={}) == set()
+
+    def test_the_counters_are_not_grown_by_being_read(self) -> None:
+        agent_name_to_scored: dict = defaultdict(Counter, {"healthy_agent": Counter({"count": 1})})
+        agent_name_to_dropped: dict = defaultdict(Counter, {"broken_agent": Counter({"failed": 1})})
+
+        for agent_name in sorted(agent_name_to_scored.keys() | agent_name_to_dropped.keys()):
+            _masking_step_metrics(
+                agent_name,
+                agent_name_to_scored.get(agent_name, Counter()),
+                agent_name_to_dropped.get(agent_name, Counter()),
+            )
+
+        assert set(agent_name_to_scored) == {"healthy_agent"}
+        assert set(agent_name_to_dropped) == {"broken_agent"}

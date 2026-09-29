@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+from functools import partial
+
+from nemo_gym.web.chromium import ensure_chromium
 from nemo_gym.web.models import WebActionProfile, WebBenchmark, WebRuntimeProfile, WebTask
 from nemo_gym.web.session_manager import WebSessionManager
 from resources_servers.webarena_browser.backend import webarena_backend_factory
@@ -18,7 +21,13 @@ WEBARENA_VERIFIER_PROFILES = {
 
 class WebArenaBrowserSessionManager(WebSessionManager):
     def __init__(self, config: WebArenaBrowserResourcesServerConfig) -> None:
-        super().__init__(config, backend_factory=webarena_backend_factory)
+        super().__init__(
+            config,
+            backend_factory=webarena_backend_factory,
+            prepare_runtime=partial(
+                ensure_chromium, channel=config.browser_channel, allow_install=config.browser_auto_install
+            ),
+        )
 
     def _validate_task(self, task: WebTask) -> None:
         super()._validate_task(task)
