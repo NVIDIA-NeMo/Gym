@@ -822,11 +822,18 @@ def test_build_sbatch_script_contains_vllm_srun(submit_config, bench_dir):
     assert "srun --overlap" in script
 
 
-def test_build_sbatch_script_driver_output_flag(submit_config, bench_dir):
+@pytest.mark.parametrize(
+    ("run_args", "expected"),
+    [({}, True), ({"require_complete": True}, True), ({"require_complete": False}, False)],
+)
+def test_build_sbatch_script_driver_output_flag(submit_config, bench_dir, run_args, expected):
     benchmark = submit_config.driver.benchmarks["gsm8k"]
+    benchmark.run.update(run_args)
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
     assert "--output=logs/driver.log" in script
+    assert f"+require_complete={expected}" in script
+    assert f"+require_complete={not expected}" not in script
 
 
 def test_build_sbatch_script_output_jsonl_fpath(submit_config, bench_dir):

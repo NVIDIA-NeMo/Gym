@@ -21,6 +21,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
 from importlib import import_module
+from importlib.metadata import version as distribution_version
 from os import environ, getenv
 from pathlib import Path
 from platform import python_version
@@ -34,12 +35,12 @@ from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
 from omegaconf.errors import InterpolationResolutionError
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
-from ray import __version__ as ray_version
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, legacy_config_path_alias
 from nemo_gym.config_types import (
     AgentCompositionError,
+    AgentWithoutEnvironmentServerError,
     AlmostServerError,
     ConfigError,
     ConfigInterpolationError,
@@ -68,6 +69,8 @@ from nemo_gym.telemetry.setup import (
 
 
 logger = logging.getLogger(__name__)
+
+ray_version = distribution_version("ray")
 
 _GLOBAL_CONFIG_DICT = None
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
@@ -165,6 +168,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
+# The field an environment server names its agent in.
+AGENT_SERVER_REF_KEY_NAME = "agent_server"
 ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
@@ -792,10 +797,29 @@ Duplicate config paths:
                 agents[source.agent_type] = composed
                 global_config_dict[renames[target.name]] = instance
 
+            self._retarget_environment_servers(global_config_dict, renames)
             self._raise_on_outdated_routing(global_config_dict, renames)
             self._route_rows_stamped_before_the_swap(global_config_dict, renames)
 
         self._raise_on_unapplied_agent_overrides(held_agent_overrides, set(renames.values()))
+
+    @staticmethod
+    def _retarget_environment_servers(global_config_dict: DictConfig, renames: dict[str, str]) -> None:
+        """Point each environment server at the agent composition put in place of the one it named.
+
+        The server is named after the environment, not the agent, so a swap leaves its own name
+        alone and only its `agent_server` reference has to follow.
+        """
+        for instance in global_config_dict.values():
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            for server in servers.values():
+                reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
+                if isinstance(reference, DictConfig) and reference.get("name") in renames:
+                    reference["name"] = renames[reference["name"]]
 
     @staticmethod
     def _composed_instance_name(target: _AgentInstance, agent_type: str) -> str:
@@ -1023,6 +1047,42 @@ the check."""
             elif OmegaConf.is_missing(original, key):
                 composed[key] = MISSING
 
+    def _raise_on_agent_without_environment_server(self, global_config_dict: DictConfig) -> None:
+        """Reject an agent that rollout collection would otherwise have to call directly.
+
+        Runs after composition, so every agent left is one a run can dispatch to.
+        """
+        with_environment_server = set()
+        for instance in global_config_dict.values():
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            for server in servers.values():
+                reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
+                if isinstance(reference, DictConfig):
+                    with_environment_server.add(reference.get("name"))
+
+        without_environment_server = [
+            agent.name
+            for agent in self._agent_instances(global_config_dict)
+            if not self._is_unbound_agent(agent.server_config)
+            and agent.name not in with_environment_server
+            and agent.server_config.get("entrypoint") is not None
+        ]
+        if not without_environment_server:
+            return
+
+        listing = "\n".join(f"  - {name}" for name in sorted(without_environment_server))
+        raise AgentWithoutEnvironmentServerError(
+            f"""Agent instance(s) have no environment server, so rollout collection cannot reach them:
+{listing}
+
+Declare one for each, naming the agent in its `{AGENT_SERVER_REF_KEY_NAME}` reference, or run
+scripts/add_legacy_agent_environment_servers.py to update your config."""
+        )
+
     def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
         """Fail fast with one actionable error listing every unset '???' value.
 
@@ -1220,6 +1280,8 @@ Pass each config with --config (it builds the list for you), e.g.:
 
         # Must run after the swap above (inherited bindings must exist to carry over) and before the
         # missing-value check below (it removes the unbound agent instance that still carries '???').
+        # NOTE(martas): this is the logic for legacy config structure. after migration
+        # to environment servers, this should be updated.
         self.compose_unbound_agent(global_config_dict, held_agent_overrides)
         global_config_dict = OmegaConf.merge(global_config_dict, held_agent_overrides)
         self.apply_legacy_agent_aliases(global_config_dict)
@@ -1229,6 +1291,8 @@ Pass each config with --config (it builds the list for you), e.g.:
         # a '???' in a deleted or overwritten branch is not reported. Otherwise the first unset
         # value surfaces as an opaque MissingMandatoryValue deep in the pipeline.
         self.raise_on_missing_values(global_config_dict)
+        # NOTE(martas): this is for catching agents not attached to an environment server
+        self._raise_on_agent_without_environment_server(global_config_dict)
 
         # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
         with open_dict(global_config_dict):
@@ -1515,6 +1579,24 @@ def _apply_verbosity(global_config_dict: DictConfig) -> None:
         logging.getLogger().setLevel(logging.DEBUG)
 
 
+def translate_interpolation_error(e: InterpolationResolutionError) -> ConfigInterpolationError:
+    """Same class of user error as an unset '???' (see raise_on_missing_values), reported the same way
+    instead of letting omegaconf's traceback reach the top level. Covers both a missing `${key}`
+    (InterpolationKeyError) and a failing resolver such as `${oc.env:VAR}`, which carries its own
+    message and so is passed through as-is."""
+    match = re.search(r"Interpolation key '([^']+)' not found", str(e))
+    if not match:
+        return ConfigInterpolationError(str(e))
+    key = match.group(1)
+    return ConfigInterpolationError(
+        f"""Config value '{e.full_key}' references '{key}', which is not set after merging.
+
+Provide it via a CLI override, in env.yaml, or in a config you pass via config_paths.
+For example, on the command line:
+  ++{key}=<value>"""
+    )
+
+
 def set_global_config_dict(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
@@ -1523,21 +1605,7 @@ def set_global_config_dict(
     try:
         global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
     except InterpolationResolutionError as e:
-        # Same class of user error as an unset '???' (see raise_on_missing_values), so report it the same
-        # way instead of letting omegaconf's traceback reach the top level. Covers both a missing `${key}`
-        # (InterpolationKeyError) and a failing resolver such as `${oc.env:VAR}`, which carries its own
-        # message and so is passed through as-is.
-        match = re.search(r"Interpolation key '([^']+)' not found", str(e))
-        if not match:
-            raise ConfigInterpolationError(str(e)) from e
-        key = match.group(1)
-        raise ConfigInterpolationError(
-            f"""Config value '{e.full_key}' references '{key}', which is not set after merging.
-
-Provide it via a CLI override, in env.yaml, or in a config you pass via config_paths.
-For example, on the command line:
-  ++{key}=<value>"""
-        ) from e
+        raise translate_interpolation_error(e) from e
 
     _GLOBAL_CONFIG_DICT = global_config_dict
 

@@ -30,16 +30,18 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import unquote
+
+from resources_servers.sec_local_index.sec_urls import parse_sec_archives_url
 
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_START_DATE = "1900-01-01"
-MAX_END_DATE = "2025-04-07"
 PAGE_SIZE = 100
 TOKEN_RE = re.compile(r'"(?:[^"]|"")*"|\S+')
 BAREWORD_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+_COVERAGE_UNSET = object()
 
 SIDECAR_SCHEMA_VERSION = 1
 SIDECAR_SUFFIX = ".metadata"
@@ -73,8 +75,6 @@ DUMP_PATH_COLUMNS = ("canonical_url_key", "source_path")
 # Keeps the IN clause below SQLite's bound-parameter limit on any build.
 DUMP_PATH_CHUNK_SIZE = 500
 
-SEC_ARCHIVES_URL_RE = re.compile(r"sec\.gov/Archives/edgar/data/(\d+)/(\d+)/([^?#]*)")
-
 
 def default_sidecar_path(index_path: str | Path) -> Path:
     return Path(str(index_path) + SIDECAR_SUFFIX)
@@ -86,13 +86,13 @@ def canonical_url_key(url: str) -> str | None:
     Must stay byte-identical to the key the index builder writes: unpadded CIK,
     dashless accession, lowercased filename.
     """
-    match = SEC_ARCHIVES_URL_RE.search(url)
-    if not match:
+    parsed = parse_sec_archives_url(url)
+    if parsed is None:
         return None
-    filename = unquote(match.group(3)).strip("/").rsplit("/", 1)[-1].lower()
+    filename = parsed.document_basename
     if not filename:
         return None
-    return f"{int(match.group(1))}:{match.group(2)}:{filename}"
+    return f"{parsed.unpadded_cik}:{parsed.accession}:{filename}"
 
 
 def _relative_source_path(source_path: str) -> str | None:
@@ -139,6 +139,14 @@ class LocalEdgarRequest:
     end_date: str
     page: int
     top_n_results: int
+
+
+class OutOfCoverageError(ValueError):
+    """The requested window lies wholly outside the filings held locally.
+
+    Has no live equivalent: sec-api.io serves the whole of EDGAR, so there an
+    empty result only ever means the query matched nothing.
+    """
 
 
 def _quote_fts(value: str) -> str:
@@ -222,14 +230,14 @@ def _optional_strings(name: str, value: Any) -> tuple[str, ...] | None:
 
 def normalize_request(
     search_query: str,
-    start_date: str = DEFAULT_START_DATE,
-    end_date: str = MAX_END_DATE,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     top_n_results: int = PAGE_SIZE,
     page: int = 1,
     form_types: Optional[list[str]] = None,
     ciks: Optional[list[str]] = None,
     *,
-    max_end_date: str = MAX_END_DATE,
+    max_end_date: str,
 ) -> LocalEdgarRequest:
     if not isinstance(search_query, str) or not search_query.strip():
         raise ValueError(
@@ -270,7 +278,7 @@ class LocalEdgarSearch:
         self,
         index_path: str | Path,
         *,
-        max_end_date: str = MAX_END_DATE,
+        max_end_date: str,
         metrics_dir: str | Path | None = None,
         metadata_path: str | Path | None = None,
     ):
@@ -281,6 +289,7 @@ class LocalEdgarSearch:
         self.metadata_path = self._resolve_metadata_path(metadata_path)
         self._require_usable_metadata_source()
         self.max_end_date = _date_value("max_end_date", max_end_date)
+        self._coverage: tuple[str, str] | None | object = _COVERAGE_UNSET
         self.metrics_path: Path | None = None
         self._metrics_lock = threading.Lock()
         self._local = threading.local()
@@ -293,6 +302,22 @@ class LocalEdgarSearch:
     @property
     def uses_metadata_sidecar(self) -> bool:
         return self.metadata_path is not None
+
+    @property
+    def coverage(self) -> tuple[str, str] | None:
+        """Earliest and latest filing_date held locally, or None for an empty index.
+
+        Read from the sidecar when there is one: the same query against the index
+        is a full scan over the filing bodies and costs seconds rather than
+        milliseconds.
+        """
+        if self._coverage is _COVERAGE_UNSET:
+            table = SIDECAR_TABLE if self.metadata_path is not None else "documents"
+            earliest, latest = (
+                self._session().execute(f"SELECT MIN(filing_date), MAX(filing_date) FROM {table}").fetchone()
+            )
+            self._coverage = None if earliest is None or latest is None else (str(earliest), str(latest))
+        return self._coverage
 
     def _resolve_metadata_path(self, metadata_path: str | Path | None) -> Path | None:
         """Locate the metadata sidecar, requiring it to match the index if present.
@@ -332,7 +357,7 @@ class LocalEdgarSearch:
             raise ValueError(
                 f"Metadata sidecar {candidate} has schema version {version!r}, "
                 f"expected {SIDECAR_SCHEMA_VERSION}. Rebuild it with "
-                f"scripts/build_local_edgar_metadata.py."
+                f"resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py."
             )
 
         connection = self._connect()
@@ -346,12 +371,12 @@ class LocalEdgarSearch:
             raise ValueError(
                 f"Metadata sidecar {candidate} covers {recorded.get('document_count')} documents "
                 f"but the index holds {documents}. Rebuild it with "
-                f"scripts/build_local_edgar_metadata.py."
+                f"resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py."
             )
         if recorded.get("source_fingerprint") != fingerprint:
             raise ValueError(
                 f"Metadata sidecar {candidate} was built from a different index. Rebuild it with "
-                f"scripts/build_local_edgar_metadata.py."
+                f"resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py."
             )
 
     def _connect(self) -> sqlite3.Connection:
@@ -415,7 +440,7 @@ class LocalEdgarSearch:
         raise ValueError(
             f"Local EDGAR index {self.index_path} stores filing text in documents and has no "
             f"metadata sidecar, so every search would read filing text to return metadata. "
-            f"Build one with 'python resources_servers/finance_sec_search/scripts/"
+            f"Build one with 'python resources_servers/sec_local_index/scripts/"
             f"build_local_edgar_metadata.py --index {self.index_path}', or point "
             f"local_edgar_metadata_path at it if it is stored elsewhere."
         )
@@ -423,24 +448,34 @@ class LocalEdgarSearch:
     def search(
         self,
         search_query: str,
-        start_date: str = DEFAULT_START_DATE,
-        end_date: str = MAX_END_DATE,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
         top_n_results: int = PAGE_SIZE,
         page: int = 1,
         form_types: Optional[list[str]] = None,
         ciks: Optional[list[str]] = None,
     ) -> list[dict[str, Any]]:
-        started = time.perf_counter()
-        request = normalize_request(
-            search_query,
-            start_date,
-            end_date,
-            top_n_results,
-            page,
-            form_types,
-            ciks,
-            max_end_date=self.max_end_date,
+        return self.execute(
+            normalize_request(
+                search_query,
+                start_date,
+                end_date,
+                top_n_results,
+                page,
+                form_types,
+                ciks,
+                max_end_date=self.max_end_date,
+            )
         )
+
+    def execute(self, request: LocalEdgarRequest) -> list[dict[str, Any]]:
+        """Run an already-normalized request.
+
+        Callers that normalize elsewhere use this so a request is not validated
+        and clamped twice.
+        """
+        self._require_coverage(request)
+        started = time.perf_counter()
         match_all = request.search_query.strip() == "*"
         results = self._execute(request, match_all=match_all)
         filter_browse_fallback = not results and not match_all and bool(request.ciks)
@@ -454,6 +489,18 @@ class LocalEdgarSearch:
             filter_browse_fallback=filter_browse_fallback,
         )
         return results
+
+    def _require_coverage(self, request: LocalEdgarRequest) -> None:
+        coverage = self.coverage
+        if coverage is None:
+            return
+        earliest, latest = coverage
+        if request.start_date > latest or request.end_date < earliest:
+            raise OutOfCoverageError(
+                f"No filings are indexed between {request.start_date} and {request.end_date}. "
+                f"This local corpus covers {earliest} through {latest}. "
+                f"Search within that range."
+            )
 
     def _execute(
         self,
@@ -511,6 +558,9 @@ class LocalEdgarSearch:
 
     async def search_async(self, **arguments: Any) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self.search, **arguments)
+
+    async def execute_async(self, request: LocalEdgarRequest) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.execute, request)
 
     @property
     def supports_dump_paths(self) -> bool:

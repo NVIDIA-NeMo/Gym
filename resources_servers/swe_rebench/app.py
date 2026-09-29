@@ -132,6 +132,7 @@ class SWERebenchVerifyResponse(BaseVerifyResponse):
 
 
 class SWERebenchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: SWERebenchResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:

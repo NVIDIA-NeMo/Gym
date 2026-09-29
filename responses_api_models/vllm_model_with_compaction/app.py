@@ -48,6 +48,8 @@ def _validate_context_compaction_params(body: Dict[str, Any]) -> VLLMContextComp
 class VLLMModelWithCompaction(VLLMModel):
     """Dedicated vLLM adapter for context-compacted generation."""
 
+    ray_enabled = False
+
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("POST", "/tokenize")})
     _TOKENIZE_CHAT_FIELDS = (*VLLMModel._TOKENIZE_CHAT_FIELDS, "required_prefix_token_ids")
 

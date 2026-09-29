@@ -21,3 +21,10 @@ wmt24pp_wmt_translation_simple_agent:
         prompt_config: benchmarks/wmt24pp/prompts/default.yaml
         prepare_script: benchmarks/wmt24pp/prepare.py
         license: Creative Commons Attribution-ShareAlike 4.0 International
+
+wmt24pp_wmt_translation_environment_server:
+  _inherit_from: wmt_translation_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: wmt24pp_wmt_translation_simple_agent

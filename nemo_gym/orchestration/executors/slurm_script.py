@@ -856,6 +856,7 @@ def build_sbatch_script(
     driver_env = dict(config.driver.env)
     if benchmark.command is None:
         run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
+        run_args.setdefault("require_complete", True)
         gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
     else:
         # A command replaces `gym eval run`, so the run args it would have carried

@@ -43,7 +43,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from resources_servers.finance_sec_search.local_edgar_search import (  # noqa: E402
+from resources_servers.sec_local_index.local_edgar_search import (  # noqa: E402
     METADATA_COLUMNS,
     SIDECAR_SCHEMA_VERSION,
     default_sidecar_path,
