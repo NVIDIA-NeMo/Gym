@@ -17,7 +17,7 @@ installed upstream package, so a pin bump that changes the harness fails here.
 |------|-------------|----------|
 | `web_search` | Tavily web search (`TavilyWebSearch`) | `tavily_api_key` |
 | `edgar_search` | sec-api.io full-text EDGAR search (`EDGARSearch`), or a local index | `sec_api_key`, or `local_edgar_index_path` |
-| `price_history` | Tiingo daily OHLC for equity/etf/crypto/fx (`PriceHistory`) | `pricing_data_api_key` |
+| `price_history` | Tiingo daily OHLC for equity/etf/crypto/fx (`PriceHistory`), or local daily records | `pricing_data_api_key`, or `local_pricing_dir` |
 | `parse_html_page` | Fetch + parse a page to text, store under a key (`ParseHtmlPage`) | — |
 | `retrieve_information` | LLM over stored docs via `{{key}}` prompts (`RetrieveInformation`) | `retrieval_model_server` |
 | `calculator` | Safe arithmetic via simpleeval (`Calculator`) | — |
@@ -63,6 +63,133 @@ serves the whole of EDGAR.
 See [`resources_servers/sec_local_index/README.md`](../sec_local_index/README.md)
 for the shared library behind both modes and how it is kept aligned with
 upstream.
+
+### Where prices come from
+
+`price_history_mode` selects the source for `price_history`. It defaults to `live`.
+
+| `price_history_mode` | `price_history` | Needs |
+|---|---|---|
+| `live` | Tiingo, through the cache when `use_cache` is on | `pricing_data_api_key` |
+| `local` | `<local_pricing_dir>/equity/<TICKER>.jsonl`; never the network | `local_pricing_dir` |
+
+Each local file holds one JSON record per line, for example
+`{"date": "2024-01-02T00:00:00.000Z", "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5}`.
+Records may carry any column upstream prints (`adjClose`, `volume`, ...);
+upstream drops columns no record in the response populates, so a store of raw
+prices prints only `date,open,high,low,close`.
+
+#### Building a local store
+
+Local mode needs a daily price dataset that you are licensed to use for your
+purpose; none is shipped here. It could be an export from a market data
+vendor, exchange historical data, or a dataset your organization already
+holds. The steps below turn it into the store.
+
+**1. Shape it as one long table.** One row per ticker and trading day, saved as
+Parquet or CSV (one file or a directory of files):
+
+```text
+date,ticker,open,high,low,close,volume
+2024-01-02,AAA,10.00,10.50,9.80,10.20,120000
+2024-01-03,AAA,10.20,10.40,9.90,10.05,98000
+2024-01-02,BBB-B,41.10,41.60,40.90,41.35,5300
+```
+
+| Column | Required | Meaning |
+|---|---|---|
+| `date` | yes | Trading day: a `YYYY-MM-DD` string, date or timestamp |
+| `ticker` | yes | Symbol as the model will ask for it; share classes as `BRK-B` or `BRK.B` |
+| `open`, `high`, `low`, `close` | at least one price column | As-traded (unadjusted) prices |
+| `adjOpen`, `adjHigh`, `adjLow`, `adjClose` | | Split- and dividend-adjusted prices |
+| `volume`, `adjVolume`, `divCash`, `splitFactor` | | Shares traded, adjusted volume, cash dividend, split ratio |
+
+The tool's description tells the model that `open`..`close` are raw and
+`adj*` are adjusted, so put each series in the matching column. If your source
+has adjusted prices only, use the `adj*` columns and leave out `close`. Other
+columns are ignored, and the model sees only the columns your data has.
+
+Most sources need only a rename, or a reshape from one file per ticker:
+
+```python
+import pandas as pd
+from pathlib import Path
+
+# A vendor export with its own column names
+df = pd.read_csv("export.csv").rename(columns={"Date": "date", "Symbol": "ticker", "Close": "close"})
+
+# Or one file per ticker, named <TICKER>.csv
+df = pd.concat(pd.read_csv(p).assign(ticker=p.stem) for p in Path("per_ticker").glob("*.csv"))
+
+df.to_parquet("daily_prices.parquet", index=False)
+```
+
+**2. Check it.** The script rejects duplicate rows and unusable symbols. It
+can't know whether your prices are right, so check these first:
+
+```python
+df = pd.read_parquet("daily_prices.parquet")
+df["date"] = pd.to_datetime(df["date"])
+assert not df.duplicated(["ticker", "date"]).any(), "one row per ticker and day"
+price = "close" if "close" in df else "adjClose"
+assert df[price].gt(0).all(), "no missing or non-positive prices"
+assert (df["date"].dt.dayofweek < 5).all(), "trading days only"
+print(df["date"].min(), df["date"].max(), df["ticker"].nunique())
+```
+
+- Dates after upstream's `MAX_END_DATE` (2026-03-01) are never served.
+- In raw prices, a split shows up as a one-day jump. If your answers are
+  computed from raw closes, avoid windows that contain one.
+- Make sure every ticker your tasks ask about is present.
+
+**3. Build the store and point local mode at it:**
+
+```bash
+python resources_servers/finance_agent_v2/scripts/build_local_prices.py \
+    daily_prices.parquet --output /data/local_prices --drop-columns volume
+```
+
+```yaml
+price_history_mode: local
+local_pricing_dir: /data/local_prices
+```
+
+The script writes one file per ticker in ascending date order. It fails if a
+ticker has two rows for the same date, and skips symbols the tool would reject.
+Use `--drop-columns` for columns the model shouldn't see, for example `volume`
+if your source covers only part of the market.
+
+**4. Spot-check what the model will see**, from the server's venv at the
+repository root:
+
+```bash
+python -c "
+import asyncio, logging
+from resources_servers.finance_agent_v2.local_tools import LocalPriceHistory
+args = {'ticker': 'AAA', 'start_date': '2024-01-02', 'end_date': '2024-01-05', 'asset_class': 'equity'}
+print(asyncio.run(LocalPriceHistory('/data/local_prices').execute(args, {}, logging.getLogger())).output)
+"
+```
+
+Prices differ slightly between providers, so compare scores only between runs
+that use the same store. When you generate training answers from your own
+dataset, serve that same dataset here so a correct reading of the tool always
+matches the answer.
+
+Files are read on first use and at most 2 million daily records stay in memory
+(about 1-3 GB, depending on the price columns), so startup loads no prices and
+memory stays bounded however long the histories are.
+
+Local mode behaves like live mode where it can:
+
+- The upstream `MAX_END_DATE` clamp and argument validation still apply.
+- `etf` reads the same store as `equity`.
+- A dash share class (`BRK-B`) also finds a dot file (`BRK.B.jsonl`).
+- A ticker the store lacks returns upstream's "No pricing data returned" message.
+- `crypto` and `fx` return an error.
+
+Use local mode when the data used to label answers is the same data the tool
+serves, so a correct reading of the tool always matches the label.
 
 ## Dependencies
 
@@ -115,6 +242,10 @@ sec_api_key: ${oc.env:SEC_API_KEY,null}                 # edgar_search (sec-api.
 # Optional for startup; both are needed for full-tool benchmark coverage.
 tavily_api_key: ${oc.env:TAVILY_API_KEY,null}           # web_search (Tavily)
 pricing_data_api_key: ${oc.env:TIINGO_API_KEY,null}     # price_history (Tiingo)
+
+# Optional: live (Tiingo, default) or local (see "Where prices come from").
+price_history_mode: live
+local_pricing_dir: null
 
 # Persistent, shared cache root (survives across jobs; served on cache hits):
 finance_agent_v2_cache_dir: /shared/cache/finance_agent_v2
