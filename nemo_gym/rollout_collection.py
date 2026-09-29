@@ -37,6 +37,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
+from nemo_gym._checkpoint.agent import (
+    AGENT_COMPLETION_RECEIPT_HEADER,
+    decode_agent_completion_receipt,
+)
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_model import (
     clear_model_call_captures_for_rollouts,
@@ -196,6 +200,7 @@ class _CompletedRollout:
     row: Dict[str, Any]
     result: Dict[str, Any]
     rollout_latency_ms: Optional[float]
+    completion_receipt: Optional[dict[str, Any]] = None
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -1982,11 +1987,27 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 try:
                     res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                     await raise_for_status(res)
+                    response_headers = getattr(res, "headers", None)
+                    encoded_receipt = (
+                        response_headers.get(AGENT_COMPLETION_RECEIPT_HEADER)
+                        if isinstance(response_headers, Mapping)
+                        else None
+                    )
+                    completion_receipt = (
+                        decode_agent_completion_receipt(encoded_receipt).model_dump(mode="json")
+                        if encoded_receipt is not None
+                        else None
+                    )
                     result = await get_response_json(res)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time() - started_at) * 1000
-                    return _CompletedRollout(row=row, result=result, rollout_latency_ms=rollout_latency_ms)
+                    return _CompletedRollout(
+                        row=row,
+                        result=result,
+                        rollout_latency_ms=rollout_latency_ms,
+                        completion_receipt=completion_receipt,
+                    )
                 except Exception as e:
                     print(
                         "[rollout_collection] /run failed "
@@ -2041,6 +2062,33 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         return map(
             _without_metadata,
+            self._run_examples_with_metadata(
+                examples,
+                head_server_config=head_server_config,
+                semaphore=semaphore,
+                route_failures_to_sidecar=route_failures_to_sidecar,
+            ),
+        )
+
+    def run_examples_with_metadata(
+        self,
+        examples: List[Dict],
+        head_server_config: Optional[BaseServerConfig] = None,
+        semaphore: Optional[Semaphore] = None,
+        route_failures_to_sidecar: bool = False,
+    ) -> Iterator[Future]:
+        """Return rollout results plus checkpoint transport metadata."""
+
+        async def _with_metadata(future: Future) -> Tuple[Dict, Dict, Dict]:
+            completed = await future
+            return (
+                completed.row,
+                completed.result,
+                {"completion_receipt": completed.completion_receipt},
+            )
+
+        return map(
+            _with_metadata,
             self._run_examples_with_metadata(
                 examples,
                 head_server_config=head_server_config,

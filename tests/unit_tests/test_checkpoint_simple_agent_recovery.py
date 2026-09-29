@@ -29,6 +29,7 @@ from omegaconf import OmegaConf
 import nemo_gym.server_utils
 from nemo_gym._checkpoint import (
     AGENT_CHECKPOINT_URL_PREFIX,
+    AGENT_COMPLETION_RECEIPT_HEADER,
     CHECKPOINT_CONTROL_TOKEN_ENV,
     GATED_MODEL_ROUTE_SUFFIXES,
     MODEL_ADMISSION_URL_PREFIX,
@@ -39,6 +40,7 @@ from nemo_gym._checkpoint import (
     ControlCapabilities,
     ControlFence,
     MultiProcessCapability,
+    decode_agent_completion_receipt,
     install_control_plane,
     install_model_admission,
     install_model_checkpoint,
@@ -370,13 +372,21 @@ async def test_simple_agent_restores_next_turn_without_repeating_resource_mutati
         )
         assert completed.status_code == 200
         assert completed.json()["reward"] == 1.0
-        receipt_response = await source_clients["agent.test"].get(
-            f"{AGENT_CHECKPOINT_URL_PREFIX}/completion-receipt",
-            params={"rollout_id": COMPLETED_ROLLOUT_ID, "attempt_index": 0},
-            headers=AUTH_HEADERS,
+        completion_receipt = decode_agent_completion_receipt(
+            completed.headers[AGENT_COMPLETION_RECEIPT_HEADER]
+        ).model_dump(mode="json")
+        replayed = await source_clients["agent.test"].post(
+            "/run",
+            json=_run_body(
+                COMPLETED_ROLLOUT_ID,
+                0,
+                initial_count=3,
+                expected_count=3,
+            ),
         )
-        assert receipt_response.status_code == 200
-        completion_receipt = receipt_response.json()
+        assert replayed.status_code == 200
+        assert replayed.json() == completed.json()
+        assert replayed.headers[AGENT_COMPLETION_RECEIPT_HEADER] == completed.headers[AGENT_COMPLETION_RECEIPT_HEADER]
         acknowledgement = await _post_control(
             source_clients["agent.test"],
             f"{AGENT_CHECKPOINT_URL_PREFIX}/acknowledge",
@@ -502,13 +512,9 @@ async def test_simple_agent_restores_next_turn_without_repeating_resource_mutati
         )
         assert result.status_code == 200, result.text
         assert result.json()["reward"] == 1.0
-        receipt_response = await restored_clients["agent.test"].get(
-            f"{AGENT_CHECKPOINT_URL_PREFIX}/completion-receipt",
-            params={"rollout_id": ROLLOUT_ID, "attempt_index": 1},
-            headers=AUTH_HEADERS,
-        )
-        assert receipt_response.status_code == 200
-        completion_receipt = receipt_response.json()
+        completion_receipt = decode_agent_completion_receipt(
+            result.headers[AGENT_COMPLETION_RECEIPT_HEADER]
+        ).model_dump(mode="json")
         assert completion_receipt["manifest_capture_key"] == f"{ROLLOUT_ID}-a1"
         assert completion_receipt["terminal_model_call_id"] == restored_model_requests[0]["call_id"]
         restored_manifest = RolloutManifest.model_validate(

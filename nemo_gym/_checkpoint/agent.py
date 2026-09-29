@@ -15,6 +15,7 @@
 """Shared checkpoint participant for whitebox agent servers."""
 
 import asyncio
+import base64
 import hashlib
 import io
 import json
@@ -51,7 +52,9 @@ AGENT_CHECKPOINT_SCHEMA_VERSION = 2
 AGENT_STATE_MANIFEST_SCHEMA_VERSION = 2
 AGENT_EXECUTION_GENERATION_HEADER = "x-nemo-gym-agent-execution-generation"
 COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE = "completed_result_acknowledgement"
+COMPLETION_RECEIPT_IN_RUN_RESPONSE_FEATURE = "completion_receipt_in_run_response_v1"
 DISCARD_RESTORED_CONTINUATION_FEATURE = "discard_restored_continuation_v1"
+AGENT_COMPLETION_RECEIPT_HEADER = "x-nemo-gym-agent-completion-receipt"
 _AGENT_ARCHIVE_PATTERN = r"^agent-part-[0-9]{6}\.tar$"
 _AGENT_ARCHIVE_MAX_MEMBERS = 512
 _AGENT_ARCHIVE_MAX_PAYLOAD_BYTES = 64 << 20
@@ -270,6 +273,28 @@ class AgentAcknowledgeRequest(BaseModel):
                 "completion receipt model-lineage capture key and terminal call id must be supplied together"
             )
         return self
+
+
+def encode_agent_completion_receipt(receipt: AgentAcknowledgeRequest) -> str:
+    """Encode a completion receipt for bounded HTTP response metadata."""
+    payload = json.dumps(
+        receipt.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def decode_agent_completion_receipt(value: str) -> AgentAcknowledgeRequest:
+    """Decode and validate a completion receipt from HTTP response metadata."""
+    padding = "=" * (-len(value) % 4)
+    try:
+        payload = base64.urlsafe_b64decode((value + padding).encode())
+        decoded = json.loads(payload)
+    except (ValueError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError("invalid encoded agent completion receipt") from error
+    return AgentAcknowledgeRequest.model_validate(decoded)
 
 
 class AgentRetireRequest(CheckpointControlRequest):

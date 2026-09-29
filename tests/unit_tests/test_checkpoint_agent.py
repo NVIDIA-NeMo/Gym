@@ -32,6 +32,7 @@ from nemo_gym._checkpoint import (
     AGENT_MANIFEST_NAME,
     AGENT_RECORD_INDEX_NAME,
     AGENT_STATE_SUBDIR,
+    AgentAcknowledgeRequest,
     AgentAdmissionClosedError,
     AgentBoundaryKind,
     AgentBoundaryRecord,
@@ -47,6 +48,8 @@ from nemo_gym._checkpoint import (
     MultiProcessCapability,
     PendingModelPayload,
     commit_agent_state,
+    decode_agent_completion_receipt,
+    encode_agent_completion_receipt,
     install_agent_checkpoint,
     install_control_plane,
     read_jsonl_artifact,
@@ -67,6 +70,35 @@ def _boundary(*, attempt_index: int = 0, boundary_index: int = 1) -> AgentBounda
         last_committed_model_call_id="call-1",
         resource_state_revisions={"resources": 3},
     )
+
+
+def test_completion_receipt_header_encoding_round_trips() -> None:
+    receipt = AgentAcknowledgeRequest(
+        rollout_id="rollout-a",
+        attempt_index=2,
+        execution_generation=3,
+        result_identity="result-rollout-a-2",
+        result_digest="1" * 64,
+        manifest_capture_key="rollout-a-a2",
+        terminal_model_call_id="call-1",
+    )
+
+    encoded = encode_agent_completion_receipt(receipt)
+
+    assert "=" not in encoded
+    assert decode_agent_completion_receipt(encoded) == receipt
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        "not-base64!",
+        "e30",  # Valid base64 containing an incomplete receipt: {}.
+    ],
+)
+def test_completion_receipt_header_rejects_malformed_payload(encoded: str) -> None:
+    with pytest.raises((ValueError, ValidationError)):
+        decode_agent_completion_receipt(encoded)
 
 
 def test_pending_model_boundary_round_trips_typed_generation_state() -> None:
