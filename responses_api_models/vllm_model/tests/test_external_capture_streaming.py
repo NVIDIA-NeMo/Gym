@@ -24,6 +24,7 @@ from nemo_gym.token_id_capture.staging import resolve_terminal, select_terminal_
 from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
 from nemo_gym.token_id_capture.staging.rebuild import verify_and_linearize
 from nemo_gym.token_id_capture.staging.records import (
+    WORKER_MISSING_COMMIT_COORDS_REASON,
     CaptureAdmission,
     RolloutManifest,
     RolloutReceipt,
@@ -348,6 +349,31 @@ async def test_synthetic_completion_leaves_call_uncommitted(
     attribution = resolve_terminal(manifest.records, served, declared_response_id=served["id"])
     assert not attribution.attributed
     assert "declared_terminal_not_captured" in attribution.reason
+
+
+@pytest.mark.parametrize("backend", ["vllm_worker", "megatron_worker"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_worker_completion_without_coordinates_still_fails_closed(make_harness, monkeypatch, backend, stream):
+    # A real worker completion that is missing its acknowledgement must still poison the call.
+    # It must not be treated like a synthetic completion, which is left uncommitted.
+    h = make_harness("responses", backend=backend)
+    original = h.worker.create_chat_completion
+
+    async def drop_coords(**body):
+        payload = await original(**body)
+        payload.pop("ng_commit_coords")
+        return payload
+
+    monkeypatch.setattr(h.worker, "create_chat_completion", drop_coords)
+    messages = await _request(h.app, _path("responses"), _body("responses", stream))
+    assert messages[0]["status"] == 200
+    assert h.finalize.await_count == 1
+    manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
+    assert manifest.records == []
+    assert [failure.reason for failure in manifest.failures] == [
+        WORKER_MISSING_COMMIT_COORDS_REASON,
+        UNCOMMITTED_CALL_REASON,
+    ]
 
 
 @pytest.mark.parametrize("override", ["extra_body", "sampling_overrides"])
