@@ -613,7 +613,9 @@ guard takes the row out of the comparison entirely (it is `sandbox_error`, a
 non-verdict). To measure agreement with
 the two configurable ones removed, rescore the same rollouts with
 `answer_check_ascription: false` and `normalize_trailing_whitespace: false` and
-pass that file as `--rescore-with`.
+pass that file as `--rescore-with`. It must carry a verdict for every rollout
+being compared: the script fails closed on a missing key exactly as it does on a
+colliding one, because a rollout with no verdict is not an agreement.
 
 ### The committed example is synthetic
 

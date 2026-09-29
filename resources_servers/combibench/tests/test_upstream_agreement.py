@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from resources_servers.combibench.scripts.upstream_agreement import index_by_key, row_key
+from resources_servers.combibench.scripts.upstream_agreement import index_by_key, require_every_key, row_key
 
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -58,6 +58,22 @@ class TestIndexByKey:
         """A collision in --rescore-with mis-pairs verdicts, so the message has to say which file."""
         with pytest.raises(SystemExit, match="--rescore-with verdicts"):
             index_by_key([("a#0", {}), ("a#0", {})], "--rescore-with verdicts")
+
+
+class TestRequireEveryKey:
+    """A rollout with no verdict to compare against is not an agreement."""
+
+    def test_a_complete_mapping_passes(self) -> None:
+        require_every_key(["a#0", "a#1"], {"a#0": {}, "a#1": {}, "b#0": {}}, "--rescore-with verdicts")
+
+    def test_a_missing_verdict_fails_closed(self) -> None:
+        """``.get(key, {})`` gave gym_status null and gym_success False, which then
+        counted as an agreement on every row upstream also rejected."""
+        with pytest.raises(SystemExit) as excinfo:
+            require_every_key(["a#0", "a#1", "b#0"], {"a#0": {}}, "--rescore-with verdicts")
+        message = str(excinfo.value)
+        assert "2 of 3 rollouts have no matching entry in the --rescore-with verdicts" in message
+        assert "a#1" in message and "b#0" in message
 
 
 class TestCommittedReports:

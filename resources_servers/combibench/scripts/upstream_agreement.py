@@ -35,7 +35,9 @@ failed here, and upstream's ``is_error`` never reads that field. Only the first
 two are configurable; to measure agreement with them removed, rescore the same
 rollouts through ``gym eval reverify`` with ``answer_check_ascription: false``
 and ``normalize_trailing_whitespace: false``, and pass that file as
-``--rescore-with``.
+``--rescore-with``. That file must hold a verdict for every rollout being
+compared: a rollout with no match is not an agreement, so the script refuses
+rather than scoring it as one.
 
 A ``sandbox_error`` row is not a verdict: this verifier reached no scoring
 decision on it. Such rows still appear in the counters below, where upstream's
@@ -172,6 +174,26 @@ def index_by_key(pairs: list[tuple[str, dict]], what: str) -> dict[str, dict]:
     return keyed
 
 
+def require_every_key(keys: list[str], keyed: dict[str, dict], what: str) -> None:
+    """Refuse to compare when a rollout has no verdict to compare against.
+
+    The counterpart of ``index_by_key``'s collision check, and for the same
+    reason. ``gym_verdicts.get(key, {})`` gave a rollout with no match
+    ``gym_status: null`` and ``gym_success: False``, which then counted as an
+    *agreement* on every row upstream also rejected — a non-verdict scored as a
+    match, which is exactly what this script argues against elsewhere. Only
+    ``--rescore-with`` can reach it: without it the verdicts come from the
+    rollouts themselves, so every key is present by construction.
+    """
+    missing = [key for key in keys if key not in keyed]
+    if missing:
+        raise SystemExit(
+            f"{len(missing)} of {len(keys)} rollouts have no matching entry in the {what}, "
+            f"e.g. {', '.join(sorted(set(missing))[:5])}. Every rollout must have a verdict to compare "
+            "against; a rollout with none is not an agreement, so this refuses rather than counting it as one."
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Paired agreement between this verifier and upstream's")
     parser.add_argument("--rollouts", type=Path, required=True, help="rollouts.jsonl from a Gym eval run")
@@ -210,6 +232,7 @@ def main() -> None:
         ]
         what = "--rescore-with verdicts"
     gym_verdicts = index_by_key([(row_key(row, index), row) for index, row in enumerate(source)], what)
+    require_every_key([row_key(row, index) for index, row in enumerate(rows)], gym_verdicts, what)
 
     client = compat_client(Lean4Client, args.lean_server_url, args.lean_server_api_key)
 
@@ -223,7 +246,8 @@ def main() -> None:
             ground_truths=row.get("answers"),
         )
         upstream_name = getattr(error_type, "name", str(error_type))
-        gym = gym_verdicts.get(key, {})
+        # Present for every key: ``require_every_key`` refused above otherwise.
+        gym = gym_verdicts[key]
         record = {
             "upstream_error_type": upstream_name,
             "upstream_success": upstream_name == "SUCCESS",
