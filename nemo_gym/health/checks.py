@@ -267,6 +267,9 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
         calls.append(
             {
                 "call_index": position,
+                # Ordering signal. `call_index` is the position in the merged
+                # trajectory list, which is not chronological.
+                "started_at": raw.get("started_at"),
                 "model_call_id": raw.get("model_call_id"),
                 "response_id": metadata.get("response_id"),
                 "model_ref": metadata.get("model_ref"),
@@ -598,13 +601,49 @@ def _model_call_failed(bindings: _CallBindings, subject: dict[str, int | str]) -
     ]
 
 
+def _model_chains(calls: Sequence[dict[str, Any]]) -> dict[Any, list[dict[str, Any]]]:
+    """Group calls by the model they went to."""
+    chains: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+    for call in calls:
+        ref = call.get("model_ref")
+        key = (ref.get("type"), ref.get("name")) if isinstance(ref, dict) else None
+        chains[key].append(call)
+    return chains
+
+
+def _chain_ended_on_failure(chain: Sequence[dict[str, Any]]) -> bool:
+    """Whether this model's own last call, in time, failed.
+
+    Per model rather than across every captured call: a judge or auxiliary
+    request landing after a failed policy call would otherwise read as the
+    rollout recovering, and hide the failure.
+
+    Without timestamps a multi-call chain cannot be ordered -- `call_index` is
+    the position in the merged trajectory list, so a producer-supplied retry
+    can precede the attempt it retried. Say nothing rather than call a
+    recovered rollout unhealthy.
+    """
+    if not chain:
+        return False
+    failed = [call for call in chain if _is_failed(call)]
+    if not failed:
+        return False
+    if len(failed) == len(chain):
+        # Nothing to order: whichever went last, it failed.
+        return True
+    if any(call.get("started_at") is None for call in chain):
+        return False
+    ordered = sorted(chain, key=lambda call: (call.get("started_at") or 0.0, call.get("call_index") or 0))
+    return _is_failed(ordered[-1])
+
+
 def _ended_on_failed_call(calls: Sequence[dict[str, Any]]) -> bool:
-    """Whether the rollout's last observed model call failed."""
-    return bool(calls and _is_failed(calls[-1]))
+    """Whether any model's own last call failed."""
+    return any(_chain_ended_on_failure(chain) for chain in _model_chains(calls).values())
 
 
 def _rollout_ended_on_failed_model_call(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
-    """Flag a rollout whose last observed model call failed.
+    """Flag a model whose own last call in the rollout failed.
 
     The bound-call checks cannot see this: binding resolves a reference by
     `(model_ref, response_id)` or `model_call_id`, and a call that failed came
@@ -612,27 +651,32 @@ def _rollout_ended_on_failed_model_call(trajectory: dict[str, Any], subject: dic
     the producer claims. Reading the captured calls directly also covers the
     agents that publish no trajectory at all.
 
-    Only the last call is judged, so a failure the client retried successfully
-    stays healthy -- the signal is that the rollout ENDED on a failure, which is
+    Judged per model and in time order -- see `_chain_ended_on_failure`. Only
+    the chain's last call counts, so a failure the client retried successfully
+    stays healthy; the signal is that the rollout ENDED on a failure, which is
     what makes its reward indistinguishable from a genuine zero.
     """
-    calls = _normalized_trajectory_calls(trajectory)
-    if not _ended_on_failed_call(calls):
-        return []
-    last = calls[-1]
-    return [
-        Finding(
-            check="rollout_ended_on_failed_model_call",
-            subject=subject,
-            locator=_call_locator(last, len(calls) - 1),
-            detail={
-                "status": last.get("status_code"),
-                "error_category": last.get("error_category"),
-                "observed_calls": len(calls),
-                "successful_calls": sum(1 for call in calls if _is_successful(call)),
-            },
+    findings = []
+    for key, chain in _model_chains(_normalized_trajectory_calls(trajectory)).items():
+        if not _chain_ended_on_failure(chain):
+            continue
+        ordered = sorted(chain, key=lambda call: (call.get("started_at") or 0.0, call.get("call_index") or 0))
+        last = ordered[-1]
+        findings.append(
+            Finding(
+                check="rollout_ended_on_failed_model_call",
+                subject=subject,
+                locator=_call_locator(last, last.get("call_index")),
+                detail={
+                    "model_ref": "/".join(str(part) for part in key) if key else None,
+                    "status": last.get("status_code"),
+                    "error_category": last.get("error_category"),
+                    "observed_calls": len(chain),
+                    "successful_calls": sum(1 for call in chain if _is_successful(call)),
+                },
+            )
         )
-    ]
+    return findings
 
 
 def _rollout_token_count_mismatch(
