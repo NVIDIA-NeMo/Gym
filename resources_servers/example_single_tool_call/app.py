@@ -49,6 +49,8 @@ class SimpleWeatherVerifier:
 
 class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer):
     ray_enabled = False
+    # Tool results depend only on the request, so a continuation needs no session state.
+    checkpoint_mode = "stateless"
     config: SimpleWeatherResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
