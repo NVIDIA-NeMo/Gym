@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym.verifier_fixture import (
     VerifierFixture,
@@ -63,6 +63,10 @@ class _Request(BaseModel):
     seed: int | None = None
 
 
+class _ResponseRequest(_Request):
+    response: dict[str, str] = Field(default_factory=lambda: {"id": "response-1", "output": "answer"})
+
+
 class _Server:
     def __init__(self, sample: Callable[[], float], full_reward: float = 1.0, zero_reward: float = 0.0):
         self._sample = sample
@@ -75,6 +79,21 @@ class _Server:
         if request.outcome == "sample":
             return {"reward": self._sample()}
         return {"reward": self._full_reward if request.outcome == "full" else self._zero_reward}
+
+
+class _ResponseServer(_Server):
+    def __init__(self, mode: str):
+        super().__init__(lambda: 0.5)
+        self._mode = mode
+
+    async def verify(self, request: _ResponseRequest) -> dict:
+        result = await super().verify(request)
+        if self._mode == "mutate":
+            request.response["output"] = "changed"
+        if self._mode == "missing":
+            return result
+        response = {"id": "response-2", "output": "different"} if self._mode == "replace" else request.response
+        return {**result, "response": response}
 
 
 def _fixture(
@@ -101,6 +120,14 @@ def _fixture(
     )
 
 
+def _response_fixture(path: Path, mode: str) -> VerifierFixture:
+    return VerifierFixture(
+        server_factory=lambda: _ResponseServer(mode),
+        request_model=_ResponseRequest,
+        cases_path=path,
+    )
+
+
 async def test_exercises_the_four_case_floor(tmp_path: Path) -> None:
     path = tmp_path / "cases.jsonl"
     original = _write_cases(path)
@@ -110,6 +137,33 @@ async def test_exercises_the_four_case_floor(tmp_path: Path) -> None:
     assert [result.kind for result in results] == ["full_reward", "zero_reward", "malformed", "determinism"]
     assert results[-1].observed_rewards == (0.5, 0.5)
     assert path.read_text(encoding="utf-8") == original
+
+
+async def test_accepts_a_verifier_that_preserves_the_request_response(tmp_path: Path) -> None:
+    path = tmp_path / "cases.jsonl"
+    _write_cases(path, determinism=False)
+
+    await exercise_verifier_fixture(_response_fixture(path, "preserve"), reward_range=(0, 1), determinism="unknown")
+
+
+@pytest.mark.parametrize(
+    ("mode", "message"),
+    [
+        ("mutate", "mutated request.response"),
+        ("missing", "returned no response"),
+        ("replace", "differs from request.response"),
+    ],
+)
+async def test_rejects_a_verifier_that_changes_the_request_response(
+    tmp_path: Path,
+    mode: str,
+    message: str,
+) -> None:
+    path = tmp_path / "cases.jsonl"
+    _write_cases(path, determinism=False)
+
+    with pytest.raises(VerifierFixtureError, match=message):
+        await exercise_verifier_fixture(_response_fixture(path, mode), reward_range=(0, 1), determinism="unknown")
 
 
 @pytest.mark.parametrize(
