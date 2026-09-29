@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
 import re
 from typing import Any, cast
 
@@ -145,17 +144,13 @@ class NemoGymLLM(BaseLLM):
 
         response_dict = await self._post_chat_completions(payload)
 
-        execution = response_dict.get("_ng_model_execution")
-        if isinstance(execution, dict):
-            context_overflow = execution.get("local_response_reason") == "context_length_exceeded"
-        else:
-            # Compatibility with Gym servers that do not report execution outcomes.
-            context_overflow = response_dict.get("id") == "chtcmpl-123"
-        if context_overflow:
+        # Detect silently-swallowed context-length errors from the Gym proxy.
+        # When vLLM returns 400 "maximum context length", the proxy catches it
+        # and returns a fake 200 with id="chtcmpl-123" and content=None.
+        if response_dict.get("id") == "chtcmpl-123":
             self.context_length_exceeded = True
             raise ContextLengthExceededError(
-                f"Model {self._model_name} context length exceeded "
-                + ("(reported by Gym)" if execution is not None else "(detected fake response id='chtcmpl-123')")
+                f"Model {self._model_name} context length exceeded (detected fake response id='chtcmpl-123')"
             )
 
         choices = response_dict.get("choices", [])
@@ -295,18 +290,7 @@ class NemoGymLLM(BaseLLM):
                 raise ContextLengthExceededError(f"Model {self._model_name} context length exceeded: {response.text}")
             response.raise_for_status()
 
-        result = response.json()
-        # Keep the header local to the client; it is not part of the response JSON contract.
-        result.pop("_ng_model_execution", None)
-        raw_execution = response.headers.get("x-nemo-gym-model-execution")
-        if raw_execution is not None:
-            try:
-                execution = json.loads(raw_execution)
-            except ValueError:
-                execution = None
-            if isinstance(execution, dict) and isinstance(execution.get("upstream_attempted"), bool):
-                result["_ng_model_execution"] = execution
-        return result
+        return response.json()
 
     async def aclose(self) -> None:
         """Close the persistent HTTP client. Called at episode end; best-effort

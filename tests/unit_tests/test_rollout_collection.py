@@ -349,8 +349,18 @@ class TestRolloutCollection:
                         "request": "captured",
                         "response": {"status": "incomplete"},
                         "response_status": "completed",
+                        "upstream_attempted": True,
+                        "response_source": "local",
+                        "upstream_status_code": 400,
+                        "local_response_reason": "context_length_exceeded",
                     },
-                    {"model_call_id": "capture-only", "request": "new"},
+                    {
+                        "model_call_id": "capture-only",
+                        "request": "new",
+                        "upstream_attempted": False,
+                        "response_source": "local",
+                        "local_response_reason": "empty_assistant",
+                    },
                 ]
             },
         }
@@ -358,6 +368,7 @@ class TestRolloutCollection:
         trajectory = _build_trajectory_record(row, result)
 
         assert (trajectory.task_id, trajectory.rollout_id) == ("collector-task", "2-3")
+        trajectory = type(trajectory).model_validate_json(trajectory.model_dump_json())
         assert (trajectory.turns[0].task_id, trajectory.turns[0].rollout_id) == ("collector-task", "2-3")
         assert {gap.code for gap in trajectory.gaps} >= {"producer_trajectory_identity_mismatch"}
         assert [call.model_call_id for call in trajectory.model_calls] == ["producer-only", "shared", "capture-only"]
@@ -365,7 +376,17 @@ class TestRolloutCollection:
         assert trajectory.model_calls[1].response_metadata.model_dump(exclude_none=True) == {
             "model": "producer-model",
             "response_status": "completed",
+            "upstream_attempted": True,
+            "response_source": "local",
+            "upstream_status_code": 400,
+            "local_response_reason": "context_length_exceeded",
         }
+        assert trajectory.model_calls[2].response_metadata.model_dump(exclude_none=True) == {
+            "upstream_attempted": False,
+            "response_source": "local",
+            "local_response_reason": "empty_assistant",
+        }
+        assert trajectory.model_calls[0].response_metadata.model_dump(exclude_none=True) == {}
 
     def test_trajectory_projection_failure_preserves_rollout(self) -> None:
         row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}

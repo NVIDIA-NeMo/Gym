@@ -1395,23 +1395,7 @@ class _CaptureMiddleware:
         known_non_generating = (method, path) in self._non_generating_requests
 
         # State is shared with the handler even through middleware scope copies.
-        # Emit the outcome without capture enabled, too: remote harnesses consume it.
         request_state = scope.setdefault("state", {})
-        original_send = send
-
-        async def _send_execution(message: dict[str, Any]) -> None:
-            execution = request_state.get("nemo_gym_model_execution")
-            if message.get("type") == "http.response.start" and execution is not None:
-                message = {
-                    **message,
-                    "headers": [
-                        *message.get("headers", []),
-                        (b"x-nemo-gym-model-execution", orjson.dumps(execution)),
-                    ],
-                }
-            await original_send(message)
-
-        send = _send_execution
 
         # Forward when no active store needs this correlated endpoint.
         # The prefix is already stripped.

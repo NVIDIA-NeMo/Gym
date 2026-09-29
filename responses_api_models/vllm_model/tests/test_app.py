@@ -15,6 +15,7 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
@@ -24,6 +25,7 @@ from pytest import MonkeyPatch, mark, raises
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
+from nemo_gym.base_responses_api_model import CaptureStore, read_model_call_records
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
@@ -810,21 +812,28 @@ class TestApp:
 
     @mark.parametrize("propagate", [False, True])
     @mark.parametrize("responses_api", [False, True])
+    @mark.parametrize("completions_api", [False, True])
     def test_context_overflow_propagation_flag(
-        self, monkeypatch: MonkeyPatch, propagate: bool, responses_api: bool
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, propagate: bool, responses_api: bool, completions_api: bool
     ) -> None:
         server = self._setup_server(monkeypatch, propagate_context_overflow_errors=propagate)
+        server.config.use_completions_api = completions_api
+        server.server_client.global_config_dict = {
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        }
         request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
         error = ClientResponseError(request_info, (), status=400, message="Bad Request")
         error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
         mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        mock_client.create_completion = AsyncMock(side_effect=error)
         server._clients = [mock_client]
 
         app = server.setup_webserver()
         server.setup_exception_middleware(app)
         response = TestClient(app).post(
-            "/v1/responses" if responses_api else "/v1/chat/completions",
+            "/ng-rollout/overflow/v1/responses" if responses_api else "/ng-rollout/overflow/v1/chat/completions",
             json={"model": "dummy_model", "input": [{"role": "user", "content": "hi"}]}
             if responses_api
             else {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
@@ -839,6 +848,86 @@ class TestApp:
                 assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
             else:
                 assert '"finish_reason": "length"' in response.text
+
+        [call] = read_model_call_records(CaptureStore(tmp_path), "overflow")
+        assert call.upstream_attempted is True
+        assert call.upstream_status_code == 400
+        assert call.status_code == response.status_code
+        assert call.response_source == ("upstream" if propagate else "local")
+        assert call.local_response_reason == (None if propagate else "context_length_exceeded")
+        assert call.error_category == ("client_error" if propagate else "context_length_exceeded")
+        assert call.finish_reason == (None if propagate else "max_output_tokens" if responses_api else "length")
+
+    @mark.parametrize(
+        ("backend", "outcome"),
+        [
+            ("chat", "empty_assistant"),
+            ("chat", "stop"),
+            ("chat", "content_filter"),
+            ("completions", "stop"),
+            ("responses", "stop"),
+        ],
+    )
+    def test_capture_distinguishes_local_and_upstream_responses(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, backend: str, outcome: str
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.sequential_reasoning_allowed = outcome != "empty_assistant"
+        server.config.use_completions_api = backend == "completions"
+        server.config.is_responses_native = backend == "responses"
+        server.server_client.global_config_dict = {
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        }
+        provider_response = PARAMETERIZE_DATA[0][-1 if backend == "responses" else -2].model_dump()
+        if backend == "responses":
+            provider_response["usage"] = {
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "total_tokens": 5,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            }
+        else:
+            provider_response["choices"][0]["finish_reason"] = (
+                "content_filter" if outcome == "empty_assistant" else outcome
+            )
+            provider_response["usage"] = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+            if backend == "completions":
+                provider_response["object"] = "text_completion"
+                provider_response["choices"][0]["text"] = provider_response["choices"][0].pop("message")["content"]
+        upstream = AsyncMock(return_value=provider_response)
+        client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        client.create_chat_completion = client.create_completion = client.create_response = upstream
+        server._clients = [client]
+        messages = (
+            [{"role": "assistant", "content": ""}]
+            if outcome == "empty_assistant"
+            else [{"role": "user", "content": "hi"}]
+        )
+        response = TestClient(server.setup_webserver()).post(
+            "/ng-rollout/normal/v1/responses" if backend == "responses" else "/ng-rollout/normal/v1/chat/completions",
+            json={"model": "dummy_model", "input" if backend == "responses" else "messages": messages},
+        )
+
+        assert response.status_code == 200
+        [call] = read_model_call_records(CaptureStore(tmp_path), "normal")
+        assert call.status_code == 200
+        assert call.upstream_status_code is None
+        assert call.error_category is None
+        if outcome == "empty_assistant":
+            upstream.assert_not_awaited()
+            assert call.upstream_attempted is False
+            assert call.response_source == "local"
+            assert call.local_response_reason == "empty_assistant"
+            assert call.finish_reason == "content_filter"
+        else:
+            upstream.assert_awaited_once()
+            assert call.upstream_attempted is True
+            assert call.response_source == "upstream"
+            assert call.local_response_reason is None
+            assert (call.tokens_in, call.tokens_out, call.tokens_total) == (3, 2, 5)
+            assert call.finish_reason == (None if backend == "responses" else outcome)
 
     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
