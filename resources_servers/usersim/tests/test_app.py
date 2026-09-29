@@ -167,7 +167,7 @@ def test_seed_session_resolves_replayable_scenario(tmp_path: Path) -> None:
     assert first.json()["usersim_context"] == second.json()["usersim_context"]
     assert first.json()["usersim_context"]["personas_dataset_version"] == "0.0.2"
     assert len(first.json()["usersim_context"]["personas_panel_sha256"]) == 64
-    assert first.json()["usersim_context"]["usersim_revision"] == "626bb52bd60afc2f20e6e814dd455428ad44652b"
+    assert first.json()["usersim_context"]["usersim_revision"] == "44c39daf481a23a87742c3c456852aca910653ce"
     scenario = first.json()["scenario"]
     assert scenario["persona"]["first_name"] in {"Morgan", "Avery"}
     assert scenario["probe_type"] == "general_open_ended"
