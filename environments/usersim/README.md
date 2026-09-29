@@ -65,7 +65,6 @@ After preparation:
 ```bash
 gym eval run \
   --environment usersim \
-  --agent usersim_assistant \
   --split benchmark \
   --output results/usersim.jsonl \
   ++observability_enabled=true \
