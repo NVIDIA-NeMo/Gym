@@ -966,6 +966,8 @@ def accumulate_response_usage(
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
     usage: Optional[NeMoGymResponseUsage] = None
+    # Providers can return deployment-specific tiers. Accept any string.
+    service_tier: Optional[str] = None
 
 
 ########################################
@@ -1015,6 +1017,8 @@ class NeMoGymChoice(Choice):
 
 class NeMoGymChatCompletion(ChatCompletion):
     choices: List[NeMoGymChoice]
+    # Providers can return deployment-specific tiers. Accept any string.
+    service_tier: Optional[str] = None
 
 
 ########################################
