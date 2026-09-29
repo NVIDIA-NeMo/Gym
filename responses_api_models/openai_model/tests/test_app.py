@@ -81,6 +81,14 @@ class TestApp:
     async def test_sanity(self) -> None:
         self._setup_server()
 
+    def test_client_preserves_organization_and_default_headers(self) -> None:
+        server = self._setup_server(
+            openai_organization="org-id",
+            openai_default_headers={"X-Custom": "value"},
+        )
+        assert server._client.organization == "org-id"
+        assert server._client.default_headers == {"X-Custom": "value"}
+
     async def test_retry_configuration_is_scoped_to_model_server(self):
         judge = self._setup_server(max_http_attempts=5)
         policy = self._setup_server()
