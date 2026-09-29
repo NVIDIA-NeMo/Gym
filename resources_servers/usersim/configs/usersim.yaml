@@ -50,7 +50,7 @@ usersim_resources:
       description: Deterministic NeMo UserSim persona and general-probe initialization.
       personas_cache_dir: ~/.cache/nemo-gym/usersim/personas
       personas_dataset_version: 0.0.2
-      usersim_revision: 2f1f116bd03664ecf5668e9b58f665eda2ca051c
+      usersim_revision: 626bb52bd60afc2f20e6e814dd455428ad44652b
       tool_simulation_model:
         type: responses_api_models
         name: tool_simulation_model
