@@ -506,6 +506,58 @@ class TestApp:
         assert result.ng_trajectory["rollout_id"] == "explicit-rollout-a2"
         assert body.model_dump() == body_before
 
+    async def test_run_preserves_response_aliases_in_verify_payload(self) -> None:
+        server, server_client = _make_agent(False)
+        json_schema_format = {
+            "type": "json_schema",
+            "name": "answer",
+            "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+            "strict": True,
+        }
+        # FastAPI serializes the model server response by alias, so the wire field is `schema`, not `schema_`.
+        response_payload = NeMoGymResponse.model_validate(
+            {
+                "id": "response-1",
+                "created_at": 1.0,
+                "model": "model",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "message-1",
+                        "content": [{"annotations": [], "text": '{"answer": "yes"}', "type": "output_text"}],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "text": {"format": json_schema_format},
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        ).model_dump(mode="json", by_alias=True)
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            if url_path.endswith("/v1/responses"):
+                return _mock_response(response_payload)
+            assert url_path == "/verify"
+            return _mock_response(kwargs["json"] | {"reward": 1.0})
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest.model_validate(
+            {"responses_create_params": {"input": "question", "text": {"format": json_schema_format}}}
+        )
+
+        await server.run(MagicMock(cookies={}), body)
+
+        verify_payload = server_client.post.await_args_list[-1].kwargs["json"]
+        assert verify_payload["response"]["text"]["format"]["schema"] == json_schema_format["schema"]
+        assert "schema_" not in verify_payload["response"]["text"]["format"]
+        verify_request = SimpleAgentVerifyRequest.model_validate(verify_payload)
+        assert verify_request.response.text.format.schema_ == json_schema_format["schema"]
+
     async def test_responses_continues_on_malformed_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
         """Malformed JSON in a tool-call's arguments must not crash the rollout.
 
