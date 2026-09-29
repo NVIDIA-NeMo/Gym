@@ -836,7 +836,7 @@ def build_sbatch_script(
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
     run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
-    run_args["require_complete"] = True
+    run_args.setdefault("require_complete", True)
     gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
     entrypoint = render_driver_entrypoint(
         repo=gi.repo if gi else None,

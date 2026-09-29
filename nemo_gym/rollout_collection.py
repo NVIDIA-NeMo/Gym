@@ -605,7 +605,9 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
 
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
-    require_complete: bool = Field(default=False, description="Fail on missing rollouts; enforced by eval submit.")
+    require_complete: bool = Field(
+        default=False, description="Fail on missing rollouts; enabled by default by eval submit."
+    )
     num_samples_in_parallel: Optional[int] = Field(
         default=None, description="Limit the number of concurrent samples running at once."
     )
