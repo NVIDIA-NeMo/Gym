@@ -35,7 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
-from nemo_gym.sandbox import SandboxSpec
+from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tool_access import DirectHTTPToolAccess
@@ -315,8 +315,8 @@ class TestSanity:
             # Mirrors AsyncSandbox.exec so an unsupported argument fails here too.
             async def exec(
                 self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
-            ) -> SimpleNamespace:
-                return SimpleNamespace(stdout="", stderr="", return_code=0)
+            ) -> SandboxExecResult:
+                return SandboxExecResult(stdout="", stderr="", return_code=0)
 
             async def download(self, remote_path, local_path) -> None:
                 result = {"messages": [{"role": "assistant", "content": "done"}], "final_response": "done"}
@@ -333,6 +333,32 @@ class TestSanity:
         assert runner_input["user_message"] == "fix bug"
         assert response.metadata["harness_execution"] == "sandbox"
 
+    async def test_runner_timeout_stops_the_runner(self, monkeypatch) -> None:
+        class _Sandbox:
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+
+            async def upload(self, *_args) -> None:
+                pass
+
+            # Mirrors AsyncSandbox.exec so an unsupported argument fails here too.
+            async def exec(
+                self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
+            ) -> SandboxExecResult:
+                self.commands.append(command)
+                if "runner.pid" in command and "exec " in command:
+                    return SandboxExecResult(stdout=None, stderr="timed out", return_code=124, error_type="timeout")
+                return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+        sandbox = _Sandbox()
+        hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
+
+        with pytest.raises(TimeoutError, match="sandbox_runner_timeout_seconds"):
+            await hermes.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
+
+        stop = [command for command in sandbox.commands if "runner.stop" in command and "kill -TERM" in command]
+        assert len(stop) == 1
+
     async def test_close_during_activation_stops_the_runner(self, monkeypatch) -> None:
         class _Sandbox:
             def __init__(self) -> None:
@@ -348,12 +374,12 @@ class TestSanity:
             # Mirrors AsyncSandbox.exec so an unsupported argument fails here too.
             async def exec(
                 self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
-            ) -> SimpleNamespace:
+            ) -> SandboxExecResult:
                 self.commands.append(command)
                 if "runner.pid" in command and "exec " in command:
                     self.runner_started.set()
                     await asyncio.Event().wait()
-                return SimpleNamespace(stdout="", stderr="", return_code=0)
+                return SandboxExecResult(stdout="", stderr="", return_code=0)
 
         sandbox = _Sandbox()
         hermes, request, seed = self._sandbox_session(monkeypatch, sandbox)
