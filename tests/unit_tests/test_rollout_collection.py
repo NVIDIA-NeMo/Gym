@@ -2661,7 +2661,14 @@ class TestRolloutCollection:
 
         client = MagicMock()
         client.post = post
-        client.global_config_dict = OmegaConf.create({"agent": {"responses_api_agents": {"impl": {}}}})
+        client.global_config_dict = OmegaConf.create(
+            {
+                "agent": {"responses_api_agents": {"impl": {}}},
+                "environment": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent"}}}
+                },
+            }
+        )
         monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *a, **k: client)
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
         monkeypatch.setattr(
@@ -2733,7 +2740,14 @@ class TestRolloutCollection:
 
         client = MagicMock()
         client.post = post
-        client.global_config_dict = OmegaConf.create({"agent": {"responses_api_agents": {"impl": {}}}})
+        client.global_config_dict = OmegaConf.create(
+            {
+                "agent": {"responses_api_agents": {"impl": {}}},
+                "environment": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent"}}}
+                },
+            }
+        )
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
             "setup_server_client_utils",
