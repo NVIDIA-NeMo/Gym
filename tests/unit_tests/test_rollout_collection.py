@@ -2664,9 +2664,7 @@ class TestRolloutCollection:
         client.global_config_dict = OmegaConf.create(
             {
                 "agent": {"responses_api_agents": {"impl": {}}},
-                "environment": {
-                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent"}}}
-                },
+                "environment": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "agent"}}}},
             }
         )
         monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *a, **k: client)
@@ -2743,9 +2741,7 @@ class TestRolloutCollection:
         client.global_config_dict = OmegaConf.create(
             {
                 "agent": {"responses_api_agents": {"impl": {}}},
-                "environment": {
-                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent"}}}
-                },
+                "environment": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "agent"}}}},
             }
         )
         monkeypatch.setattr(
