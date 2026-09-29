@@ -298,7 +298,9 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
     if not agent_name:
         raise ValueError("A Harbor target needs `--agent <harness>` (for example `--agent hermes_agent`)")
     prepared = prepare_target(
-        args.target, exclude=_patterns(args, "exclude_tasks"), only=_patterns(args, "only_tasks"),
+        args.target,
+        exclude=_patterns(args, "exclude_tasks"),
+        only=_patterns(args, "only_tasks"),
         force=getattr(args, "force", False),
     )
     agent = resolve_agent(agent_name)
@@ -312,7 +314,9 @@ def validate_target(args: argparse.Namespace, overrides: list[str]) -> None:
     from nemo_gym.cli.main import _merge_config_paths, dispatch
 
     prepared = prepare_target(
-        args.target, exclude=_patterns(args, "exclude_tasks"), only=_patterns(args, "only_tasks"),
+        args.target,
+        exclude=_patterns(args, "exclude_tasks"),
+        only=_patterns(args, "only_tasks"),
         force=getattr(args, "force", False),
     )
     agent = resolve_agent(ORACLE_AGENT)

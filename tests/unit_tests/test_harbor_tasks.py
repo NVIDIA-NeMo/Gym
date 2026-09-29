@@ -867,6 +867,7 @@ class TestCli:
         assert seen == {"target": "harbor:o/ds@4.0.0", "force": True}
         prepare_target("harbor:o/ds@4.0.0", output_root=tmp_path / "out")
         assert seen["force"] is False
+
     def test_prepare_skips_excluded_and_compose_tasks(self, tmp_path, capsys):
         folder = tmp_path / "ds"
         for name in ("keep", "gpu-task", "grouped"):
