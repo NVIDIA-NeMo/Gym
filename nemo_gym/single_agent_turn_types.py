@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
-from nemo_gym.base_resources_server import ResourcesVerifyRequest, ResourcesVerifyResponse
+from nemo_gym.base_resources_server import BaseVerifyResponse, ResourcesVerifyRequest
 from nemo_gym.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
@@ -26,13 +26,17 @@ class SingleAgentTurnTaskInput(BaseModel):
     task_data: dict[str, JsonValue]
 
 
-class SingleAgentTurnResult(BaseModel):
-    """Successful single-agent-turn output."""
+class SingleAgentTurnResult(BaseVerifyResponse):
+    """Successful single-agent-turn output: the Resources verify response plus agent observations.
 
-    model_config = ConfigDict(extra="forbid")
+    The verify response fields stay at the top level so a stored rollout record has the same shape
+    as an agent's `/run` result.
+    Extra fields are allowed because each Resources Server returns its own benchmark-specific fields.
+    """
 
-    verification: ResourcesVerifyResponse
-    agent_observations: AgentObservationBundle | None = None
+    model_config = ConfigDict(extra="allow")
+
+    ng_agent_observations: AgentObservationBundle | None = None
 
 
 class SingleAgentTurnFailure(EpisodeFailure):

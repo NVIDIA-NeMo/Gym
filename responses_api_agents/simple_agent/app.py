@@ -51,6 +51,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
+    AgentObservationBundle,
     ModelCallRef,
     ObservationGap,
     TrajectoryRecord,
@@ -73,6 +74,7 @@ class SimpleAgentSessionState:
     request: AgentSeedSessionRequest
     tool_access: DirectHTTPToolAccess | None
     resources_cookies: dict[str, str]
+    observations: AgentObservationBundle | None = None
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -99,16 +101,15 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     _agent_session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
     _closed_agent_session_ids: set[str] = PrivateAttr(default_factory=set)
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Process-local Simple Agent sessions require num_workers=1")
-
     async def seed_agent_session(
         self,
         request: Request,
         body: AgentSeedSessionRequest,
     ) -> AgentSeedSessionResponse:
+        # Sessions live in this worker's memory, so every call for a session must reach this worker.
+        # The legacy /run path keeps no session and still supports several workers.
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("Simple Agent sessions require num_workers=1")
         if body.sandbox_access is not None:
             raise ValueError("Simple Agent does not support sandbox access")
 
@@ -161,6 +162,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             request.session.pop(_AGENT_SESSION_ID_KEY, None)
             return AgentCloseSessionResponse(
                 agent_session_id=agent_session_id,
+                agent_observations=state.observations,
                 resources_cookies=state.resources_cookies,
             )
 
@@ -417,6 +419,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         )
         if state is not None:
             state.resources_cookies = dict(resources_server_cookies or {})
+            if trajectory is not None:
+                # A session returns agent evidence at close, where the Environment Server records it.
+                state.observations = AgentObservationBundle(
+                    source="simple_agent", records=list(trajectory.invocations), gaps=list(trajectory.gaps)
+                )
 
         # Legacy self-dispatch propagates resources cookies for its later verification call.
         if state is None:

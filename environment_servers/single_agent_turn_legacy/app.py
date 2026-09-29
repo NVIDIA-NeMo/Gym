@@ -27,6 +27,7 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
@@ -42,6 +43,7 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
         app.post("/run")(self.run_legacy)
+        app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
     async def run_legacy(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -120,12 +122,14 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             return failure
         if response.result is None:
             raise ValueError("Successful episode response has no result")
-        result = response.result.verification.model_dump(mode="json")
+        result = response.result.model_dump(mode="json")
+        if result.get("ng_agent_observations") is None:
+            result.pop("ng_agent_observations", None)
         result["agent_ref"] = agent_ref
-        if response.result.agent_observations is not None:
-            result["ng_agent_observations"] = response.result.agent_observations.model_dump(mode="json")
         return result
 
 
 if __name__ == "__main__":
     SingleAgentTurnLegacyEnvironmentServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = SingleAgentTurnLegacyEnvironmentServer.run_webserver()  # noqa: F401

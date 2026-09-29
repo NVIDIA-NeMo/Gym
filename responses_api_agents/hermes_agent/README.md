@@ -85,6 +85,7 @@ hermes_agent:
 | `terminal_timeout` | `60` | sets `TERMINAL_TIMEOUT` (process-global); per-command wall-clock seconds |
 | `sandbox_provider` | `null` | named provider used to create an agent-owned sandbox when Resources does not supply `sandbox_access` |
 | `sandbox_config` | `{}` | `SandboxSpec` fields used with `sandbox_provider`; ignored when Resources supplies a sandbox |
+| `sandbox_runner_timeout_seconds` | `21600` | bounds one sandbox activation; the episode deadline still applies |
 | `system_prompt` | `null` | passed as `system_message` to `run_conversation`; falls back to any system item in `body.input` |
 | `session_close_retry_window_seconds` | `300` | native-session close receipt retention from successful cleanup; retries do not extend expiry |
 
@@ -93,7 +94,7 @@ The model-server url is resolved at request time and passed to `AIAgent(base_url
 Native EnvironmentServer sessions run Hermes inside a sandbox. They borrow the Resources-owned
 task sandbox when supplied, or create an agent-owned sandbox from `sandbox_provider` and
 `sandbox_config`. SWE-bench Pro uses the borrowed path. Use one agent-server worker and a Linux
-sandbox with PTY support; the benchmark recipe enables `[terminal]`.
+sandbox with exec support; the benchmark recipe enables `[terminal]`.
 Each session runs once and must confirm process cleanup before verification. Close receipts are
 process-local; configure the retry window to cover response timeouts and backoff. Other sessions
 cannot evict receipts early, and expired sessions return 409 without falling back to the host.
@@ -122,3 +123,10 @@ seed response. Identical retries share a session; mismatched requests and closed
 are rejected. Abandoned sessions expire after `session_lifetime_seconds` (default 21600);
 failed cleanup retains its handle for a retry. Close receipts expire separately from
 closed-ID tombstones, which remain for at least the lifetime/retry horizon.
+
+
+## Sandbox-mode requirements
+
+Each sandbox session installs Hermes at seed time unless the pinned Hermes already imports from `/tmp/nemo-gym-hermes-runtime-<commit>/venv`, for example because the image bakes it in or an earlier session in the same sandbox installed it. Installing needs outbound access to GitHub and the Python package index. Hermes calls the Model Server directly from the sandbox, so the sandbox must also reach the Model Server at its configured host and port. Its image must also match the host CPU architecture and C library because the host's `uv` executable is copied into the sandbox.
+
+The Hermes runner and the model's terminal tool execute as the same user in the same sandbox. The host reads the final result, including token IDs, from `/tmp/nemo-gym-hermes-sessions/<session-id>/output.json`; commands issued by the model can also write that file. Sandbox mode is suitable for evaluation, but it must not be used to produce RL training data until results are returned through a channel the model cannot modify.

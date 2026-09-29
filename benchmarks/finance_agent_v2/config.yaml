@@ -17,6 +17,9 @@ config_paths:
 # Isolated copy of the resource server for this benchmark.
 finance_agent_v2_benchmark_resources_server:
   _inherit_from: finance_agent_v2_resources_server
+  resources_servers:
+    finance_agent_v2:
+      edgar_search_mode: live
 
 # Benchmark agent — inherits the finance_agent_v2 instance, overrides the dataset
 # to the frozen benchmark split and points at the isolated resources server above.

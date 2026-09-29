@@ -57,3 +57,11 @@ widesearch_hermes_benchmark:
           jsonl_fpath: benchmarks/widesearch/data/widesearch_benchmark.jsonl
           prepare_script: benchmarks/widesearch/prepare.py
           license: MIT
+
+widesearch_hermes_benchmark_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: widesearch_hermes_benchmark

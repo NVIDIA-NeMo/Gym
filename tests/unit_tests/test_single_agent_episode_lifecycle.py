@@ -16,7 +16,7 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServerConfig,
     _is_retryable_dependency_error,
 )
-from nemo_gym.base_resources_server import ResourcesVerifyResponse
+from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.global_config import GlobalConfigDictParser
@@ -26,6 +26,7 @@ from nemo_gym.server_utils import BaseServerConfig, ServerClient
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
+    SingleAgentTurnResult,
     SingleAgentTurnTaskInput,
 )
 
@@ -78,14 +79,14 @@ class _Client(ServerClient):
             raise response
         if url_path == "/seed_session" and "resources_session_id" in response.body.decode():
             data = orjson.loads(response.body)
-            data["resources_session_id"] = kwargs["json"].resources_session_id
+            data["resources_session_id"] = kwargs["json"]["resources_session_id"]
             response.body = orjson.dumps(data)
         elif (
             url_path in ("/v1/agent_sessions", "/v1/agent_sessions/close")
             and "agent_session_id" in response.body.decode()
         ):
             data = orjson.loads(response.body)
-            data["agent_session_id"] = kwargs["json"].agent_session_id
+            data["agent_session_id"] = kwargs["json"]["agent_session_id"]
             response.body = orjson.dumps(data)
         return response
 
@@ -183,8 +184,8 @@ async def test_single_agent_protocol_and_direct_tool_access() -> None:
     result = await environment.run_request(_request())
 
     assert result.result is not None
-    assert result.result.verification.reward == 1.0
-    assert result.result.verification.model_dump()["benchmark_field"] == "preserved"
+    assert result.result.reward == 1.0
+    assert result.result.model_dump()["benchmark_field"] == "preserved"
     assert [path for _, path, _ in client.calls] == [
         "/seed_session",
         "/v1/agent_sessions",
@@ -193,7 +194,7 @@ async def test_single_agent_protocol_and_direct_tool_access() -> None:
         "/verify",
         "/close_session",
     ]
-    create_body = client.calls[1][2]["json"]
+    create_body = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
     assert create_body.task_id == TaskId(taskset="source", task_id="task")
     assert len(create_body.tool_accesses) == 1
     access = create_body.tool_accesses[0]
@@ -209,17 +210,17 @@ async def test_single_agent_protocol_and_direct_tool_access() -> None:
     assert client.calls[3][2]["cookies"] == {"session": "agent-activated"}
     assert client.calls[4][2]["cookies"] == {"session": "resources-updated"}
     assert client.calls[5][2]["cookies"] == {"session": "resources-updated"}
-    assert client.calls[3][2]["json"].episode_id == _request().episode_id
-    assert client.calls[5][2]["json"].episode_id == _request().episode_id
+    assert client.calls[3][2]["json"]["episode_id"] == _request().episode_id.model_dump(mode="json")
+    assert client.calls[5][2]["json"]["episode_id"] == _request().episode_id.model_dump(mode="json")
 
 
 async def test_verifier_only_episode_does_not_expose_resource_tools() -> None:
     environment, client = _environment()
     result = await environment.run_request(_request())
 
-    assert result.result.verification.reward == 1.0
-    assert client.calls[1][2]["json"].tool_accesses == []
-    assert client.calls[1][2]["json"].sandbox_access is not None
+    assert result.result.reward == 1.0
+    assert client.calls[1][2]["json"]["tool_accesses"] == []
+    assert client.calls[1][2]["json"]["sandbox_access"] is not None
 
 
 async def test_token_capture_keeps_prefixed_twin_route() -> None:
@@ -228,7 +229,7 @@ async def test_token_capture_keeps_prefixed_twin_route() -> None:
     assert client.calls[2][1] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
     verified_response = client.calls[4][2]["json"].verification_input.response
     assert verified_response == _agent_response()
-    assert result.result.verification.response == verified_response
+    assert result.result.response == verified_response
 
 
 @pytest.mark.parametrize("reward", [0.0, 1.0])
@@ -257,10 +258,10 @@ async def test_failed_agent_response_still_reaches_verification(reward: float, m
     forwarded = client.calls[4][2]["json"].verification_input.response
     assert forwarded == NeMoGymResponse.model_validate(failed_response)
     assert client.calls[4][2]["cookies"] == {"session": "resources-updated"}
-    assert result.result.verification.response == forwarded
-    assert result.result.verification.reward == reward
-    assert result.result.verification.mask_sample is mask_sample
-    assert result.result.verification.response.status == "failed"
+    assert result.result.response == forwarded
+    assert result.result.reward == reward
+    assert result.result.mask_sample is mask_sample
+    assert result.result.response.status == "failed"
 
 
 @pytest.mark.parametrize("mask_sample", [False, True])
@@ -292,12 +293,12 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
 
     result = await environment.run_request(_request())
     result = SingleAgentTurnResponse.model_validate_json(result.model_dump_json())
-    assert result.result.verification.mask_sample is mask_sample
-    assert result.result.verification.reward == 1.0
-    assert result.result.verification.model_extra["benchmark_field"] == "preserved"
-    assert result.result.verification.model_extra["grader_output"] == {"resolved": True}
-    assert result.result.verification.response == _agent_response()
-    assert result.result.agent_observations == AgentObservationBundle.model_validate(observations)
+    assert result.result.mask_sample is mask_sample
+    assert result.result.reward == 1.0
+    assert result.result.model_extra["benchmark_field"] == "preserved"
+    assert result.result.model_extra["grader_output"] == {"resolved": True}
+    assert result.result.response == _agent_response()
+    assert result.result.ng_agent_observations == AgentObservationBundle.model_validate(observations)
     if adapter_module is None:
         return
     adapter = adapter_module.SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)
@@ -352,7 +353,7 @@ async def test_agent_close_failure_prevents_verification_and_unwind_retries(*, r
 
     assert result.result is None
     assert result.failure.stage == "cleanup"
-    assert result.failure.terminal is True
+    assert result.failure.terminal is False
     assert result.failure.partial_response == _agent_response()
     assert [path for _, path, _ in client.calls] == [
         "/seed_session",
@@ -415,8 +416,10 @@ async def test_resources_close_failure_preserves_verification(
     assert result.failure is None
     assert result.episode_id == _request().episode_id
     assert result.task_id == _request().task.task_id
-    assert result.result.verification == ResourcesVerifyResponse.model_validate(verification)
-    assert result.result.agent_observations == observations
+    assert result.result == SingleAgentTurnResult.model_validate(
+        verification | {"ng_agent_observations": observations}
+    )
+    assert result.result.ng_agent_observations == observations
     assert [path for _, path, _ in client.calls][-3:] == ["/verify", "/close_session", "/close_session"]
     assert client.calls[-1][2]["cookies"] == {"session": "resources-updated"}
     assert "resources close failed" in caplog.text
@@ -446,8 +449,8 @@ async def test_resources_close_timeout_preserves_verification(
     result = await asyncio.wait_for(environment.run_request(_request()), timeout=1)
 
     assert result.failure is None
-    assert result.result.verification.reward == 1.0
-    assert result.result.verification.response == _agent_response()
+    assert result.result.reward == 1.0
+    assert result.result.response == _agent_response()
     assert close_cancelled.is_set()
     assert "Episode cleanup timed out" in caplog.text
     assert [path for _, path, _ in client.calls][-2:] == ["/verify", "/close_session"]
@@ -470,7 +473,7 @@ async def test_post_verification_cleanup_uses_cleanup_not_episode_deadline(
     result = await asyncio.wait_for(environment.run_request(_request()), timeout=1)
 
     assert result.failure is None
-    assert result.result.verification.reward == 1.0
+    assert result.result.reward == 1.0
     assert [path for _, path, _ in client.calls][-2:] == ["/verify", "/close_session"]
     assert not client.responses
 

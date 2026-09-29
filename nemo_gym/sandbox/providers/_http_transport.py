@@ -2,13 +2,37 @@
 # SPDX-License-Identifier: Apache-2.0
 """Adapt sandbox SDK HTTPX requests to Gym's shared aiohttp client."""
 
+import asyncio
+import logging
+import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 
 import aiohttp
 import httpx
 
 from nemo_gym import server_utils
+
+
+logger = logging.getLogger(__name__)
+_MAX_RATE_LIMIT_RETRIES = 3
+
+
+def _retry_after_seconds(value: str | None, *, fallback: float) -> float:
+    if value is not None:
+        value = value.strip()
+        try:
+            if value.isascii() and value.isdigit():
+                return float(int(value))
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, retry_at.timestamp() - time.time())
+        except (ValueError, TypeError, OverflowError):
+            pass
+    return fallback
 
 
 @contextmanager
@@ -56,40 +80,62 @@ class GymAiohttpTransport(httpx.AsyncBaseTransport):
         self.proxy = proxy
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        """Retry buffered requests on 429 using Retry-After or exponential backoff (three retries)."""
+        replayable = True
         try:
             data = request.content or None
         except httpx.RequestNotRead:
+            # A consumed upload stream cannot safely be sent again.
+            replayable = False
             data = request.stream
             # aiohttp frames streamed bodies itself.
             request.headers.pop("transfer-encoding", None)
 
         timeout = request.extensions.get("timeout", {})
-        with _map_aiohttp_exceptions():
-            response = await server_utils.request(
-                method=request.method,
-                url=str(request.url),
-                # Provider/SDK retries own the operation semantics. In particular,
-                # a failed command submission must not be replayed by this adapter.
-                _max_connection_retries=1,
-                headers=request.headers.multi_items(),
-                data=data,
-                allow_redirects=False,
-                auto_decompress=False,
-                compress=False,
-                # aiohttp includes ssl in its pool key. A fresh SSLContext per
-                # adapter would prevent connection reuse between providers.
-                ssl=self.verify,
-                server_hostname=request.extensions.get("sni_hostname"),
-                proxy=str(self.proxy.url) if self.proxy else None,
-                proxy_auth=aiohttp.BasicAuth(*self.proxy.auth) if self.proxy and self.proxy.auth else None,
-                proxy_headers=self.proxy.headers if self.proxy else None,
-                timeout=aiohttp.ClientTimeout(
-                    total=None,
-                    connect=timeout.get("pool"),
-                    sock_connect=timeout.get("connect"),
-                    sock_read=timeout.get("read"),
-                ),
+        for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
+            with _map_aiohttp_exceptions():
+                response = await server_utils.request(
+                    method=request.method,
+                    url=str(request.url),
+                    # Only explicit rate-limit rejections are retried here. Connection
+                    # failures could follow a successful command submission.
+                    _max_connection_retries=1,
+                    headers=request.headers.multi_items(),
+                    data=data,
+                    allow_redirects=False,
+                    auto_decompress=False,
+                    compress=False,
+                    # aiohttp includes ssl in its pool key. A fresh SSLContext per
+                    # adapter would prevent connection reuse between providers.
+                    ssl=self.verify,
+                    server_hostname=request.extensions.get("sni_hostname"),
+                    proxy=str(self.proxy.url) if self.proxy else None,
+                    proxy_auth=aiohttp.BasicAuth(*self.proxy.auth) if self.proxy and self.proxy.auth else None,
+                    proxy_headers=self.proxy.headers if self.proxy else None,
+                    timeout=aiohttp.ClientTimeout(
+                        total=None,
+                        connect=timeout.get("pool"),
+                        sock_connect=timeout.get("connect"),
+                        sock_read=timeout.get("read"),
+                    ),
+                )
+            if response.status != 429 or not replayable or attempt == _MAX_RATE_LIMIT_RETRIES:
+                break
+
+            try:
+                delay = _retry_after_seconds(response.headers.get("Retry-After"), fallback=2.0**attempt)
+            finally:
+                # Free the shared pool slot before sleeping, including on cancellation.
+                response.close()
+            logger.warning(
+                "Sandbox HTTP request rate limited; method=%s host=%s retry=%s/%s sleep_s=%s",
+                request.method,
+                request.url.host,
+                attempt + 1,
+                _MAX_RATE_LIMIT_RETRIES,
+                delay,
             )
+            await asyncio.sleep(delay)
 
         try:
             extensions = {"http_version": f"HTTP/{response.version.major}.{response.version.minor}".encode()}

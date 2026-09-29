@@ -17,6 +17,7 @@ from typing_extensions import Self
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure, EpisodeId
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SimpleServer
 
 
@@ -181,34 +182,37 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         response: EpisodeResponseT
         cancelled: asyncio.CancelledError | None = None
         deadline = asyncio.timeout(self.config.default_episode_timeout_seconds)
-        try:
+        # Every downstream call of this episode, including final cleanup, carries its attempt-qualified
+        # rollout id, so Resources and Model Server calls stay correlated with the rollout.
+        with rollout_context(request.episode_id.capture_key):
             try:
-                async with deadline:
-                    response = await self.run(request, cleanup)
-            except TimeoutError as error:
-                if deadline.expired():
-                    response = self.failure_response(
-                        request,
-                        EpisodeFailure(
-                            message="Episode timed out",
-                            terminal=False,
-                        ),
-                    )
-                else:
+                try:
+                    async with deadline:
+                        response = await self.run(request, cleanup)
+                except TimeoutError as error:
+                    if deadline.expired():
+                        response = self.failure_response(
+                            request,
+                            EpisodeFailure(
+                                message="Episode timed out",
+                                terminal=False,
+                            ),
+                        )
+                    else:
+                        response = self._unhandled_failure_response(request, error)
+                except HandledEpisodeError as error:
+                    response = self.failure_response(request, error.failure)
+                except asyncio.CancelledError as error:
+                    cancelled = error
+                except Exception as error:
                     response = self._unhandled_failure_response(request, error)
-            except HandledEpisodeError as error:
-                response = self.failure_response(request, error.failure)
-            except asyncio.CancelledError as error:
-                cancelled = error
-            except Exception as error:
-                response = self._unhandled_failure_response(request, error)
-        finally:
-            try:
-                with CancelScope(shield=True):
-                    await cleanup.aclose()
             finally:
-                if acquired and self._admission is not None:
-                    self._admission.release()
+                try:
+                    with CancelScope(shield=True):
+                        await cleanup.aclose()
+                finally:
+                    if acquired and self._admission is not None:
+                        self._admission.release()
 
         if cancelled is not None:
             raise cancelled

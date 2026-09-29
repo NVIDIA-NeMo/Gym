@@ -46,6 +46,7 @@ from nemo_gym.base_responses_api_model import (
 )
 from nemo_gym.config_types import (
     AgentWithoutEnvironmentServerError,
+    AmbiguousEnvironmentServerError,
     BaseNeMoGymCLIConfig,
     BaseServerConfig,
     ConfigError,
@@ -59,6 +60,7 @@ from nemo_gym.global_config import (
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -69,6 +71,7 @@ from nemo_gym.global_config import (
     allowed_agents_for,
     dataset_agent_pins,
     get_global_config_dict,
+    label_runs,
     pairing_override_enabled,
     resolve_dataset_agent,
 )
@@ -185,8 +188,10 @@ NG_TERMINAL_KEY = "_ng_failure_terminal"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
 ENVIRONMENT_SERVER_FAILURE_CLASS = "environment_server_failed"
-NG_ENVIRONMENT_SERVER_KEY = "_ng_environment_server"
-NG_TASKSET_KEY = "_ng_taskset"
+NG_ENVIRONMENT_SERVER_KEY = ENVIRONMENT_SERVER_STAMP_KEY_NAME
+# Implementation name under `environment_servers:`, so readers know which result type a record holds.
+NG_RESULT_TYPE_KEY = "_ng_result_type"
+NG_TASK_ID_KEY = "_ng_task_id"
 _NO_RESULT_FAILURE_CLASSES = frozenset(
     {
         AGENT_REQUEST_FAILED_FAILURE_CLASS,
@@ -201,12 +206,9 @@ _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw"
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
 
-def _environment_server_for_agent(agent_name: str, global_config_dict: DictConfig) -> str:
-    """Return the environment server that fronts an agent.
-
-    Resolving from the agent only describes an episode that has exactly one.
-    Native tasksets name their environment server through ``environment_server_routes``.
-    """
+def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, list[str]]:
+    """Map each agent name to the environment servers whose ``agent_server`` names it."""
+    servers_by_agent: dict[str, list[str]] = {}
     for name, instance in global_config_dict.items():
         if not isinstance(instance, DictConfig):
             continue
@@ -215,11 +217,31 @@ def _environment_server_for_agent(agent_name: str, global_config_dict: DictConfi
             continue
         for server in servers.values():
             reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-            if isinstance(reference, DictConfig) and reference.get("name") == agent_name:
-                return str(name)
-    raise AgentWithoutEnvironmentServerError(
-        f"Agent '{agent_name}' has no environment server, so collection cannot reach it. "
-        "Config validation should have caught this before any server started."
+            agent_name = reference.get("name") if isinstance(reference, DictConfig) else None
+            if agent_name is not None:
+                servers_by_agent.setdefault(str(agent_name), []).append(str(name))
+    return servers_by_agent
+
+
+def _environment_server_for_agent(agent_name: str, servers_by_agent: Mapping[str, list[str]]) -> str:
+    """Return the one environment server that fronts an agent.
+
+    A row routed by its agent cannot choose between several environment servers.
+    Several servers may still front one agent when every row names its server directly.
+    Native tasksets name their environment server through ``environment_server_routes``.
+    """
+    servers = servers_by_agent.get(agent_name, [])
+    if len(servers) == 1:
+        return servers[0]
+    if not servers:
+        raise AgentWithoutEnvironmentServerError(
+            f"Agent '{agent_name}' has no environment server, so collection cannot reach it. "
+            "Config validation should have caught this before any server started."
+        )
+    raise AmbiguousEnvironmentServerError(
+        f"Agent '{agent_name}' is fronted by several environment servers: {sorted(servers)}. "
+        "Rows that route by agent cannot choose between them. "
+        "Set environment_routing_mode=legacy with environment_server_name, or route these rows by taskset."
     )
 
 
@@ -278,6 +300,64 @@ def _native_episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_episode_response(result: Any) -> bool:
+    """True for a ``BaseEpisodeResponse``-shaped reply: object identities plus a ``result`` or ``failure`` key.
+
+    The collector only applies this to a row it dispatched as an episode request
+    (``_materialized_taskset(row)``), so an agent's verify response that echoes identity fields is left alone.
+    """
+    return (
+        isinstance(result, Mapping)
+        and isinstance(result.get("episode_id"), Mapping)
+        and isinstance(result.get("task_id"), Mapping)
+        and ("result" in result or "failure" in result)
+    )
+
+
+def _is_collector_key(key: str) -> bool:
+    """Keys rollout collection writes itself; an Environment Server result must not use them."""
+    return key.startswith("_ng_") or key in (NG_TRAJECTORY_KEY, "ng_model_call_capture", NG_PERF_KEY)
+
+
+def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Turn a ``BaseEpisodeResponse`` into the rollout record the collector stores.
+
+    A handled ``failure`` becomes a failures-sidecar row, so resume retries a non-terminal one and
+    never a terminal one. A ``result`` is stored as the Environment Server returned it; the collector
+    adds only its own ``_ng_*`` keys, so any Environment Server type can be collected without the
+    collector knowing its result fields.
+    """
+    task_id = response.get("task_id")
+    failure = response.get("failure")
+    if failure is not None:
+        if not isinstance(failure, Mapping):
+            raise ValueError(
+                f"environment server reply for task {task_id!r} carries a non-object failure: {failure!r}"
+            )
+        record: Dict[str, Any] = {
+            NG_TASK_ID_KEY: task_id,
+            NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
+            NG_TERMINAL_KEY: bool(failure.get("terminal", False)),
+            "_ng_failure_message": failure.get("message"),
+        }
+        if failure.get("stage") is not None:
+            record["_ng_failure_stage"] = failure["stage"]
+        if failure.get("partial_response") is not None:
+            record["_ng_failure_partial_response"] = failure["partial_response"]
+        return record
+    result = response.get("result")
+    if not isinstance(result, Mapping):
+        raise ValueError(f"environment server reply for task {task_id!r} carries a non-object result: {result!r}")
+    reserved = sorted(key for key in result if _is_collector_key(key))
+    if reserved:
+        raise ValueError(
+            f"environment server result for task {task_id!r} uses keys reserved for rollout collection: {reserved}"
+        )
+    record = dict(result)
+    record[NG_TASK_ID_KEY] = task_id
+    return record
+
+
 @dataclass(frozen=True)
 class _CompletedRollout:
     """A finished ``/run`` dispatch, with timing carried alongside (not inside) the raw result."""
@@ -285,6 +365,8 @@ class _CompletedRollout:
     row: Dict[str, Any]
     result: Dict[str, Any]
     rollout_latency_ms: Optional[float]
+    environment_server: Optional[str] = None
+    environment_server_type: Optional[str] = None
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -307,6 +389,100 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
     )
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return task_id, rollout_id
+
+
+def _turn_content(request: Any, response: Any) -> tuple[Any, Any, Any, int]:
+    """Split one captured model call into the turn's question, answer, reasoning, and tool-call count.
+
+    Handles Responses API output items and chat-completions messages, the two dialects the Model
+    Server captures.
+    """
+    question = request.get("input", request.get("messages")) if isinstance(request, dict) else request
+    if isinstance(request, dict) and isinstance(request.get("input"), list):
+        # Responses API input messages may omit `type`, which defaults to "message"; turns state it.
+        question = [
+            {"type": "message", **item} if isinstance(item, dict) and "role" in item and "type" not in item else item
+            for item in request["input"]
+        ]
+    if isinstance(response, dict) and isinstance(response.get("output"), list):
+        output = [item for item in response["output"] if isinstance(item, dict)]
+        reasoning = [item for item in output if item.get("type") == "reasoning"] or None
+        answer = [item for item in output if item.get("type") != "reasoning"]
+        tool_calls = sum(1 for item in answer if item.get("type") == "function_call")
+        return question, answer, reasoning, tool_calls
+    choices = response.get("choices") if isinstance(response, dict) else None
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message") or {}
+        reasoning = message.get("reasoning_content") or message.get("reasoning")
+        answer = {key: value for key, value in message.items() if key not in ("reasoning_content", "reasoning")}
+        return question, answer, reasoning, len(message.get("tool_calls") or [])
+    return question, None, None, 0
+
+
+def _turns_from_model_calls(
+    task_id: str,
+    rollout_id: str,
+    invocations: list[AgentInvocation],
+    model_calls: list[TrajectoryModelCall],
+    resolved: Any,
+) -> list[TrajectoryTurn]:
+    """Build one turn per captured model call that returned a response, for an agent that sent no trajectory.
+
+    A call belongs to the invocation whose ``model_calls`` reference it. With a single invocation
+    every call belongs to it, and with none they belong to ``root``. A call that cannot be attributed
+    to one of several invocations is skipped rather than guessed.
+    """
+    invocation_by_call_id: dict[str, str] = {}
+    invocation_by_response_id: dict[str, str] = {}
+    for invocation in invocations:
+        for ref in invocation.model_calls:
+            if ref.model_call_id:
+                invocation_by_call_id[ref.model_call_id] = invocation.invocation_id
+            if ref.response_id:
+                invocation_by_response_id[ref.response_id] = invocation.invocation_id
+    default_invocation = invocations[0].invocation_id if len(invocations) == 1 else None if invocations else "root"
+
+    turns: list[TrajectoryTurn] = []
+    turn_counts: Counter = Counter()
+    tool_counts: Counter = Counter()
+    for call in model_calls:
+        if call.response is None:
+            # A call that returned nothing is not a model decision.
+            continue
+        metadata = call.response_metadata
+        invocation_id = (
+            invocation_by_call_id.get(call.model_call_id or "")
+            or invocation_by_response_id.get(metadata.response_id or "")
+            or default_invocation
+        )
+        if invocation_id is None:
+            continue
+        question, answer, reasoning, tool_calls = _turn_content(call.request, call.response)
+        turn_counts[invocation_id] += 1
+        turns.append(
+            TrajectoryTurn(
+                invocation_id=invocation_id,
+                task_id=task_id,
+                rollout_id=rollout_id,
+                turn_no=turn_counts[invocation_id],
+                timestamp=call.started_at or call.completed_at or 0.0,
+                question=question,
+                answer=answer,
+                reasoning_content=reasoning,
+                step_count=tool_counts[invocation_id],
+                model_calls=[
+                    ModelCallRef(
+                        model_call_id=call.model_call_id,
+                        model_ref=metadata.model_ref,
+                        response_id=metadata.response_id,
+                    )
+                ],
+            )
+        )
+        tool_counts[invocation_id] += tool_calls
+    if turns and isinstance(resolved, bool):
+        turns[-1] = turns[-1].model_copy(update={"resolved": resolved})
+    return turns
 
 
 def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> TrajectoryRecord:
@@ -448,6 +624,10 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 gaps.append(ObservationGap.model_validate(raw_gap))
             except Exception:
                 gaps.append(ObservationGap(code="model_call_capture_gap_invalid"))
+    if not isinstance(raw_trajectory, dict):
+        # An agent that sends its own trajectory owns its turns, and an empty list there means no turn
+        # completed. Agents that report only invocations, or nothing, get turns from the captured calls.
+        turns = _turns_from_model_calls(task_id, rollout_id, invocations, model_calls, result.get("resolved"))
     if not model_calls:
         gaps.append(ObservationGap(code="model_calls_unavailable"))
     if not turns:
@@ -1429,7 +1609,13 @@ class RolloutCollectionHelper(BaseModel):
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
         failures_fpath = failures_path_for(output_fpath)
-        environment_server_client = self.setup_server_client() if config.environment_routing_mode != "agent" else None
+        # Any run that stamps environment servers on rows (a non-default routing mode, or routes for
+        # materialized tasksets) needs the merged config to resolve those servers below.
+        environment_server_client = (
+            self.setup_server_client()
+            if config.environment_routing_mode != "agent" or config.environment_server_routes
+            else None
+        )
 
         # Create the output directory up front: every artifact this run writes (materialized inputs,
         # rollouts, failures sidecar, aggregate metrics) is derived from output_fpath and keeps its
@@ -1557,6 +1743,9 @@ class RolloutCollectionHelper(BaseModel):
         pcts_to_print = list(range(1, 100)) + [99.5, 100]
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
+        # How many results reported each metric, so a result without a metric (such as an unscored
+        # result without a reward) does not dilute that metric's average.
+        agent_name_to_metric_counts = defaultdict(Counter)
         # Quality accounting restricted to persisted rollouts: `count`/`reward` over the
         # unmasked ones, `masked` over the rest. Token capture already reports its own
         # masking; this is the same accounting for what an environment declares on its
@@ -1591,6 +1780,9 @@ class RolloutCollectionHelper(BaseModel):
         ):
             completed = await future
             row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
+            if _materialized_taskset(row) is not None and _is_episode_response(result):
+                # The row went out as an episode request, so the reply is a BaseEpisodeResponse.
+                result = _episode_record(result)
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -1606,11 +1798,12 @@ class RolloutCollectionHelper(BaseModel):
                 # Capture readback recomputes the id from the finished record.
                 # Preserve an explicit id on the result just like the indices.
                 result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
-            if NG_ENVIRONMENT_SERVER_KEY in row:
-                result[NG_ENVIRONMENT_SERVER_KEY] = row[NG_ENVIRONMENT_SERVER_KEY]
-            taskset = _materialized_taskset(row)
-            if taskset is not None:
-                result[NG_TASKSET_KEY] = taskset
+            # Every record names the Environment Server that ran it and that server's type,
+            # so readers group by server instead of agent_ref and know which result type they hold.
+            if completed.environment_server is not None:
+                result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
+            if completed.environment_server_type is not None:
+                result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -1723,9 +1916,9 @@ class RolloutCollectionHelper(BaseModel):
             if not no_result:
                 # An infrastructure failure is not a score of zero, and not a sample either.
                 metrics = agent_name_to_metrics[agent_name]
-                metrics.update(
-                    {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
-                )
+                numeric = {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
+                metrics.update(numeric)
+                agent_name_to_metric_counts[agent_name].update(numeric.keys())
                 agent_name_to_counts[agent_name] += 1
 
             # Quality accounting covers only what reaches the main rollout output, which is
@@ -1736,8 +1929,9 @@ class RolloutCollectionHelper(BaseModel):
                 agent_name_to_dropped[agent_name].update({"omitted" if no_persist else "failed": 1})
             elif result.get(MASK_SAMPLE_KEY):
                 agent_name_to_scored[agent_name].update({"masked": 1})
-            else:
-                agent_name_to_scored[agent_name].update({"reward": float(result.get("reward") or 0.0), "count": 1})
+            elif "reward" in result:
+                # A result without a reward is unscored, not a zero.
+                agent_name_to_scored[agent_name].update({"reward": float(result["reward"] or 0.0), "count": 1})
 
             current_pct = 100 * completed_dispatches / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
@@ -1758,7 +1952,8 @@ class RolloutCollectionHelper(BaseModel):
                     metrics = agent_name_to_metrics[agent_name]
                     agent_total_samples = dispatched_per_agent[agent_name]
                     agent_sample_pct = 100 * agent_name_to_counts[agent_name] / agent_total_samples
-                    avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
+                    metric_counts = agent_name_to_metric_counts[agent_name]
+                    avg_metrics = {k: v / metric_counts[k] for k, v in metrics.items()}
                     print_str += f"""Found {agent_name_to_counts[agent_name]} / {agent_total_samples} ({agent_sample_pct:.2f}%) rollouts for `{agent_name}`.
 {json.dumps(avg_metrics, indent=4)}
 """
@@ -1768,11 +1963,12 @@ class RolloutCollectionHelper(BaseModel):
                 if get_exporters():
                     step_metrics = {"progress/total/rollouts_per_min": rollouts_per_min}
                     for agent_name, metrics in agent_name_to_metrics.items():
-                        step_metrics[f"progress/{agent_name}/reward"] = round(
-                            100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
-                        )
+                        scored = agent_name_to_metric_counts[agent_name]["reward"]
+                        if not scored:
+                            continue
+                        step_metrics[f"progress/{agent_name}/reward"] = round(100 * metrics["reward"] / scored, 2)
                         step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
-                            100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]), 2
+                            100 * metrics["reward"] / (counts_left[agent_name] + scored), 2
                         )
                     # The union, not just the scored agents: an agent whose every request
                     # fails never lands in `agent_name_to_counts`, and reporting only the
@@ -1881,25 +2077,56 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         rows: List[Dict],
         output_fpath: Path,
     ) -> Optional[Path]:
-        """Call /aggregate_metrics on each agent's environment server after rollouts complete.
+        """Call /aggregate_metrics on the environment server each rollout ran through.
 
-        Writes a single _aggregate_metrics.json with one entry per agent (same shape
-        as the old _agent_metrics.json). Returns the file path.
+        Rows are grouped by the environment server stamped on them at preprocessing
+        (``_ng_environment_server``); a row without the stamp is grouped by the environment server
+        that fronts its agent, as before, so the identity decided at dispatch is the one aggregation
+        uses, across shards and resumed runs alike. Writes a single _aggregate_metrics.json with one
+        entry per environment server (same shape as the old _agent_metrics.json, plus the server
+        name). Returns the file path.
         """
         if not results:
             return None
 
-        # Group results by agent name
-        agent_results: Dict[str, List[Dict]] = {}
+        server_client = self.setup_server_client()
+        global_config_dict = server_client.global_config_dict
+        available_servers = sorted(
+            str(name)
+            for name, block in global_config_dict.items()
+            if isinstance(block, DictConfig) and ENVIRONMENT_SERVER_TYPE_KEY_NAME in block
+        )
+
+        # Group results by the environment server they ran through.
+        servers_by_agent = _environment_servers_by_agent(global_config_dict)
+        server_results: Dict[str, List[Dict]] = {}
+        server_agents: Dict[str, Optional[str]] = {}
         for row, result in zip(rows, results):
             agent_name = (row.get(AGENT_REF_KEY_NAME) or result.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            if not agent_name:
-                continue
-            agent_results.setdefault(agent_name, []).append(result)
+            server_name = row.get(NG_ENVIRONMENT_SERVER_KEY) or result.get(NG_ENVIRONMENT_SERVER_KEY)
+            if not isinstance(server_name, str):
+                if not agent_name:
+                    continue
+                server_name = _environment_server_for_agent(agent_name, servers_by_agent)
+            elif server_name not in available_servers:
+                # Shards aggregated under a config that no longer declares the server that produced them.
+                raise ValueError(
+                    f"Result rows are stamped with environment server {server_name!r}, which is not in the "
+                    f"running config (available: {available_servers}); aggregate with the config that produced them"
+                )
+            server_results.setdefault(server_name, []).append(result)
+            if server_name not in server_agents:
+                if agent_name is None:
+                    # A native row names no agent; the environment server's own binding does.
+                    agent_name = self._agent_name_for_row({NG_ENVIRONMENT_SERVER_KEY: server_name}, global_config_dict)
+                server_agents[server_name] = agent_name
 
-        server_client = self.setup_server_client()
+        # One entry per environment server, labelled by the agent it binds so metric names and
+        # `agent_ref` keep today's shape. Servers that front the same agent (a native server and its
+        # legacy_agent twin) are each labelled by their own name, whatever order their rows arrive in.
+        labels = label_runs(server_agents)
 
-        async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
+        async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
             # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.
             stripped = []
             for r in agent_result_list:
@@ -1929,7 +2156,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
             agg_request = AggregateMetricsRequest(verify_responses=stripped)
             agg_response = await server_client.post(
-                server_name=_environment_server_for_agent(agent_name, server_client.global_config_dict),
+                server_name=server_name,
                 url_path="/aggregate_metrics",
                 json=agg_request,
             )
@@ -1938,6 +2165,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
             agent_entry = {
                 AGENT_REF_KEY_NAME: {"name": agent_name},
+                NG_ENVIRONMENT_SERVER_KEY: server_name,
                 "agent_metrics": agg_result.agent_metrics,
                 "key_metrics": agg_result.key_metrics,
                 "group_level_metrics": agg_result.group_level_metrics,
@@ -1948,7 +2176,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             return agent_entry
 
         all_agent_metrics: List[Dict] = []
-        tasks = [_fetch_agent_metrics(name, results_list) for name, results_list in agent_results.items()]
+        tasks = [
+            _fetch_agent_metrics(server_name, labels[server_name], results_list)
+            for server_name, results_list in server_results.items()
+        ]
         for coro in asyncio.as_completed(tasks):
             agent_entry = await coro
             all_agent_metrics.append(agent_entry)
@@ -2253,21 +2484,30 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         self.resolve_task_sources(direct_agent_examples, server_client.global_config_dict)
         self._validate_agent_names(direct_agent_examples, server_client.global_config_dict)
         self._validate_agent_pairings(direct_agent_examples, server_client.global_config_dict)
+        # Resolve every agent-routed row before dispatch, so an unroutable agent fails the run instead of one future.
+        servers_by_agent = _environment_servers_by_agent(server_client.global_config_dict)
+        server_for_agent = {
+            agent_name: _environment_server_for_agent(agent_name, servers_by_agent)
+            for agent_name in {row[AGENT_REF_KEY_NAME]["name"] for row in direct_agent_examples}
+        }
+        server_types = {
+            str(name): str(next(iter(block[ENVIRONMENT_SERVER_TYPE_KEY_NAME])))
+            for name, block in server_client.global_config_dict.items()
+            if isinstance(block, DictConfig) and isinstance(block.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME), DictConfig)
+        }
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
+            server_name = (
+                self._dispatch_name(row)
+                if NG_ENVIRONMENT_SERVER_KEY in row
+                else server_for_agent[row[AGENT_REF_KEY_NAME]["name"]]
+            )
+            server_type = server_types.get(server_name)
             async with semaphore:
                 started_at = time()
                 res = None
                 try:
-                    server_name = (
-                        self._dispatch_name(row)
-                        if NG_ENVIRONMENT_SERVER_KEY in row
-                        else _environment_server_for_agent(
-                            row[AGENT_REF_KEY_NAME]["name"],
-                            server_client.global_config_dict,
-                        )
-                    )
                     request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
@@ -2275,7 +2515,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time() - started_at) * 1000
-                    return _CompletedRollout(row=row, result=result, rollout_latency_ms=rollout_latency_ms)
+                    return _CompletedRollout(
+                        row=row,
+                        result=result,
+                        rollout_latency_ms=rollout_latency_ms,
+                        environment_server=server_name,
+                        environment_server_type=server_type,
+                    )
                 except Exception as e:
                     print(
                         "[rollout_collection] /run failed "
@@ -2291,7 +2537,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # when the body was the part that failed.
                     status = getattr(e, "status", None) or getattr(res, "status", None)
                     return _CompletedRollout(
-                        row=row, result=_agent_request_failure_row(e, status), rollout_latency_ms=None
+                        row=row,
+                        result=_agent_request_failure_row(e, status),
+                        rollout_latency_ms=None,
+                        environment_server=server_name,
+                        environment_server_type=server_type,
                     )
 
         return tqdm.as_completed(
@@ -2431,6 +2681,8 @@ def _expand_input_glob(input_glob: str) -> List[str]:
     seen: Dict[str, None] = {}  # preserve insertion order while deduping
     for pattern in patterns:
         for path in sorted(glob_module.glob(pattern)):
+            if Path(path).stem.endswith("_failures"):
+                continue
             seen.setdefault(path, None)
     return list(seen)
 
@@ -2476,7 +2728,8 @@ class RolloutAggregationHelper(BaseModel):
         if config.count_failure_classes_as_zero:
             print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
 
-        # `_call_aggregate_metrics` only inspects each row's AGENT_REF_KEY_NAME, which results already carry.
+        # `_call_aggregate_metrics` groups by the `_ng_environment_server` stamp, falling back to
+        # AGENT_REF_KEY_NAME; result rows carry both from the run that produced them.
         helper = RolloutCollectionHelper()
         scored = results + counted
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(scored, scored, output_fpath)

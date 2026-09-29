@@ -62,6 +62,8 @@ from nemo_gym.global_config import (
     STD_PREFIX,
     STD_STAT_NAME,
     TASK_INDEX_KEY_NAME,
+    rollout_run_key,
+    rollout_run_labels,
 )
 
 
@@ -133,7 +135,7 @@ class RewardProfiler:
         # another's completed ones. Without fan-out each task has one agent and this reduces to
         # the plain per-task count.
         def _group_of(key: Tuple[int, int]) -> Tuple[int, Optional[str]]:
-            return key[0], (rows_by_key[key].get(AGENT_REF_KEY_NAME) or {}).get("name")
+            return key[0], rollout_run_key(rows_by_key[key])
 
         expected_by_task = Counter(_group_of(key) for key in rows_by_key)
         completed_by_task = Counter(_group_of(key) for key in matched_keys)
@@ -395,8 +397,12 @@ class RewardProfiler:
         # byte-identical output.
         # Tolerate rows without an agent_ref exactly as before: only matched rows ever required
         # one, so the detection must not introduce a new failure on unmatched (partial) rows.
+        # Group by what ran each rollout, named the way aggregate metrics name it. Each label names
+        # exactly one Environment Server, so two servers that front one agent stay separate.
+        labels = rollout_run_labels(rows)
+
         def _agent_name(row: Dict[str, Any]) -> Optional[str]:
-            return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            return labels.get(rollout_run_key(row))
 
         per_agent = len({(row[TASK_INDEX_KEY_NAME], _agent_name(row)) for row in rows}) > len(
             {row[TASK_INDEX_KEY_NAME] for row in rows}
@@ -416,11 +422,11 @@ class RewardProfiler:
             task_idx_to_rollout_infos[_group_key(row)].append(self.rollout_info_from_result(result))
 
             # Add additional helpful information
-            result = result | (result["response"].get("usage") or {})
+            result = result | ((result.get("response") or {}).get("usage") or {})
 
             # agent_name is a temporary column used for aggregations below
             numeric_result = {
-                "agent_name": row["agent_ref"]["name"],
+                "agent_name": _agent_name(row),
                 TASK_INDEX_KEY_NAME: task_idx,
                 ROLLOUT_INDEX_KEY_NAME: rollout_idx,
             }
