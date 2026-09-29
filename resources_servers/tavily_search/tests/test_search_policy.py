@@ -129,7 +129,7 @@ async def test_sdk_requests_rotate_keys_on_rate_limit_and_filter_results(server,
     success.release.assert_called_once()
 
 
-@pytest.mark.parametrize("status, attempts", [(429, 3), (503, 3), (401, 1)])
+@pytest.mark.parametrize("status, attempts", [(429, 3), (503, 3), (401, 2), (432, 2), (433, 2), (400, 1)])
 async def test_retry_budget_and_redacted_errors(server, monkeypatch, status, attempts):
     response = http_response(status, {"error": "private-key-or-provider-details"})
     post = AsyncMock(return_value=response)
@@ -141,6 +141,54 @@ async def test_retry_budget_and_redacted_errors(server, monkeypatch, status, att
     assert post.await_count == attempts
     assert response.release.call_count == attempts
     response.json.assert_not_awaited()
+
+
+@pytest.mark.parametrize("status", [401, 432, 433])
+@pytest.mark.parametrize("endpoint", ["/search", "/extract"])
+async def test_rejected_key_falls_back_without_changing_request(server, monkeypatch, status, endpoint):
+    bad = http_response(status, {"error": "private-key-details"})
+    good = http_response(200, {"results": []})
+    post = AsyncMock(side_effect=[bad, good])
+    monkeypatch.setattr(module, "request", post)
+    monkeypatch.setattr(module, "sleep", AsyncMock())
+    transport = server._async_tavily_clients[0]._client
+    result = await transport.post(endpoint, '{"query":"math"}', timeout=60)
+    assert result.status_code == 200
+    assert [c.kwargs["headers"]["authorization"] for c in post.await_args_list] == ["Bearer key-one", "Bearer key-two"]
+    assert all(c.kwargs["data"] == '{"query":"math"}' for c in post.await_args_list)
+    assert all(c.kwargs["url"].endswith(endpoint) for c in post.await_args_list)
+    bad.release.assert_called_once()
+    good.release.assert_called_once()
+    bad.json.assert_not_awaited()
+
+
+async def test_key_failover_shares_budget_and_skips_rejected_key(server, monkeypatch):
+    transport = server._async_tavily_clients[0]._client
+    post = AsyncMock(side_effect=[http_response(401), http_response(503), http_response(200, {"results": []})])
+    monkeypatch.setattr(module, "request", post)
+    monkeypatch.setattr(module, "sleep", AsyncMock())
+    await transport.post("/search", "{}", timeout=60)
+    assert [c.kwargs["headers"]["authorization"] for c in post.await_args_list] == [
+        "Bearer key-one",
+        "Bearer key-two",
+        "Bearer key-two",
+    ]
+    transport.max_attempts = 1
+    post.reset_mock(side_effect=True)
+    post.return_value = http_response(432)
+    with pytest.raises(RuntimeError, match="Tavily HTTP 432 after 1 attempts"):
+        await transport.post("/search", "{}", timeout=60)
+    assert post.await_count == 1
+
+
+async def test_single_rejected_key_is_not_retried(server, monkeypatch):
+    transport = server._async_tavily_clients[0]._client
+    transport.retry_api_keys = ["key-one", "key-one"]
+    post = AsyncMock(return_value=http_response(401))
+    monkeypatch.setattr(module, "request", post)
+    with pytest.raises(RuntimeError, match="Tavily HTTP 401 after 1 attempts"):
+        await transport.post("/search", "{}", timeout=60)
+    assert post.await_count == 1
 
 
 @pytest.mark.parametrize("tool", ["find_in_page", "scroll_page"])

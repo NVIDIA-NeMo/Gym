@@ -150,11 +150,16 @@ class TavilySearchAIOHTTPClient(BaseModel):
 
     async def post(self, endpoint: str, content: str, timeout: float) -> TavilySearchAIOHTTPClientResponse:
         headers = {key.lower(): value for key, value in self.headers.items()}
+        authorizations = list(
+            dict.fromkeys([headers.get("authorization", ""), *("Bearer " + key for key in self.retry_api_keys)])
+        )
+        rejected = set()
+        key_index = 0
         for attempt in range(self.max_attempts):
-            # The SDK selects the first key per tool call. Rotate subsequent HTTP attempts too.
-            if attempt and self.retry_api_keys:
-                key = self.retry_api_keys[(attempt - 1) % len(self.retry_api_keys)]
-                headers["authorization"] = "Bearer " + key
+            # Skip keys rejected during this call; transient failures still rotate the pool.
+            while authorizations[key_index] in rejected:
+                key_index = (key_index + 1) % len(authorizations)
+            headers["authorization"] = authorizations[key_index]
             response = None
             try:
                 response = await request(
@@ -167,7 +172,13 @@ class TavilySearchAIOHTTPClient(BaseModel):
                 )
                 if response.status == 200:
                     return TavilySearchAIOHTTPClientResponse(status_code=200, data=await response.json())
-                if response.status not in RETRY_ERROR_CODES or attempt + 1 == self.max_attempts:
+                key_rejected = response.status in {401, 432, 433}
+                if key_rejected:
+                    rejected.add(headers["authorization"])
+                retryable = response.status in RETRY_ERROR_CODES or (
+                    key_rejected and len(rejected) < len(authorizations)
+                )
+                if not retryable or attempt + 1 == self.max_attempts:
                     # Provider error bodies may contain credentials; never forward them to the agent.
                     raise RuntimeError(f"Tavily HTTP {response.status} after {attempt + 1} attempts")
             except (ClientConnectionError, ClientPayloadError, TimeoutError):
@@ -176,6 +187,7 @@ class TavilySearchAIOHTTPClient(BaseModel):
             finally:
                 if response is not None:
                     response.release()
+            key_index = (key_index + 1) % len(authorizations)
             await sleep(min(2**attempt, 8))
         raise RuntimeError("Tavily retry budget exhausted")
 

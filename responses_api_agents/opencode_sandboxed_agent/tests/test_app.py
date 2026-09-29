@@ -621,9 +621,11 @@ class TestOpenCodeSandboxedAgent:
 class TestBenchmarkLifecycle:
     _create_config = TestOpenCodeSandboxedAgent._create_config
 
-    async def test_config_overlay_keeps_model_route_and_remaining_budget(self, monkeypatch):
+    @mark.parametrize("model_timeout", [None, 3600000])
+    async def test_config_overlay_keeps_model_route_and_remaining_budget(self, monkeypatch, model_timeout):
         config = self._create_config()
         config.sandbox_timeout = 14400
+        config.opencode_model_call_timeout = model_timeout
         config.output_token_policy = "remaining_context"
         config.opencode_config = {"provider": {"nemo_gym": {"models": {"dummy_model": {"limit": {"output": 65536}}}}}}
         config.opencode_config["agent"] = {"build": {"prompt": "Custom instructions."}}
@@ -637,6 +639,9 @@ class TestBenchmarkLifecycle:
         result = await server._create_opencode_config(request)
         assert result["provider"]["nemo_gym"]["options"]["baseURL"] == "http://model.example:8000/v1"
         assert result["provider"]["nemo_gym"]["options"]["chunkTimeout"] == 14400000
+        assert result["provider"]["nemo_gym"]["options"]["timeout"] == (
+            model_timeout if model_timeout is not None else False
+        )
         assert result["agent"]["build"]["prompt"] == "Custom instructions."
         assert result["plugin"] == ["file:///tmp/nemo-gym-remaining-context.js"]
         assert "plugin" not in config.opencode_config

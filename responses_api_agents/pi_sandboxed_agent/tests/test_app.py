@@ -131,8 +131,11 @@ def request_body():
     )
 
 
-async def test_native_execution_preserves_settings_timing_and_verification(agent):
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_native_execution_preserves_settings_timing_and_verification(agent, cleanup_fails, caplog):
     server, sandbox = agent
+    if cleanup_fails:
+        sandbox.stop.side_effect = RuntimeError("cleanup unavailable")
     staged = {}
 
     async def upload(local, remote):
@@ -155,6 +158,8 @@ async def test_native_execution_preserves_settings_timing_and_verification(agent
     assert not any(g.code == "no_sandbox_runtime" for g in result.ng_agent_observations.gaps)
     sandbox.stop.assert_awaited_once()
     assert _RUN.get() is None
+    if cleanup_fails:
+        assert "Failed to stop Pi sandbox" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -204,8 +209,11 @@ async def test_partial_event_tail_only_recovers_failed_execution(agent, failure,
 
 
 @pytest.mark.parametrize("failure", ["exit", "timeout", "export", "cancel", "judge"])
-async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure):
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure, cleanup_fails):
     server, sandbox = agent
+    if cleanup_fails:
+        sandbox.stop.side_effect = RuntimeError("cleanup unavailable")
     if failure == "exit":
         sandbox.exec.side_effect = [
             SimpleNamespace(return_code=0, error_type=None),

@@ -321,7 +321,10 @@ class PiSandboxedAgent(PiAgent):
             finally:
                 _RUN.reset(token)
                 # Connected resource-owned sandboxes remain alive through verification, just like OpenCode.
-                await sandbox.stop()
+                try:
+                    await sandbox.stop()
+                except Exception:
+                    LOG.exception("Failed to stop Pi sandbox")
 
 
 if __name__ == "__main__":

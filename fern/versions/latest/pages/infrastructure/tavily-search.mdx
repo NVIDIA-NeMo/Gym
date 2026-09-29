@@ -139,6 +139,12 @@ These changes apply to existing Tavily configurations as well as HLE:
   SDK timeout takes precedence. Exhaustion raises a tool-service error instead of
   returning an empty search. Under sustained rate limits, reduce concurrency or
   explicitly increase the attempt budget.
+- Invalid-key (401) and exhausted-quota (432/433) responses try another configured
+  key within that same attempt budget. A rejected key is skipped for the rest of
+  the current call; if no alternative remains, the call fails immediately.
+  Keys are reconsidered on subsequent calls so replenished quota or restored
+  access does not require restarting the server. Other non-retryable client errors
+  still fail immediately. See [Tavily's error codes](https://help.tavily.com/articles/8645538886-understanding-http-errors).
 - The page cache evicts the least recently used page at `max_cached_pages`
   (default 128); zero disables it.
   `max_cached_page_chars` limits stored page content and applies only when caching
