@@ -36,6 +36,7 @@ LOG = logging.getLogger("nemo_gym.web.visual_browser")
 
 
 class VisualBrowserDriverConfig(WebResourcesServerConfig):
+    browser_auto_install: bool = True
     """Configuration shared by headed visual-browser benchmark policies."""
 
     artifact_dir: str = "cache/visual-browser/artifacts"
@@ -453,18 +454,36 @@ class VisualBrowserDriver:
         had_runtime = any(owner is not None for owner in (self._context, self._browser, self._playwright))
         task_id = self._task.task_id if self._task is not None else "unknown"
         started = time.monotonic()
-        for owner in (self._context, self._browser):
+        errors: list[Exception] = []
+        for attribute in ("_context", "_browser"):
+            owner = getattr(self, attribute)
             if owner is not None:
                 try:
                     owner.close()
-                except Exception:
-                    pass
+                    setattr(self, attribute, None)
+                except Exception as exc:
+                    errors.append(exc)
+                    LOG.warning(
+                        "event=visual_browser_close_failed session=%s component=%s error_type=%s",
+                        self.session_id,
+                        attribute,
+                        type(exc).__name__,
+                    )
         if self._playwright is not None:
             try:
                 self._playwright.stop()
-            except Exception:
-                pass
-        self._playwright = self._browser = self._context = self._page = None
+                # The driver has reaped its owned browser and its contexts.
+                self._playwright = self._browser = self._context = None
+            except Exception as exc:
+                errors.append(exc)
+                LOG.warning(
+                    "event=visual_browser_close_failed session=%s component=playwright error_type=%s",
+                    self.session_id,
+                    type(exc).__name__,
+                )
+        if any(owner is not None for owner in (self._context, self._browser, self._playwright)):
+            raise RuntimeError("visual browser cleanup is incomplete; retained handles require retry") from errors[-1]
+        self._page = None
         self._task = None
         self._observation = None
         if had_runtime:

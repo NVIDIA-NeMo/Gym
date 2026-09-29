@@ -209,6 +209,25 @@ def test_config_transport_helpers_and_default_hooks(tmp_path: Path) -> None:
     driver._before_post_action_capture(failure_step=0)
 
 
+def test_close_retains_failed_runtime_handles_for_retry(tmp_path: Path) -> None:
+    from unittest.mock import Mock
+
+    driver = _driver(tmp_path)
+    context = types.SimpleNamespace(close=Mock(side_effect=[RuntimeError("context failed"), None]))
+    browser = types.SimpleNamespace(close=Mock(side_effect=[RuntimeError("browser failed"), None]))
+    playwright = types.SimpleNamespace(stop=Mock(side_effect=[RuntimeError("driver failed"), None]))
+    driver._context, driver._browser, driver._playwright = context, browser, playwright
+    with pytest.raises(RuntimeError, match="cleanup is incomplete"):
+        driver.close()
+    assert driver._context is context
+    assert driver._browser is browser
+    assert driver._playwright is playwright
+    driver.close()
+    driver.close()
+    assert driver._context is driver._browser is driver._playwright is None
+    assert context.close.call_count == browser.close.call_count == playwright.stop.call_count == 2
+
+
 def test_reset_capture_evaluation_and_close(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     context = _Context()
     browser = _Browser(context)

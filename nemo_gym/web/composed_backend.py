@@ -72,6 +72,8 @@ class ComposedWebBackend:
         self._task: WebTask | None = None
         self._observation: WebObservation | None = None
         self._closed = False
+        self._driver_closed = False
+        self._evaluator_closed = False
 
     def reset(self, task: WebTask) -> tuple[WebObservation, dict[str, Any]]:
         if self._closed:
@@ -128,16 +130,20 @@ class ComposedWebBackend:
         )
 
     def close(self) -> None:
-        if self._closed:
+        if self._driver_closed and self._evaluator_closed:
             return
         self._closed = True
         first_error: BaseException | None = None
         try:
-            self.driver.close()
+            if not self._driver_closed:
+                self.driver.close()
+                self._driver_closed = True
         except BaseException as exc:  # Cleanup must still close the evaluator.
             first_error = exc
         try:
-            self.evaluator.close()
+            if not self._evaluator_closed:
+                self.evaluator.close()
+                self._evaluator_closed = True
         except BaseException as exc:
             if first_error is None:
                 first_error = exc

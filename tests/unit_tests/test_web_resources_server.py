@@ -3,7 +3,7 @@
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -225,10 +225,85 @@ def test_http_contract_routes_lifecycle_and_session_cookie() -> None:
     assert len(session_ids) == 1
 
 
+def test_http_caller_identity_survives_lost_cookie_and_rejects_unauthorized_close(tmp_path) -> None:
+    from tests.unit_tests.test_web_session_manager import _manager
+
+    manager, backends = _manager(tmp_path)
+    identity = {"_ng_session_id": "a" * 32, "_ng_session_close_token": "secret-capability-" * 3}
+    with TestClient(_server(manager).setup_webserver()) as client:
+        body = {"task": _task_json(), **identity}
+        assert client.post("/seed_session", json=body).json()["session_id"] == identity["_ng_session_id"]
+        assert client.get("/session").json()["session_id"] == identity["_ng_session_id"]
+        client.cookies.clear()  # Simulate losing the response's Set-Cookie.
+        assert client.post("/seed_session", json=body).status_code == 200
+        assert len(backends) == 1
+        changed = {**body, "task": _task_json("8")}
+        assert client.post("/seed_session", json=changed).status_code == 409
+        wrong_cookie = {**identity, "_ng_session_id": "b" * 32}
+        assert client.post("/close", json=wrong_cookie).status_code == 409
+        client.cookies.clear()
+        wrong_token = {**identity, "_ng_session_close_token": "wrong-capability-" * 3}
+        assert client.post("/close", json=wrong_token).status_code == 403
+        assert client.post("/close", json=identity).json()["closed"] is True
+        assert client.post("/close", json=identity).json()["closed"] is True
+        assert client.post("/seed_session", json=body).status_code == 409
+        assert backends[0].close_calls == 1
+
+
+def test_http_close_failure_retains_handle_and_reports_retryable_cleanup(tmp_path) -> None:
+    from tests.unit_tests.test_web_session_manager import FakeBrowserSessionProvider, _manager
+
+    provider = FakeBrowserSessionProvider()
+    manager, _ = _manager(tmp_path, browser_session_provider=provider)
+    identity = {"_ng_session_id": "a" * 32, "_ng_session_close_token": "secret-capability-" * 3}
+    with TestClient(_server(manager).setup_webserver()) as client:
+        assert client.post("/seed_session", json={"task": _task_json(), **identity}).status_code == 200
+        release = provider.release
+        provider.release = AsyncMock(side_effect=RuntimeError("release failed"))
+        response = client.post("/close", json=identity)
+        assert response.status_code == 503
+        assert response.json()["closed"] is False
+        assert response.json()["failure_kind"] == "session_release_failed"
+        assert client.get("/healthz").json()["cleanup_pending"] == 1
+        provider.release = release
+        assert client.post("/close", json=identity).json()["closed"] is True
+        assert client.get("/healthz").json()["cleanup_pending"] == 0
+        assert len(provider.released) == 1
+
+
+def test_http_close_before_seed_and_invalid_capability_do_not_leak_or_resurrect() -> None:
+    manager = FakeManager()
+    identity = {"_ng_session_id": "a" * 32, "_ng_session_close_token": "secret-capability-" * 3}
+    with TestClient(_server(manager).setup_webserver()) as client:
+        assert client.post("/close", json=identity).status_code == 200
+        assert client.post("/seed_session", json={"task": _task_json(), **identity}).status_code == 409
+        invalid = {**identity, "_ng_session_close_token": "short-secret"}
+        response = client.post("/close", json=invalid)
+        assert response.status_code == 422
+        assert "short-secret" not in response.text
+        response = client.post("/close", json={"_ng_session_close_token": identity["_ng_session_close_token"]})
+        assert response.status_code == 422
+        assert identity["_ng_session_close_token"] not in response.text
+        assert not any(method == "seed_session" for method, _sid in manager.calls)
+
+
+def test_verify_cleanup_failure_does_not_overwrite_a_valid_policy_score() -> None:
+    manager = FakeManager()
+    manager.close_session = AsyncMock(return_value=False)
+    with TestClient(_server(manager).setup_webserver()) as client:
+        response = client.post("/verify", json=_verify_request().model_dump(mode="json"))
+    assert response.status_code == 200
+    result = response.json()
+    assert result["reward"] == 1.0
+    assert result["mask_sample"] is False
+    assert result["failure_kind"] is None
+    assert result["cleanup_failure_kind"] == "session_release_failed"
+
+
 @pytest.mark.parametrize(
     ("method", "path", "body", "error", "status", "kind", "retryable"),
     [
-        ("session_status", "/session", None, SessionNotFoundError("gone"), 404, "session_not_found", True),
+        ("session_status", "/session", None, SessionNotFoundError("gone"), 404, "session_lost", True),
         (
             "reset_session",
             "/reset",
@@ -364,7 +439,8 @@ async def test_verify_maps_valid_invalid_and_infrastructure_results() -> None:
     assert failed.raw_score == 0.0
     assert failed.task_success is False
     assert failed.mask_sample is True
-    assert failed.failure_kind == "verifier_error:RuntimeError:judge offline"
+    assert failed.failure_kind == "verifier_error"
+    assert failed.failure_reason == "RuntimeError: judge offline"
     assert manager.closed == ["session-a", "session-a", "session-a"]
 
 

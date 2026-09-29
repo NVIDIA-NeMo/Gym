@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -16,11 +17,12 @@ from uuid import uuid4
 
 from aiohttp import ClientResponseError
 from fastapi import Body, Request, Response
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import SESSION_LOST, SESSION_RELEASE_FAILED, TRANSPORT_TIMEOUT
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -157,6 +159,8 @@ class WebAgentRunResponse(BaseVerifyResponse):
     verifier_result: WebVerifierResult | None = None
     artifact_session_id: str | None = None
     recording_artifacts: list[WebArtifactRef] = Field(default_factory=list)
+    cleanup_failure_kind: str | None = None
+    cleanup_failure_reason: str | None = None
 
 
 @dataclass
@@ -165,6 +169,9 @@ class _RunArtifacts:
 
     session_id: str | None = None
     recordings: list[WebArtifactRef] = field(default_factory=list)
+    seed_completed: bool = False
+    cleanup_failure_kind: str | None = None
+    cleanup_failure_reason: str | None = None
 
 
 def _extract_output_text(response: NeMoGymResponse) -> str:
@@ -289,7 +296,7 @@ def _failure_route(exc: Exception) -> tuple[str, bool, str, dict[str, Any]]:
     metadata: dict[str, Any] = {}
     failure_class = "retryable_infrastructure"
     terminal = False
-    failure_kind = f"infrastructure_error:{type(exc).__name__}"
+    failure_kind = TRANSPORT_TIMEOUT if isinstance(exc, TimeoutError) else "web:infrastructure_error"
     if not isinstance(exc, ClientResponseError):
         return failure_class, terminal, failure_kind, metadata
 
@@ -302,6 +309,7 @@ def _failure_route(exc: Exception) -> tuple[str, bool, str, dict[str, Any]]:
         failure_kind = "model_context_overflow"
     if isinstance(error_kind, str):
         metadata["error_kind"] = error_kind
+        failure_kind = error_kind
     else:
         error_kind = None
 
@@ -452,6 +460,7 @@ def _redact_old_images(
 
 class WebAgent(SimpleResponsesAPIAgent):
     config: WebAgentConfig
+    _cleanup_tasks: set[asyncio.Task[None]] = PrivateAttr(default_factory=set)
 
     @property
     def environment_server_name(self) -> str:
@@ -555,7 +564,8 @@ class WebAgent(SimpleResponsesAPIAgent):
     ) -> WebAgentRunResponse:
         env_cookies = request.cookies
         model_cookies = None
-        seeded = False
+        identity = {"_ng_session_id": uuid4().hex, "_ng_session_close_token": secrets.token_urlsafe(32)}
+        artifacts.session_id = identity["_ng_session_id"]
         last_model_response: NeMoGymResponse | None = None
         usage = None
         trajectory: list[Any] = []
@@ -591,11 +601,12 @@ class WebAgent(SimpleResponsesAPIAgent):
             seed_response, seed_payload = await self._seed_session(
                 task=task,
                 cookies=env_cookies,
+                identity=identity,
             )
             seed_data = WebSeedSessionResponse.model_validate(seed_payload)
             artifacts.session_id = seed_data.session_id
             env_cookies = seed_response.cookies
-            seeded = True
+            artifacts.seed_completed = True
             observation = seed_data.observation
             LOG.info(
                 "event=web_seed_complete benchmark=%s task=%s session=%s origin=%s screenshot=%s elapsed_seconds=%.3f",
@@ -1037,40 +1048,12 @@ class WebAgent(SimpleResponsesAPIAgent):
             )
 
         finally:
-            if seeded:
-                close_started = time.monotonic()
-                try:
-                    _close_response, close_payload = await self._post_json(
-                        server_name=self.environment_server_name,
-                        url_path="/close",
-                        json={},
-                        cookies=env_cookies,
-                        timeout_secs=self.config.close_request_timeout_secs,
-                    )
-                    close_data = WebCloseResponse.model_validate(close_payload)
-                    if close_data.session_id is not None:
-                        artifacts.session_id = close_data.session_id
-                    artifacts.recordings = close_data.recording_artifacts
-                    LOG.info(
-                        "event=web_session_close_complete benchmark=%s task=%s session=%s recordings=%d "
-                        "elapsed_seconds=%.3f",
-                        task.benchmark.value,
-                        task.task_id,
-                        artifacts.session_id or "unknown",
-                        len(artifacts.recordings),
-                        time.monotonic() - close_started,
-                    )
-                except Exception as exc:  # noqa: BLE001 - cleanup must not replace a completed result.
-                    LOG.warning(
-                        "event=web_session_close_failed benchmark=%s task=%s session=%s error_type=%s "
-                        "elapsed_seconds=%.3f",
-                        task.benchmark.value,
-                        task.task_id,
-                        artifacts.session_id or "unknown",
-                        type(exc).__name__,
-                        time.monotonic() - close_started,
-                        exc_info=True,
-                    )
+            # Identity is known before seed, including when its response never
+            # arrives. A second rollout cancellation must not abandon cleanup.
+            cleanup = asyncio.create_task(self._close_browser(identity, env_cookies, artifacts))
+            self._cleanup_tasks.add(cleanup)
+            cleanup.add_done_callback(self._cleanup_tasks.discard)
+            await asyncio.shield(cleanup)
 
         if last_model_response is None:
             if truncation_reason != "model_context_overflow":
@@ -1159,6 +1142,8 @@ class WebAgent(SimpleResponsesAPIAgent):
             verifier_result=verifier_result,
             artifact_session_id=artifacts.session_id,
             recording_artifacts=artifacts.recordings,
+            cleanup_failure_kind=artifacts.cleanup_failure_kind,
+            cleanup_failure_reason=artifacts.cleanup_failure_reason,
             **judge_failure_metadata,
         )
 
@@ -1251,6 +1236,7 @@ class WebAgent(SimpleResponsesAPIAgent):
         *,
         task: WebTask,
         cookies: Any,
+        identity: dict[str, str] | None = None,
     ) -> tuple[Any, Any]:
         """Wait through transient resource-server failures without spending a rollout attempt."""
 
@@ -1267,7 +1253,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                 return await self._post_json(
                     server_name=self.environment_server_name,
                     url_path="/seed_session",
-                    json={"task": task.model_dump(mode="json")},
+                    json={"task": task.model_dump(mode="json"), **(identity or {})},
                     cookies=cookies,
                     timeout_secs=remaining,
                 )
@@ -1292,6 +1278,45 @@ class WebAgent(SimpleResponsesAPIAgent):
                         max(delay * 2, self.config.seed_retry_initial_delay_secs),
                         self.config.seed_retry_max_delay_secs,
                     )
+
+    async def _close_browser(self, identity: dict[str, str], cookies: Any, artifacts: _RunArtifacts) -> None:
+        """Bounded, idempotent cleanup; never replace an already valid verdict."""
+
+        deadline = time.monotonic() + self.config.close_request_timeout_secs
+        for attempt in range(3):
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("web session cleanup deadline exceeded")
+                _, payload = await self._post_json(
+                    server_name=self.environment_server_name,
+                    url_path="/close",
+                    json=identity,
+                    cookies=cookies,
+                    timeout_secs=remaining,
+                )
+                result = WebCloseResponse.model_validate(payload)
+                if not result.closed:
+                    raise RuntimeError(result.failure_reason or "browser cleanup is incomplete")
+                artifacts.recordings = result.recording_artifacts
+                artifacts.cleanup_failure_kind = artifacts.cleanup_failure_reason = None
+                LOG.info("event=web_session_close_complete session=%s", artifacts.session_id)
+                return
+            except Exception as exc:  # noqa: BLE001 - cleanup is a separate outcome.
+                # Do not include the identity request or its close capability.
+                artifacts.cleanup_failure_kind = SESSION_RELEASE_FAILED
+                artifacts.cleanup_failure_reason = f"session cleanup failed: {type(exc).__name__}"
+                LOG.warning(
+                    "event=web_session_close_failed session=%s attempt=%d error_type=%s",
+                    artifacts.session_id,
+                    attempt + 1,
+                    type(exc).__name__,
+                )
+                if isinstance(exc, ClientResponseError) and 400 <= exc.status < 500:
+                    break
+                if attempt < 2 and deadline > time.monotonic():
+                    await asyncio.sleep(min(0.1, deadline - time.monotonic()))
+        LOG.error("event=web_session_cleanup_pending session=%s", artifacts.session_id)
 
     @staticmethod
     def _failure_response(
@@ -1319,6 +1344,8 @@ class WebAgent(SimpleResponsesAPIAgent):
             detail = f"{detail}; response_body={str(response_content).strip()}"
         detail = detail[:500]
         failure_class, terminal, failure_kind, failure_metadata = _failure_route(exc)
+        if artifacts is not None and not artifacts.seed_completed and failure_class == "retryable_infrastructure":
+            failure_kind = SESSION_LOST
         LOG.error(
             "event=web_rollout_classified_failure benchmark=%s task=%s failure_class=%s "
             "failure_kind=%s terminal=%s error_type=%s",
@@ -1360,8 +1387,11 @@ class WebAgent(SimpleResponsesAPIAgent):
             mask_sample=True,
             failure_kind=failure_kind,
             verifier_result=verifier_result,
+            failure_reason=detail,
             artifact_session_id=artifacts.session_id,
             recording_artifacts=artifacts.recordings,
+            cleanup_failure_kind=artifacts.cleanup_failure_kind,
+            cleanup_failure_reason=artifacts.cleanup_failure_reason,
             **routing,
         )
 

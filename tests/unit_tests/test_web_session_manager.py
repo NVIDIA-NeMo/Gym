@@ -547,7 +547,7 @@ async def test_provider_fills_missing_handle_identity(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_close_attempts_all_cleanup_layers_after_independent_failures(tmp_path) -> None:
+async def test_close_retains_failed_layers_and_does_not_unlock_a_live_browser(tmp_path) -> None:
     provider = FakeBrowserSessionProvider()
     pool = FailingSitePool()
     runner = FailingCloseRunner()
@@ -561,11 +561,22 @@ async def test_close_attempts_all_cleanup_layers_after_independent_failures(tmp_
     await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
     backends[0].fail_close = True
 
-    assert await manager.close_session("session-a") is True
+    assert await manager.close_session("session-a") is False
     assert backends[0].close_calls == 1
-    assert runner.close_calls == 1
+    assert runner.close_calls == 0
     assert [handle.session_id for handle in provider.released] == ["browser:session-a"]
-    assert pool.released == [(pool.acquired[0], False)]
+    assert pool.released == []
+    assert (await manager.health())["cleanup_pending"] == 1
+    backends[0].fail_close = False
+    assert not await manager.close_session("session-a")  # executor close fails
+    assert pool.released == []
+    runner.close = AsyncMock()
+    assert not await manager.close_session("session-a")  # site release fails
+    pool.release = AsyncMock()
+    assert await manager.close_session("session-a")
+    assert len(provider.released) == 1
+    assert backends[0].close_calls == 2
+    assert (await manager.health())["cleanup_pending"] == 0
 
 
 @pytest.mark.asyncio
@@ -596,10 +607,15 @@ async def test_failed_seed_attempts_all_cleanup_layers_after_independent_failure
         await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
 
     assert backends[0].close_calls == 1
-    assert runner.close_calls == 1
+    assert runner.close_calls == 0
     assert [handle.session_id for handle in provider.released] == ["browser:session-a"]
-    assert pool.released == [(pool.acquired[0], False)]
+    assert pool.released == []
     assert manager._creating == set()
+    assert (await manager.health())["cleanup_pending"] == 1
+    backends[0].close = lambda: None
+    runner.close = AsyncMock()
+    pool.release = AsyncMock()
+    assert await manager.close_session("session-a")
 
 
 @pytest.mark.asyncio
@@ -782,8 +798,12 @@ async def test_seed_precondition_failure_releases_backend_and_lease(tmp_path) ->
         await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
 
     assert backends[0].close_calls == 1
-    assert pool.released == [(pool.acquired[0], False)]
+    assert pool.released == []
+    assert (await manager.health())["cleanup_pending"] == 1
     assert (await manager.health())["creating"] == 0
+    backends[0].close = lambda: None
+    assert await manager.close_session("session-a")
+    assert pool.released == [(pool.acquired[0], False)]
     await manager.stop()
 
 
@@ -835,6 +855,10 @@ async def test_reset_step_evaluate_and_close_failures_mark_session_unhealthy(tmp
     assert manager._sessions["evaluate"].status == "error"
 
     await manager.stop()
+    assert [healthy for _lease, healthy in pool.released] == [False, False]
+    assert (await manager.health())["cleanup_pending"] == 1
+    backends[2].fail_close = False
+    assert await manager.close_session("evaluate")
     assert [healthy for _lease, healthy in pool.released] == [False, False, False]
 
 
