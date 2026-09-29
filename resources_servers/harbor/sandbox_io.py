@@ -43,7 +43,10 @@ async def upload_dir(sandbox: AsyncSandbox, source: Path, target: str, *, timeou
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "upload.tar.gz"
         with tarfile.open(archive, "w:gz") as tar:
-            tar.add(source, arcname=".")
+            # Add the children, not the folder itself: an archive entry for "." makes tar restore the
+            # source folder's mode onto the target, which fails on a root-owned world-writable target.
+            for child in sorted(Path(source).iterdir()):
+                tar.add(child, arcname=child.name)
         await sandbox.upload(archive, remote)
     result = await _exec_as_root(
         sandbox,
