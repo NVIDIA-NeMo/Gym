@@ -166,8 +166,7 @@ class E2BCreateConfig:
     # Sandbox timeout in seconds; the lifecycle policy selects pause or kill.
     # ``SandboxSpec.ttl_s`` overrides it per sandbox.
     timeout_s: float | None = 3600.0
-    # None preserves the service/SDK default. True pauses on timeout and resumes
-    # on traffic; False explicitly kills on timeout so paused VMs are not orphaned.
+    # True pauses/resumes; False kills at timeout; None preserves SDK defaults.
     auto_resume: bool | None = field(default=None, kw_only=True)
     allow_internet_access: bool = True
     secure: bool = True
@@ -267,13 +266,7 @@ class E2BProvider:
         return params
 
     def _request_params(self) -> dict[str, Any]:
-        """Per-request options for calls on an existing sandbox object.
-
-        ``commands.run`` and ``files.*`` take ``request_timeout`` only.
-        The sandbox already carries the connection config, including for
-        ``get_info``; forwarding connection params to data-plane methods
-        raises ``TypeError: unexpected keyword argument 'api_key'``.
-        """
+        """Return the request timeout; data-plane methods reject connection parameters."""
         if self._connection.request_timeout_s is None:
             return {}
         return {"request_timeout": self._connection.request_timeout_s}
@@ -475,8 +468,7 @@ class E2BProvider:
             if isinstance(exc, type)
         )
         try:
-            # Envd health checks are data-plane traffic and would wake a paused
-            # AgentENV sandbox. Read control-plane state without resuming it.
+            # Control-plane status avoids waking paused sandboxes with a health check.
             info = await sandbox.get_info(**self._request_params())
         except not_found:
             return SandboxStatus.STOPPED
