@@ -679,7 +679,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             f">{quote(stdout_path)} 2>{quote(stderr_path)}"
         )
         try:
-            await state.sandbox.exec(
+            launched = await state.sandbox.exec(
                 command,
                 cwd=state.workdir,
                 timeout_s=self.config.sandbox_runner_timeout_seconds,
@@ -687,6 +687,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
         except BaseException:
             await self._stop_sandbox_runner(state)
             raise
+        # A timed-out exec returns a result, and the runner keeps running in the sandbox.
+        if launched.error_type == "timeout":
+            await self._stop_sandbox_runner(state)
+            raise TimeoutError(
+                f"Hermes sandbox runner exceeded sandbox_runner_timeout_seconds="
+                f"{self.config.sandbox_runner_timeout_seconds:g}"
+            )
         try:
             output = await self._download_json(state.sandbox, output_path)
         except Exception as error:
