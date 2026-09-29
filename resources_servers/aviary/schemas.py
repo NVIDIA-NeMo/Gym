@@ -42,6 +42,8 @@ class AviaryResourcesServerConfig(BaseResourcesServerConfig):
 
 class AviarySeedSessionRequest(BaseSeedSessionRequest):
     task_idx: int
+    # Hypotest can hide answer correctness when the policy continues after submission.
+    suppress_answer_feedback: bool = False
 
 
 class AviaryEnvStateEasyInputMessage(NeMoGymEasyInputMessage):
