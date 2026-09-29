@@ -36,6 +36,7 @@ from resources_servers.combibench.app import (
     CombibenchResourcesServerConfig,
     CombibenchStatus,
     CombibenchVerifyRequest,
+    _per_worker_concurrency,
 )
 from resources_servers.combibench.fine_eval import LeanResult
 from resources_servers.combibench.lean_client import KiminaLeanClient
@@ -451,6 +452,30 @@ class TestMetrics:
         assert aggregate.agent_metrics["hackmath/pass@1/accuracy"] == 100.0
         assert aggregate.agent_metrics["imo/pass@1/accuracy"] == 0.0
         assert not any(k.startswith(("hackmath/", "imo/")) for k in aggregate.key_metrics)
+
+
+class TestConcurrencyIsSplitAcrossWorkers:
+    """The cap is a per-process semaphore; ``num_workers`` runs several processes."""
+
+    @pytest.mark.parametrize(
+        ("workers", "expected"),
+        [(None, 8), (1, 8), (2, 4), (8, 1), (16, 1)],
+    )
+    def test_the_cap_is_divided_by_num_workers(self, workers: Optional[int], expected: int) -> None:
+        config = CombibenchResourcesServerConfig(
+            host="0.0.0.0", port=8080, entrypoint="", name="combibench", num_workers=workers
+        )
+        # Undivided, four workers would put 32 requests against a server running 8 REPLs.
+        assert _per_worker_concurrency(config) == expected
+
+    def test_the_client_is_built_with_the_divided_cap(self) -> None:
+        server = CombibenchResourcesServer(
+            config=CombibenchResourcesServerConfig(
+                host="0.0.0.0", port=8080, entrypoint="", name="combibench", num_workers=4
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        assert server._verifier.lean_client._semaphore._value == 2
 
 
 class TestShippedConfig:

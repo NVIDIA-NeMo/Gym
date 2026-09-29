@@ -127,8 +127,11 @@ class CombibenchResourcesServerConfig(BaseResourcesServerConfig):
     # See fine_eval.answer_check: elaborate the gold answer at the abbrev's
     # declared type. False reproduces upstream's unascribed check.
     answer_check_ascription: bool = True
-    # Bound on in-flight Lean calls. Rollout fan-out is unbounded, and the Lean
-    # server can only run LEAN_SERVER_MAX_REPLS (8 by default) of them at once.
+    # Bound on in-flight Lean calls *for the whole server*. Rollout fan-out is
+    # unbounded, and the Lean server can only run LEAN_SERVER_MAX_REPLS (8 by
+    # default) of them at once. The semaphore that enforces it lives on one
+    # client instance in one process, so it is divided by ``num_workers``; see
+    # ``_per_worker_concurrency``.
     max_concurrent_lean_requests: int = DEFAULT_MAX_CONCURRENCY
 
 
@@ -316,6 +319,32 @@ class CombibenchVerifier:
         return CombibenchVerifyResponse(**payload, reward=1.0 if status is CombibenchStatus.SUCCESS else 0.0)
 
 
+def _per_worker_concurrency(config: CombibenchResourcesServerConfig) -> int:
+    """Split ``max_concurrent_lean_requests`` across the configured uvicorn workers.
+
+    The bound is an ``asyncio.Semaphore`` on one client instance, so it holds
+    within a process. ``num_workers > 1`` runs the server as that many processes
+    (``server_utils.run_webserver``), each with its own client and its own
+    semaphore, so the undivided cap would put N x the limit in flight against a
+    Lean server that can still only run ``LEAN_SERVER_MAX_REPLS`` at a time —
+    the queueing this bound exists to avoid, multiplied.
+
+    Floored at 1: a worker that could hold no request at all would deadlock, and
+    more workers than REPLs is a deployment question, not something to enforce
+    by refusing to score.
+    """
+    workers = max(1, config.num_workers or 1)
+    per_worker = max(1, config.max_concurrent_lean_requests // workers)
+    if workers > 1:
+        LOG.info(
+            "num_workers=%s, so each worker holds %s of the %s in-flight Lean requests",
+            workers,
+            per_worker,
+            config.max_concurrent_lean_requests,
+        )
+    return per_worker
+
+
 class CombibenchResourcesServer(SimpleResourcesServer):
     config: CombibenchResourcesServerConfig
 
@@ -326,7 +355,7 @@ class CombibenchResourcesServer(SimpleResourcesServer):
             KiminaLeanClient(
                 self.config.lean_server_url,
                 self.config.lean_server_api_key,
-                max_concurrency=self.config.max_concurrent_lean_requests,
+                max_concurrency=_per_worker_concurrency(self.config),
             ),
         )
 

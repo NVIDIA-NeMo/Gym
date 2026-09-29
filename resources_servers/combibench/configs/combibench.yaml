@@ -14,6 +14,8 @@ combibench:
       normalize_trailing_whitespace: true
       answer_check_ascription: true
       # Match LEAN_SERVER_MAX_REPLS on the Lean server; see README "Lean server".
+      # This is the bound for the whole server: it is enforced by a per-process
+      # semaphore, so under num_workers > 1 it is divided across the workers.
       max_concurrent_lean_requests: 8
 combibench_simple_agent:
   responses_api_agents:

@@ -399,7 +399,10 @@ the server at it with `COMBIBENCH_LEAN_SERVER_URL` (and
 `COMBIBENCH_LEAN_SERVER_API_KEY` if the server has one).
 
 Keep `max_concurrent_lean_requests` equal to the server's
-`LEAN_SERVER_MAX_REPLS`. Rollout fan-out is otherwise unbounded, and a request
+`LEAN_SERVER_MAX_REPLS`. It is the bound for the whole resources server, not per
+process: the `asyncio.Semaphore` that enforces it lives on one client instance,
+so under `num_workers: N` the configured value is divided by `N` and each worker
+holds its share (floored at 1). Rollout fan-out is otherwise unbounded, and a request
 beyond that number is a connection waiting for a REPL that does not exist yet;
 past the server's own queue it becomes a 429 charged to nobody. A compile that
 exhausts the client timeout is not retried (`_max_connection_retries=1`):
