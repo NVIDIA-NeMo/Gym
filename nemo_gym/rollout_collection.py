@@ -1039,7 +1039,7 @@ class _BoundedCompletionIterator:
         return True
 
     def _fill(self) -> None:
-        while len(self._pending) + len(self._ready) < self._max_resident_tasks and self._admit():
+        while not self._closed and len(self._pending) + len(self._ready) < self._max_resident_tasks and self._admit():
             pass
 
     async def _next_completed(self):
@@ -1071,22 +1071,23 @@ class _BoundedCompletionIterator:
         return await task
 
     async def aclose(self) -> None:
-        async with self._lock:
-            if self._closed:
-                return
+        # A concurrent consumer may hold the lock while waiting for a task.
+        # Cancel resident tasks without taking the lock so it can wake up.
+        if self._closed:
+            return
 
-            self._closed = True
-            resident = [*self._pending, *self._ready]
-            self._pending.clear()
-            self._ready.clear()
+        self._closed = True
+        resident = [*self._pending, *self._ready]
+        self._pending.clear()
+        self._ready.clear()
 
-            for task in resident:
-                task.cancel()
+        for task in resident:
+            task.cancel()
 
-            if resident:
-                await asyncio.gather(*resident, return_exceptions=True)
+        if resident:
+            await asyncio.gather(*resident, return_exceptions=True)
 
-            self._progress.close()
+        self._progress.close()
 
 
 class RolloutCollectionHelper(BaseModel):
