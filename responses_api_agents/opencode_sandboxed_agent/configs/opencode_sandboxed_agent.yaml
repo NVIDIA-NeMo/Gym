@@ -28,6 +28,13 @@ opencode_sandboxed_agent:
         permission:
           "*": allow
 
+          # Disable tools here, not via a `tools:` map. OpenCode (1.17.11) turns `tools:` into
+          # permission rules ordered before this block, so the trailing "*": allow would win
+          # (last match wins) and re-enable them, and would also override every deny rule below.
+          webfetch: deny
+          websearch: deny
+          skill: deny
+
           edit:
             "**": allow
 
@@ -128,20 +135,6 @@ opencode_sandboxed_agent:
             "*wget *githubusercontent.com*": deny
             "*curl *github.io*": deny
             "*wget *github.io*": deny
-
-        tools:
-          bash: true
-          edit: true
-          read: true
-          glob: true
-          grep: true
-          write: true
-          apply_patch: true
-          webfetch: false
-          websearch: false
-          task: true
-          skill: false
-          todowrite: true
 
       sandbox_timeout: 10800  # 3hr default for harness execution
 
