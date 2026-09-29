@@ -1,0 +1,31 @@
+{
+  "version": "1.18.26-gym-correlation.1",
+  "source_base_sha": "774cc7c1914e4329eefde5a669f938b0cf566661",
+  "source_patch_sha256": "1f10adaff1ce09732e296c688477a60be02eed53639698b3b91b1ef618e451d7",
+  "bun_version": "1.3.14",
+  "targets": [
+    "bun-linux-x64",
+    "bun-linux-x64-musl"
+  ],
+  "embedded_web_ui": false,
+  "models_snapshot_sha256": "0bceb356bf1ab45a4c67ed746a18cd60ec048a79ecd311601e61461d09b3f42c",
+  "build_helper_sha256": "46b5688780629cf35c5e665147b9656699abb50484f0eb16af8f63d9a3da54a8",
+  "frozen_lockfile_install": true,
+  "binaries": [
+    {
+      "filename": "opencode-linux-x64-1.18.26-gym-correlation.1",
+      "bytes": 149584000,
+      "sha256": "824027cc9eca5cc7a786a059b5884c9f28a2d894b484e2e1f05e338db911021a"
+    },
+    {
+      "filename": "opencode-linux-x64-musl-1.18.26-gym-correlation.1",
+      "bytes": 159787296,
+      "sha256": "56758cac191dabcbe2cde57145eaa840c3f0cfbedbf0043fa018abfb0c965aa6"
+    }
+  ],
+  "upstream": "https://github.com/anomalyco/opencode",
+  "upstream_tag": "v1.18.26",
+  "source_patch": "assistant-message-id.patch",
+  "channel": "gym-correlation",
+  "scope": "Classic runner; saved assistant-message ID header, including compaction summaries; title calls have no assistant ID."
+}
