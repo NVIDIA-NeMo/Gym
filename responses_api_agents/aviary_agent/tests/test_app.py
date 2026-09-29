@@ -15,6 +15,7 @@ import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, call
 
+import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import (
@@ -307,6 +308,129 @@ class TestApp:
         assert calls[4][1]["url_path"] == "/step"
         assert calls[4][1]["json"]["action"][0]["call_id"] == "call_2"
         assert calls[5] == call(server_name="my resources name", url_path="/close", json={"env_id": env_id})
+
+    @pytest.mark.parametrize("return_transitions", [False, True])
+    @pytest.mark.parametrize("generate_final_response, env_done", [(True, True), (False, True), (True, False)])
+    async def test_responses_generates_final_response_after_environment_done(
+        self, return_transitions: bool, generate_final_response: bool, env_done: bool
+    ) -> None:
+        config = AviaryAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(
+                type="responses_api_models",
+                name="my model name",
+            ),
+            resources_server=ResourcesServerRef(
+                type="resources_servers",
+                name="my resources name",
+            ),
+            max_steps=1,
+            return_transitions=return_transitions,
+            generate_final_response_after_done=generate_final_response,
+        )
+        agent = AviaryAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        env_id = str(uuid.uuid4())
+        mock_seed_session_data = {
+            "env_id": env_id,
+            "obs": [{"role": "user", "content": "Initial observation"}],
+            "tools": [],
+        }
+        mock_terminal_response = {
+            "id": "resp_terminal",
+            "created_at": 1753983920.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                NeMoGymResponseFunctionToolCall(
+                    call_id="submit_call",
+                    name="submit_answer",
+                    arguments=json.dumps({"answer": "The answer is 42"}),
+                ).model_dump()
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        mock_terminal_step = {
+            "obs": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "submit_call",
+                    "output": "Answer submitted.",
+                }
+            ],
+            "reward": 1.0,
+            "done": env_done,
+        }
+        mock_final_response = {
+            "id": "resp_final",
+            "created_at": 1753983921.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg_final",
+                    "content": [{"annotations": [], "text": "The answer is 42", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "none",
+            "tools": [],
+        }
+        mock_close_data = {"message": "Success", "success": True}
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.json.side_effect = [
+            mock_seed_session_data,
+            mock_terminal_response,
+            mock_terminal_step,
+            mock_final_response,
+            mock_close_data,
+        ]
+        dotjson_mock.raise_for_status = MagicMock()
+        dotjson_mock.cookies = MagicMock()
+        agent.server_client.post = AsyncMock(return_value=dotjson_mock)
+
+        request = AviaryAgentRunRequest(
+            task_idx=42,
+            capture_rollout_id="final-response-test",
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        )
+        response = await agent.responses(request)
+
+        output = response.output[-1][1:] if return_transitions else response.output
+        expected_types = ["function_call", "function_call_output"]
+        has_final_response = generate_final_response and env_done
+        if has_final_response:
+            expected_types.append("message")
+            assert output[-1].content[0].text == "The answer is 42"
+        assert [item.type for item in output] == expected_types
+        assert response.contains_transitions is return_transitions
+        if return_transitions:
+            assert len(response.output) == (2 if has_final_response else 1)
+
+        calls = agent.server_client.post.await_args_list
+        model_path = agent.url_path_for_run("/v1/responses", request)
+        paths = ["/seed_session", model_path, "/step"]
+        if has_final_response:
+            paths.append(model_path)
+        assert [request_call.kwargs["url_path"] for request_call in calls] == [*paths, "/close"]
+        assert calls[0].kwargs["json"].get("suppress_answer_feedback", False) is generate_final_response
+
+        if has_final_response:
+            final_model_input = calls[3].kwargs["json"]
+            assert final_model_input.tools == []
+            assert final_model_input.tool_choice == "none"
+            assert final_model_input.input[-1].type == "function_call_output"
+            assert final_model_input.input[-1].output == "Answer submitted."
+            assert calls[3].kwargs["cookies"] is dotjson_mock.cookies
 
     async def test_responses_return_transitions_false(self) -> None:
         config = AviaryAgentConfig(
