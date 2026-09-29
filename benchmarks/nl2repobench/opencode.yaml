@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - resources_servers/nl2repobench/configs/nl2repobench.yaml
+
+nl2repobench_opencode_resources_server:
+  _inherit_from: nl2repobench_resources_server
+  resources_servers:
+    nl2repobench:
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+
+nl2repobench_opencode_sandboxed_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      sandbox_timeout: 21600
+
+      # The agent sandbox denies all egress except the policy model host
+      # (enforce_agent_no_network: true), so the default `curl
+      # https://opencode.ai/install` fallback fails. Reuse the same
+      # pre-staged, network-free OpenCode binary as the other opencode
+      # benchmarks (see benchmarks/nemotron_3.5_super/sandbox_utils.yaml for
+      # the equivalent per-benchmark entries).
+      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+
+      resources_server:
+        type: resources_servers
+        name: nl2repobench_opencode_resources_server
+      datasets:
+        - name: nl2repobench_v1
+          type: benchmark
+          jsonl_fpath: benchmarks/nl2repobench/data/nl2repobench_benchmark.jsonl
+          prepare_script: benchmarks/nl2repobench/prepare.py
+          num_repeats: 1
