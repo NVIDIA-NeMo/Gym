@@ -171,6 +171,47 @@ def test_legacy_adapter_forwards_aggregate_metrics_to_resources() -> None:
     assert [(server, path) for server, path, _ in client.calls] == [("resources", "/aggregate_metrics")]
 
 
+@pytest.mark.parametrize("task_id_field", ["task_id", "problem_id", "instance_id"])
+def test_explicit_identity_does_not_require_collector_indexes(task_id_field: str) -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    response = TestClient(adapter.setup_webserver()).post(
+        "/run",
+        json={
+            task_id_field: "task",
+            "_ng_rollout_id": "explicit-rollout",
+            "_ng_attempt_index": 2,
+            "responses_create_params": {"input": "task"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reward"] == 1.0
+    seed_body = client.calls[0][2]["json"]
+    assert seed_body["task_id"] == {"taskset": "resources", "task_id": "task"}
+    assert seed_body["episode_id"] == {"rollout_id": "explicit-rollout", "attempt": 2}
+    assert client.calls[2][1] == "/ng-rollout/explicit-rollout-a2/v1/responses"
+
+
+@pytest.mark.parametrize("task_fields, expected_task_id", [({}, "3"), ({"task_id": 0}, "0")])
+def test_task_identity_preserves_index_fallback_and_zero(task_fields: dict[str, int], expected_task_id: str) -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    request = adapter._native_request(
+        {
+            **task_fields,
+            "_ng_task_index": 3,
+            "_ng_rollout_index": 2,
+            "responses_create_params": {"input": "task"},
+        }
+    )
+
+    assert request.task.task_id.task_id == expected_task_id
+    assert request.episode_id == EpisodeId(rollout_id="3-2", attempt=0)
+
+
 async def test_legacy_and_native_envelopes_project_the_same_result() -> None:
     legacy_environment, legacy_client = _environment_server()
     native_environment, native_client = _environment_server()
