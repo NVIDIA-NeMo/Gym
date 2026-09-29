@@ -41,8 +41,6 @@ COLLECTOR_CONFIG_NAME = "collector.yaml"
 COLLECTOR_HEALTH_PORT = 13133
 OTLP_GRPC_PORT = 4317
 OTLP_HTTP_PORT = 4318
-# Gym's optional-dependency group that brings nemo-lens; installed in the driver when the collector
-# is active so Gym's own servers emit into the collector.
 GYM_TELEMETRY_EXTRA = "telemetry"
 
 
@@ -79,12 +77,7 @@ def scrape_targets(config: SubmitConfig) -> dict[str, int]:
 
 
 def otel_active(config: SubmitConfig) -> bool:
-    """Whether a collector step is added to this job.
-
-    Enabled is enough: Gym's own servers push spans, metrics and logs through the collector whether
-    or not the job serves a model locally (a `type: api` policy, a CPU-only judge run), so a job
-    without anything to scrape still gets one.
-    """
+    """Enabled is enough: Gym's own servers push telemetry even when there is no local model to scrape."""
     return config.otel.enabled
 
 
@@ -94,8 +87,6 @@ def gym_telemetry_active(config: SubmitConfig) -> bool:
 
 
 def validate_gym_telemetry(config: SubmitConfig) -> None:
-    """The telemetry extra is installed with the `gym_install` checkout; without one, Lens would be
-    switched on in a driver that cannot import it and the run would export no Gym telemetry at all."""
     if gym_telemetry_active(config) and config.driver.gym_install is None:
         raise ValueError(
             "otel.gym_telemetry is on but driver.gym_install is not set, so the driver cannot install "
@@ -153,8 +144,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     token = f"${{env:{obs.token_env}}}"
     interval = f"{obs.scrape_interval_seconds}s"
 
-    # The scrape job name becomes the scraped data's `service.name`, which `transform/identity`
-    # below turns into its display name; Lens-instrumented Gym servers arrive with their own.
+    # The job name is what scraped data carries as `service.name`, and so becomes its display identity.
     scrape_configs = [
         {
             "job_name": f"{obs.component}/{name}",
@@ -174,8 +164,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
                     "static_configs": [{"targets": [f"localhost:{port}"]}],
                 }
             )
-    # Every producer's own `service.name` is kept as the display identity, then `service.name`
-    # itself is overwritten with the routing identity the backend expects (see `resource` below).
+    # Each producer's own `service.name` survives as the display identity before `resource` overwrites it.
     keep_display_name = (
         'set(resource.attributes["service.name.override"], resource.attributes["service.name"]) '
         'where resource.attributes["service.name.override"] == nil and resource.attributes["service.name"] != nil'
@@ -214,9 +203,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     # dashboards match it as a label string.
     resource_actions.append({"key": "slurm_job_id", "action": "convert", "converted_type": "string"})
 
-    # Spans become latency/count series too, so operations that only exist as spans (Gym's
-    # sandbox start/exec, model calls) get dashboard panels without a metric of their own. The
-    # display identity is kept as a dimension because `service.name` is the routing name by then.
+    # Operations that exist only as spans (sandbox start/exec, model calls) still get latency and count series.
     span_metrics = {
         "histogram": {
             "explicit": {"buckets": ["250ms", "1s", "2s", "5s", "10s", "30s", "60s", "120s", "300s", "600s", "1800s"]}

@@ -312,9 +312,7 @@ class OtelConfig(_StrictModel):
     service_name: str | None = None
     # Display identity of the scraped metrics in the backend (`service.name.override`).
     component: str = "gym-vllm"
-    # Gym's own nemo-lens instrumentation in the driver and its servers. Needs `driver.gym_install`,
-    # which is where the `telemetry` extra gets installed; off keeps the collector for engine and
-    # node metrics only.
+    # Gym's own nemo-lens telemetry; needs `driver.gym_install`, which installs the `telemetry` extra.
     gym_telemetry: bool = True
     # Gym span groups to switch on: a preset or comma-separated names (`default`, `verify`, `sandbox`, ...).
     gym_span_groups: str = "default,verify"
