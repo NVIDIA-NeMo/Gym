@@ -315,6 +315,7 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     """
 
     model_server: ModelServerRef
+    install_optional_runtime_dependencies: bool = False
     resources_server: Optional[ResourcesServerRef] = None
     concurrency: int = 4
     provider_name: str = "docker"
@@ -1869,5 +1870,6 @@ def _empty_response(
 if __name__ == "__main__":
     from responses_api_agents.osworld_agent.runtime_dependencies import require_optional_runtime_dependencies
 
-    require_optional_runtime_dependencies()
+    config = OSWorldAgent.load_config_from_global_config()
+    require_optional_runtime_dependencies(install_if_missing=config.install_optional_runtime_dependencies)
     OSWorldAgent.run_webserver()

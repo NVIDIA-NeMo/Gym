@@ -3,6 +3,7 @@
 
 import importlib.metadata
 import os
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -164,6 +165,53 @@ def test_optional_runtime_installer_matches_agent_torch_backend(tmp_path: Path) 
     assert "numpy>=2.1,<2.5" in argv
     assert "opencv-python-headless~=4.10.0.84" in argv
     assert "torchvision==0.26.0" in argv
+
+
+def test_opt_in_install_restarts_with_fresh_imports(tmp_path: Path) -> None:
+    """An already-imported package must be reloaded from disk after installation."""
+    module = tmp_path / "runtime_probe.py"
+    module.write_text('value = "before"\n')
+    metadata = tmp_path / "runtime_probe-1.0.dist-info"
+    metadata.mkdir()
+    (metadata / "METADATA").write_text("Name: runtime-probe\nVersion: 1.0\n")
+    installer = tmp_path / "install runtime.sh"
+    installer.write_text(
+        f"printf '%s\\n' 'value = \"after\"' > {shlex.quote(str(module))}\n"
+        f"printf '%s\\n' 'Name: runtime-probe' 'Version: 2.0' > {shlex.quote(str(metadata / 'METADATA'))}\n"
+        f"printf '%s\\n' installed >> {shlex.quote(str(tmp_path / 'installs'))}\n"
+    )
+    startup = tmp_path / "startup.py"
+    startup.write_text(
+        "import functools\nimport runtime_probe\n"
+        "from pathlib import Path\n"
+        "from responses_api_agents.osworld_agent import runtime_dependencies as runtime\n"
+        "runtime.validate_optional_runtime_dependencies = functools.partial(\n"
+        "    runtime.validate_optional_runtime_dependencies,\n"
+        "    (runtime.RuntimeDependency('runtime-probe', 'runtime_probe', '==2.0'),))\n"
+        f"runtime.require_optional_runtime_dependencies(install_if_missing=True, installer=Path({str(installer)!r}))\n"
+        "assert runtime_probe.value == 'after', runtime_probe.value\n"
+    )
+    repo_root = Path(runtime_dependencies.__file__).resolve().parents[2]
+    result = subprocess.run(
+        [sys.executable, "-B", str(startup)],
+        env=os.environ | {"PYTHONPATH": str(repo_root)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "installs").read_text().splitlines() == ["installed"]
+
+
+def test_opt_in_install_failure_stops_startup(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(runtime_dependencies, "validate_optional_runtime_dependencies", lambda: ("missing",))
+    installer = tmp_path / "broken-installer.sh"
+    installer.write_text("exit 7\n")
+
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        runtime_dependencies.require_optional_runtime_dependencies(install_if_missing=True, installer=installer)
+
+    assert exc_info.value.returncode == 7
 
 
 def test_managed_requirements_cover_the_e2b_provider_imports() -> None:
