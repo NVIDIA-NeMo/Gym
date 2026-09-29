@@ -186,7 +186,15 @@ class CombibenchVerifyResponse(CombibenchRunRequest, BaseVerifyResponse):
     # signal for how much of the run was lost to the harness.
     harness_failure: float
     answer_tags: list[str] = Field(default_factory=list)
-    lean_code: Optional[str] = None  # exactly what was compiled, answer checks included
+    # Exactly what was compiled, answer checks included, and deliberately not
+    # truncated the way ``lean_messages`` is: this field is the evidence a verdict
+    # is re-checked against, and a rescoring or an upstream-agreement comparison
+    # run on a clipped submission would be comparing a different program. It is
+    # already bounded before it is built -- ``max_code_characters`` (200,000)
+    # rejects an oversized extraction as ``code_too_long`` without compiling it,
+    # so nothing longer than that plus the appended answer checks can reach here.
+    # ``lean_messages`` has no such upstream bound, which is why it gets one here.
+    lean_code: Optional[str] = None
     lean_error: Optional[str] = None
     lean_messages: list[dict[str, Any]] = Field(default_factory=list)
     lean_time: Optional[float] = None

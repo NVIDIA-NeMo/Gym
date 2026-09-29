@@ -295,6 +295,13 @@ occupy a REPL, not to decide any proof.
   tag is left as upstream computes it, because changing it would diverge from
   the harness this server exists to reproduce. No paragraph in the pinned corpus
   is shaped that way.
+- `answer_tags` returns a **list**, where upstream collects the tags into a dict
+  keyed by tag name (`evaluation/util.py`). Two paragraphs that declare the same
+  `<name>_solution` therefore collapse to one answer check upstream and stay two
+  here, which shifts the positional pairing with the published answers from that
+  point on. The pinned corpus has 47 distinct abbreviations and no repeat, so
+  this is unreachable on it; a list is kept because it is also what preserves
+  statement order, which the positional zip depends on.
 - A statement paragraph that opens with `open ... in` directly above its
   `theorem` starts with a header prefix, so the whole paragraph — theorem
   included — is skipped by the statement check. Upstream has the identical
