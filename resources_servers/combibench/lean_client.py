@@ -153,6 +153,14 @@ class KiminaLeanClient:
                     _max_connection_retries=1,
                 )
                 if response.status in SATURATION_STATUSES:
+                    # Released explicitly: nothing below reads this body, and an
+                    # unread response keeps its connection checked out of the
+                    # shared aiohttp pool until it is garbage-collected. That is
+                    # exactly the wrong moment to leak one — the server is
+                    # saturated and this request is about to be retried. The other
+                    # early returns consume the body (``text()`` / ``json()``),
+                    # which releases it, and the ``except`` branch never got one.
+                    await response.release()
                     return response.status
                 if response.status != 200:
                     text = await response.text()

@@ -38,6 +38,7 @@ class _FakeResponse:
         self.status = status
         self._body = body
         self._text = text
+        self.released = False
 
     async def json(self):
         if isinstance(self._body, Exception):
@@ -46,6 +47,9 @@ class _FakeResponse:
 
     async def text(self):
         return self._text
+
+    async def release(self):
+        self.released = True
 
 
 def _patch_request(monkeypatch, response=None, exc: Exception | None = None) -> list[dict]:
@@ -145,6 +149,13 @@ class TestSaturationIsRetried:
         assert len(calls) == MAX_SATURATION_ATTEMPTS
         assert slept == [SATURATION_BACKOFF_SECONDS, SATURATION_BACKOFF_SECONDS * 2]
         assert result.transport_failure is True and "HTTP 503" in result.error
+
+    async def test_a_saturation_reply_releases_its_connection(self, monkeypatch, slept) -> None:
+        """An unread body holds a pooled connection until GC -- when the pool is already starved."""
+        response = _FakeResponse(429, text="busy")
+        _patch_request(monkeypatch, response)
+        await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert response.released is True
 
     async def test_a_timeout_is_still_tried_once(self, monkeypatch, slept) -> None:
         """The timeout path is unchanged: it already cost a REPL its whole budget."""
