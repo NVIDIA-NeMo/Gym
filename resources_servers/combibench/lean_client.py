@@ -111,28 +111,57 @@ MAX_VERSION_PROBES = 3
 # ``max_concurrency`` slots is held by a request no verdict depends on.
 VERSION_PROBE_TIMEOUT_SECONDS = 30
 
-# Kimina raises ``HTTPException(500, str(e))`` at exactly three sites, all inside
-# ``run_one`` in ``server/routers/check.py`` (a grep for ``HTTPException`` over
-# ``server/`` finds no fourth 5xx: the others are 401, 429 and 499):
+# Kimina answers 5xx for one snippet in four shapes. Three are
+# ``HTTPException(500, str(e))`` raised inside ``run_one`` in
+# ``server/routers/check.py`` (a grep for ``HTTPException`` over ``server/``
+# finds no other 5xx: the rest are 401, 429 and 499), and the fourth is
+# Starlette answering for an exception ``run_one`` never caught:
 #
 # * ``:84``  — ``manager.get_repl`` raised something other than
-#   ``NoAvailableReplError``, i.e. the server could not *spawn* a Lean process
-#   (``Repl.create``/``start``, which shells out to ``lake env``). Infrastructure.
+#   ``NoAvailableReplError``. Not a failure to *spawn* Lean, despite where it
+#   sits: spawning is ``repl.start()``, which runs inside ``manager.prep``, so a
+#   real spawn failure arrives at ``:118`` as "Failed to start REPL". What
+#   ``get_repl`` does that can raise is ``Repl.create``, which writes a row
+#   through prisma when ``LEAN_SERVER_DATABASE_URL`` is set — so against the
+#   shipped image, which sets it empty, this site is close to unreachable.
+#   Infrastructure.
 # * ``:118`` — ``manager.prep`` raised, which ``server/manager.py:197-215``
-#   normalises to ``ReplError("Failed to start REPL")`` or
-#   ``ReplError("Failed to run header on REPL")``. Infrastructure.
+#   normalises to ``ReplError("Failed to start REPL")`` — the Lean process would
+#   not start, infrastructure — or ``ReplError("Failed to run header on REPL")``
+#   — the *import header* raised. Kimina's header is the submission's own leading
+#   ``import`` run (``server/split.py``), so that one may well be the model's;
+#   see ``is_header_run_failure``.
 # * ``:159`` — executing the *body* raised. This is where a model's proof lands:
-#   ``server/repl.py`` raises ``LeanError`` whenever the REPL wrote anything to
-#   stderr, and ``native_decide`` is allowed by design. The model's.
+#   ``server/repl.py`` raises ``LeanError("Lean process broken pipe")`` or
+#   ``LeanError("Failed to write to REPL stdin")`` when the REPL is no longer
+#   there to write to, and ``ReplError("JSON decode error")`` when what it wrote
+#   back is not JSON. Model code reaches all three by killing the REPL — it runs
+#   under an ``RLIMIT_AS`` cap (``repl.py::start``) and ``native_decide`` is
+#   allowed by design. (``repl.py:305`` also raises ``LeanError`` when the REPL
+#   wrote to stderr, but that check is dead at this pin: ``error_file`` is a
+#   ``TemporaryFile`` that ``create_subprocess_exec`` is never given — it is
+#   passed ``stderr=PIPE``, which nothing reads — so the file is always empty.)
+#   The model's.
+# * an exception the endpoint never caught at all: the prisma writes at
+#   ``check.py:96-106``/``129-140``/``169-186``, again only with a database
+#   configured. Starlette's default handler answers those with a 500 whose body
+#   is not JSON, so no ``detail`` matches and it is charged. See the README's
+#   "Who a failure is charged to" for why that is the safe direction.
 #
-# FastAPI serialises the exception as ``{"detail": str(e)}``, so the two
-# ``manager.prep`` cases arrive as those fixed strings and are told apart by them.
-# ``:84`` carries whatever the spawn failure said and so cannot be matched; it
+# FastAPI serialises the three ``HTTPException``s as ``{"detail": str(e)}``, so
+# the two ``manager.prep`` cases arrive as those fixed strings and are told apart
+# by them. ``:84`` carries whatever the failure said and so cannot be matched; it
 # falls through to "charged", which is the safe direction of the two — the rule
 # this server keeps is that a failure the model *could* have caused is never
-# masked — and it is a failure to start a process at all, which a saturated or
-# broken server announces in several louder ways too.
-REPL_LIFECYCLE_DETAILS = ("Failed to start REPL", "Failed to run header on REPL")
+# masked — and, being all but unreachable against the shipped image, it is a
+# residual rather than a live tradeoff.
+REPL_START_FAILURE_DETAIL = "Failed to start REPL"
+HEADER_RUN_FAILURE_DETAIL = "Failed to run header on REPL"
+
+# The two details ``manager.prep`` normalises its failures to. Only the first is
+# excused unconditionally; the second depends on whose header it was, which this
+# module cannot see. See ``is_header_run_failure``.
+REPL_LIFECYCLE_DETAILS = (REPL_START_FAILURE_DETAIL, HEADER_RUN_FAILURE_DETAIL)
 
 
 def _server_error_detail(text: str) -> str:
@@ -147,21 +176,27 @@ def _server_error_detail(text: str) -> str:
 
 
 def is_model_attributable_server_error(status: int, text: str) -> bool:
-    """Whether a 5xx is Kimina reporting that *this submission* blew up.
+    """Whether a 5xx is Kimina reporting that *this submission's body* blew up.
 
-    Two ways it is not, and both are masked as transport failures:
+    Three ways it is not:
 
     * The status is a 5xx Kimina never emits. Only 500 comes out of
       ``check.py``; 502/504 (and 501, 505, ...) are what a proxy or load
       balancer in front of the server answers when the server itself did not,
       which no model can cause. (503 never reaches here: it is in
-      ``SATURATION_STATUSES`` and is retried.)
-    * The detail is one of ``REPL_LIFECYCLE_DETAILS`` — the server failing to
-      start a REPL or to run the *import header* on it, which is REPL lifecycle,
-      not this proof.
+      ``SATURATION_STATUSES`` and is retried.) Masked.
+    * The detail is ``REPL_START_FAILURE_DETAIL`` — the server could not start a
+      Lean process at all, which is REPL lifecycle and nothing to do with this
+      proof. Masked.
+    * The detail is ``HEADER_RUN_FAILURE_DETAIL`` — the *import header* raised.
+      Neither charged nor masked here: whose header it was decides that, and
+      only the caller has the submission and the reference statement to compare.
+      ``is_header_run_failure`` names that case and
+      ``app.CombibenchVerifier.verify`` settles it, exactly as it already does
+      for the header *timeout*.
 
     This does key on the wording of a server message, deliberately: the message
-    is the only thing distinguishing the three sites that share status 500, and
+    is the only thing distinguishing the sites that share status 500, and
     ``fine_eval.HEADER_TIMEOUT_MARKER`` already keys the ``header_timeout``
     status on Kimina's literal "header command timed out". Both strings are
     pinned upstream text, and both fail in the charged direction if upstream
@@ -170,6 +205,23 @@ def is_model_attributable_server_error(status: int, text: str) -> bool:
     if status != 500:
         return False
     return not any(marker in _server_error_detail(text) for marker in REPL_LIFECYCLE_DETAILS)
+
+
+def is_header_run_failure(status: int, text: str) -> bool:
+    """Whether a 500 is Kimina saying the *import header* raised.
+
+    The twin of ``fine_eval.HEADER_TIMEOUT_MARKER`` for the non-timeout case.
+    ``manager.prep`` re-raises a ``TimeoutError`` from the header command
+    unchanged — which ``check.py`` turns into the "header command timed out"
+    verdict — but normalises *everything else* to ``ReplError("Failed to run
+    header on REPL")``, which becomes a 500 with no trace of what actually
+    failed. Since Kimina's header is the submission's own leading ``import`` run,
+    that 500 is a failure the model can cause by writing ``import Foo``, and
+    excusing it unconditionally would delete such a rollout from the denominator.
+    Who it belongs to is decided by the caller from
+    ``fine_eval.header_is_harness_supplied``; this only reports the shape.
+    """
+    return status == 500 and HEADER_RUN_FAILURE_DETAIL in _server_error_detail(text)
 
 
 # Kimina exposes no version endpoint, so the toolchain is read by compiling a
@@ -219,8 +271,10 @@ class KiminaLeanClient:
         still unresolved after the retries — is a transport failure: callers
         attribute it to the harness and mask the rollout. A Kimina 500 raised
         from executing *this submission* is not one of those: it is charged to
-        the model. A 500 raised from REPL lifecycle, and any 5xx Kimina does not
-        emit at all, is. See ``is_model_attributable_server_error``,
+        the model. A 500 raised from failing to start a REPL, and any 5xx Kimina
+        does not emit at all, is. A 500 from the import header raising is left
+        open for the caller to attribute (``header_error``). See
+        ``is_model_attributable_server_error``, ``is_header_run_failure``,
         ``_verify_once`` and the README's "Who a failure is charged to".
 
         A saturation reply (``SATURATION_STATUSES``) is retried with backoff,
@@ -279,25 +333,30 @@ class KiminaLeanClient:
                 if response.status != 200:
                     text = await response.text()
                     LOG.warning("Lean server returned HTTP %s: %s", response.status, text[:500])
-                    # A Kimina 500 raised from *executing this snippet* is the
-                    # model's: ``server/repl.py`` raises ``LeanError`` whenever
-                    # the REPL wrote anything to stderr, and ``native_decide``
-                    # is allowed by design, so masking it would let a rollout
-                    # that Lean refused to evaluate be deleted from the
-                    # denominator instead of scored 0, which upstream never
-                    # does. A 500 raised from *REPL lifecycle* — the server
-                    # could not start a REPL or could not run the import header
-                    # on it — is not, and neither is a gateway 5xx that Kimina
-                    # never emits; see ``is_model_attributable_server_error``.
+                    # A Kimina 500 raised from *executing this snippet's body* is
+                    # the model's: model code can kill the REPL (memory cap,
+                    # ``native_decide``), and every way it does — broken pipe,
+                    # unwritable stdin, stdout that is not JSON — comes back as
+                    # this 500, so masking it would let a rollout Lean refused to
+                    # evaluate be deleted from the denominator instead of scored
+                    # 0, which upstream never does. A 500 from *failing to start a
+                    # REPL* is not, and neither is a gateway 5xx Kimina never
+                    # emits; see ``is_model_attributable_server_error``. A 500 from
+                    # the *import header* raising is neither until the caller says
+                    # whose header it was — ``header_error`` carries that question
+                    # up, the same way a header timeout already travels up as its
+                    # own status.
                     #
                     # Everything else non-200 (401, 404, 422, ...) is this
                     # client or its credentials being wrong, which the model
                     # cannot cause, so it stays a masked transport failure.
                     server_error = is_model_attributable_server_error(response.status, text)
+                    header_error = is_header_run_failure(response.status, text)
                     return LeanResult(
                         error=f"HTTP {response.status}: {text[:500]}",
-                        transport_failure=not server_error,
+                        transport_failure=not (server_error or header_error),
                         server_error=server_error,
+                        header_error=header_error,
                     )
                 body = await response.json()
         except Exception as exc:  # network errors, timeouts, bad JSON

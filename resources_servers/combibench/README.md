@@ -85,9 +85,9 @@ wherever the concept is shared, so `completed`, `empty_generation`,
 `banned_tokens`, `statement_modified`, `compile_error`, `has_sorry`, `timeout`
 and `sandbox_error` mean the same thing here as in `leancat`. CombiBench adds
 `format_error`, `code_too_long`, `lean_error`, `header_timeout`,
-`model_header_timeout` and `bad_task` next to them, which is the extension that
-module describes: upstream's
-Fine-Eval distinguishes outcomes a whole-file benchmark has no equivalent for.
+`model_header_timeout`, `model_header_error` and `bad_task` next to them, which
+is the extension that module describes: upstream's Fine-Eval distinguishes
+outcomes a whole-file benchmark has no equivalent for.
 
 1. **Extract** the last ```` ```lean4 ```` block (falling back to ```` ```lean ````);
    none → `format_error`; empty output → `empty_generation`; a block longer than
@@ -136,31 +136,40 @@ Charged to the model (reward 0.0, `mask_sample: false`, in the denominator):
 | Status | When |
 | --- | --- |
 | `timeout` | the REPL hit the budget on the submission body — a proof that does not terminate is the model's output, and excusing it would make hanging reward-neutral |
-| `lean_error` | the REPL reported an error string, **or** `/verify` answered 500 from executing this snippet |
+| `lean_error` | the REPL reported an error string; `/verify` answered 500 from executing this snippet; or the per-item `response` was a `{"message": ...}` Error object, which Kimina's own client reads as a Lean error on the snippet |
 | `model_header_timeout` | the header that would not load inside the budget is one the model wrote itself |
+| `model_header_error` | the header Kimina could not run at all (500, "Failed to run header on REPL") is one the model wrote itself — `import Foo` is the model's choice, not an outage |
 
 The 500 case is the one worth spelling out, because not every 500 is the
-model's. Kimina raises `HTTPException(500, str(e))` at exactly three sites, all
-in `run_one` (`server/routers/check.py`; nothing else under `server/` answers
-5xx):
+model's. Kimina answers 5xx for one snippet in four shapes — three
+`HTTPException(500, str(e))` raised in `run_one` (`server/routers/check.py`;
+nothing else under `server/` answers 5xx), plus one the endpoint never catches:
 
-| Site | Raised when | Charged to |
+| Shape | Raised when | Charged to |
 | --- | --- | --- |
-| `check.py:159` | executing the **body** raised — `server/repl.py` raises `LeanError` whenever the REPL wrote anything to stderr, and `native_decide` is allowed by design | the model → `lean_error` |
-| `check.py:118` | `manager.prep` raised, which `server/manager.py:197-215` normalises to `ReplError("Failed to start REPL")` or `ReplError("Failed to run header on REPL")` | the harness → `sandbox_error` |
-| `check.py:84` | `manager.get_repl` raised something other than `NoAvailableReplError`, i.e. the server could not spawn a Lean process at all | the harness in principle; see below |
+| `check.py:159` | executing the **body** raised. `server/repl.py` raises `LeanError("Lean process broken pipe")` / `LeanError("Failed to write to REPL stdin")` when the REPL is gone, and `ReplError("JSON decode error")` when its stdout is not JSON — all reachable by model code that kills the REPL, which runs under an `RLIMIT_AS` cap and may use `native_decide` by design | the model → `lean_error` |
+| `check.py:118`, detail `"Failed to start REPL"` | the Lean process would not start (`repl.start()`, which shells out to `lake env`) | the harness → `sandbox_error` |
+| `check.py:118`, detail `"Failed to run header on REPL"` | the **import header** raised. Kimina's header is the submission's own leading `import` run (`server/split.py`), so this can be the model's `import Foo` as easily as a broken toolchain; `manager.prep` normalises every non-timeout header failure to this one string and the reply says nothing more | whoever wrote the header: `sandbox_error` if harness-supplied, `model_header_error` if not |
+| an exception `run_one` never caught | Starlette's default handler answers with a 500 whose body is **not** JSON. Reachable through the prisma writes at `check.py:96-106`/`129-140`/`169-186`, which only run with `LEAN_SERVER_DATABASE_URL` set — the shipped `kimina_image` sets it empty | no `detail` to match, so the model → `lean_error` |
+| `check.py:84` | `manager.get_repl` raised something other than `NoAvailableReplError`. **Not** a failed spawn, despite where it sits: spawning is `repl.start()`, which runs inside `manager.prep`, so a real spawn failure arrives at `:118` as "Failed to start REPL". What `get_repl` can raise is `Repl.create`, which writes through prisma when a database is configured | no `detail` to match, so the model → `lean_error`; near-unreachable, see below |
 
-FastAPI serialises the exception as `{"detail": str(e)}`, so the two
-`manager.prep` cases arrive as those two fixed strings and are told apart by
-them (`lean_client.is_model_attributable_server_error`). This does key on the
-wording of a server message, deliberately — it is the only thing distinguishing
-three sites that share one status code, and `fine_eval.HEADER_TIMEOUT_MARKER`
-already keys `header_timeout` on Kimina's literal "header command timed out".
-The `check.py:84` detail is whatever the spawn failure said, so it cannot be
-matched; it falls through to `lean_error`. That is the safe direction of the
-two: the rule above is that a failure the model *could* have caused is never
-masked, and if upstream reworded either marker these cases would likewise become
-charged rather than silently masked.
+FastAPI serialises the three `HTTPException`s as `{"detail": str(e)}`, so the
+two `manager.prep` cases arrive as those fixed strings and are told apart by
+them (`lean_client.is_model_attributable_server_error`,
+`lean_client.is_header_run_failure`). This does key on the wording of a server
+message, deliberately — it is the only thing distinguishing sites that share one
+status code, and `fine_eval.HEADER_TIMEOUT_MARKER` already keys `header_timeout`
+on Kimina's literal "header command timed out". If upstream reworded either
+marker these cases would become charged rather than silently masked, which is
+the direction that cannot inflate a score.
+
+The last two rows have no `detail` this client can match and so fall through to
+`lean_error`. For the Starlette shape that is a deliberate choice of direction:
+an operator who enables the proof log takes a downward bias on the score rather
+than a shrinking denominator, and a systematic database failure is loud in the
+server's own logs. For `check.py:84` it is a residual rather than a live
+tradeoff — against the shipped image, which configures no database, essentially
+nothing in `get_repl` can raise at all.
 
 A 5xx Kimina does not emit at all — 502, 504 and friends — is a proxy or load
 balancer in front of the server answering for a server that did not, which no
@@ -172,7 +181,7 @@ Charged to the harness (reward 0.0, `harness_failure: 1.0`, `mask_sample: true`,
 
 | Status | `failure_kind` | When |
 | --- | --- | --- |
-| `sandbox_error` | `provider_unavailable` | the connection was refused or timed out client-side; `/verify` answered a non-5xx HTTP error (401, 404, 422 — this client or its credentials, not the model); it answered 500 from REPL lifecycle ("Failed to start REPL" / "Failed to run header on REPL") or a 5xx Kimina never emits (502, 504 — a proxy, not the server); saturation (429/503) survived all three retries; the reply was not JSON, had no `results`, carried a result with neither an `error` nor a `response`, or carried an error object instead of a verdict |
+| `sandbox_error` | `provider_unavailable` | the connection was refused or timed out client-side; `/verify` answered a non-5xx HTTP error (401, 404, 422 — this client or its credentials, not the model); it answered 500 with "Failed to start REPL", or with "Failed to run header on REPL" **and** the header was the harness's own; it answered a 5xx Kimina never emits (502, 504 — a proxy, not the server); saturation (429/503) survived all three retries; the reply was not JSON, had no `results`, carried a result with neither an `error` nor a `response`, or carried an `error`/`stderr` object instead of a verdict |
 | `header_timeout` | `provider_unavailable` | a cold REPL could not finish `import Mathlib` inside the timeout, **and** the header was the reference statement's own or the default one `extract_lean_code` prepends — Kimina reports this as `Lean REPL header command timed out`, distinct from the submission timing out |
 | `bad_task` | `combibench:bad_task` | the row cannot be scored: no `formal_statement`, malformed `answers`, or an answer count that disagrees with the number of `_solution` abbrevs the statement declares |
 
@@ -181,10 +190,13 @@ reported what it found. `bad_task` is namespaced because
 `nemo_gym/failure_kinds.py` has no shared name for a malformed task row; the two
 Lean-server faults are the registered `provider_unavailable`.
 
-Which header a `header_timeout` belongs to is decided by re-deriving Kimina's own
-split (`server/split.py`: the leading run of `import` lines, Mathlib hoisted,
-duplicates dropped) for the submission and for the reference statement and
-comparing them; see `fine_eval.header_is_harness_supplied`.
+Which header a failed header command belongs to — the timeout and the 500 alike
+— is decided by re-deriving Kimina's own split (`server/split.py`: the leading
+run of `import` lines, Mathlib hoisted, duplicates dropped) for the submission
+and for the reference statement and comparing them; see
+`fine_eval.header_is_harness_supplied`. Harness-supplied, it is masked
+(`header_timeout` / `sandbox_error`); model-authored, it is charged
+(`model_header_timeout` / `model_header_error`).
 
 Every response carries `lean_version`, the Lean version the server reports for
 `#eval Lean.versionString`; a server built for another toolchain otherwise scores
@@ -585,8 +597,10 @@ from the denominator in the table above and the summary counters in the JSON are
 left as the script wrote them. That run predates "Who a failure is charged to"
 above, which narrowed what `sandbox_error` covers: a 500 raised from executing
 the snippet is now a `lean_error` charged to the model rather than a masked
-non-verdict, so a rerun may place those two rows in the scored denominator
-instead — unless they were REPL-lifecycle or gateway 5xx, which stay masked.
+non-verdict, and so is a 500 from a header the model wrote (`model_header_error`)
+and a `{"message": ...}` payload, so a rerun may place those two rows in the
+scored denominator instead — unless they were a failure to start a REPL, a
+harness-supplied header, or a gateway 5xx, which stay masked.
 
 What the run does and does not establish about the departures. The two
 accepts-here-rejects-there departures produced no disagreement, but that is

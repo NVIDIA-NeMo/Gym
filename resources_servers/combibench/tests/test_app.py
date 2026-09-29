@@ -244,15 +244,47 @@ class TestVerify:
         assert result.failure_kind is None
         assert result.failure_reason is None
 
+    async def test_header_error_on_the_reference_header_is_a_harness_fault(self) -> None:
+        """A 500 saying the header would not run, on the statement's own header, is not the model's."""
+        client = FakeLeanClient(LeanResult(error="HTTP 500: Failed to run header on REPL", header_error=True))
+        result = await _make_server(client).verify(_request(_fenced(SOLUTION)))
+        assert result.reward == 0.0
+        assert result.status == CombibenchStatus.LEAN_SERVER_ERROR.value
+        assert result.harness_failure == 1.0
+        assert "import header" in result.failure_reason
+        assert result.mask_sample is True
+        assert result.failure_kind == PROVIDER_UNAVAILABLE
+
+    async def test_header_error_on_a_model_chosen_header_is_charged_to_the_model(self) -> None:
+        """``import Foo`` is the model's choice; Kimina answering 500 for it is its own failure.
+
+        Kimina runs the submission's leading ``import`` run as the pooled REPL's
+        header and normalises every non-timeout failure of it to
+        ``ReplError("Failed to run header on REPL")`` → 500. Excusing that
+        unconditionally would delete a model-caused failure from the denominator,
+        which is the same mistake the header *timeout* path already avoids.
+        """
+        client = FakeLeanClient(LeanResult(error="HTTP 500: Failed to run header on REPL", header_error=True))
+        result = await _make_server(client).verify(
+            _request(_fenced(SOLUTION.replace("import Mathlib", "import Mathlib\nimport Foo", 1)))
+        )
+        assert result.reward == 0.0
+        assert result.status == CombibenchStatus.MODEL_HEADER_ERROR.value
+        assert result.harness_failure == 0.0
+        assert result.mask_sample is False
+        assert result.failure_kind is None
+        assert result.failure_reason is None
+
     async def test_a_per_snippet_server_error_is_charged_to_the_model(self) -> None:
         """Kimina's 500 comes from executing *this* snippet, so it scores 0 rather than vanishing.
 
-        ``server/routers/check.py`` turns any exception raised while getting a
-        REPL, running the header or running the body into
-        ``HTTPException(500, ...)`` for that snippet, and one of those exceptions
-        is the ``LeanError`` ``server/repl.py`` raises whenever the REPL wrote to
-        stderr. Model output can reach it, so masking it would let a rollout the
-        model caused be deleted from the denominator instead of scored 0.
+        ``server/routers/check.py:159`` turns any exception raised while running
+        the body into ``HTTPException(500, ...)`` for that snippet, and model
+        output reaches it: a proof that exhausts the REPL's ``RLIMIT_AS`` cap
+        leaves ``server/repl.py`` raising ``LeanError("Lean process broken
+        pipe")`` or ``ReplError("JSON decode error")``. Masking it would let a
+        rollout the model caused be deleted from the denominator instead of
+        scored 0.
         """
         client = FakeLeanClient(LeanResult(error="HTTP 500: boom", server_error=True))
         result = await _make_server(client).verify(_request(_fenced(SOLUTION)))

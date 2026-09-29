@@ -314,13 +314,23 @@ class LeanResult:
     # the documented JSON, saturation that outlasted the retries). Reported as a
     # harness fault rather than as a failed proof.
     transport_failure: bool = False
-    # True when the server answered 500 from *executing this snippet* — not
-    # every 5xx does: Kimina also raises 500 when it cannot start a REPL or run
-    # the import header on one, and a 502/504 comes from a proxy in front of a
-    # server that did not answer at all. Those are transport failures instead.
-    # ``lean_client.is_model_attributable_server_error`` draws the line and
-    # documents it; this flag only carries the answer.
+    # True when the server said *this snippet* blew up: a 500 from executing the
+    # body, or a ``{"message": ...}`` payload, which Kimina's own client reads as
+    # a Lean error on the snippet. Not every 5xx qualifies — Kimina also raises
+    # 500 when it cannot start a REPL, and a 502/504 comes from a proxy in front
+    # of a server that did not answer at all. Those are transport failures
+    # instead. ``lean_client.is_model_attributable_server_error`` and
+    # ``lean_client._payload_failure`` draw the line and document it; this flag
+    # only carries the answer.
     server_error: bool = False
+    # True when the server answered 500 because running the *import header*
+    # raised (``lean_client.is_header_run_failure``). Deliberately neither of the
+    # two flags above: Kimina's header is the submission's own leading ``import``
+    # run, so whether this is the harness's fault depends on whose header it was,
+    # which only a caller holding the reference statement can say. The default is
+    # the masked one; the caller re-attributes, exactly as it does for a header
+    # *timeout*.
+    header_error: bool = False
 
 
 def classify_lean_result(result: LeanResult) -> str:
@@ -332,12 +342,17 @@ def classify_lean_result(result: LeanResult) -> str:
 
     Two departures from upstream's ``is_error``:
 
-    * A header timeout is separated out rather than failing the submission like
-      any other error string, because the header is often not the model's: when
-      it is the reference statement's, a cold REPL that could not finish
-      ``import Mathlib`` inside the budget is infrastructure. The caller
-      (``app.CombibenchVerifier.verify``) decides which of the two it was; this
-      function only names the case.
+    * The two header failures — the header command timing out, and the header
+      command raising anything else (``header_error``) — are separated out
+      rather than failing the submission like any other error string, because
+      the header is often not the model's: when it is the reference statement's,
+      a cold REPL that could not finish ``import Mathlib`` is infrastructure.
+      The caller (``app.CombibenchVerifier.verify``) decides which of the two it
+      was in both cases; this function only names them. The timeout gets its own
+      status because it has a masked name of its own (``header_timeout``); the
+      non-timeout failure has none, so it defaults to the masked
+      ``sandbox_error`` and the caller upgrades it when the header was the
+      model's.
     * The REPL's ``sorries`` list is consulted as well as the warning. Upstream
       never reads that field (``sorries`` does not appear anywhere in
       ``evaluation/``), so this is *stricter* than upstream: a submission whose
@@ -347,6 +362,11 @@ def classify_lean_result(result: LeanResult) -> str:
       would be a worse error than disagreeing with upstream about it.
     """
     if result.transport_failure:
+        return STATUS_SANDBOX_ERROR
+    if result.header_error:
+        # The import header raised. Masked here, which is right when the header
+        # is the reference statement's; ``app.CombibenchVerifier.verify`` charges
+        # it to the model when the header was the model's own choice.
         return STATUS_SANDBOX_ERROR
     if result.server_error:
         # Kimina's per-snippet 500 from executing *this submission* (the client

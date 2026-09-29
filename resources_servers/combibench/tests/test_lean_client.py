@@ -24,14 +24,17 @@ from resources_servers.combibench import lean_client
 from resources_servers.combibench.fine_eval import classify_lean_result
 from resources_servers.combibench.lean_client import (
     DEFAULT_LEAN_SERVER_MAX_WAIT_SECONDS,
+    HEADER_RUN_FAILURE_DETAIL,
     HTTP_TIMEOUT_MARGIN_SECONDS,
     MAX_SATURATION_ATTEMPTS,
     MAX_VERSION_PROBES,
     REPL_LIFECYCLE_DETAILS,
+    REPL_START_FAILURE_DETAIL,
     SATURATION_BACKOFF_SECONDS,
     SATURATION_STATUSES,
     KiminaLeanClient,
     http_budget_seconds,
+    is_header_run_failure,
 )
 from resources_servers.lean_proof.status import STATUS_COMPILE_ERROR, STATUS_SANDBOX_ERROR
 
@@ -102,11 +105,15 @@ class TestKiminaLeanClient:
 
         ``server/routers/check.py:159`` wraps every non-timeout exception from
         running the body into ``HTTPException(500, str(e))`` for that snippet
-        alone, and ``server/repl.py`` raises ``LeanError`` whenever the REPL
-        wrote anything to stderr. Model output reaches that path —
-        ``native_decide`` is allowed by design — so a masked ``sandbox_error``
-        here would delete the attempt from the denominator instead of scoring it
-        0, which upstream never does.
+        alone, and ``server/repl.py`` gets there by raising ``LeanError("Lean
+        process broken pipe")`` or ``ReplError("JSON decode error")`` once the
+        REPL is no longer answering. Model output reaches that path — the REPL
+        runs under an ``RLIMIT_AS`` cap and ``native_decide`` is allowed by
+        design — so a masked ``sandbox_error`` here would delete the attempt
+        from the denominator instead of scoring it 0, which upstream never does.
+        (``repl.py:305`` also raises ``LeanError`` on REPL stderr, but that
+        check is dead at this pin: ``error_file`` is a ``TemporaryFile`` that
+        ``create_subprocess_exec`` is never handed, so it is always empty.)
         """
         _patch_request(monkeypatch, _FakeResponse(500, text='{"detail":"Lean process broken pipe"}'))
         result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
@@ -114,21 +121,46 @@ class TestKiminaLeanClient:
         assert "HTTP 500" in result.error
         assert classify_lean_result(result) == "lean_error"
 
-    @pytest.mark.parametrize("detail", list(REPL_LIFECYCLE_DETAILS))
-    async def test_a_repl_lifecycle_500_is_a_transport_failure(self, monkeypatch, detail: str) -> None:
-        """Not every 500 is the model's: ``manager.prep`` raises these two before the body ever runs.
+    async def test_a_repl_startup_500_is_a_transport_failure(self, monkeypatch) -> None:
+        """``manager.prep`` raises this one before any Lean code runs, model's or not.
 
-        ``server/manager.py:197-215`` normalises a REPL that would not start, or
-        an import header that would not run on it, to
-        ``ReplError("Failed to start REPL")`` / ``ReplError("Failed to run
-        header on REPL")``, which ``check.py:118`` turns into
-        ``HTTPException(500, str(e))`` and FastAPI serialises as ``{"detail":
-        ...}``. Charging that to the model would score a proof Lean never saw.
+        ``server/manager.py:197-202`` normalises a REPL process that would not
+        start to ``ReplError("Failed to start REPL")``, which ``check.py:118``
+        turns into ``HTTPException(500, str(e))`` and FastAPI serialises as
+        ``{"detail": ...}``. Charging that to the model would score a proof Lean
+        never saw. Unlike its sibling below, no submission can cause it.
         """
-        _patch_request(monkeypatch, _FakeResponse(500, text=f'{{"detail":"{detail}"}}'))
+        _patch_request(monkeypatch, _FakeResponse(500, text=f'{{"detail":"{REPL_START_FAILURE_DETAIL}"}}'))
         result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
         assert result.transport_failure is True and result.server_error is False
+        assert result.header_error is False
         assert classify_lean_result(result) == STATUS_SANDBOX_ERROR
+
+    async def test_a_header_run_500_is_left_for_the_caller_to_attribute(self, monkeypatch) -> None:
+        """The other ``manager.prep`` detail is not lifecycle: the header is the submission's.
+
+        ``server/manager.py:203-215`` re-raises a header ``TimeoutError``
+        unchanged but normalises every *other* header failure to
+        ``ReplError("Failed to run header on REPL")``. Kimina's header is the
+        submission's own leading ``import`` run (``server/split.py``), so
+        ``import Foo`` from the model lands here. The client defaults it to the
+        masked status and flags ``header_error`` so
+        ``app.CombibenchVerifier.verify`` can charge a model-authored header,
+        exactly as it already does for the header timeout.
+        """
+        _patch_request(monkeypatch, _FakeResponse(500, text=f'{{"detail":"{HEADER_RUN_FAILURE_DETAIL}"}}'))
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert result.header_error is True
+        assert result.transport_failure is False and result.server_error is False
+        # Masked unless the caller says the header was the model's own.
+        assert classify_lean_result(result) == STATUS_SANDBOX_ERROR
+
+    async def test_the_two_prep_details_are_still_the_pinned_strings(self) -> None:
+        """Both markers are pinned upstream text; a reworded one must fail loudly, not silently."""
+        assert REPL_LIFECYCLE_DETAILS == (REPL_START_FAILURE_DETAIL, HEADER_RUN_FAILURE_DETAIL)
+        assert is_header_run_failure(500, '{"detail":"Failed to run header on REPL"}') is True
+        assert is_header_run_failure(500, '{"detail":"Failed to start REPL"}') is False
+        assert is_header_run_failure(502, '{"detail":"Failed to run header on REPL"}') is False
 
     @pytest.mark.parametrize("status", [502, 504])
     async def test_a_gateway_5xx_is_a_transport_failure(self, monkeypatch, status) -> None:

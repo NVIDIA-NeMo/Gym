@@ -268,6 +268,16 @@ class TestClassification:
         """Kimina's 500 says executing this snippet raised, which upstream fails the model for."""
         assert classify_lean_result(LeanResult(error="HTTP 500: boom", server_error=True)) == "lean_error"
 
+    def test_a_header_run_failure_defaults_to_masked(self) -> None:
+        """Whose header it was is the caller's question; the default here is the safe one.
+
+        ``app.CombibenchVerifier.verify`` upgrades this to ``model_header_error``
+        when the header was the model's own, the way it upgrades a
+        ``header_timeout`` to ``model_header_timeout``.
+        """
+        header = LeanResult(error="HTTP 500: Failed to run header on REPL", header_error=True)
+        assert classify_lean_result(header) == STATUS_SANDBOX_ERROR
+
 
 class TestImportHeader:
     """Which header Kimina would load decides who a header timeout belongs to."""

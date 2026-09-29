@@ -95,6 +95,10 @@ class CombibenchStatus(str, Enum):
     LEAN_ERROR = "lean_error"  # Lean server reported a non-timeout REPL error, or a 5xx for this snippet
     # The model chose an import header that would not load inside the timeout.
     MODEL_HEADER_TIMEOUT = "model_header_timeout"
+    # The model chose an import header that failed to load for some other reason
+    # (``import Foo``, a module that does not build): Kimina answers 500 with
+    # "Failed to run header on REPL" and says nothing more about why.
+    MODEL_HEADER_ERROR = "model_header_error"
     # Harness faults: the model did not cause these.
     LEAN_SERVER_ERROR = STATUS_SANDBOX_ERROR
     HEADER_TIMEOUT = "header_timeout"  # a cold REPL could not load the *reference* header in time
@@ -326,7 +330,21 @@ class CombibenchVerifier:
         result: LeanResult = await self.lean_client.verify(submission, self.config.lean_timeout_seconds)
         status = CombibenchStatus(classify_lean_result(result))
         failure_reason = None
-        if status is CombibenchStatus.LEAN_SERVER_ERROR:
+        if status is CombibenchStatus.LEAN_SERVER_ERROR and result.header_error:
+            # The non-timeout twin of the block below, and it belongs to whoever
+            # the header belongs to for the same reason. Kimina normalises every
+            # non-timeout failure of the header command to
+            # ``ReplError("Failed to run header on REPL")`` and answers 500, so
+            # the reply says nothing about what went wrong -- but the header it
+            # ran is the submission's own leading ``import`` block, which the
+            # model may well have written, and ``import Foo`` is a failure the
+            # model caused. Excusing it unconditionally (which this did until the
+            # third review round) deletes such a rollout from the denominator.
+            if header_is_harness_supplied(submission, body.formal_statement):
+                failure_reason = f"Lean server could not run the reference import header: {result.error}"
+            else:
+                status = CombibenchStatus.MODEL_HEADER_ERROR
+        elif status is CombibenchStatus.LEAN_SERVER_ERROR:
             failure_reason = f"Lean server unavailable or replied malformed: {result.error}"
         elif status is CombibenchStatus.HEADER_TIMEOUT:
             # Kimina loads the submission's import header into a pooled REPL before it
