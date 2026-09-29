@@ -1317,3 +1317,22 @@ async def test_unresolved_yaml_shapes_fail_before_provisioning(tmp_path, documen
     with pytest.raises(ValueError, match="mapping|upstream"):
         await AsyncSandboxCompose(provider, path).start()
     assert provider.created == []
+
+
+async def test_cleanup_failure_still_attempts_volume_helper_and_transport():
+    provider = Provider()
+    provider.aclose = AsyncMock()
+    group = AsyncSandboxCompose(provider, None)
+    broken = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("service delete failed")))
+    healthy = SimpleNamespace(stop=AsyncMock())
+    helper = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=1, stderr="volume failed")), stop=AsyncMock()
+    )
+    group.services = {"broken": broken, "healthy": healthy}
+    group._volume_helper = helper
+    with pytest.raises(ExceptionGroup) as exc:
+        await group.stop()
+    assert len(exc.value.exceptions) == 2
+    healthy.stop.assert_awaited_once()
+    helper.stop.assert_awaited_once()
+    provider.aclose.assert_awaited_once()

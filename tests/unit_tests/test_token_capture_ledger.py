@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import pytest
 
+from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, _custody_columns
 from nemo_gym.token_id_capture.protocols import CaptureLedger
-from nemo_gym.token_id_capture.records import compute_digest
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, compute_digest
 from nemo_gym.token_id_capture.sink import (
     UNRESOLVED_PARENT_REASON,
     CaptureContext,
@@ -70,6 +71,7 @@ def _call_record(
         admitted_at=admitted_at,
         chain_hash=chain_hash,
         cumulative_hash=cumulative_hash,
+        fingerprint_version=FINGERPRINT_VERSION,
     )
 
 
@@ -340,6 +342,51 @@ async def test_file_store_cross_handle_visibility(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("version", [None, 0, FINGERPRINT_VERSION - 1, FINGERPRINT_VERSION, FINGERPRINT_VERSION + 1])
+async def test_file_store_requires_current_fingerprint_version(tmp_path, version):
+    import json
+
+    writer = FileLineageStore(tmp_path)
+    await _record_call_1(writer)
+    path = tmp_path / "r1.lineage.jsonl"
+    row = json.loads(path.read_text())
+    if version is None:
+        row.pop("fingerprint_version")
+    else:
+        row["fingerprint_version"] = version
+    # Keep the matching fingerprint and context; only the stored version differs.
+    path.write_text(json.dumps(row) + "\n")
+
+    reader = FileLineageStore(tmp_path)
+    resolution = await reader.resolve("r1", [USER_1, ASSISTANT_1, USER_2])
+    context = await _admit(reader, [USER_1, ASSISTANT_1, USER_2])
+    if version == FINGERPRINT_VERSION:
+        assert resolution.status == ParentResolutionStatus.RESOLVED
+        assert resolution.match.model_call_id == "c1"
+        assert context.capture_admission.staging_chain == ["r1/c1"]
+    else:
+        assert resolution.status == ParentResolutionStatus.UNRESOLVED
+        assert resolution.match is None
+        assert context.capture_admission is None
+        manifest = RolloutManifest.model_validate(await reader.manifest("r1"))
+        assert [failure.reason for failure in manifest.failures] == [UNRESOLVED_PARENT_REASON]
+
+
+@pytest.mark.asyncio
+async def test_file_store_ignores_old_version_when_current_match_is_appended(tmp_path):
+    writer = FileLineageStore(tmp_path)
+    reader = FileLineageStore(tmp_path)
+    old_record = _call_record("old").model_copy(update={"fingerprint_version": FINGERPRINT_VERSION - 1})
+    await writer.record(_commit(old_record, [USER_1], [ASSISTANT_1]))
+    assert (await reader.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match is None
+
+    await _record_call_1(writer)
+    match = (await reader.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match
+    assert match is not None and match.model_call_id == "c1"
+    assert match.staging_chain == ("r1/c1",)
+
+
+@pytest.mark.asyncio
 async def test_lineage_only_rows_do_not_enter_the_manifest(tmp_path):
     """Local-capture rows (no custody columns) resolve but are not manifest rows."""
     import json
@@ -349,6 +396,7 @@ async def test_lineage_only_rows_do_not_enter_the_manifest(tmp_path):
     store = FileLineageStore(tmp_path)
     lineage_only_row = {
         "model_call_id": "c1",
+        "fingerprint_version": FINGERPRINT_VERSION,
         "fingerprint": assistant_fingerprint([USER_1, ASSISTANT_1]),
         "context_len": 1,
         "context_digest": conversation_digest([USER_1]),
@@ -389,8 +437,8 @@ async def test_custody_row_missing_a_chain_digest_poisons_the_manifest(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_legacy_token_carrying_row_resolves_but_cannot_anchor_a_chain(tmp_path):
-    """Pre-chain external rows stay readable; extending them fails closed."""
+async def test_unversioned_legacy_token_carrying_row_cannot_resolve_or_anchor_a_chain(tmp_path):
+    """Unversioned pre-chain external rows cannot supply a parent token prefix."""
     import json
 
     from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
@@ -406,16 +454,14 @@ async def test_legacy_token_carrying_row_resolves_but_cannot_anchor_a_chain(tmp_
         **{
             key: value
             for key, value in _custody_columns(_call_record("c1"), ("r1/c1",)).items()
-            if key not in ("chain_hash", "cumulative_hash", "response_id")
+            if key not in ("chain_hash", "cumulative_hash", "response_id", "fingerprint_version")
         },
     }
     path = tmp_path / "r1.lineage.jsonl"
     path.write_text(json.dumps(legacy_row, sort_keys=True, separators=(",", ":")) + "\n")
 
     match = (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match
-    assert match is not None
-    assert list(match.cumulative_token_ids) == TOKENS_1
-    assert match.chain_hash == ""
+    assert match is None
 
     context = await _admit(store, [USER_1, ASSISTANT_1, USER_2])
     assert context.capture_admission is None

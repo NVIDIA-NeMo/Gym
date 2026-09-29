@@ -26,9 +26,23 @@ genrm_compare_resources_server:
         name: genrm_model
       
       # Cohort-based verify (Difference 1): number of rollouts per prompt before running comparison.
-      # When > 1, verify() buffers by task/prompt identity and returns relative rewards when a cohort is full.
-      # Ensure rollout data has this many rows per prompt (e.g. num_repeats in rollout collection).
+      # For isolated retries/replay, share a fresh _ng_group_id across exactly this many members.
+      # Use local _ng_rollout_index slots 0..15 and enough concurrency to admit the whole group.
+      # File collector: --num-repeats 16 --concurrency 16 (one task, one agent).
       num_rollouts_per_prompt: 16
+
+      # Separate finite deadlines: collection starts at first arrival; evaluation
+      # starts only when all members are present. Increase for long tool rollouts.
+      cohort_collection_timeout_s: 1800
+      cohort_evaluation_timeout_s: 1800
+      # Includes connection retries and queue wait. A 24576-token judge answer
+      # takes about 614 seconds at 40 tokens/s; allow the full evaluation budget.
+      judge_request_timeout_s: 1800
+
+      # Retain compact rewards/digests for idempotent late retries. The cache is also
+      # bounded, so disabling the TTL does not make terminal state unbounded.
+      cohort_result_ttl_s: 21600
+      max_terminal_cohorts: 4096
       
       # Generation params for GenRM calls
       genrm_responses_create_params:
@@ -71,7 +85,7 @@ genrm_compare_resources_server:
       # Debug logging
       debug_logging: false
       
-      # Parse retry configuration
+      # Shared retry budget for parse failures and judge HTTP 408, 429, or 5xx
       genrm_parse_retries: 3
       genrm_parse_retry_sleep_s: 0.2
       

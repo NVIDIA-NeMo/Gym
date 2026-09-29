@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 from fastapi.testclient import TestClient
-from openai import AsyncOpenAI
+from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, AsyncOpenAI, Timeout
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
@@ -164,15 +164,56 @@ class TestPolicyClient:
     """
 
     @staticmethod
-    def _agent() -> VerifiersAgent:
+    def _agent(**config_overrides) -> VerifiersAgent:
         config = VerifiersAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
             name="",
             model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            **config_overrides,
         )
         return VerifiersAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_policy_client_keeps_the_sdk_deadlines_by_default(self) -> None:
+        agent = self._agent()
+        with patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL):
+            client = agent._get_client().client
+        assert client.timeout == DEFAULT_TIMEOUT
+        assert client.max_retries == DEFAULT_MAX_RETRIES
+
+    def test_policy_client_applies_configured_deadlines_and_retries(self) -> None:
+        agent = self._agent(client_timeout_s=3600, client_connect_timeout_s=60, client_max_retries=0)
+        with patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL):
+            client = agent._get_client().client
+        assert client.timeout == Timeout(connect=60, read=3600, write=3600, pool=3600)
+        assert client.max_retries == 0
+
+    def test_connect_timeout_alone_keeps_the_sdk_read_deadline_and_retries(self) -> None:
+        agent = self._agent(client_connect_timeout_s=60)
+        with patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL):
+            client = agent._get_client().client
+        assert client.timeout == Timeout(
+            connect=60, read=DEFAULT_TIMEOUT.read, write=DEFAULT_TIMEOUT.write, pool=DEFAULT_TIMEOUT.pool
+        )
+        assert client.max_retries == DEFAULT_MAX_RETRIES
+
+    def test_rollout_prefixed_client_inherits_deadlines_and_retries(self) -> None:
+        agent = self._agent(client_timeout_s=3600, client_connect_timeout_s=60, client_max_retries=0)
+
+        def fake_resolve(model_server_name: str, rollout_id: str | None = None) -> str:
+            prefix = f"/ng-rollout/{rollout_id}" if rollout_id else ""
+            return f"http://policy{prefix}/v1"
+
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", side_effect=fake_resolve),
+            patch.object(VerifiersAgent, "rollout_id_from_run", lambda _self, body: body.rollout_id),
+        ):
+            prefixed = agent._get_client(MagicMock(rollout_id="7-2")).client
+
+        assert str(prefixed.base_url).rstrip("/") == "http://policy/ng-rollout/7-2/v1"
+        assert prefixed.timeout == Timeout(connect=60, read=3600, write=3600, pool=3600)
+        assert prefixed.max_retries == 0
 
     def test_policy_client_is_shared_across_rollouts(self) -> None:
         agent = self._agent()

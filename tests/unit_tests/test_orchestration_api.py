@@ -95,13 +95,63 @@ def test_policy_model_conflict_raises():
 
 
 def test_service_env_accepted():
-    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "bar"}}}))
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "lit:bar"}}}))
     assert config.services["svc"].env == {"FOO": "bar"}
 
 
 def test_driver_env_accepted():
-    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "env": {"KEY": "val"}}))
+    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "env": {"KEY": "lit:val"}}))
     assert config.driver.env == {"KEY": "val"}
+
+
+def test_env_lit_prefix_strips_to_literal():
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "lit:600"}}}))
+    assert config.services["svc"].env == {"FOO": "600"}
+
+
+def test_env_no_prefix_raises():
+    with pytest.raises(ValidationError, match="must start with one of the prefixes"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "bar"}}}))
+
+
+def test_env_host_prefix_reads_submitting_env(monkeypatch):
+    monkeypatch.setenv("MY_HOST_VAR", "host-value")
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "host:MY_HOST_VAR"}}}))
+    assert config.services["svc"].env == {"FOO": "host-value"}
+
+
+def test_env_host_prefix_missing_var_raises(monkeypatch):
+    monkeypatch.delenv("MY_MISSING_HOST_VAR", raising=False)
+    with pytest.raises(ValidationError, match="MY_MISSING_HOST_VAR"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "host:MY_MISSING_HOST_VAR"}}}))
+
+
+def test_env_runtime_prefix_left_unresolved():
+    config = SubmitConfig.model_validate(
+        _config(services={"svc": {**SERVICE, "env": {"FOO": "runtime:NEL_INVOCATION_ID"}}})
+    )
+    assert config.services["svc"].env == {"FOO": "runtime:NEL_INVOCATION_ID"}
+
+
+def test_env_host_prefix_invalid_var_name_raises():
+    with pytest.raises(ValidationError, match="not a valid environment variable name"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "host:1BAD"}}}))
+
+
+def test_env_runtime_prefix_invalid_var_name_raises():
+    with pytest.raises(ValidationError, match="not a valid environment variable name"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "runtime:1BAD"}}}))
+
+
+def test_driver_env_host_prefix_reads_submitting_env(monkeypatch):
+    monkeypatch.setenv("MY_DRIVER_HOST_VAR", "driver-host-value")
+    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "env": {"KEY": "host:MY_DRIVER_HOST_VAR"}}))
+    assert config.driver.env == {"KEY": "driver-host-value"}
+
+
+def test_driver_env_runtime_prefix_left_unresolved():
+    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "env": {"KEY": "runtime:NEL_INVOCATION_ID"}}))
+    assert config.driver.env == {"KEY": "runtime:NEL_INVOCATION_ID"}
 
 
 def test_service_unknown_field_raises():
