@@ -4,6 +4,7 @@
 """mini-SWE rollout orchestration using resource-owned sandboxes."""
 
 import asyncio
+import json
 import logging
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
@@ -11,19 +12,28 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, time
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import Field, field_validator
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
+    BaseResponsesAPIAgentConfig,
+    SimpleResponsesAPIAgent,
+)
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
+from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME, get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
+from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
+from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
@@ -48,14 +58,23 @@ from responses_api_agents.miniswe_sandboxed_agent.models import (
 
 LOGGER = logging.getLogger(__name__)
 
+# The harbor resources server leaves the task's in-sandbox tool declarations here at seed time.
+TASK_CONTEXT_FILE = "/tmp/.nemo-gym/task.json"
+
 
 @dataclass
 class MiniSWESession:
-    """Execution state shared by /run and responses for one borrowed sandbox."""
+    """Execution state shared by /run and responses for one borrowed sandbox.
+
+    The legacy ``/run`` path fills ``seed`` from the resources server's reply. An episode session
+    (``/v1/agent_sessions``) receives the sandbox from the environment server instead: ``seed`` then
+    carries only the identity, ``original_params`` is bound by the first ``/v1/responses`` call, whose
+    input is the instruction, and ``provider`` is this process's transport, released at close.
+    """
 
     sandbox: AsyncSandbox
     seed: SeedSessionResponse
-    original_params: NeMoGymResponseCreateParamsNonStreaming
+    original_params: NeMoGymResponseCreateParamsNonStreaming | None
     rollout_id: str
     capture_model_calls: bool
     artifact_directory: Path | None = None
@@ -63,16 +82,24 @@ class MiniSWESession:
     setup_started_at: str | None = None
     result: AgentExecutionResult | None = None
     worker: asyncio.Task | None = None
+    workdir: str | None = None
+    provider: Any | None = None
+    episode: AgentSeedSessionRequest | None = None
+    observations: AgentObservationBundle | None = None
 
 
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
     num_workers: Literal[1] = 1
-    resources_server: ResourcesServerRef
+    # The resources server the legacy `/run` path seeds and verifies against. Episode sessions
+    # (`/v1/agent_sessions`) receive the sandbox from the environment server and need none.
+    resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     sandbox_model_base_url: str | None = None
     harness: MiniSWEConfig = Field(default_factory=MiniSWEConfig)
     artifacts_dir: Path = Path("results/miniswe_sandboxed_agent")
     agent_max_timeout_sec: float | None = Field(default=None, gt=0)
+    # Wall-clock budget of one episode-session turn; the legacy path takes it from the seed reply.
+    agent_timeout_sec: float = Field(default=28800, gt=0)
     setup_timeout_sec: float = Field(default=360, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
 
@@ -96,6 +123,40 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _instruction(input_value: Any) -> str:
+    """The task instruction: the text of the row's input messages."""
+    if isinstance(input_value, str):
+        return input_value
+    messages: list[str] = []
+    for item in input_value or []:
+        value = item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+        if not isinstance(value, dict):
+            messages.append(str(value))
+            continue
+        content = value.get("content", "")
+        if isinstance(content, str):
+            messages.append(content)
+        elif isinstance(content, list):
+            messages.extend(
+                str(part.get("text", "")) for part in content if isinstance(part, dict) and part.get("text")
+            )
+    return "\n\n".join(part for part in messages if part)
+
+
+async def _read_task_context(sandbox: AsyncSandbox) -> dict[str, Any]:
+    """``mcp_servers`` and ``skills_dir`` the resources server recorded for this task, if any."""
+    result = await sandbox.exec(f"cat {TASK_CONTEXT_FILE} 2>/dev/null || true", timeout_s=30)
+    text = (result.stdout or "").strip()
+    if not text:
+        return {}
+    try:
+        context = json.loads(text)
+    except json.JSONDecodeError:
+        LOGGER.warning(f"Ignoring unreadable {TASK_CONTEXT_FILE}")
+        return {}
+    return context if isinstance(context, dict) else {}
+
+
 def empty_response(params: NeMoGymResponseCreateParamsNonStreaming, model: str) -> NeMoGymResponse:
     return NeMoGymResponse(
         id="resp_" + uuid4().hex,
@@ -117,6 +178,10 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
         self._runs = {}
         self._sessions: dict[tuple[str, str], MiniSWESession] = {}
+        # Episode sessions by agent_session_id -> key into _sessions.
+        self._agent_sessions: dict[str, tuple[str, str]] = {}
+        self._agent_session_locks: dict[str, asyncio.Lock] = {}
+        self._closed_agent_session_ids: set[str] = set()
         self._finalizers = set()
         self._closing = False
         self._shutdown_deadline: float | None = None
@@ -160,11 +225,98 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         if not task.cancelled() and (error := task.exception()) is not None:
             LOGGER.error("mini-SWE background operation failed", exc_info=(type(error), error, error.__traceback__))
 
+    # -- episode sessions: the environment server seeds the sandbox and calls /v1/responses ------------
+
+    async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
+        """Borrow the resources server's sandbox for this episode."""
+        agent_session_id = body.agent_session_id
+        owner = request.session[SESSION_ID_KEY]
+        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
+        async with lock:
+            if agent_session_id in self._closed_agent_session_ids:
+                raise HTTPException(409, f"Agent session is already closed: {agent_session_id}")
+            key = self._agent_sessions.get(agent_session_id)
+            state = self._sessions.get(key) if key else None
+            if state is not None and state.episode is not None:
+                if (state.episode.episode_id, state.episode.task_id) != (body.episode_id, body.task_id):
+                    raise HTTPException(409, "agent_session_id is already bound to another episode or task")
+                return AgentSeedSessionResponse(agent_session_id=agent_session_id)
+            if body.sandbox_access is None:
+                raise HTTPException(422, "mini-SWE needs sandbox_access from the resources server")
+            connection = body.sandbox_access.connection
+            if not isinstance(connection, DirectSandboxConnection):
+                raise HTTPException(422, "mini-SWE supports only direct sandbox connections")
+            provider = create_provider(
+                resolve_provider_config(connection.provider_config_ref, get_global_config_dict())
+            )
+            try:
+                sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+            except BaseException:
+                await provider.aclose()
+                raise
+            # The environment server addresses the turn as /ng-rollout/<capture_key>/v1/responses.
+            key = (owner, body.episode_id.capture_key)
+            self._sessions[key] = MiniSWESession(
+                sandbox=sandbox,
+                seed=SeedSessionResponse(
+                    session_id=agent_session_id,
+                    task_id=body.task_id.task_id,
+                    agent_timeout_sec=self.config.agent_timeout_sec,
+                ),
+                original_params=None,
+                rollout_id=body.episode_id.capture_key,
+                capture_model_calls=True,
+                artifact_directory=self.config.artifacts_dir / agent_session_id,
+                workdir=body.sandbox_access.workdir,
+                provider=provider,
+                episode=body,
+            )
+            self._agent_sessions[agent_session_id] = key
+            return AgentSeedSessionResponse(agent_session_id=agent_session_id)
+
+    async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
+        agent_session_id = body.agent_session_id
+        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
+        observations = None
+        async with lock:
+            key = self._agent_sessions.get(agent_session_id)
+            state = self._sessions.get(key) if key else None
+            if state is not None:
+                if state.episode is None or state.episode.episode_id != body.episode_id:
+                    raise HTTPException(409, "episode_id does not match the seeded agent session")
+                self._sessions.pop(key, None)
+                self._agent_sessions.pop(agent_session_id, None)
+                observations = state.observations
+                try:
+                    await state.sandbox.disconnect()
+                finally:
+                    if state.provider is not None:
+                        # Resources retains sandbox/Compose ownership; release only our transport.
+                        await state.provider.aclose()
+            self._closed_agent_session_ids.add(agent_session_id)
+        return AgentCloseSessionResponse(agent_session_id=agent_session_id, agent_observations=observations)
+
+    async def _bind_episode_turn(
+        self, state: MiniSWESession, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: str | None
+    ) -> None:
+        """First /v1/responses on an episode session: the input is the instruction, task.json the tool grants."""
+        state.original_params = body.model_copy(deep=True)
+        state.seed.instruction = _instruction(body.input)
+        task_context = await _read_task_context(state.sandbox)
+        state.seed.mcp_servers = task_context.get("mcp_servers") or []
+        state.seed.skills_dir = task_context.get("skills_dir")
+        # Model calls carry the /ng-rollout/<id> the environment server used, so capture correlates them.
+        state.capture_model_calls = rollout_id is not None
+        if rollout_id is not None:
+            state.rollout_id = rollout_id
+
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        if self._closing:
+            raise HTTPException(503, "Agent server is shutting down")
         owner = request.session[SESSION_ID_KEY]
         rollout_id = current_rollout_id()
+        matches = [key for key in self._sessions if key[0] == owner]
         if rollout_id is None:
-            matches = [key for key in self._sessions if key[0] == owner]
             if len(matches) > 1:
                 raise HTTPException(
                     409, "Multiple mini-SWE rollouts for this session; use /ng-rollout/<id>/v1/responses"
@@ -172,8 +324,12 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             state = self._sessions.get(matches[0]) if matches else None
         else:
             state = self._sessions.get((owner, rollout_id))
+            if state is None and len(matches) == 1 and self._sessions[matches[0]].episode is not None:
+                state = self._sessions[matches[0]]
         if state is None:
-            raise HTTPException(409, "No seeded mini-SWE sandbox for this session")
+            raise HTTPException(404 if not matches else 409, "No seeded mini-SWE sandbox for this session")
+        if state.original_params is None:
+            await self._bind_episode_turn(state, body, rollout_id)
         if body != state.original_params:
             raise HTTPException(409, "Agent session is already bound to another request")
 
@@ -195,16 +351,19 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         timings["agent_setup"] = {"started_at": state.setup_started_at or now()}
                         deadline = state.setup_deadline or monotonic() + self.config.setup_timeout_sec
                         async with asyncio.timeout_at(deadline):
-                            cwd = await sandbox.exec("pwd", timeout_s=30, user=seed.user)
-                            if cwd.return_code:
-                                raise RuntimeError("Unable to determine the task working directory")
+                            workdir = state.workdir
+                            if workdir is None:
+                                cwd = await sandbox.exec("pwd", timeout_s=30, user=seed.user)
+                                if cwd.return_code or not (cwd.stdout or "").strip():
+                                    raise RuntimeError("Unable to determine the task working directory")
+                                workdir = (cwd.stdout or "").strip().splitlines()[-1]
                             context = HarnessContext(
                                 session_id=seed.session_id,
                                 task_id=seed.task_id,
                                 rollout_id=rollout_id,
                                 instruction=seed.instruction,
                                 user=seed.user,
-                                workdir=cwd.stdout.strip(),
+                                workdir=workdir,
                                 setup_timeout_sec=self.config.setup_timeout_sec,
                                 mcp_servers=seed.mcp_servers,
                                 skills_dir=seed.skills_dir,
@@ -274,11 +433,32 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 if not state.worker.cancelling():
                     state.worker.cancel()
         state.result = state.worker.result()
+        if state.episode is not None:
+            return self._episode_turn_response(state, state.result)
         return state.result.response
+
+    @staticmethod
+    def _episode_turn_response(state: MiniSWESession, result: AgentExecutionResult) -> NeMoGymResponse:
+        """The environment server sees one response; carry the harness outcome in its metadata."""
+        observations = result.harness_metadata.get("ng_agent_observations") if result.harness_metadata else None
+        if observations:
+            state.observations = AgentObservationBundle.model_validate(observations)
+        response = result.response
+        metadata = dict(response.metadata or {})
+        metadata["miniswe_termination"] = result.termination.reason
+        if result.termination.detail:
+            metadata["miniswe_termination_detail"] = result.termination.detail[:500]
+        metadata["miniswe_agent_started"] = str(result.agent_started).lower()
+        response.metadata = metadata
+        return response
+
+    # -- legacy /run: this agent seeds and verifies against a TB4-style resources server ---------------
 
     async def run(self, request: Request, body: MiniSWERunRequest) -> MiniSWEVerifyResponse:
         if self._closing:
             raise HTTPException(503, "Agent server is shutting down")
+        if self.config.resources_server is None:
+            raise HTTPException(422, "The legacy /run path needs a resources_server; use episode sessions instead")
         payload = body.model_dump(mode="json")
         rollout_id = self.rollout_id_from_run(body)
         payload["rollout_id"] = rollout_id or body.capture_rollout_id or payload.get("rollout_id") or uuid4().hex
