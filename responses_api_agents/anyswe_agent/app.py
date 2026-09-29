@@ -66,8 +66,8 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
     metrics_fpath.write_text(json.dumps(existing | update))
 
 
-def _model_url_for_rollout(model_url: str, rollout_id: Optional[str]) -> str:
-    return apply_rollout_prefix(model_url, rollout_id) if model_url and rollout_id else model_url
+def _model_url_for_rollout(model_url: str, rollout_id: Optional[str], token_capture: bool = False) -> str:
+    return apply_rollout_prefix(model_url, rollout_id, token_capture=token_capture) if model_url and rollout_id else model_url
 
 
 def _model_name(params: "AnySweInstanceConfig") -> str:
@@ -754,7 +754,9 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         persistent_dir.mkdir(parents=True, exist_ok=True)
         server_config = self._server.model_dump()
         if not self.config.sandbox_model_base_url:
-            server_config["model_server_url"] = _model_url_for_rollout(server_config["model_server_url"], rollout_id)
+            server_config["model_server_url"] = _model_url_for_rollout(
+                server_config["model_server_url"], rollout_id, token_capture=self._token_id_capture_enabled()
+            )
         params = AnySweInstanceConfig(
             **self.config.model_dump(),
             **server_config,
