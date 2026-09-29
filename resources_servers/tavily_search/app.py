@@ -228,6 +228,7 @@ class URLExclusionPolicy:
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: TavilySearchResourcesServerConfig
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)

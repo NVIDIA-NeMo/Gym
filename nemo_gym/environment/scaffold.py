@@ -310,6 +310,17 @@ def _asset_config(composition: _Composition) -> str:
         config[composition.resource_instance] = {
             "resources_servers": {composition.resource_implementation: {"datasets": [dataset_dict]}}
         }
+    # Rollout collection dispatches to environment servers, so the agent needs one in front of it.
+    # NOTE(martas): for now this builds the legacy config structure
+    # should be migrated once we have any migrated agents
+    config[f"{composition.module_name}_environment_server"] = {
+        "environment_servers": {
+            "legacy_agent": {
+                "entrypoint": "app.py",
+                "agent_server": {"type": "responses_api_agents", "name": composition.agent_instance},
+            }
+        }
+    }
     if composition.rollout_driver:
         config["rollout_collection_driver"] = composition.rollout_driver
 
@@ -608,6 +619,8 @@ def _resources_server_app(module_name: str) -> str:
 
 
         class {class_name}ResourcesServer({class_name}Verifier, SimpleResourcesServer):
+            ray_enabled = False
+
             config: {class_name}ResourcesServerConfig
 
 
@@ -714,6 +727,8 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
 
 
         class {class_name}Agent(SimpleAgent):
+            ray_enabled = False
+
             async def responses(
                 self,
                 request: Request,
@@ -737,6 +752,8 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
 
 
         class {class_name}Agent(SimpleAgent):
+            ray_enabled = False
+
             async def responses(
                 self,
                 request: Request,

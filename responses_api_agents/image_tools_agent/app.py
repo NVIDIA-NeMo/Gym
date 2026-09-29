@@ -159,6 +159,7 @@ def _final_assistant_response(response: NeMoGymResponse) -> NeMoGymResponse:
 
 
 class ImageToolsAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: ImageToolsAgentConfig
     _logic: ImageToolsGymToolLogic = PrivateAttr()
 

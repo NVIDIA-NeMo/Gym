@@ -30,3 +30,11 @@ swe_next_opencode_sandboxed_agent:
           jsonl_fpath: resources_servers/swe_next/data/swe_next_training.jsonl
           num_repeats: 1
           license: MIT
+
+swe_next_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swe_next_opencode_sandboxed_agent

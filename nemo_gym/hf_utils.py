@@ -18,7 +18,8 @@ from pathlib import Path
 
 import yaml
 from datasets import load_dataset
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import CommitOperationAdd, DatasetCard, HfApi, hf_hub_download
+from huggingface_hub.errors import RemoteEntryNotFoundError
 from huggingface_hub.utils import HfHubHTTPError
 
 from nemo_gym.config_types import DownloadJsonlDatasetHuggingFaceConfig, UploadJsonlDatasetHuggingFaceConfig
@@ -163,17 +164,36 @@ def upload_jsonl_dataset(
         print(f"[Nemo-Gym] - Error adding to collection: {e}")
         raise
 
-    # File upload
+    # Commit the data and discovery metadata together, including when creating a PR.
     try:
-        commit_info = client.upload_file(
-            path_or_fileobj=config.input_jsonl_fpath,
-            path_in_repo=Path(config.input_jsonl_fpath).name,
+        parent_commit = client.repo_info(repo_id, repo_type="dataset", revision=config.revision).sha
+        try:
+            card_path = hf_hub_download(
+                repo_id=repo_id,
+                filename="README.md",
+                repo_type="dataset",
+                revision=parent_commit,
+                token=config.hf_token,
+            )
+            card = DatasetCard.load(card_path)
+        except RemoteEntryNotFoundError:
+            card = DatasetCard("")
+        card.data.tags = list(dict.fromkeys([*(card.data.get("tags") or []), "rl-environment", "nemo-gym"]))
+        commit_info = client.create_commit(
             repo_id=repo_id,
+            operations=[
+                CommitOperationAdd(
+                    path_in_repo=Path(config.input_jsonl_fpath).name,
+                    path_or_fileobj=config.input_jsonl_fpath,
+                ),
+                CommitOperationAdd(path_in_repo="README.md", path_or_fileobj=str(card).encode("utf-8")),
+            ],
             token=config.hf_token,
             repo_type="dataset",
             create_pr=config.create_pr,
             revision=config.revision,
-            commit_message=config.commit_message,
+            parent_commit=parent_commit,
+            commit_message=config.commit_message or f"Upload {Path(config.input_jsonl_fpath).name}",
             commit_description=config.commit_description,
         )
         if config.create_pr:
