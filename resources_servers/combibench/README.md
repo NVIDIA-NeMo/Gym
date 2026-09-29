@@ -106,11 +106,16 @@ Fine-Eval distinguishes outcomes a whole-file benchmark has no equivalent for.
 6. **Answer check.** For each `abbrev <name>_solution`, append
    `example : <name>_solution = (<gold> : <type>) := by try rfl; try norm_num`.
    Tags and answers are zipped positionally and a surplus on either side is
-   dropped, as upstream does. On `split: test` a disagreement between the two
-   counts is a `bad_task` instead of a silently skipped check: the answer is
-   what the model has to supply there, so a truncated row could otherwise score
-   1.0 with the wrong answer filled in. `prepare.py::validate_rows` already
-   refuses to write such a row, so this only catches a hand-made one.
+   dropped, as upstream does. Whenever the statement declares at least one
+   `_solution` abbrev, a disagreement between the two counts is a `bad_task`
+   instead of a silently skipped check: the answer is what the model has to
+   supply, so a truncated row could otherwise score 1.0 with the wrong answer
+   filled in. The guard is keyed on the statement's own tags rather than on
+   `split`, which is an untyped, defaulted field a malformed row can simply omit
+   — the case the guard exists for. `test_with_solution` rows declare no
+   `_solution` abbrev (the answer is already substituted), so they never reach
+   it. `prepare.py::validate_rows` applies the same rule and refuses to write a
+   disagreeing row, so this only catches a hand-made one.
 7. **Compile** through the Lean server with a 60 s timeout. Any error message →
    `compile_error`; a `sorry` warning or REPL `sorries` entry → `has_sorry`;
    the REPL timing out on the submission → `timeout`; any other REPL error
@@ -151,7 +156,7 @@ Charged to the harness (reward 0.0, `harness_failure: 1.0`, `mask_sample: true`,
 | --- | --- | --- |
 | `sandbox_error` | `provider_unavailable` | the connection was refused or timed out client-side; `/verify` answered a non-5xx HTTP error (401, 404, 422 — this client or its credentials, not the model); saturation (429/503) survived all three retries; the reply was not JSON, had no `results`, or carried an error object instead of a verdict |
 | `header_timeout` | `provider_unavailable` | a cold REPL could not finish `import Mathlib` inside the timeout, **and** the header was the reference statement's own or the default one `extract_lean_code` prepends — Kimina reports this as `Lean REPL header command timed out`, distinct from the submission timing out |
-| `bad_task` | `combibench:bad_task` | the row cannot be scored (no `formal_statement`, malformed `answers`, or an answer count that disagrees with the number of `_solution` abbrevs) |
+| `bad_task` | `combibench:bad_task` | the row cannot be scored: no `formal_statement`, malformed `answers`, or an answer count that disagrees with the number of `_solution` abbrevs the statement declares |
 
 None of these is a verdict on the proof: the server either never ran it or never
 reported what it found. `bad_task` is namespaced because

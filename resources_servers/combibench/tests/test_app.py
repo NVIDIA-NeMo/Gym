@@ -324,7 +324,7 @@ class TestVerify:
 
     @pytest.mark.parametrize("answers", [None, [], ["10", "11"]], ids=["none", "empty", "surplus"])
     async def test_answer_count_disagreeing_with_the_tags_is_a_bad_task(self, answers: Any) -> None:
-        """A row whose answers do not match its abbrevs cannot be scored on ``test``.
+        """A row whose answers do not match its abbrevs cannot be scored.
 
         The zip drops the surplus, so a truncated row would lose an answer check
         and could still score 1.0 with the wrong answer filled in.
@@ -336,10 +336,32 @@ class TestVerify:
         assert "solution abbrev" in result.failure_reason
         assert client.calls == []  # never compiled, so no 1.0 is possible
 
+    @pytest.mark.parametrize("split", [None, "", "TEST", 7], ids=["null", "empty", "case", "number"])
+    async def test_the_guard_does_not_depend_on_split_being_present(self, split: Any) -> None:
+        """``split`` is untyped and defaulted, so keying the guard on it failed open.
+
+        A hand-made or truncated row that simply omits ``split`` used to skip the
+        check entirely, lose an answer check in the positional zip and score 1.0
+        with an unverified answer -- which is exactly the row where a silent 1.0
+        would be believed.
+        """
+        client = FakeLeanClient()
+        result = await _make_server(client).verify(_request(_fenced(SOLUTION), answers=None, split=split))
+        assert result.status == CombibenchStatus.BAD_TASK.value
+        assert client.calls == []
+
     async def test_the_with_solution_split_is_left_alone(self) -> None:
-        """Its answers are already substituted into the statement, so the count is not load-bearing."""
-        result = await _make_server().verify(_request(_fenced(SOLUTION), answers=None, split="test_with_solution"))
+        """Its answer is already substituted into the statement, so it declares no abbrev at all."""
+        statement = "import Mathlib\n\ntheorem synthetic_choose_1 : Nat.choose 5 2 = ((10) : ℕ) := by sorry\n"
+        solved = statement.replace("by sorry", "by decide")
+        client = FakeLeanClient()
+        result = await _make_server(client).verify(
+            _request(_fenced(solved), formal_statement=statement, answers=["10"], split="test_with_solution")
+        )
+        assert result.answer_tags == []
         assert result.status == CombibenchStatus.SUCCESS.value
+        # The published answer rides along on the row but appends no check.
+        assert client.calls == [solved.strip()]
 
     async def test_echoed_lean_diagnostics_are_bounded(self) -> None:
         """Lean output is model-influenced, so what lands in every rollout row is capped.

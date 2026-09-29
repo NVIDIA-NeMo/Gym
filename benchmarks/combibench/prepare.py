@@ -217,12 +217,14 @@ def format_row(record: dict, split: str, source: str) -> dict:
     }
 
 
-def validate_rows(rows: list[dict], split: str) -> None:
+def validate_rows(rows: list[dict]) -> None:
     """Fail before writing anything if a row cannot be scored.
 
     Every statement must still contain a ``sorry`` for the model to fill, and a
-    ``test`` row must publish exactly one answer per ``abbrev ..._solution`` so
-    the verifier's positional zip pairs them correctly.
+    statement that declares ``abbrev ..._solution`` must publish exactly one
+    answer per abbreviation so the verifier's positional zip pairs them
+    correctly. No split is passed: the statement itself says whether it needs
+    answers, and that is the condition the verifier checks too.
     """
     problems = []
     seen = set()
@@ -242,13 +244,17 @@ def validate_rows(rows: list[dict], split: str) -> None:
         if answers is not None and (not isinstance(answers, list) or not all(isinstance(a, str) for a in answers)):
             problems.append(f"{name}: answers must be null or a list of strings")
             continue
-        if split == "test":
-            tags = answer_tags(statement_chunks(statement))
-            if len(tags) != len(answers or []):
-                problems.append(
-                    f"{name}: {len(tags)} solution abbrev(s) {tags} but {len(answers or [])} answer(s); "
-                    "the verifier zips these positionally"
-                )
+        # Keyed on "this statement declares answer abbrevs", matching the verifier's
+        # own guard (``app.CombibenchVerifier.verify``) rather than on the split name,
+        # so the two guards state one rule and cannot drift.
+        # ``test_with_solution`` statements carry the answer already substituted and
+        # so declare no ``_solution`` abbrev, which is why this never fires on them.
+        tags = answer_tags(statement_chunks(statement))
+        if tags and len(tags) != len(answers or []):
+            problems.append(
+                f"{name}: {len(tags)} solution abbrev(s) {tags} but {len(answers or [])} answer(s); "
+                "the verifier zips these positionally"
+            )
     if problems:
         raise SystemExit("Invalid benchmark rows; refusing to write.\n  " + "\n  ".join(problems))
 
@@ -294,7 +300,7 @@ def prepare(
     rows = [format_row(record, split, "synthetic" if source_file is not None else source) for record in records]
     if limit is not None:
         rows = rows[:limit]
-    validate_rows(rows, split)
+    validate_rows(rows)
     if limit is None and source_file is None:
         check_corpus_complete(rows, split)
 
