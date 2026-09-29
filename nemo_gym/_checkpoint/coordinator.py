@@ -46,6 +46,7 @@ import hashlib
 import json
 import shutil
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Literal, Optional
@@ -72,13 +73,14 @@ from nemo_gym._checkpoint.model_control_contracts import (
     MODEL_ADMISSION_URL_PREFIX,
     GenerationCutCoordinatorProof,
     GenerationCutFrozenTicket,
+    GenerationCutReceipt,
     GenerationCutWorkerProof,
     ModelAbortInflightRequest,
     ModelAdmissionPauseRequest,
     ModelAdmissionResumeRequest,
 )
 from nemo_gym.token_id_capture.control_routes import require_control_auth
-from nemo_gym.token_id_capture.protocols import CaptureLedger, GenerationCutCaptureLedger
+from nemo_gym.token_id_capture.protocols import CaptureLedger
 
 
 class MissingWorkersError(ControlError):
@@ -130,6 +132,20 @@ _FRAME_LENGTH_BYTES = 8
 _MAX_COORDINATOR_MESSAGE_BYTES = 64 * 1024 * 1024
 _COORDINATOR_RESPONSE_GRACE_S = 5.0
 
+
+def _checkpoint_telemetry(event: str, **fields: Any) -> None:
+    """Emit one compact, machine-readable checkpoint flight-recorder event."""
+    print(
+        "gym_checkpoint_telemetry "
+        + json.dumps(
+            {"event": event, "timestamp": time.time(), **fields},
+            sort_keys=True,
+            default=str,
+        ),
+        flush=True,
+    )
+
+
 _LEASE_MUTATING_SERVICE_OPERATIONS = frozenset(
     {
         "abandon_generation_cut_claim",
@@ -148,17 +164,18 @@ class _WorkerAttemptIdentity(BaseModel):
 
 
 class _WorkerCheckpointIndexRecord(BaseModel):
-    """One compact row in a worker's checkpoint-scoped evidence index.
+    """One row in a worker's immutable checkpoint-scoped cut journal.
 
-    Full generation-cut coordinates live in the canonical rollout lineage.
-    This artifact records only frozen membership, which tickets wrote a cut,
-    and attempt exclusions needed to validate the service-level checkpoint.
+    The receipt row is the prepare-time durability boundary for every cut
+    produced by this worker. Ticket rows authenticate frozen membership and
+    exclusion rows carry attempt fences. Checkpoint commit later folds the
+    receipt into the canonical per-rollout lineage archives.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal[1] = 1
-    record_type: Literal["ticket", "exclusion"]
+    record_type: Literal["ticket", "exclusion", "receipt"]
     ticket_id: str | None = None
     rollout_id: str | None = None
     attempt_index: int | None = Field(default=None, ge=0)
@@ -166,6 +183,7 @@ class _WorkerCheckpointIndexRecord(BaseModel):
     generation_started: bool | None = None
     response_started: bool | None = None
     cut_recorded: bool = False
+    generation_cut_receipt: GenerationCutReceipt | None = None
 
     @model_validator(mode="after")
     def _validate_record(self) -> "_WorkerCheckpointIndexRecord":
@@ -183,9 +201,31 @@ class _WorkerCheckpointIndexRecord(BaseModel):
                     )
                 )
                 or self.cut_recorded
+                or self.generation_cut_receipt is not None
             ):
                 raise ValueError("checkpoint exclusion cannot contain generation-ticket fields")
             return self
+        if self.record_type == "receipt":
+            if self.generation_cut_receipt is None:
+                raise ValueError("checkpoint receipt row requires a generation-cut receipt")
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        self.ticket_id,
+                        self.rollout_id,
+                        self.attempt_index,
+                        self.model_call_id,
+                        self.generation_started,
+                        self.response_started,
+                    )
+                )
+                or self.cut_recorded
+            ):
+                raise ValueError("checkpoint receipt cannot contain ticket or exclusion fields")
+            return self
+        if self.generation_cut_receipt is not None:
+            raise ValueError("checkpoint ticket cannot contain a generation-cut receipt")
         if self.ticket_id is None or self.generation_started is None or self.response_started is None:
             raise ValueError("checkpoint ticket index row is missing frozen-ticket fields")
         if (self.rollout_id is None) != (self.attempt_index is None):
@@ -213,6 +253,10 @@ class _WorkerCheckpointIndexRecord(BaseModel):
     def from_exclusion(cls, rollout_id: str, attempt_index: int) -> "_WorkerCheckpointIndexRecord":
         return cls(record_type="exclusion", rollout_id=rollout_id, attempt_index=attempt_index)
 
+    @classmethod
+    def from_receipt(cls, receipt: GenerationCutReceipt) -> "_WorkerCheckpointIndexRecord":
+        return cls(record_type="receipt", generation_cut_receipt=receipt)
+
     def frozen_ticket(self) -> GenerationCutFrozenTicket:
         if self.record_type != "ticket":
             raise ValueError("checkpoint exclusion is not a frozen ticket")
@@ -232,6 +276,7 @@ class CoordinatorCheckpointEvidence:
 
     generation_cut_proof: GenerationCutCoordinatorProof
     generation_cut_tickets: tuple[GenerationCutFrozenTicket, ...]
+    generation_cut_receipts: tuple[GenerationCutReceipt, ...]
     checkpoint_exclusions: frozenset[tuple[str, int]]
 
 
@@ -542,6 +587,19 @@ class AdmissionCoordinator:
                         record.membership_digest = None
                         record.proof_error = None
                     record.acked_seq = message_seq
+                    if self._state != AdmissionState.ACCEPTING:
+                        _checkpoint_telemetry(
+                            "coordinator_worker_ack_received",
+                            checkpoint_id=self._checkpoint_id,
+                            worker_id=record.worker_id,
+                            worker_pid=record.pid,
+                            sequence=message_seq,
+                            inflight=record.inflight,
+                            generation_pending=record.generation_pending,
+                            cut_records=record.cut_records,
+                            cut_artifact_revision=record.cut_artifact_revision,
+                            proof_error=record.proof_error,
+                        )
                     await self._notify()
                 elif kind == "counters":
                     message_seq = int(message.get("seq", -1))
@@ -769,12 +827,59 @@ class AdmissionCoordinator:
         """Publish one state revision while ``_broadcast_lock`` is held."""
         self._seq += 1
         message = self._state_message()
+        trace_checkpoint = self._state != AdmissionState.ACCEPTING and self._checkpoint_id is not None
+        if trace_checkpoint:
+            _checkpoint_telemetry(
+                "coordinator_broadcast_started",
+                checkpoint_id=self._checkpoint_id,
+                state=self._state.value,
+                sequence=self._seq,
+                connected_workers=sum(1 for record in self._workers.values() if record.connected),
+                expected_workers=self.expected_workers,
+            )
         for record in tuple(self._workers.values()):
             if record.connected:
+                send_started = time.monotonic()
+                if trace_checkpoint:
+                    _checkpoint_telemetry(
+                        "coordinator_worker_send_started",
+                        checkpoint_id=self._checkpoint_id,
+                        worker_id=record.worker_id,
+                        worker_pid=record.pid,
+                        sequence=self._seq,
+                    )
                 try:
                     await self._write_to_worker(record, message)
-                except (BrokenPipeError, ConnectionResetError):
+                except (BrokenPipeError, ConnectionResetError) as error:
                     record.connected = False
+                    if trace_checkpoint:
+                        _checkpoint_telemetry(
+                            "coordinator_worker_send_failed",
+                            checkpoint_id=self._checkpoint_id,
+                            worker_id=record.worker_id,
+                            worker_pid=record.pid,
+                            sequence=self._seq,
+                            duration_seconds=time.monotonic() - send_started,
+                            error_type=type(error).__name__,
+                            error=str(error),
+                        )
+                else:
+                    if trace_checkpoint:
+                        _checkpoint_telemetry(
+                            "coordinator_worker_send_completed",
+                            checkpoint_id=self._checkpoint_id,
+                            worker_id=record.worker_id,
+                            worker_pid=record.pid,
+                            sequence=self._seq,
+                            duration_seconds=time.monotonic() - send_started,
+                        )
+        if trace_checkpoint:
+            _checkpoint_telemetry(
+                "coordinator_broadcast_completed",
+                checkpoint_id=self._checkpoint_id,
+                state=self._state.value,
+                sequence=self._seq,
+            )
 
     async def close_admission(
         self,
@@ -784,6 +889,13 @@ class AdmissionCoordinator:
     ) -> None:
         async with self._broadcast_lock:
             connected = tuple(sorted(record.worker_id for record in self._workers.values() if record.connected))
+            _checkpoint_telemetry(
+                "coordinator_pause_started",
+                checkpoint_id=checkpoint_id,
+                expected_workers=self.expected_workers,
+                connected_workers=len(connected),
+                worker_ids=connected,
+            )
             if len(connected) != self.expected_workers:
                 raise MissingWorkersError(
                     f"cannot freeze checkpoint worker membership: expected {self.expected_workers}, "
@@ -801,6 +913,12 @@ class AdmissionCoordinator:
                 record.membership_digest = None
                 record.proof_error = None
             await self._broadcast_locked()
+            _checkpoint_telemetry(
+                "coordinator_pause_broadcast_completed",
+                checkpoint_id=checkpoint_id,
+                expected_workers=self.expected_workers,
+                sequence=self._seq,
+            )
 
     async def resume_admission(self) -> str | None:
         async with self._broadcast_lock:
@@ -936,10 +1054,30 @@ class AdmissionCoordinator:
 
         worker_proofs: list[GenerationCutWorkerProof] = []
         generation_cut_tickets: list[GenerationCutFrozenTicket] = []
+        generation_cut_receipts: list[GenerationCutReceipt] = []
         checkpoint_exclusions = set(local_exclusions)
         for (worker_id, _), rows in zip(references, loaded, strict=True):
             ticket_rows = [row for row in rows if row.record_type == "ticket"]
             tickets = [row.frozen_ticket() for row in ticket_rows]
+            receipt_rows = [row for row in rows if row.record_type == "receipt"]
+            if len(receipt_rows) > 1:
+                raise ValueError(f"worker {worker_id!r} checkpoint journal contains multiple receipts")
+            receipt = receipt_rows[0].generation_cut_receipt if receipt_rows else None
+            cut_ticket_ids = {row.ticket_id for row in ticket_rows if row.cut_recorded}
+            receipt_ticket_ids = {prefix.ticket_id for prefix in receipt.prefixes} if receipt is not None else set()
+            if cut_ticket_ids != receipt_ticket_ids:
+                raise ValueError(f"worker {worker_id!r} checkpoint journal receipt differs from its cut tickets")
+            # Build once with the receipt so the contract validates every cut
+            # identity against frozen membership. The persisted coordinator
+            # proof remains compact; canonical cut rows live in model lineage.
+            GenerationCutWorkerProof.build(
+                checkpoint_id=checkpoint_id,
+                coordinator_sequence=sequence,
+                worker_id=worker_id,
+                frozen_tickets=tickets,
+                ready_ticket_ids=[ticket.ticket_id for ticket in tickets],
+                generation_cut_receipt=receipt,
+            )
             proof = GenerationCutWorkerProof.build(
                 checkpoint_id=checkpoint_id,
                 coordinator_sequence=sequence,
@@ -955,6 +1093,8 @@ class AdmissionCoordinator:
                 raise ValueError("worker generation-cut count changed after artifact validation")
             worker_proofs.append(proof)
             generation_cut_tickets.extend(row.frozen_ticket() for row in ticket_rows if row.cut_recorded)
+            if receipt is not None:
+                generation_cut_receipts.append(receipt)
             checkpoint_exclusions.update(
                 (row.rollout_id, row.attempt_index)
                 for row in rows
@@ -970,6 +1110,7 @@ class AdmissionCoordinator:
         return CoordinatorCheckpointEvidence(
             generation_cut_proof=proof,
             generation_cut_tickets=tuple(sorted(generation_cut_tickets, key=lambda item: item.ticket_id)),
+            generation_cut_receipts=tuple(sorted(generation_cut_receipts, key=lambda item: item.cut_id)),
             checkpoint_exclusions=frozenset(checkpoint_exclusions),
         )
 
@@ -1309,8 +1450,9 @@ class WorkerAdmissionAgent:
         if message_sequence < self._coordinator_sequence:
             return
         state = AdmissionState(message["state"])
+        checkpoint_id = message.get("checkpoint_id")
         self._coordinator_sequence = message_sequence
-        self._checkpoint_id = message.get("checkpoint_id")
+        self._checkpoint_id = checkpoint_id
         self._restored_cuts_available = bool(message.get("restored_cuts_available", False))
         if state == AdmissionState.ACCEPTING:
             self.limiter.resume()
@@ -1321,7 +1463,6 @@ class WorkerAdmissionAgent:
                 self._checkpoint_artifact_fingerprint = None
                 self._checkpoint_artifact_reference = None
         else:
-            checkpoint_id = message.get("checkpoint_id")
             self.limiter.close(checkpoint_id)
         raw_fence_index = message.get("attempt_fence_index")
         if raw_fence_index is not None:
@@ -1339,13 +1480,79 @@ class WorkerAdmissionAgent:
             cut_timeout_s = 10.0 if requested_cut_timeout_s is None else max(float(requested_cut_timeout_s), 0.0)
             if self.cut_timeout_s is not None:
                 cut_timeout_s = min(cut_timeout_s, self.cut_timeout_s)
-            await self.limiter.prepare_generation_cut(
+            counts_before = self.limiter.counts()
+            inventory = self.limiter.generation_cut_inventory(
                 checkpoint_id,
                 server_name=self.server_name,
-                timeout_s=cut_timeout_s,
+            )
+            frozen_ticket_count = len(
+                self.limiter.generation_cut_worker_proof(
+                    checkpoint_id,
+                    coordinator_sequence=message_sequence,
+                    worker_id=self.worker_id,
+                ).frozen_tickets
+            )
+            _checkpoint_telemetry(
+                "worker_generation_cut_started",
+                checkpoint_id=checkpoint_id,
+                server_name=self.server_name,
+                worker_id=self.worker_id,
+                worker_pid=self.pid,
+                sequence=message_sequence,
+                frozen_ticket_count=frozen_ticket_count,
+                active_prefix_count=len(inventory.active_prefixes),
+                inflight=counts_before["inflight_total"],
+                generation_pending=counts_before["generation_pending_total"],
+                timeout_seconds=cut_timeout_s,
+            )
+            cut_started = time.monotonic()
+            try:
+                cut_ready = await self.limiter.prepare_generation_cut(
+                    checkpoint_id,
+                    server_name=self.server_name,
+                    timeout_s=cut_timeout_s,
+                )
+            except BaseException as error:
+                _checkpoint_telemetry(
+                    "worker_generation_cut_failed",
+                    checkpoint_id=checkpoint_id,
+                    server_name=self.server_name,
+                    worker_id=self.worker_id,
+                    worker_pid=self.pid,
+                    sequence=message_sequence,
+                    duration_seconds=time.monotonic() - cut_started,
+                    error_type=type(error).__name__,
+                    error=str(error),
+                )
+                raise
+            counts_after = self.limiter.counts()
+            _checkpoint_telemetry(
+                "worker_generation_cut_completed",
+                checkpoint_id=checkpoint_id,
+                server_name=self.server_name,
+                worker_id=self.worker_id,
+                worker_pid=self.pid,
+                sequence=message_sequence,
+                ready=cut_ready,
+                duration_seconds=time.monotonic() - cut_started,
+                inflight=counts_after["inflight_total"],
+                generation_pending=counts_after["generation_pending_total"],
             )
         assert self._writer is not None
+        artifact_started = time.monotonic()
         artifact_payload = await self._generation_cut_artifact_status_payload()
+        _checkpoint_telemetry(
+            "worker_cut_artifact_completed",
+            checkpoint_id=checkpoint_id,
+            server_name=self.server_name,
+            worker_id=self.worker_id,
+            worker_pid=self.pid,
+            sequence=message_sequence,
+            duration_seconds=time.monotonic() - artifact_started,
+            cut_records=artifact_payload.get("generation_cut_records", 0),
+            artifact_revision=artifact_payload.get("generation_cut_artifact_revision", 0),
+            error=artifact_payload.get("generation_cut_error"),
+        )
         payload = {
             "type": "ack",
             "seq": message_sequence,
@@ -1353,7 +1560,18 @@ class WorkerAdmissionAgent:
             "generation_pending": self.limiter.counts()["generation_pending_total"],
             **artifact_payload,
         }
+        ack_started = time.monotonic()
         await self._write(payload)
+        _checkpoint_telemetry(
+            "worker_state_ack_sent",
+            checkpoint_id=checkpoint_id,
+            server_name=self.server_name,
+            worker_id=self.worker_id,
+            worker_pid=self.pid,
+            sequence=message_sequence,
+            duration_seconds=time.monotonic() - ack_started,
+            state=state.value,
+        )
 
     def _on_limiter_change(self) -> None:
         writer = self._writer
@@ -1423,19 +1641,10 @@ class WorkerAdmissionAgent:
                 worker_id=self.worker_id,
             )
             receipt = proof.generation_cut_receipt
-            if receipt is not None:
-                if not isinstance(self.capture_ledger, GenerationCutCaptureLedger):
-                    raise RuntimeError(
-                        "multi-worker generation cuts require a process-shared capture ledger "
-                        "that can persist and reload generation-cut lineage"
-                    )
-                # The lineage append is the durability boundary.  Never
-                # advertise the compact index until the full cut is visible
-                # to every policy worker and the coordinator.
-                await self.capture_ledger.record_generation_cut(receipt)
             cut_ticket_ids = {prefix.ticket_id for prefix in receipt.prefixes} if receipt is not None else set()
             records = tuple(
-                [
+                ([_WorkerCheckpointIndexRecord.from_receipt(receipt)] if receipt is not None else [])
+                + [
                     _WorkerCheckpointIndexRecord.from_ticket(
                         ticket,
                         cut_recorded=ticket.ticket_id in cut_ticket_ids,
@@ -1644,15 +1853,37 @@ def build_coordinator_control_app(
         deadline = Deadline(deadline_ts=body.deadline_ts)
 
         async def run() -> dict[str, Any]:
-            await coordinator.close_admission(
-                body.checkpoint_id,
-                cut_timeout_s=deadline.remaining(),
-            )
             try:
+                await coordinator.close_admission(
+                    body.checkpoint_id,
+                    cut_timeout_s=deadline.remaining(),
+                )
                 status = await _await_worker_acks(min(ack_timeout_s, max(deadline.remaining(), 0.001)))
-            except BaseException:
+            except BaseException as error:
+                status = coordinator.status()
+                _checkpoint_telemetry(
+                    "coordinator_pause_failed",
+                    checkpoint_id=body.checkpoint_id,
+                    error_type=type(error).__name__,
+                    error=str(error),
+                    state=status["state"],
+                    workers=status["workers"],
+                    missing_workers=status["missing_workers"],
+                    inflight_total=status["inflight_total"],
+                    generation_pending_total=status["generation_pending_total"],
+                    per_worker=status["per_worker"],
+                )
                 await coordinator.resume_admission()
                 raise
+            _checkpoint_telemetry(
+                "coordinator_pause_completed",
+                checkpoint_id=body.checkpoint_id,
+                state=status["state"],
+                workers=status["workers"],
+                inflight_total=status["inflight_total"],
+                generation_pending_total=status["generation_pending_total"],
+                per_worker=status["per_worker"],
+            )
             return {
                 "state": status["state"],
                 "workers": {

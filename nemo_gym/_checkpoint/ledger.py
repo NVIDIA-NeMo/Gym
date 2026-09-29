@@ -45,6 +45,7 @@ import os
 import shutil
 import tarfile
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Protocol, runtime_checkable
 
@@ -267,12 +268,84 @@ def _parse_lineage_payload(source_name: str, payload: bytes) -> list[dict[str, A
     return records
 
 
+@dataclass(frozen=True)
+class _LineageArchiveSource:
+    """One canonical per-capture-key payload ready for archive packaging."""
+
+    capture_key: str
+    root: AgentContinuationRoot | None
+    member_name: str
+    path: Path | None
+    cut_rows: tuple[GenerationCutLineageRecord, ...] = ()
+
+    def estimated_bytes(self) -> int:
+        """Return an upper bound used for deterministic archive partitioning."""
+        base_bytes = self.path.stat().st_size if self.path is not None else 0
+        cut_bytes = sum(
+            len(json.dumps(row.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()) + 1
+            for row in self.cut_rows
+        )
+        return base_bytes + cut_bytes + (1 if base_bytes and cut_bytes else 0)
+
+
+@dataclass(frozen=True)
+class _LineageRestoreArchiveSet:
+    """One model participant's immutable archive inventory during restore."""
+
+    server_name: str | None
+    ledger_dir: Path
+    references: list[_LineageArchiveReference]
+    members_by_archive: dict[str, list[_LineageArchiveMember]]
+
+
+def _merge_generation_cut_rows(
+    capture_key: str,
+    base_payload: bytes,
+    cut_rows: list[GenerationCutLineageRecord],
+) -> bytes:
+    """Merge worker-journal cuts without mutating the live lineage store."""
+    records = _parse_lineage_payload(f"{capture_key}{_LEDGER_SUFFIX}", base_payload)
+    cuts_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    for record in records:
+        if record.get("event") != "generation_cut":
+            continue
+        identity = (str(record.get("checkpoint_id", "")), str(record.get("ticket_id", "")))
+        existing = cuts_by_identity.get(identity)
+        if existing is not None and existing != record:
+            raise LedgerMismatchError(
+                f"lineage for {capture_key!r} contains conflicting generation-cut rows for ticket {identity[1]!r}"
+            )
+        cuts_by_identity[identity] = record
+
+    appended: list[bytes] = []
+    for cut in sorted(cut_rows, key=lambda item: item.ticket_id):
+        if cut.capture_key != capture_key:
+            raise LedgerMismatchError(
+                "worker generation-cut journal row is stored under the wrong capture key: "
+                f"expected={capture_key!r}, actual={cut.capture_key!r}"
+            )
+        payload = cut.model_dump(mode="json")
+        identity = (cut.checkpoint_id, cut.ticket_id)
+        existing = cuts_by_identity.get(identity)
+        if existing is not None:
+            if existing != payload:
+                raise LedgerMismatchError(f"conflicting generation-cut journal row for ticket {cut.ticket_id!r}")
+            continue
+        cuts_by_identity[identity] = payload
+        appended.append(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+
+    if not appended:
+        return base_payload
+    separator = b"" if not base_payload or base_payload.endswith(b"\n") else b"\n"
+    return base_payload + separator + b"".join(appended)
+
+
 def _write_lineage_archive(
     ledger_dir: Path,
     *,
     checkpoint_id: str,
     archive_index: int,
-    members: list[tuple[str, AgentContinuationRoot | None, Path]],
+    members: list[_LineageArchiveSource],
 ) -> tuple[
     _LineageArchiveReference,
     list[_LineageArchiveMember],
@@ -287,18 +360,27 @@ def _write_lineage_archive(
         temporary = Path(handle.name)
         try:
             with tarfile.open(fileobj=handle, mode="w") as archive:
-                for capture_key, root, source in members:
-                    payload = source.read_bytes()
-                    records = _parse_lineage_payload(source.name, payload)
+                for source in members:
+                    base_payload = source.path.read_bytes() if source.path is not None else b""
+                    payload = _merge_generation_cut_rows(
+                        source.capture_key,
+                        base_payload,
+                        list(source.cut_rows),
+                    )
+                    if not payload:
+                        raise LedgerMismatchError(
+                            f"capture key {source.capture_key!r} has no checkpointable lineage rows"
+                        )
+                    records = _parse_lineage_payload(source.member_name, payload)
                     for reference in _external_references_for_rows(
-                        capture_key,
+                        source.capture_key,
                         records,
-                        root.last_committed_model_call_id if root is not None else None,
+                        source.root.last_committed_model_call_id if source.root is not None else None,
                         checkpoint_id=checkpoint_id,
                     ):
                         external_references.setdefault(reference.key, reference)
 
-                    member_name = source.name
+                    member_name = source.member_name
                     info = tarfile.TarInfo(name=member_name)
                     info.size = len(payload)
                     info.mode = 0o600
@@ -310,7 +392,7 @@ def _write_lineage_archive(
                     archive.addfile(info, io.BytesIO(payload))
                     member_references.append(
                         _LineageArchiveMember(
-                            capture_key=capture_key,
+                            capture_key=source.capture_key,
                             archive=archive_name,
                             member=member_name,
                             sha256=hashlib.sha256(payload).hexdigest(),
@@ -339,14 +421,14 @@ def _write_lineage_archive(
 
 
 def _partition_lineage_archives(
-    members: list[tuple[str, AgentContinuationRoot | None, Path]],
-) -> list[list[tuple[str, AgentContinuationRoot | None, Path]]]:
+    members: list[_LineageArchiveSource],
+) -> list[list[_LineageArchiveSource]]:
     """Partition sorted members by both file count and source payload bytes."""
-    partitions: list[list[tuple[str, AgentContinuationRoot | None, Path]]] = []
-    current: list[tuple[str, AgentContinuationRoot | None, Path]] = []
+    partitions: list[list[_LineageArchiveSource]] = []
+    current: list[_LineageArchiveSource] = []
     current_bytes = 0
     for member in members:
-        member_bytes = member[2].stat().st_size
+        member_bytes = member.estimated_bytes()
         if current and (
             len(current) >= _LEDGER_ARCHIVE_MAX_MEMBERS
             or current_bytes + member_bytes > _LEDGER_ARCHIVE_MAX_PAYLOAD_BYTES
@@ -367,6 +449,60 @@ def _fsync_dir(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _link_or_copy_restore_entry(source: str | Path, target: str | Path) -> str:
+    """Preserve non-lineage live-store state while replacing its namespace."""
+    source = Path(source)
+    target = Path(target)
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
+    return str(target)
+
+
+def _clone_non_lineage_namespace(source: Path, destination: Path) -> None:
+    """Clone files not owned by the capture-ledger checkpoint participant."""
+    if not source.exists():
+        return
+    for entry in source.iterdir():
+        if entry.name.endswith(_LEDGER_SUFFIX):
+            continue
+        target = destination / entry.name
+        if entry.is_symlink():
+            target.symlink_to(os.readlink(entry))
+        elif entry.is_dir():
+            shutil.copytree(
+                entry,
+                target,
+                copy_function=_link_or_copy_restore_entry,
+                symlinks=True,
+            )
+        elif entry.is_file():
+            _link_or_copy_restore_entry(entry, target)
+        else:
+            raise LedgerMismatchError(f"capture-ledger namespace contains unsupported entry {entry.name!r}")
+
+
+def _publish_restore_directory(staging: Path, target: Path) -> None:
+    """Publish a completely built restore directory with crash-retry safety."""
+    parent = target.parent
+    previous = staging.with_name(f"{staging.name}.previous")
+    moved_previous = False
+    if target.exists():
+        os.replace(target, previous)
+        moved_previous = True
+    try:
+        os.replace(staging, target)
+    except BaseException:
+        if moved_previous and previous.exists() and not target.exists():
+            os.replace(previous, target)
+        raise
+    _fsync_dir(parent)
+    if moved_previous:
+        shutil.rmtree(previous, ignore_errors=True)
+        _fsync_dir(parent)
 
 
 def _validate_ledger_schema(
@@ -612,6 +748,31 @@ def _validate_lineage_archives(
         manifest,
     )
 
+    _stream_lineage_archives(
+        ledger_dir,
+        archive_references,
+        members_by_archive,
+    )
+    return archive_references, members
+
+
+def _stream_lineage_archives(
+    ledger_dir: Path,
+    archive_references: list[_LineageArchiveReference],
+    members_by_archive: dict[str, list[_LineageArchiveMember]],
+    *,
+    destination: Path | None = None,
+    collect_rows: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
+    """Validate archives, optionally materializing members in one pass.
+
+    ``destination`` must be a private restore directory. Files are closed but
+    deliberately not fsynced individually: the committed checkpoint remains
+    the durable source, and an interrupted restore can rebuild this disposable
+    namespace. Publishing happens only after every archive validates.
+    """
+    rows_by_capture_key: dict[str, list[dict[str, Any]]] = {}
+
     for reference in archive_references:
         path = ledger_dir / reference.name
         if not path.is_file():
@@ -648,9 +809,22 @@ def _validate_lineage_archives(
                         raise LedgerMismatchError(
                             f"lineage archive member {reference.name!r}/{info.name!r} row count is corrupted"
                         )
+                    if destination is not None:
+                        target = destination / member.member
+                        if not target.exists():
+                            with target.open("xb") as handle:
+                                handle.write(payload)
+                    if collect_rows:
+                        previous = rows_by_capture_key.get(member.capture_key)
+                        if previous is not None and previous != records:
+                            raise LedgerMismatchError(
+                                "model-ledger participants contain conflicting lineage for the same rollout: "
+                                f"member={member.member!r}"
+                            )
+                        rows_by_capture_key[member.capture_key] = records
         except (OSError, tarfile.TarError) as error:
             raise LedgerMismatchError(f"lineage archive {reference.name!r} cannot be read") from error
-    return archive_references, members
+    return rows_by_capture_key
 
 
 def _validate_lineage_archive_inventory(
@@ -732,6 +906,42 @@ def _checkpoint_lineage_union(checkpoint_root: Path, checkpoint_id: object) -> d
     return expected
 
 
+def _namespaced_v3_restore_archive_sets(
+    checkpoint_root: Path,
+    checkpoint_id: object,
+) -> list[_LineageRestoreArchiveSet] | None:
+    """Load every namespaced v3+ archive set, or decline mixed legacy input."""
+    model_ledger_root = checkpoint_root / MODEL_LEDGER_SUBDIR
+    archive_sets: list[_LineageRestoreArchiveSet] = []
+    for participant_dir in sorted(path for path in model_ledger_root.iterdir() if path.is_dir()):
+        manifest_path = participant_dir / LEDGER_MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text())
+        _validate_ledger_schema(manifest, participant_dir)
+        if manifest.get("server_name") != participant_dir.name:
+            raise LedgerMismatchError(
+                f"model-ledger participant directory {participant_dir.name!r} does not match its manifest"
+            )
+        if manifest.get("checkpoint_id") != checkpoint_id:
+            raise LedgerMismatchError(
+                f"model-ledger participant {participant_dir.name!r} belongs to a different checkpoint transaction"
+            )
+        if int(manifest["schema_version"]) < 3:
+            return None
+        references, _members, members_by_archive = _validate_lineage_archive_inventory(
+            checkpoint_root,
+            manifest,
+        )
+        archive_sets.append(
+            _LineageRestoreArchiveSet(
+                server_name=participant_dir.name,
+                ledger_dir=participant_dir,
+                references=references,
+                members_by_archive=members_by_archive,
+            )
+        )
+    return archive_sets
+
+
 def _write_payload_fsynced(payload: bytes, target: Path) -> None:
     with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".ledger-", delete=False) as handle:
         temporary = Path(handle.name)
@@ -809,16 +1019,21 @@ class CaptureLedgerCheckpointer:
             raise LedgerMismatchError(
                 f"continuation roots refer to retired model attempts: capture_keys={fenced_roots!r}"
             )
-        cut_capture_keys = {
-            capture_key_for(prefix.rollout_id, prefix.attempt_index)
-            for receipt in generation_cut_receipts
-            for prefix in receipt.prefixes
-        } - fenced
+        cut_rows_by_capture_key: dict[str, list[GenerationCutLineageRecord]] = {}
+        for receipt in generation_cut_receipts:
+            for cut in generation_cut_lineage_records(receipt):
+                if cut.capture_key in fenced:
+                    continue
+                cut_rows_by_capture_key.setdefault(cut.capture_key, []).append(cut)
+        cut_capture_keys = set(cut_rows_by_capture_key)
         archived_capture_keys = set(normalized_roots) | cut_capture_keys
-        sources = {
+        paths = {
             capture_key: self.store_root / f"{capture_key}{_LEDGER_SUFFIX}" for capture_key in archived_capture_keys
         }
-        missing_roots = sorted(capture_key for capture_key, source in sources.items() if not source.is_file())
+        # A cut-only first call legitimately has no ordinary lineage file.
+        # Continuation roots, however, must always resolve to committed
+        # terminal lineage before checkpoint packaging.
+        missing_roots = sorted(capture_key for capture_key in normalized_roots if not paths[capture_key].is_file())
         if missing_roots:
             raise LedgerMismatchError(f"continuation roots have no model lineage: capture_keys={missing_roots!r}")
 
@@ -828,10 +1043,18 @@ class CaptureLedgerCheckpointer:
         archive_references: list[_LineageArchiveReference] = []
         lineage_members: list[_LineageArchiveMember] = []
         external_references: dict[str, ExternalStorageReference] = {}
-        ordered_sources = [
-            (capture_key, normalized_roots.get(capture_key), sources[capture_key])
-            for capture_key in sorted(archived_capture_keys)
-        ]
+        ordered_sources: list[_LineageArchiveSource] = []
+        for capture_key in sorted(archived_capture_keys):
+            path = paths[capture_key]
+            ordered_sources.append(
+                _LineageArchiveSource(
+                    capture_key=capture_key,
+                    root=normalized_roots.get(capture_key),
+                    member_name=f"{capture_key}{_LEDGER_SUFFIX}",
+                    path=path if path.is_file() else None,
+                    cut_rows=tuple(cut_rows_by_capture_key.get(capture_key, [])),
+                )
+            )
         for archive_index, archive_sources in enumerate(_partition_lineage_archives(ordered_sources)):
             archive_reference, archive_members, archive_external_references = _write_lineage_archive(
                 ledger_dir,
@@ -978,10 +1201,14 @@ class CaptureLedgerCheckpointer:
         storage_reference_index = _validate_storage_reference_index(checkpoint_dir, manifest)
 
         if schema_version >= 3:
-            archive_references, archive_members = _validate_lineage_archives(checkpoint_dir, ledger_dir, manifest)
+            archive_references, archive_members, members_by_archive = _validate_lineage_archive_inventory(
+                checkpoint_dir,
+                manifest,
+            )
         else:
             archive_references = []
             archive_members = []
+            members_by_archive = {}
         if self.server_name is None:
             expected = {member.member: (member.sha256, member.bytes, member.rows) for member in archive_members}
             if schema_version < 3:
@@ -1005,7 +1232,11 @@ class CaptureLedgerCheckpointer:
                 f"live capture-ledger files do not match the checkpoint union: members={corrupted}"
             )
 
-        # Validate the complete source before changing the live namespace.
+        rows_by_capture_key: dict[str, list[dict[str, Any]]] = {}
+
+        # Legacy checkpoints retain their per-file durable copy. New archive
+        # checkpoints are reconstructed in a private sibling directory and
+        # published only after the complete checkpoint union validates.
         validated: list[tuple[Path, str]] = []
         if schema_version < 3:
             for rollout_id, meta in manifest["rollouts"].items():
@@ -1017,38 +1248,88 @@ class CaptureLedgerCheckpointer:
                             f"its committed digest; refusing to install a corrupted ledger"
                         )
                     validated.append((source, name))
-        self.store_root.mkdir(parents=True, exist_ok=True)
         if schema_version >= 3:
-            members_by_archive: dict[str, list[_LineageArchiveMember]] = {}
-            for member in archive_members:
-                members_by_archive.setdefault(member.archive, []).append(member)
-            for reference in archive_references:
-                with tarfile.open(ledger_dir / reference.name, mode="r:") as archive:
-                    for member in members_by_archive[reference.name]:
-                        extracted = archive.extractfile(member.member)
-                        if extracted is None:  # Already validated; guard against an in-place source mutation.
-                            raise LedgerMismatchError(
-                                f"lineage archive member {reference.name!r}/{member.member!r} disappeared"
+            current_archive_set = _LineageRestoreArchiveSet(
+                server_name=self.server_name,
+                ledger_dir=ledger_dir,
+                references=archive_references,
+                members_by_archive=members_by_archive,
+            )
+            namespace_complete = self.store_root.is_dir() and set(existing) == set(expected)
+            if namespace_complete:
+                rows_by_capture_key = _stream_lineage_archives(
+                    current_archive_set.ledger_dir,
+                    current_archive_set.references,
+                    current_archive_set.members_by_archive,
+                    collect_rows=self.server_name is not None,
+                )
+            else:
+                archive_sets = (
+                    [current_archive_set]
+                    if self.server_name is None
+                    else _namespaced_v3_restore_archive_sets(
+                        checkpoint_dir,
+                        manifest.get("checkpoint_id"),
+                    )
+                )
+                if archive_sets is None:
+                    # A mixed legacy/namespaced checkpoint cannot be installed
+                    # as one directory because the legacy participant has no
+                    # archive inventory. Keep retries safe by installing only
+                    # complete, validated files for this participant.
+                    self.store_root.mkdir(parents=True, exist_ok=True)
+                    rows_by_capture_key = _stream_lineage_archives(
+                        current_archive_set.ledger_dir,
+                        current_archive_set.references,
+                        current_archive_set.members_by_archive,
+                        destination=self.store_root,
+                        collect_rows=True,
+                    )
+                    _fsync_dir(self.store_root)
+                else:
+                    self.store_root.parent.mkdir(parents=True, exist_ok=True)
+                    staging = Path(
+                        tempfile.mkdtemp(
+                            dir=self.store_root.parent,
+                            prefix=f".{self.store_root.name}.restore-",
+                        )
+                    )
+                    try:
+                        _clone_non_lineage_namespace(self.store_root, staging)
+                        for archive_set in archive_sets:
+                            participant_rows = _stream_lineage_archives(
+                                archive_set.ledger_dir,
+                                archive_set.references,
+                                archive_set.members_by_archive,
+                                destination=staging,
+                                collect_rows=archive_set.server_name == self.server_name,
                             )
-                        _write_payload_fsynced(extracted.read(), self.store_root / member.member)
+                            if archive_set.server_name == self.server_name:
+                                rows_by_capture_key = participant_rows
+                        staged = {path.name for path in staging.glob(f"*{_LEDGER_SUFFIX}")}
+                        if staged != set(expected):
+                            raise LedgerMismatchError(
+                                "restored capture-ledger namespace does not match the checkpoint union: "
+                                f"missing={sorted(set(expected) - staged)!r}, "
+                                f"unexpected={sorted(staged - set(expected))!r}"
+                            )
+                        _fsync_dir(staging)
+                        _publish_restore_directory(staging, self.store_root)
+                    finally:
+                        if staging.exists():
+                            shutil.rmtree(staging, ignore_errors=True)
             rollout_count = len(archive_members)
             total_rows = sum(member.rows for member in archive_members)
         else:
+            self.store_root.mkdir(parents=True, exist_ok=True)
             for source, name in validated:
                 _copy_fsynced(source, self.store_root / name)
             rollout_count = len(manifest["rollouts"])
             total_rows = sum(int(meta.get("rows", 0)) for meta in manifest["rollouts"].values())
-        _fsync_dir(self.store_root)
+            _fsync_dir(self.store_root)
 
         restored_cut_receipts: tuple[GenerationCutReceipt, ...] = ()
         if self.server_name is not None and isinstance(manifest.get("checkpoint_id"), str):
-            rows_by_capture_key = {
-                member.capture_key: _parse_lineage_payload(
-                    member.member,
-                    (self.store_root / member.member).read_bytes(),
-                )
-                for member in archive_members
-            }
             restored_cut_receipts = generation_cut_receipts_from_lineage(
                 rows_by_capture_key,
                 checkpoint_id=manifest["checkpoint_id"],
@@ -1450,34 +1731,35 @@ class PolicyModelCheckpointCoordinatorService:
     ) -> tuple[GenerationCutReceipt, ...]:
         tickets = evidence.generation_cut_tickets
         if not tickets:
+            if evidence.generation_cut_receipts:
+                raise LedgerMismatchError("worker cut journals contain receipts without cut tickets")
             return ()
-        if not isinstance(ledger, GenerationCutCaptureLedger):
-            raise LedgerNotCheckpointableError(
-                "multi-worker generation cuts require a capture ledger that can reload cut lineage"
-            )
+        # ``ledger`` remains in the signature for compatibility with custom
+        # coordinator services. Multi-worker prepare now persists complete
+        # receipts in each worker's immutable journal instead of performing
+        # one fsynced lineage append per cut.
+        del ledger
         expected_by_ticket = {}
-        capture_keys = set()
         for ticket in tickets:
             if ticket.rollout_id is None or ticket.attempt_index is None or ticket.model_call_id is None:
-                raise LedgerMismatchError("compact generation-cut index contains an uncorrelated cut ticket")
+                raise LedgerMismatchError("generation-cut worker journal contains an uncorrelated cut ticket")
             if ticket.ticket_id in expected_by_ticket:
-                raise LedgerMismatchError(f"compact generation-cut index repeats ticket {ticket.ticket_id!r}")
+                raise LedgerMismatchError(f"generation-cut worker journals repeat ticket {ticket.ticket_id!r}")
             expected_by_ticket[ticket.ticket_id] = ticket
-            capture_keys.add(capture_key_for(ticket.rollout_id, ticket.attempt_index))
-        receipts = await ledger.load_generation_cut_receipts(
-            tuple(sorted(capture_keys)),
-            checkpoint_id=evidence.generation_cut_proof.checkpoint_id,
-            server_name=self.server_name,
-        )
+        receipts = evidence.generation_cut_receipts
         actual_by_ticket = {}
         for receipt in receipts:
+            if receipt.checkpoint_id != evidence.generation_cut_proof.checkpoint_id:
+                raise LedgerMismatchError("generation-cut worker journal belongs to a different checkpoint")
+            if receipt.inventory.server_name != self.server_name:
+                raise LedgerMismatchError("generation-cut worker journal belongs to a different model server")
             for prefix in receipt.prefixes:
                 if prefix.ticket_id in actual_by_ticket:
-                    raise LedgerMismatchError(f"generation-cut lineage repeats ticket {prefix.ticket_id!r}")
+                    raise LedgerMismatchError(f"generation-cut worker journals repeat ticket {prefix.ticket_id!r}")
                 actual_by_ticket[prefix.ticket_id] = prefix
         if set(actual_by_ticket) != set(expected_by_ticket):
             raise LedgerMismatchError(
-                "generation-cut lineage does not match the compact worker indexes: "
+                "generation-cut worker receipts do not match their ticket indexes: "
                 f"expected={sorted(expected_by_ticket)!r}, actual={sorted(actual_by_ticket)!r}"
             )
         for ticket_id, ticket in expected_by_ticket.items():
@@ -1487,7 +1769,7 @@ class PolicyModelCheckpointCoordinatorService:
                 or prefix.attempt_index != ticket.attempt_index
                 or prefix.model_call_id != ticket.model_call_id
             ):
-                raise LedgerMismatchError(f"generation-cut lineage identity differs for ticket {ticket_id!r}")
+                raise LedgerMismatchError(f"generation-cut worker receipt identity differs for ticket {ticket_id!r}")
         return receipts
 
     async def _commit(self, body: ModelCheckpointCommitRequest) -> dict[str, Any]:

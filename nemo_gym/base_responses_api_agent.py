@@ -30,6 +30,7 @@ from nemo_gym._checkpoint.agent import (
     AGENT_COMPLETION_RECEIPT_HEADER,
     AGENT_EXECUTION_GENERATION_HEADER,
     COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE,
+    COMPLETED_RESULT_BULK_ACKNOWLEDGEMENT_FEATURE,
     COMPLETION_RECEIPT_IN_RUN_RESPONSE_FEATURE,
     DISCARD_RESTORED_CONTINUATION_FEATURE,
     AgentBoundaryRecord,
@@ -315,6 +316,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             capabilities.concurrency_contract = "serialized_per_session"
             capabilities.features = [
                 COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE,
+                COMPLETED_RESULT_BULK_ACKNOWLEDGEMENT_FEATURE,
                 COMPLETION_RECEIPT_IN_RUN_RESPONSE_FEATURE,
             ]
             if self.checkpoint_continuation_supported:

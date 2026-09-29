@@ -33,6 +33,11 @@ from pydantic import ValidationError
 
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
+from nemo_gym._checkpoint.agent import (
+    AGENT_COMPLETION_RECEIPT_HEADER,
+    AgentAcknowledgeRequest,
+    encode_agent_completion_receipt,
+)
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
@@ -1207,6 +1212,7 @@ class TestRolloutCollection:
         row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
         response = MagicMock()
         response.status = 200
+        response.headers = {}
 
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
@@ -1230,6 +1236,7 @@ class TestRolloutCollection:
         row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
         response = MagicMock()
         response.status = 200
+        response.headers = {}
 
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
@@ -1250,12 +1257,6 @@ class TestRolloutCollection:
     async def test_run_examples_with_metadata_carries_completion_receipt(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from nemo_gym._checkpoint import (
-            AGENT_COMPLETION_RECEIPT_HEADER,
-            AgentAcknowledgeRequest,
-            encode_agent_completion_receipt,
-        )
-
         row = {
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
             TASK_INDEX_KEY_NAME: 0,
@@ -3832,6 +3833,7 @@ class TestFanOut:
             posted.append(server_name)
             response = MagicMock()
             response.ok = True
+            response.headers = {}
             response.read = AsyncMock(return_value=b"{}")
             return response
 
