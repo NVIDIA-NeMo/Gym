@@ -42,6 +42,11 @@ VERSIONS = {
         "mathlib_commit": "c44e0c8ee63ca166450922a373c7409c5d26b00b",  # pragma: allowlist secret
         "lean_sha256": "6fe3ce97a58f44e2b3567d455b994eacec5bfe9ae7774f2a573444480ba813fe",  # pragma: allowlist secret
     },
+    "v4.33.1": {
+        "lean_version": "v4.33.1",
+        "mathlib_commit": "0df444a360eaa60ab8c11dca51a86af692955474",  # pragma: allowlist secret
+        "lean_sha256": "890afd185370f85666025b883914ab4f4b339136f8c96167b69cfb62aecaf235",  # pragma: allowlist secret
+    },
 }
 
 

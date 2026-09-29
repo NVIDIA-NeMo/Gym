@@ -1,0 +1,68 @@
+# Formal Conjectures: fill one `sorry` in a Lean 4 file, verified by Lean itself.
+#
+# Verification runs through `nemo_gym.sandbox`, so no service has to be started out of band.
+# The image carries Mathlib v4.33.1, which is the toolchain Formal Conjectures pins; on another
+# Mathlib the tasks fail with ordinary-looking compile errors and the run reports a plausible,
+# meaningless number. The server probes the sandbox once on the first verify and logs an ERROR
+# if it disagrees.
+formal_conjectures_resources_server:
+  resources_servers:
+    formal_conjectures:
+      entrypoint: app.py
+      # `sandbox` is the instance name every shipped provider config binds, so the provider
+      # is chosen by which config is on +config_paths.
+      sandbox_provider: sandbox
+      sandbox_config:
+        # Built by resources_servers/lean_proof/lean_image (./build.sh v4.33.1). Pin a digest
+        # rather than a tag: FC's statements need Mathlib v4.33.1 exactly, and another Mathlib
+        # fails tasks silently instead of failing the run.
+        image: ${oc.env:FORMAL_CONJECTURES_SANDBOX_IMAGE,gym-lean:v4.33.1}
+        # One sandbox serves a whole run; with no server shutdown hook this is what reclaims
+        # it if the server dies.
+        ttl_s: 86400
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 16384
+          disk_gib: 30
+        provider_options:
+          # Scheduling reservations, well under the burst limits above: every verify imports
+          # Mathlib, so these are not minimal, but reserving the limits would occupy the
+          # capacity of ~30 ordinary sandboxes.
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        # `lake` sizes its worker pool from the host core count on clusters without LXCFS.
+        derive_cpu_env: true
+        metadata:
+          benchmark: formal_conjectures
+      compilation_timeout: 300.0
+      expected_lean_version: 4.33.1
+      # num_workers must stay unset: >1 launches uvicorn by import string, which needs a
+      # module-level `app` object this server does not define.
+      domain: math
+      description: Fill a removed proof in a Formal Conjectures Lean 4 file, checked with
+        `#print axioms` against Mathlib v4.33.1
+      value: Measures Lean proof construction on library-grounded mathematics outside
+        the competition-math distribution
+      verified: false
+
+formal_conjectures_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: formal_conjectures_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      # Eval-only: these are held-out problems with no train split, so no `train` dataset is
+      # declared (cf. scicode / polymath / critpt).
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/formal_conjectures/data/example.jsonl
+        prompt_config: benchmarks/prompts/eval/formal-conjectures/default.yaml
+        license: Apache 2.0

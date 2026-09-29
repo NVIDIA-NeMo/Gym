@@ -22,12 +22,23 @@ Shared rather than copied per server because these are exactly the functions tha
 subtle bugs: comment-aware scanning, fence extraction, `<think>` stripping. Each was wrong at
 least once during development, and a fix should land in one place.
 
-``check_statement_preserved`` is for whole-file tasks, where the model returns the entire file
-and could weaken the theorem it was asked to prove. Servers that reassemble the file around a
-model-written proof body do not need it.
+Both statement checks are for whole-file tasks, where the model returns the entire file and
+could weaken the theorem it was asked to prove. Servers that reassemble the file around a
+model-written proof body do not need either.
+
+They differ in what they hold the submission to, because the two task shapes differ:
+
+* ``check_statement_preserved`` splits the *whole reference file* on ``sorry`` and requires
+  every remaining fragment back, in order. Right when the reference has exactly one hole, as
+  in LeanCat.
+* ``check_target_statement_preserved`` requires only the *target declaration's signature*
+  back. Right when the file legitimately keeps other ``sorry``s -- a Formal Conjectures file
+  pairs a provable lemma with the open conjecture it sanity-checks, so the hole is not
+  textually unique and splitting on ``sorry`` throws out honest answers.
 """
 
 import re
+from functools import lru_cache
 from typing import List, Optional, Tuple
 
 
@@ -98,6 +109,32 @@ def strip_comments_and_strings(code: str) -> str:
     return "".join(out)
 
 
+def has_unterminated_block_comment(code: str) -> bool:
+    """Does a ``/-`` block comment run to end of file without closing?
+
+    Worth asking separately from the checks below. When a model mangles a closing delimiter
+    (writing ``- /`` for ``-/``, which happened 48 times in a 12k-rollout run) the rest of the
+    file is swallowed by the comment, so ``strip_comments_and_strings`` blanks it and every
+    later check sees an empty file. Without this the server reports "statement modified",
+    blaming the model for weakening a theorem when it actually just produced malformed output.
+    """
+    i, n, depth = 0, len(code), 0
+    while i < n:
+        two = code[i : i + 2]
+        if two == "/-":
+            depth += 1
+            i += 2
+        elif two == "-/" and depth:
+            depth -= 1
+            i += 2
+        elif two == "--" and depth == 0:
+            j = code.find("\n", i)
+            i = n if j < 0 else j + 1
+        else:
+            i += 1
+    return depth > 0
+
+
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _THINK_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
 _THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
@@ -144,7 +181,11 @@ _LEAN_FILE_START_RE = re.compile(
 
 # Upstream's shortcut list. Banning the `axiom` keyword does not ban classical reasoning:
 # Mathlib's axioms are used by name, not declared.
-_BANNED_TOKEN_RE = re.compile(r"\b(sorry|admit|axiom|unsafe)\b")
+BANNED_TOKENS = ("sorry", "admit", "axiom", "unsafe")
+
+# For tasks whose file is *allowed* to keep holes elsewhere: `sorry` and `admit` are dropped,
+# and what remains is only banned as a declaration the model added, not as a bare word.
+DECLARED_SHORTCUT_TOKENS = ("axiom", "unsafe")
 
 # The placeholder upstream uses for the holes in a reference file.
 _SORRY_RE = re.compile(r"\bsorry\b")
@@ -179,10 +220,33 @@ def extract_lean_code(text: str) -> str:
     return answer.strip()
 
 
-def find_banned_declarations(code: str) -> List[str]:
-    """Return the shortcut keywords present in ``code``, ignoring comments and strings."""
+@lru_cache(maxsize=None)
+def _banned_token_re(tokens: Tuple[str, ...], declarations_only: bool) -> re.Pattern:
+    alternation = "|".join(tokens)
+    if declarations_only:
+        # A keyword opening a declaration, not the same word used anywhere. `axiom` appears in
+        # ordinary Mathlib names (`Classical.axiom_of_choice`), and a file that is allowed to
+        # keep holes must not be rejected for mentioning one.
+        return re.compile(rf"^\s*({alternation})\s", re.MULTILINE)
+    return re.compile(rf"\b({alternation})\b")
+
+
+def find_banned_declarations(
+    code: str,
+    tokens: Tuple[str, ...] = BANNED_TOKENS,
+    *,
+    declarations_only: bool = False,
+) -> List[str]:
+    """Return the shortcut keywords present in ``code``, ignoring comments and strings.
+
+    ``tokens`` and ``declarations_only`` exist because the benchmarks disagree on what counts
+    as cheating: a single-hole task bans ``sorry`` outright, while a task whose file keeps
+    other holes on purpose can only ban a *declaration* the model added. See
+    ``DECLARED_SHORTCUT_TOKENS``.
+    """
     stripped = strip_comments_and_strings(code)
-    return sorted({match.group(1) for match in _BANNED_TOKEN_RE.finditer(stripped)})
+    pattern = _banned_token_re(tuple(tokens), declarations_only)
+    return sorted({match.group(1) for match in pattern.finditer(stripped)})
 
 
 def _normalize(text: str) -> str:
@@ -227,4 +291,39 @@ def check_statement_preserved(formal_statement: str, submission: str) -> Tuple[b
             return False, f"Statement fragment missing or altered: {needle!r}"
         cursor = found + len(needle)
 
+    return True, None
+
+
+# `lemma` is notation for `theorem` in Lean 4 -- interchangeable, and neither weakens anything.
+# Comparing them verbatim rejected 53 correct submissions in a 12k-rollout Formal Conjectures
+# run, purely because the model wrote `theorem` where upstream wrote `lemma`.
+_DECL_KEYWORD_RE = re.compile(r"\blemma\b")
+
+
+def _normalize_signature(text: str) -> str:
+    """Whitespace- and keyword-normalise a declaration so cosmetic edits do not read as edits."""
+    stripped = _DECL_KEYWORD_RE.sub("theorem", strip_comments_and_strings(text))
+    return _normalize(stripped)
+
+
+def check_target_statement_preserved(target_statement: str, submission: str) -> Tuple[bool, Optional[str]]:
+    """Check the submission still contains the target declaration's signature, unaltered.
+
+    For files that legitimately keep other ``sorry``s, where
+    :func:`check_statement_preserved`'s split on ``sorry`` does not apply: it would demand the
+    surrounding open conjectures back fragment-by-fragment and reject honest answers (measured
+    on Formal Conjectures: 23 of 100).
+
+    Only the target's recorded signature has to survive. Comments, indentation and
+    ``lemma``/``theorem`` are normalised away; a changed hypothesis, binder, conclusion or name
+    is not. This exists because the whole-file format lets a model weaken the theorem and hand
+    back something that compiles, which the compiler by definition cannot catch.
+
+    Returns ``(True, None)`` or ``(False, reason)``.
+    """
+    needle = _normalize_signature(target_statement)
+    if not needle:
+        return False, "No target statement recorded for this task."
+    if needle not in _normalize_signature(submission):
+        return False, f"The target statement was altered or removed: expected {needle[:100]!r}"
     return True, None
