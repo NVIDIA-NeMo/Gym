@@ -29,6 +29,8 @@ on:
     paths:
       - 'fern/**'
       - '.github/workflows/fern-docs-preview-build.yml'
+      - '.github/workflows/fern-docs-preview-comment.yml'
+      - '.github/scripts/*fern_preview*'
 
 permissions:
   contents: read
@@ -45,11 +47,15 @@ jobs:
       - name: Save PR metadata
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           HEAD_REF: ${{ github.head_ref }}
           BASE_REF: ${{ github.base_ref }}
         run: |
           mkdir -p preview-metadata
           echo "$PR_NUMBER" > preview-metadata/pr_number
+          echo "$GITHUB_RUN_ID" > preview-metadata/run_id
+          echo "$GITHUB_RUN_ATTEMPT" > preview-metadata/run_attempt
+          echo "$HEAD_SHA" > preview-metadata/head_sha
           echo "$HEAD_REF" > preview-metadata/head_ref
           git diff --name-only "origin/${BASE_REF}...HEAD" -- '*.mdx' > preview-metadata/changed_mdx_files 2>/dev/null || true
 
