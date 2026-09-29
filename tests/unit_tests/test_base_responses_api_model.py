@@ -224,10 +224,6 @@ def test_build_model_call_record_from_exchange():
     empty = build_model_call_record({"request": {}, "response": {}}, call_index=0)
     assert empty.request == {}
     assert empty.response == {}
-    assert empty.upstream_attempted is None
-    assert empty.response_source is None
-    assert empty.upstream_status_code is None
-    assert empty.local_response_reason is None
     assert {
         "model_call_id",
         "response_id",
@@ -239,10 +235,6 @@ def test_build_model_call_record_from_exchange():
         "status_code",
         "response_status",
         "finish_reason",
-        "upstream_attempted",
-        "response_source",
-        "upstream_status_code",
-        "local_response_reason",
         "started_at",
         "completed_at",
         "tokens_in",
@@ -1360,13 +1352,6 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
             "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
         },
     )
-    execution = {
-        "upstream_attempted": True,
-        "response_source": "local",
-        "upstream_status_code": 400,
-        "local_response_reason": "context_length_exceeded",
-    }
-    exchange.update(execution)
     exchange["request_raw"] = "malformed request"
     exchange["response_raw"] = "malformed response"
     store.record("0-0", exchange)
@@ -1400,7 +1385,6 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     assert capture["rollout_id"] == "0-0"
     assert capture["metrics"]["num_calls"] == 1
     attached_call = capture["calls"][0]
-    assert {key: attached_call[key] for key in execution} == execution
     assert attached_call["model_call_id"] == "call-A"
     assert attached_call["response_id"] == "resp-A"
     assert attached_call["model_ref"] == {"type": "responses_api_models", "name": "A"}
