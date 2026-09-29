@@ -62,3 +62,19 @@ def pins(version: str) -> dict:
     if version not in VERSIONS:
         raise SystemExit(f"unknown version {version!r}; known: {' '.join(VERSIONS)}")
     return VERSIONS[version]
+
+
+def main() -> None:
+    """Print every pin as the ``--build-arg`` flags the documented build takes.
+
+    The README tells the reader to run this module to see the pins, so it has to
+    print them; printing them in the form ``docker build`` wants means the
+    command below it can be pasted rather than retyped from the dict above.
+    """
+    for version, values in VERSIONS.items():
+        flags = " \\\n    ".join(f"--build-arg {key.upper()}={value}" for key, value in values.items())
+        print(f"# {version}\n    {flags}")
+
+
+if __name__ == "__main__":
+    main()

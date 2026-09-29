@@ -42,7 +42,7 @@ If a second REPL-backed Lean benchmark is added, this belongs next to `lean_imag
 ## Build
 
 ```bash
-python resources_servers/combibench/kimina_image/versions.py  # see the pins
+python resources_servers/combibench/kimina_image/versions.py  # prints the --build-arg flags below
 docker build \
     --build-arg LEAN_VERSION=v4.24.0 \
     --build-arg LEAN_SHA256=b14f5e5159219dd1a1956c3b806813319f5e94ccd5bdfd56f54520609a5bb5ec \
@@ -61,11 +61,22 @@ score from it.
 ## Run
 
 ```bash
-docker run -d --name kimina-combibench -p 12332:8000 \
+docker run -d --name kimina-combibench \
+    -p 127.0.0.1:12332:8000 \
+    --cap-drop=ALL --security-opt=no-new-privileges \
+    --pids-limit 512 --memory 32g \
     -e LEAN_SERVER_MAX_REPLS=8 \
     kimina-lean-server:v4.24.0
 curl http://127.0.0.1:12332/health     # {"status":"ok"}
 ```
+
+The container compiles untrusted model output and `native_decide` is allowed
+(upstream allows it), so that output can run compiled code in here: the
+container boundary is the only isolation. `--network=none` is not an option —
+the container exists to answer HTTP — so the port is published to loopback
+only. The image still runs as root and has not been validated `--read-only`;
+see the security note in the [server README](../README.md#lean-server) for what
+that costs and how to go further.
 
 `LEAN_SERVER_MAX_REPL_MEM` defaults to **12G** here, not 8G. It is applied as `RLIMIT_AS`
 on each REPL, and a REPL holding Mathlib exceeds 8G; upstream Kimina raised its own default

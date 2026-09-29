@@ -254,13 +254,21 @@ def classify_lean_result(result: LeanResult) -> str:
 
     Upstream fails a submission when the server reports an error string, when
     any message has severity ``error``, or (with sorry not accepted) when a
-    warning says the declaration uses ``sorry``. The REPL's ``sorries`` list is
-    consulted too: it is the structured form of the same warning.
+    warning says the declaration uses ``sorry``.
 
-    One departure from upstream's ``is_error``, which fails everything with an
-    error string: a header timeout is separated out. It means a cold REPL could
-    not finish ``import Mathlib`` inside the budget, which no model output can
-    cause or avoid, so the caller charges it to the harness.
+    Two departures from upstream's ``is_error``:
+
+    * A header timeout is separated out rather than failing the submission like
+      any other error string. It means a cold REPL could not finish
+      ``import Mathlib`` inside the budget, which no model output can cause or
+      avoid, so the caller charges it to the harness.
+    * The REPL's ``sorries`` list is consulted as well as the warning. Upstream
+      never reads that field (``sorries`` does not appear anywhere in
+      ``evaluation/``), so this is *stricter* than upstream: a submission whose
+      leftover ``sorry`` is reported only structurally is rejected here and
+      accepted there. It is the one departure that runs in that direction, and
+      it is kept deliberately — rewarding a proof that still contains ``sorry``
+      would be a worse error than disagreeing with upstream about it.
     """
     if result.transport_failure:
         return STATUS_SANDBOX_ERROR

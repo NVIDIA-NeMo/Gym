@@ -137,7 +137,10 @@ figures the tables below report — and adds `hackmath/`, `brualdi/`, `imo/` and
 figure, so the pooled keys and the inherited `mean/reward` are the headline and
 the per-family keys are supplementary; they are not promoted to `key_metrics`.
 
-### Two deliberate departures from upstream
+### Three deliberate departures from upstream
+
+Two of them can only make this server accept where upstream rejects; the third
+runs the other way. All three are named below.
 
 **The gold answer is elaborated at the abbreviation's declared type.** Lean's
 `=` elaborates both sides before unifying them, so in upstream's form
@@ -162,6 +165,18 @@ a model that reproduces the statement without those invisible characters has
 not changed what it proves; upstream's byte-exact substring test would reject
 it. Indentation and every visible character are still compared exactly. Set
 `normalize_trailing_whitespace: false` for upstream's behaviour.
+
+**A structurally reported `sorry` is rejected.** `classify_lean_result` returns
+`has_sorry` when the REPL's `sorries` list is non-empty as well as when a
+warning says the declaration uses `sorry`. Upstream's `is_error` never reads
+that field — `sorries` appears nowhere in its `evaluation/` tree — so this is
+the one departure that is *stricter* than upstream: a submission whose leftover
+`sorry` is reported only structurally fails here and passes there. It is not
+configurable, and it is kept deliberately: rewarding a proof that still contains
+`sorry` would be a worse error than disagreeing with upstream about it. It was
+not exercised on the run measured below: all 65 `has_sorry` rollouts there
+(41 + 24) were rejected by upstream too, so Kimina had emitted the warning that
+upstream's `is_error` reads in every one of them.
 
 ### Known blind spots, kept for fidelity
 
@@ -205,7 +220,7 @@ dataset. The Hugging Face gold-answer column is bounded by that: its four
 ascribed failures (`hackmath_6`, `imo_2008_p5`, `imo_2022_p6`, `imo_2023_p5`)
 are all statements that do not compile in the first place, so no answer can be
 checked against them. The unascribed column adds exactly the five problems named
-under "Two deliberate departures", which is the same effect measured on the
+under "Three deliberate departures", which is the same effect measured on the
 other corpus.
 
 Negative controls through `verify()`, all 100 rows, every one scoring 0:
@@ -254,7 +269,9 @@ Three things make this a check on the harness rather than a number:
   both), which is what a stable verifier looks like across independent runs.
 - Difficulty orders as published: everything solved is textbook or
   hackmath, and no olympiad problem is solved in 576 attempts.
-- Every rollout was re-scored by upstream's own harness with no disagreement.
+- Every rollout this verifier reached a verdict on was re-scored by upstream's
+  own harness with no disagreement — see the caveats in "Agreement with
+  upstream's harness" for what that does and does not establish.
 
 Caveats. 3% of rollouts hit the token budget, which accounts for every
 `format_error` — a truncated reply loses its closing fence. The paper does not
@@ -283,11 +300,38 @@ docker build \
     --build-arg KIMINA_COMMIT=fb2393de3461db35eda4c714e3fd21187e92ec90 \
     -t kimina-lean-server:v4.24.0 \
     resources_servers/combibench/kimina_image
-docker run -d --name kimina-combibench -p 12332:8000 \
+docker run -d --name kimina-combibench \
+    -p 127.0.0.1:12332:8000 \
+    --cap-drop=ALL --security-opt=no-new-privileges \
+    --pids-limit 512 --memory 32g \
     -e LEAN_SERVER_MAX_REPLS=8 \
     kimina-lean-server:v4.24.0
 curl http://127.0.0.1:12332/health     # {"status":"ok"}
 ```
+
+This container compiles untrusted model output, so the flags above are part of
+the documented command rather than an optional extra: the port is published to
+loopback only, every capability is dropped, and a runaway proof cannot fork or
+allocate the host to death. What is *not* there, and why:
+
+- **`--network=none`** cannot be used: the whole point of this container is to
+  answer HTTP on port 8000. Binding the published port to `127.0.0.1` is the
+  equivalent restriction; on a multi-tenant host put it on its own Docker
+  network with the Gym resources server instead of publishing a port at all.
+- **`--read-only`** is not documented because it is not tested here: the REPL
+  runs as `lake env` with its working directory inside the Mathlib project and
+  Lake writes there. If you need it, add `--read-only --tmpfs /tmp` plus a
+  writable mount over `/opt/mathlib/.lake` and confirm a real `/verify` still
+  succeeds before trusting a score from it.
+- **A non-root user** is not documented because the image does not build one;
+  `--user` against it has not been validated. Adding a `USER` line to
+  [`kimina_image/Dockerfile`](kimina_image/Dockerfile) is the right fix and is
+  tracked as a known gap, not a claim already met.
+
+Lean itself is not a sandbox — `native_decide` is allowed by design here, which
+means model output can run compiled code inside this container — so the
+container boundary is the only isolation there is. Do not run it with
+`--privileged`, a Docker socket mount, or host networking.
 
 Leave `LEAN_SERVER_MAX_REPL_MEM` at the image's 12G. It becomes `RLIMIT_AS` on
 each REPL and a REPL holding Mathlib exceeds 8G, at which point every `/verify`
@@ -429,14 +473,31 @@ reporting per-item agreement rather than a matching headline.
 Measured on the Goedel-Prover-V2-32B rollouts below
 (`data/upstream_agreement_*.json`):
 
-| Benchmark | Rollouts | This verifier | Upstream | Agreement |
-| --- | --- | --- | --- | --- |
-| `combibench` | 1600 | 34 | 34 | **1600 / 1600** |
-| `combibench_with_solution` | 1600 | 31 | 31 | **1600 / 1600** |
+| Benchmark | Rollouts | Scored by both | This verifier | Upstream | Agreement |
+| --- | --- | --- | --- | --- | --- |
+| `combibench` | 1600 | 1598 | 34 | 34 | **1598 / 1598** |
+| `combibench_with_solution` | 1600 | 1600 | 31 | 31 | **1600 / 1600** |
 
-The same rollouts pass under both, not merely the same number of them. Both
-departures below can only produce accepts-here-rejects-there, and neither
-produced one on this run.
+The same rollouts pass under both, not merely the same number of them.
+
+Two rollouts of the `combibench` run are `sandbox_error`: this verifier reached
+no scoring decision on them at all, so counting them as "agreements" — which the
+committed `summary.agreements` of 1600 does, because upstream also called them
+not-a-success — would be counting a non-verdict as a match. They are excluded
+from the denominator in the table above and the summary counters in the JSON are
+left as the script wrote them.
+
+What the run does and does not establish about the departures. The two
+accepts-here-rejects-there departures produced no disagreement, but that is
+weak evidence: 1566 of the 1600 rollouts are rejections both harnesses make for
+the same reason, and none of the five problems the ascription departure affects
+(`brualdi_ch8_6`, `imo_2014_p2`, `imo_2019_p5`, `imo_2022_p1`, `imo_2023_p5`)
+was ever solved by the profiled model, so the ascription path was never
+exercised end to end. The evidence for that departure is the model-free
+measurement instead: `data/harness_validation_github_test.json` against
+`data/harness_validation_github_test_upstream_check.json`, 45/45 answers
+elaborating with the ascription against 40/45 without it. The stricter
+`sorries` departure was not exercised either (see above).
 
 **Upstream's harness needs one transport-level fix to run at all**, applied in
 that script and nowhere else. It reads `res["error"]` by subscript; Kimina
@@ -450,17 +511,20 @@ client and able to compile the current statements. It is also why this server
 talks to Kimina through its own client, which reads that field with `.get`.
 
 ```bash
-uv pip install loguru strenum   # upstream's imports, which Gym does not ship
+uv pip install loguru strenum tenacity tqdm   # upstream's imports, which Gym does not ship
 python resources_servers/combibench/scripts/upstream_agreement.py \
     --rollouts results/combibench/rollouts.jsonl \
     --output resources_servers/combibench/data/upstream_agreement.json \
     --lean-server-url http://127.0.0.1:12332
 ```
 
-Disagreements can only run one way — Gym accepting where upstream rejects — and
-only from the two departures above. To measure agreement with nothing left to
-explain, rescore the same rollouts with `answer_check_ascription: false` and
-`normalize_trailing_whitespace: false` and pass that file as `--rescore-with`.
+The report keeps only the disagreeing rows under `rows`; pass `--full-rows` for
+the complete per-row map. A disagreement can come from any of the three
+departures above: the first two make Gym accept where upstream rejects, the
+`sorries` one makes Gym reject where upstream accepts. To measure agreement with
+the two configurable ones removed, rescore the same rollouts with
+`answer_check_ascription: false` and `normalize_trailing_whitespace: false` and
+pass that file as `--rescore-with`.
 
 ### The committed example is synthetic
 

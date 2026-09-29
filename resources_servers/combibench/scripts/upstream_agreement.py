@@ -26,14 +26,21 @@ by coincidence -- the same count of successes on different problems -- is not a
 reproduction, so the report records every disagreement with the status Gym
 assigned and the error type upstream assigned.
 
-Two sources of disagreement are expected by construction, and both are
-one-directional (Gym accepts, upstream rejects): the departures named in the
-server README, where the answer check ascribes the abbreviation's declared type
-and the statement check ignores trailing whitespace. To measure agreement with
-nothing left to explain, rescore the same rollouts through
-``gym eval reverify`` with ``answer_check_ascription: false`` and
-``normalize_trailing_whitespace: false``, and pass that file as
+Three sources of disagreement are expected by construction, all named in the
+server README. Two run one way (Gym accepts, upstream rejects): the answer check
+ascribes the abbreviation's declared type, and the statement check ignores
+trailing whitespace. The third runs the other way (Gym rejects, upstream
+accepts): a leftover ``sorry`` reported only in the REPL's ``sorries`` list is
+failed here, and upstream's ``is_error`` never reads that field. Only the first
+two are configurable; to measure agreement with them removed, rescore the same
+rollouts through ``gym eval reverify`` with ``answer_check_ascription: false``
+and ``normalize_trailing_whitespace: false``, and pass that file as
 ``--rescore-with``.
+
+A ``sandbox_error`` row is not a verdict: this verifier reached no scoring
+decision on it. Such rows still appear in the counters below, where upstream's
+"not a success" happens to line up with Gym's 0.0 reward; read them out of
+``gym_status_counts`` rather than as agreements.
 
 Needs the dependencies upstream's modules import that Gym does not ship:
 
