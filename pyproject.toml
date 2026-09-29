@@ -218,9 +218,9 @@ dependencies = [
     "datasets",
 
     # orjson: JSON library for faster serialization/deserialization
-    # Updated: Thu Jan 08, 2026 with orjson==3.11.3
+    # Updated: Tue Sep 29, 2026 with orjson>=3.11.6 (CVE mitigation: unbounded recursion on deeply nested JSON)
     # License: Apache 2.0 https://github.com/ijl/orjson/blob/fb3eb1f729c7e7b019f780af5695722c99c7c695/LICENSE-APACHE
-    "orjson",
+    "orjson>=3.11.6",
 
     # urllib3: HTTP client library (transitive dependency, pinned for security)
     # Updated: Mon May 19, 2026 with urllib3>=2.7.0
@@ -239,9 +239,9 @@ dependencies = [
     "fonttools>=4.60.2",
 
     # python-multipart: Streaming multipart parser (transitive dependency, pinned for security)
-    # Updated: Mon Feb 10, 2026 with python-multipart>=0.0.22
+    # Updated: Tue Sep 29, 2026 with python-multipart>=0.0.27 (CVE mitigation: unbounded multipart part headers DoS)
     # License: Apache 2.0 https://github.com/andrew-d/python-multipart/blob/master/LICENSE.txt
-    "python-multipart>=0.0.22",
+    "python-multipart>=0.0.27",
 
     # pyarrow: columnar data library (transitive dependency via mlflow, pinned for security)
     # mlflow caps pyarrow<25; versions >=23.0.1 have cp313 wheels and address use-after-free.
