@@ -240,8 +240,14 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--lean-server-url", default="http://127.0.0.1:8000")
     parser.add_argument("--lean-server-api-key", default=None)
-    parser.add_argument("--timeout", type=int, default=60, help="Lean timeout per compile, seconds")
-    parser.add_argument("--concurrency", type=int, default=8, help="Keep at or below LEAN_SERVER_MAX_REPLS")
+    # No --timeout flag: upstream's ``one_stage_verify`` does not expose one, and its
+    # ``verify()`` hard-codes the 60 s default. A flag here could only have changed
+    # what Gym was compared *against* on one side of the comparison, or nothing at
+    # all -- it read nothing. Change upstream's budget by editing the pinned tree, and
+    # say so in the report.
+    parser.add_argument(
+        "--concurrency", type=int, default=8, help="Keep at or below the server's LEAN_SERVER_MAX_REPLS"
+    )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--upstream-cache", type=Path, default=Path(tempfile.gettempdir()) / "combibench_upstream")
     parser.add_argument(
