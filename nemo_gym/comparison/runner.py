@@ -20,12 +20,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Tuple
 
-from nemo_gym import _resolve_under_cwd_or_install
+from pydantic import ValidationError
+
 from nemo_gym.comparison.diff import compare_runs
 from nemo_gym.comparison.loading import build_loaded_run, load_agg_metrics_file, resolve_agent_selections
 from nemo_gym.comparison.report import write_reports
 from nemo_gym.comparison.schema import ComparisonConfig, ComparisonResult
+from nemo_gym.config_types import ConfigError
 from nemo_gym.package_info import __version__
+from nemo_gym.path_utils import resolve_run_output_dir
 from nemo_gym.secret_utils import hide_secrets_in_overrides
 
 
@@ -83,20 +86,31 @@ def build_comparison_result(config: ComparisonConfig, command: str) -> Compariso
     )
 
 
-def resolve_output_dir(config: ComparisonConfig) -> Path:
-    """`--output-dir`, defaulting to the candidate run's own directory.
-
-    The default resolves the candidate path the same way loading does, so the report lands next to
-    the metrics file that was actually read rather than at a same-named path under the cwd.
-    """
-    if config.output_dirpath:
-        p = Path(config.output_dirpath)
-        return p if p.is_absolute() else Path.cwd() / p
-    # if we use the same location as the candidate rollouts, it should be save to write there and we can use _resolve_under_cwd_or_install function
-    return _resolve_under_cwd_or_install(config.candidate_rollouts_jsonl_fpaths[-1]).parent
-
-
 def run_comparison(config: ComparisonConfig, command: str) -> Tuple[ComparisonResult, List[Path]]:
-    """Build the comparison and write its report artifacts."""
+    """Build the comparison, write its report artifacts, and run the statistical test alongside it."""
     result = build_comparison_result(config, command)
-    return result, write_reports(result, resolve_output_dir(config), config.report_format)
+    # By keyword: `output_dirpath` and `subdir` are adjacent and both `str | None`, so a positional
+    # swap would silently write the report into the wrong directory.
+    output_dir = resolve_run_output_dir(
+        config.candidate_rollouts_jsonl_fpaths[-1], output_dirpath=config.output_dirpath
+    )
+    written = write_reports(result, output_dir, config.report_format)
+
+    if not config.no_stats:
+        from nemo_gym.global_config import maybe_get_global_config_dict
+        from nemo_gym.statistical_tests.common import stat_test_from_config_dict
+
+        try:
+            stats_config_dict = {**(maybe_get_global_config_dict() or {}), **config.model_dump()}
+            stats_markdown = stat_test_from_config_dict(stats_config_dict, "compare")
+        except (ConfigError, ValidationError) as e:
+            print(f"Skipped the statistical test: {e}")
+        else:
+            # Appended as markdown, not fenced, with every heading demoted one level so the report's
+            # own `#` title becomes a `##` section under this report's title and renders in place.
+            section = ("\n" + stats_markdown.strip()).replace("\n#", "\n##") + "\n"
+            for markdown_report in [path for path in written if path.suffix == ".md"]:
+                with markdown_report.open("a", encoding="utf-8") as f:
+                    f.write(section)
+
+    return result, written
