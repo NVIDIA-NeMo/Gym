@@ -4505,7 +4505,9 @@ class TestTurnsFromModelCalls:
         message = {"role": "assistant", "content": "", "reasoning_content": "think", "tool_calls": [{"id": "t1"}]}
         calls = [self._call("only", {"choices": [{"message": message}]}, started_at=1.0)]
 
-        [turn] = nemo_gym.rollout_collection._turns_from_model_calls("task", "rollout", [], calls, resolved=None)
+        [turn] = nemo_gym.rollout_collection._turns_from_model_calls(
+            "task", "rollout", [self._invocation("root", ["only"])], calls, resolved=None
+        )
 
         assert turn.invocation_id == "root"
         assert turn.reasoning_content == "think"
@@ -4517,20 +4519,112 @@ class TestTurnsFromModelCalls:
         failed = TrajectoryModelCall.model_validate({"model_call_id": "failed", "started_at": 1.0})
         answered = self._call("answered", {"output": []}, started_at=2.0)
 
-        turns = nemo_gym.rollout_collection._turns_from_model_calls("task", "rollout", [], [failed, answered], None)
+        turns = nemo_gym.rollout_collection._turns_from_model_calls(
+            "task", "rollout", [self._invocation("root", ["failed", "answered"])], [failed, answered], None
+        )
 
         assert [(turn.model_calls[0].model_call_id, turn.turn_no) for turn in turns] == [("answered", 1)]
 
-    def test_a_call_no_invocation_references_is_skipped_when_several_exist(self) -> None:
+    @pytest.mark.parametrize("invocation_count", [1, 2])
+    def test_a_call_no_invocation_references_is_skipped(self, invocation_count: int) -> None:
         calls = [
             self._call("owned", {"output": []}, started_at=1.0),
             self._call("orphan", {"output": []}, started_at=2.0),
         ]
-        invocations = [self._invocation("assistant", ["owned"]), self._invocation("user", [])]
+        invocations = [self._invocation("assistant", ["owned"]), self._invocation("user", [])][:invocation_count]
 
         turns = nemo_gym.rollout_collection._turns_from_model_calls("task", "rollout", invocations, calls, None)
 
         assert [turn.model_calls[0].model_call_id for turn in turns] == ["owned"]
+
+    @pytest.mark.parametrize("has_invocation", [False, True])
+    def test_unowned_capture_is_preserved_without_inventing_turns(self, has_invocation: bool) -> None:
+        result = {
+            "ng_model_call_capture": {
+                "calls": [{"model_call_id": "unowned", "response": {"output": []}, "status_code": 200}]
+            },
+        }
+        if has_invocation:
+            result["ng_agent_observations"] = {
+                "source": "external_harness",
+                "records": [{"kind": "agent_invocation", "invocation_id": "root"}],
+            }
+
+        _attach_trajectory_record({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}, result)
+
+        trajectory = result[NG_TRAJECTORY_KEY]
+        assert trajectory["turns"] == []
+        assert [call["model_call_id"] for call in trajectory["model_calls"]] == ["unowned"]
+        assert "turns_unavailable" in {gap["code"] for gap in trajectory["gaps"]}
+
+    @pytest.mark.parametrize("reference_key", ["model_call_id", "response_id"])
+    def test_judge_capture_does_not_become_a_policy_turn(self, reference_key: str) -> None:
+        from nemo_gym.health.checks import (
+            _bind_policy_call_views,
+            _normalized_trajectory_calls,
+            _rollout_token_count_mismatch,
+        )
+
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {
+            "response": {"usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}},
+            "ng_agent_observations": {
+                "source": "hermes",
+                "records": [
+                    {
+                        "kind": "agent_invocation",
+                        "invocation_id": "root",
+                        "model_calls": [
+                            {
+                                reference_key: "policy" if reference_key == "model_call_id" else "resp-policy",
+                                "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                            }
+                        ],
+                    }
+                ],
+            },
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": call_id,
+                        "response_id": f"resp-{call_id}",
+                        "model_ref": {"type": "responses_api_models", "name": model_name},
+                        "request": {"input": [{"role": "user", "content": call_id}]},
+                        "response": {
+                            "id": f"resp-{call_id}",
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "answer"}],
+                                }
+                            ],
+                        },
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "started_at": started_at,
+                        "status_code": 200,
+                    }
+                    for call_id, model_name, tokens_in, tokens_out, started_at in [
+                        ("policy", "policy_model", 10, 2, 1.0),
+                        ("judge", "judge_model", 20, 3, 2.0),
+                    ]
+                ]
+            },
+        }
+
+        _attach_trajectory_record(row, result)
+
+        trajectory = result[NG_TRAJECTORY_KEY]
+        assert [call["model_call_id"] for call in trajectory["model_calls"]] == ["policy", "judge"]
+        assert [turn["model_calls"][0]["model_call_id"] for turn in trajectory["turns"]] == ["policy"]
+        turns, _ = _bind_policy_call_views(trajectory, _normalized_trajectory_calls(trajectory))
+        assert _rollout_token_count_mismatch(result, turns, {"task_index": 0}) == []
+        perf = _build_ng_perf(result, rollout_latency_ms=None)
+        assert perf["num_turns"] == 1
+        assert perf["prompt_tokens"] == 10
+        assert perf["completion_tokens"] == 2
+        assert perf["token_observability_coverage"] == 1.0
 
 
 class TestMaskingStepMetrics:

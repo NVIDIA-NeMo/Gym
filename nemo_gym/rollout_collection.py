@@ -432,9 +432,9 @@ def _turns_from_model_calls(
 ) -> list[TrajectoryTurn]:
     """Build one turn per captured model call that returned a response, for an agent that sent no trajectory.
 
-    A call belongs to the invocation whose ``model_calls`` reference it. With a single invocation
-    every call belongs to it, and with none they belong to ``root``. A call that cannot be attributed
-    to one of several invocations is skipped rather than guessed.
+    A call belongs to the invocation whose ``model_calls`` reference it. Unreferenced calls stay
+    in the raw evidence but do not become turns: even a single-agent rollout may capture judge
+    or auxiliary calls that do not belong to the agent.
     """
     invocation_by_call_id: dict[str, str] = {}
     invocation_by_response_id: dict[str, str] = {}
@@ -444,7 +444,6 @@ def _turns_from_model_calls(
                 invocation_by_call_id[ref.model_call_id] = invocation.invocation_id
             if ref.response_id:
                 invocation_by_response_id[ref.response_id] = invocation.invocation_id
-    default_invocation = invocations[0].invocation_id if len(invocations) == 1 else None if invocations else "root"
 
     turns: list[TrajectoryTurn] = []
     turn_counts: Counter = Counter()
@@ -454,10 +453,8 @@ def _turns_from_model_calls(
             # A call that returned nothing is not a model decision.
             continue
         metadata = call.response_metadata
-        invocation_id = (
-            invocation_by_call_id.get(call.model_call_id or "")
-            or invocation_by_response_id.get(metadata.response_id or "")
-            or default_invocation
+        invocation_id = invocation_by_call_id.get(call.model_call_id or "") or invocation_by_response_id.get(
+            metadata.response_id or ""
         )
         if invocation_id is None:
             continue
@@ -630,7 +627,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 gaps.append(ObservationGap(code="model_call_capture_gap_invalid"))
     if not isinstance(raw_trajectory, dict):
         # An agent that sends its own trajectory owns its turns, and an empty list there means no turn
-        # completed. Agents that report only invocations, or nothing, get turns from the captured calls.
+        # completed. Otherwise, build turns only from calls explicitly referenced by invocations.
         turns = _turns_from_model_calls(task_id, rollout_id, invocations, model_calls, result.get("resolved"))
     if not model_calls:
         gaps.append(ObservationGap(code="model_calls_unavailable"))
