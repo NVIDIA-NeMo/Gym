@@ -192,6 +192,26 @@ class TestAnswers:
         )
         assert abbrev_types(statement_chunks(statement)) == ["ENNReal", "(Fin k → ℕ) → ℕ", "ℕ+ → ℕ+ → ℝ"]
 
+    def test_a_helper_abbrev_in_the_same_paragraph_does_not_shift_the_type(self) -> None:
+        """Keying on the paragraph's first ``abbrev`` would ascribe the helper's type.
+
+        The lazy type would then run to the paragraph's last ``:=``, and the
+        appended answer check would be invalid Lean — a correct proof scored
+        ``compile_error``. No pinned statement is shaped this way; the guard is
+        against one that is.
+        """
+        chunk = "abbrev helper : ℕ := 5\nabbrev a_solution : Finset ℕ :="
+        assert abbrev_types([chunk]) == ["Finset ℕ"]
+
+    def test_a_theorem_below_the_abbrev_does_not_extend_the_type(self) -> None:
+        """A type running past the abbrev's own ``:=`` means the match overran it."""
+        # The declaration ends at its own line, so the theorem below is not read.
+        assert abbrev_types(["abbrev a_solution : ℕ :=\ntheorem t : a_solution = 1 := by sorry"]) == ["ℕ"]
+        # Nothing ends the abbrev here, so the only match spans into the theorem:
+        # unparsed, which falls back to upstream's form rather than emitting
+        # Lean that cannot compile.
+        assert abbrev_types(["abbrev a_solution : ℕ\ntheorem t : a_solution = 1 :="]) == [None]
+
     def test_unparseable_abbrev_falls_back_to_upstream_form(self) -> None:
         assert abbrev_types(["abbrev weird_solution"]) == [None]
         assert (

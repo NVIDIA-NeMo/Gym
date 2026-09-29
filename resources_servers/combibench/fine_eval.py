@@ -175,11 +175,18 @@ def answer_tags(chunks: list[str]) -> list[str]:
     return tags
 
 
+# Anchored on the ``_solution`` declaration specifically, and at the start of a
+# line rather than of the paragraph: a paragraph holding a helper ``abbrev`` or a
+# ``theorem`` alongside the ``_solution`` one would otherwise be read from its
+# first declaration, and the lazy type would run to the paragraph's last ``:=``.
+# No paragraph in the pinned corpus is shaped that way, so this is hardening: the
+# appended answer check would be invalid Lean and turn a correct proof into a
+# ``compile_error``.
 _ABBREV_TYPE_RE = re.compile(
-    r"^(?:noncomputable\s+)?abbrev\s+\S+"
+    r"^(?:noncomputable\s+)?abbrev\s+\S*_solution"
     r"(?P<binders>(?:\s*(?:\{[^}]*\}|\([^)]*\)|\[[^\]]*\]))*)"
     r"\s*:\s*(?P<type>.+?)\s*:=\s*$",
-    re.DOTALL,
+    re.DOTALL | re.MULTILINE,
 )
 
 
@@ -188,14 +195,26 @@ def abbrev_types(chunks: list[str]) -> list[Optional[str]]:
 
     ``abbrev name {k} : (Fin k → ℕ) → ℕ :=`` yields ``(Fin k → ℕ) → ℕ``. None
     when the paragraph does not parse, in which case the check falls back to
-    upstream's unascribed form.
+    upstream's unascribed form — so every uncertain case costs at most the
+    ascription departure, never a broken submission. A parsed type that spans
+    lines or contains ``theorem`` is treated as unparsed for that reason: it is
+    the signature of the regex having swallowed a neighbouring declaration, and
+    ascribing it would produce Lean that does not compile. Neither occurs in the
+    pinned corpus (47 answer abbreviations, all parsed, none multi-line).
     """
     types: list[Optional[str]] = []
     for chunk in chunks:
         if "_solution" in chunk and "abbrev" in chunk:
-            match = _ABBREV_TYPE_RE.match(chunk)
-            types.append(match.group("type").strip() if match else None)
+            match = _ABBREV_TYPE_RE.search(chunk)
+            types.append(_parsed_type(match.group("type")) if match else None)
     return types
+
+
+def _parsed_type(raw: str) -> Optional[str]:
+    declared = raw.strip()
+    if "\n" in declared or re.search(r"\btheorem\b", declared):
+        return None
+    return declared
 
 
 def answer_check(tag: str, ground_truth: str, type_ascription: Optional[str] = None) -> str:
