@@ -4,6 +4,8 @@
 """Worker-custody tests for typed staging admission and vLLM extraction."""
 
 import asyncio
+import hashlib
+import struct
 import threading
 from collections.abc import Mapping
 from types import SimpleNamespace
@@ -28,6 +30,7 @@ from nemo_gym.token_id_capture.staging import (
     StagedCallRecord,
     StageResult,
     compute_chain_hash,
+    compute_extras_digest,
     hash_token_ids,
 )
 from nemo_gym.token_id_capture.staging.capture import (
@@ -516,8 +519,12 @@ def test_duplicate_completion_and_failure_are_rejected() -> None:
         capture.fail_call(call, reason="late error")
 
 
-def test_vllm_adapter_round_trips_native_tokens_logprobs_and_routes() -> None:
-    capture, sink = _capture(adapter=VLLMCaptureAdapter())
+@pytest.mark.parametrize("accept_attachments", [True, False])
+def test_vllm_adapter_stages_route_descriptor_with_native_attachment(accept_attachments: bool) -> None:
+    capture, sink = _capture(_MemorySink(accept_attachments=accept_attachments), adapter=VLLMCaptureAdapter())
+    routes = memoryview(struct.pack("<8h", *range(8))).cast("h", shape=[4, 1, 2])
+    descriptor = {"dtype": "int16", "shape": list(routes.shape), "sha256": hashlib.sha256(routes).hexdigest()}
+    attachments = {"routed_experts": routes}
     payload = {
         "prompt_token_ids": [10, 11],
         "choices": [
@@ -525,25 +532,29 @@ def test_vllm_adapter_round_trips_native_tokens_logprobs_and_routes() -> None:
                 "message": {
                     "generation_token_ids": [12, 13],
                     "generation_log_probs": [-0.2, -0.3],
-                    "routed_experts": {
-                        "version": 1,
-                        "encoding": "base64",
-                        "data": "AAEC",
-                    },
+                    "routed_experts": descriptor,
                 }
             }
         ],
     }
-    coords = capture.complete_call_from_response(capture.begin_call(_root()), payload)
+    coords = capture.complete_call_from_response(capture.begin_call(_root()), payload, attachments=attachments)
+    assert sink.events == ["stage"]
+    if not accept_attachments:
+        assert coords.disposition == "capture_failed"
+        assert coords.staging_key is None
+        assert sink.records == []
+        assert sink.attachments == []
+        return
+
     assert coords.disposition == "staged"
-    assert sink.records[0].token_ids_delta == [10, 11, 12, 13]
-    assert sink.records[0].extras == {
-        "routed_experts": {
-            "version": 1,
-            "encoding": "base64",
-            "data": "AAEC",
-        }
-    }
+    (record,) = sink.records
+    assert record.token_ids_delta == [10, 11, 12, 13]
+    assert record.generation_log_probs_delta == [0.0, 0.0, -0.2, -0.3]
+    assert record.extras == {"routed_experts": descriptor}
+    assert record.extras_digest == coords.extras_digest == compute_extras_digest(record.extras)
+    assert sink.attachments[0] is attachments
+    assert sink.attachments[0]["routed_experts"] is routes
+    assert "attachments" not in record.model_dump()
 
 
 def test_vllm_adapter_supports_message_prompt_ids_and_logprob_tokens() -> None:

@@ -188,9 +188,17 @@ def test_extras_commitments_cover_the_selected_chain_in_order() -> None:
         assert commitment.extras_digest_version == EXTRAS_DIGEST_VERSION
 
 
-def test_committed_extras_verify_and_corrupt_extras_fail_at_point_of_use() -> None:
+@pytest.mark.parametrize(
+    "routes",
+    [
+        [[[1, 2]], [[3, 4]], [[5, 6]]],
+        {"dtype": "int16", "shape": [3, 1, 2], "sha256": "a" * 64},
+    ],
+    ids=["legacy-routes", "native-route-descriptor"],
+)
+def test_committed_extras_verify_and_corrupt_extras_fail_at_point_of_use(routes: Any) -> None:
     """The verifier never reads extras; consumers verify them via commitments."""
-    extras = {"routed_experts": [[[1, 2]], [[3, 4]], [[5, 6]]], "note": "x"}
+    extras = {"routed_experts": routes, "note": "x"}
     root = _snapshot(
         "root",
         token_ids=[10, 11, 12],
@@ -204,6 +212,10 @@ def test_committed_extras_verify_and_corrupt_extras_fail_at_point_of_use() -> No
     assert compute_extras_digest(extras) == commitment.extras_digest
     corrupted = {**extras, "routed_experts": [[[9, 9]]] * 3}
     assert compute_extras_digest(corrupted) != commitment.extras_digest
+    if isinstance(routes, dict):
+        for field, value in [("dtype", "int32"), ("shape", [1, 3, 2]), ("sha256", "b" * 64)]:
+            corrupted = {**extras, "routed_experts": {**routes, field: value}}
+            assert compute_extras_digest(corrupted) != commitment.extras_digest
 
 
 @pytest.mark.parametrize(
