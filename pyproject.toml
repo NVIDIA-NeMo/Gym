@@ -131,6 +131,12 @@ dependencies = [
     # License: MIT https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE
     "mcp>=1.28.1,<2",
 
+    # anyio: transitive dependency of mcp/fastapi/starlette; pinned directly since
+    # mcp's own floor (>=4.10.0) resolves to a version with a known CVE.
+    # Updated Tue Sep 29, 2026 with anyio>=4.15.1 (CVE mitigation)
+    # License: MIT https://github.com/agronholm/anyio/blob/master/LICENSE
+    "anyio>=4.15.1",
+
     # itsdangerous: Requirement for Starlette SessionMiddleware
     # Updated Tue Feb 17, 2026 with itsdangerous==2.2.0
     # License: BSD 3-Clause https://github.com/pallets/itsdangerous/blob/672971d66a2ef9f85151e53283113f33d642dabd/LICENSE.txt
