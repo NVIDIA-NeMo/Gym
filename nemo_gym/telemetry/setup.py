@@ -66,6 +66,7 @@ logger = logging.getLogger(__name__)
 #: False`` before either sets it and both call ``setup_telemetry``, which nemo-lens
 #: raises on for a second call in the same process.
 _TELEMETRY_HANDLE: Optional["TelemetryHandle"] = None
+_METRICS_EXPORTING = False
 _INITIALISED = False
 _INIT_LOCK = threading.Lock()
 
@@ -342,7 +343,7 @@ def init_telemetry(
         The :class:`TelemetryHandle`, or ``None`` when nemo-lens is absent or telemetry is
         disabled. Never raises: a telemetry failure must not take a server down.
     """
-    global _TELEMETRY_HANDLE, _INITIALISED
+    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _INITIALISED
     # The whole check-and-set plus the actual setup_telemetry() call is one critical
     # section: without the lock, two threads can both observe `_INITIALISED is False`
     # before either sets it and both call setup_telemetry, which nemo-lens raises on for
@@ -397,6 +398,7 @@ def init_telemetry(
             return None
 
         _TELEMETRY_HANDLE = handle
+        _METRICS_EXPORTING = bool(config.metrics_enabled and handle.is_exporting)
 
         if config.logs_enabled and handle.is_exporting:
             try:
@@ -421,6 +423,11 @@ def get_telemetry() -> Optional["TelemetryHandle"]:
     return _TELEMETRY_HANDLE
 
 
+def is_metrics_exporting() -> bool:
+    """Whether this process has an active metrics exporter."""
+    return _METRICS_EXPORTING
+
+
 def shutdown_telemetry(timeout_ms: int = 5000) -> None:
     """Flush and shut down this process's telemetry providers.
 
@@ -442,6 +449,7 @@ def _reset_for_testing() -> None:
     Test-only. Production code has exactly one init per process, which is what
     ``_INITIALISED`` enforces.
     """
-    global _TELEMETRY_HANDLE, _INITIALISED
+    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _INITIALISED
     _TELEMETRY_HANDLE = None
+    _METRICS_EXPORTING = False
     _INITIALISED = False

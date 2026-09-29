@@ -17,7 +17,6 @@ import logging
 import multiprocessing
 import socket
 from concurrent.futures import ProcessPoolExecutor
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import uvicorn
@@ -28,7 +27,7 @@ from fastapi.exceptions import RequestValidationError
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pydantic import ValidationError
-from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, approx, mark, raises
+from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
 from yarl import URL
 
 import nemo_gym.global_config
@@ -52,15 +51,15 @@ from nemo_gym.server_utils import (
     ServerClient,
     SimpleServer,
     UvicornProxyHeadersConfig,
-    _connection_pool_capacity,
     _format_upstream_error_log,
     _log_validation_exception,
     _make_keepalive_socket_factory,
-    _report_connection_pool_capacity,
     _validation_exception_handler,
     initialize_ray,
     raise_for_status,
 )
+from nemo_gym.telemetry import connection_pool
+from nemo_gym.telemetry.connection_pool import connection_pool_capacity, report_connection_pool_capacity
 
 
 _TCP_KEEPALIVE_TEST_IDLE = 42
@@ -569,7 +568,7 @@ class TestServerUtils:
             global_aiohttp_connector_limit_per_host=17,
         )
 
-        capacity = _connection_pool_capacity(cfg, workers)
+        capacity = connection_pool_capacity(cfg, workers)
 
         assert capacity.total == expected_total
         assert capacity.per_host == expected_per_host
@@ -577,7 +576,7 @@ class TestServerUtils:
     @mark.parametrize("workers", [0, -1])
     def test_connection_pool_capacity_rejects_invalid_worker_count(self, workers: int) -> None:
         with raises(ValueError, match="worker count must be at least 1"):
-            _connection_pool_capacity(GlobalAIOHTTPAsyncClientConfig(), workers)
+            connection_pool_capacity(GlobalAIOHTTPAsyncClientConfig(), workers)
 
     def test_connection_pool_capacity_rejects_zero_effective_limit(self) -> None:
         cfg = GlobalAIOHTTPAsyncClientConfig(
@@ -586,20 +585,30 @@ class TestServerUtils:
         )
 
         with raises(ValueError, match="must remain at least 1"):
-            _connection_pool_capacity(cfg, workers=4)
+            connection_pool_capacity(cfg, workers=4)
 
-    @mark.parametrize(
-        "field",
-        [
-            "global_aiohttp_connector_limit",
-            "global_aiohttp_connector_limit_per_host",
-            "global_aiohttp_intended_concurrency",
-            "global_aiohttp_intended_concurrency_per_host",
-        ],
-    )
-    def test_connection_pool_config_rejects_nonpositive_limits(self, field: str) -> None:
+    @mark.parametrize("field", ["global_aiohttp_connector_limit", "global_aiohttp_connector_limit_per_host"])
+    def test_connection_pool_config_rejects_negative_limits(self, field: str) -> None:
+        with raises(ValidationError):
+            GlobalAIOHTTPAsyncClientConfig(**{field: -1})
+
+    @mark.parametrize("field", ["global_aiohttp_intended_concurrency", "global_aiohttp_intended_concurrency_per_host"])
+    def test_connection_pool_config_rejects_nonpositive_intended_concurrency(self, field: str) -> None:
         with raises(ValidationError):
             GlobalAIOHTTPAsyncClientConfig(**{field: 0})
+
+    @mark.parametrize(("total", "per_host"), [(0, 0), (0, 64), (64, 0)])
+    @mark.parametrize("workers", [1, 4, 16])
+    def test_connection_pool_capacity_preserves_explicit_unlimited_limits(
+        self, total: int, per_host: int, workers: int
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=total,
+            global_aiohttp_connector_limit_per_host=per_host,
+        )
+        capacity = connection_pool_capacity(cfg, workers=workers)
+        assert capacity.total == (total // workers if total else 0)
+        assert capacity.per_host == (per_host // workers if per_host else 0)
 
     def test_connection_pool_capacity_reports_effective_limits_and_warns(
         self,
@@ -613,16 +622,16 @@ class TestServerUtils:
             global_aiohttp_intended_concurrency=12,
             global_aiohttp_intended_concurrency_per_host=8,
         )
-        capacity = _connection_pool_capacity(cfg, workers=4)
-        monkeypatch.setattr(nemo_gym.server_utils, "_ephemeral_port_capacity", lambda: 5)
+        capacity = connection_pool_capacity(cfg, workers=4)
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: 5)
+        connection_pool._REPORTED_CAPACITIES.clear()
 
-        with caplog.at_level(logging.INFO, logger="nemo_gym.server_utils"):
-            _report_connection_pool_capacity(cfg, capacity, visible=True)
+        with caplog.at_level(logging.INFO, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity, visible=True)
 
         visible_report = capsys.readouterr().out
         assert "aggregate_total=10" in visible_report
         assert "effective_total=2" in visible_report
-        assert "realized_aggregate_total=8" in visible_report
         assert "intended per-worker concurrency 3 exceeds effective total limit 2" in caplog.text
         assert "intended per-host concurrency 2 exceeds effective per-host limit 1" in caplog.text
         assert "aggregate intended per-host concurrency 8" in caplog.text
@@ -643,53 +652,48 @@ class TestServerUtils:
             global_aiohttp_connector_limit_per_host=1024,
             global_aiohttp_intended_concurrency_per_host=1000,
         )
-        capacity = _connection_pool_capacity(cfg, workers=4)
-        monkeypatch.setattr(nemo_gym.server_utils, "_ephemeral_port_capacity", lambda: None)
-        nemo_gym.server_utils._REPORTED_CONNECTION_POOL_CAPACITIES.clear()
+        capacity = connection_pool_capacity(cfg, workers=4)
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: None)
+        connection_pool._REPORTED_CAPACITIES.clear()
 
-        with caplog.at_level(logging.INFO, logger="nemo_gym.server_utils"):
-            _report_connection_pool_capacity(cfg, capacity, visible=True)
+        with caplog.at_level(logging.INFO, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity, visible=True)
 
         visible_report = capsys.readouterr().out
         # effective_per_host is clamped to effective_total (16), not the configured 256.
         assert "effective_per_host=16" in visible_report
         assert "configured_per_host=256" in visible_report
-        assert "realized_aggregate_per_host=64" in visible_report
         assert "intended per-host concurrency 250 exceeds effective per-host limit 16" in caplog.text
 
-    async def test_retry_cap_bounds_internal_callers(self, monkeypatch: MonkeyPatch) -> None:
-        """`_max_connection_retries` must bound the loop for internal callers too.
-
-        The attempt counter used to be incremented only for non-internal callers, so an internal
-        caller hitting repeated generic errors retried forever.
-        """
-        attempts = 0
-
-        async def request(**_kwargs):
-            nonlocal attempts
-            attempts += 1
-            raise RuntimeError("boom")
-
-        monkeypatch.setattr(
-            nemo_gym.server_utils, "get_global_aiohttp_client", lambda: SimpleNamespace(request=request)
+    def test_connection_pool_limit_warns_against_file_descriptor_budget(
+        self, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=100,
+            global_aiohttp_connector_limit_per_host=10,
         )
-        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        capacity = connection_pool_capacity(cfg, workers=1)
+        connection_pool._REPORTED_CAPACITIES.clear()
+        monkeypatch.setattr(connection_pool.resource, "getrlimit", lambda _resource: (64, 64))
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: None)
 
-        with raises(RuntimeError, match="boom"):
-            await nemo_gym.server_utils._request_with_retries(
-                "GET", "http://example.test/work", _internal=True, _max_connection_retries=3
-            )
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity)
 
-        assert 3 == attempts
+        assert "effective total limit 100 can exhaust the file-descriptor soft limit 64" in caplog.text
 
     async def test_connection_pool_telemetry_is_not_installed_when_disabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
         monkeypatch.setattr(nemo_gym.server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 1)
-        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: False)
+        monkeypatch.setattr(connection_pool, "is_metrics_exporting", lambda: False)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
+        report = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "report_connection_pool_capacity", report)
 
         client = nemo_gym.server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
         try:
-            assert client._trace_configs == []
+            assert client.trace_configs == []
+            report.assert_not_called()
         finally:
             await client.close()
             monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
@@ -697,33 +701,21 @@ class TestServerUtils:
     async def test_connection_pool_telemetry_is_installed_when_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
         monkeypatch.setattr(nemo_gym.server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 1)
-        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: True)
+        monkeypatch.setattr(connection_pool, "is_metrics_exporting", lambda: True)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: False)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
 
         client = nemo_gym.server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
         try:
-            assert len(client._trace_configs) == 1
-            trace_config = client._trace_configs[0]
+            assert len(client.trace_configs) == 1
+            trace_config = client.trace_configs[0]
             assert len(trace_config.on_connection_queued_start) == 1
             assert len(trace_config.on_connection_queued_end) == 1
+            assert len(trace_config.on_request_end) == 1
+            assert len(trace_config.on_request_exception) == 1
         finally:
             await client.close()
             monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-
-    def test_connection_pool_queue_context_accumulates_repeated_waits(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            nemo_gym.server_utils.time,
-            "perf_counter",
-            MagicMock(side_effect=[1.0, 1.01, 2.0, 2.02]),
-        )
-        context = nemo_gym.server_utils._ConnectionQueueTraceContext(span=None)
-
-        context.queued()
-        context.released()
-        context.queued()
-        context.released()
-
-        assert context.count == 2
-        assert context.duration_ms == approx(30.0)
 
     def test_keepalive_socket_factory_uses_configured_values(self, monkeypatch: MonkeyPatch) -> None:
         mock_sock = MagicMock()

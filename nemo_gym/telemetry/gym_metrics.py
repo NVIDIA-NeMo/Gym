@@ -19,8 +19,8 @@
 declares. Anything that needs an attribute (a provider, a site, a class) is created here,
 directly on the lens meter, and cached per meter so a re-initialised telemetry handle gets
 fresh instruments. Every recorder is a no-op unless telemetry is initialised and exporting,
-and never raises into its caller; call sites still sit under a span-group gate so they cost
-nothing when disabled.
+and never raises into its caller. Call sites use the relevant span-group or metrics-export gate
+so disabled telemetry stays off the hot path.
 
 Sandbox lifecycle
 -----------------
@@ -36,6 +36,12 @@ default stops at ten seconds and a sandbox start routinely takes a minute.
 Retrying is provider-internal, so each provider that retries records it from its own loop.
 
 All four carry ``nemo.gym.sandbox.provider``.
+
+HTTP connection pool
+--------------------
+``gym.http.connection_pool.queue_duration_ms`` (histogram): connection-acquisition wait
+for one outbound request attempt, including zero for attempts that did not queue. Bounded
+attributes identify the binding connector limit, attempt outcome, and configured server.
 """
 
 import logging
@@ -51,6 +57,10 @@ SANDBOX_ACTIVE_INSTRUMENT = "gym.sandbox.active"
 SANDBOX_STARTUP_INSTRUMENT = "gym.sandbox.startup_duration_ms"
 SANDBOX_EXEC_INSTRUMENT = "gym.sandbox.exec_duration_ms"
 SANDBOX_CREATE_RETRY_INSTRUMENT = "gym.sandbox.create_retry_total"
+HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT = "gym.http.connection_pool.queue_duration_ms"
+HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
+HTTP_CONNECTION_POOL_ATTEMPT_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.attempt_outcome"
+HTTP_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.server.name"
 
 #: Milliseconds. Provisioning a remote sandbox takes tens of seconds and a long command can run
 #: for minutes; the SDK's default boundaries end at 10 s and would put most of both in +Inf.
@@ -67,6 +77,26 @@ SANDBOX_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
     300_000,
     600_000,
     1_800_000,
+)
+
+HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
+    0.01,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1,
+    2.5,
+    5,
+    10,
+    25,
+    50,
+    100,
+    250,
+    500,
+    1_000,
+    5_000,
+    30_000,
 )
 
 _INSTRUMENT_LOCK = threading.Lock()
@@ -184,6 +214,28 @@ def record_sandbox_create_retry(*, provider: str) -> None:
         SANDBOX_CREATE_RETRY_INSTRUMENT,
         "Sandbox-create attempts a provider retried.",
         {SANDBOX_PROVIDER_ATTRIBUTE: provider},
+    )
+
+
+def record_http_connection_pool_queue_duration(
+    duration_ms: float,
+    *,
+    queue_constraint: str,
+    attempt_outcome: str,
+    server_name: str,
+) -> None:
+    """Record connection-pool wait for one outbound request attempt."""
+    _record_histogram(
+        HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT,
+        "ms",
+        "Time an outbound HTTP request waited for an aiohttp pooled connection.",
+        duration_ms,
+        {
+            HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE: queue_constraint,
+            HTTP_CONNECTION_POOL_ATTEMPT_OUTCOME_ATTRIBUTE: attempt_outcome,
+            HTTP_SERVER_NAME_ATTRIBUTE: server_name,
+        },
+        boundaries=HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS,
     )
 
 

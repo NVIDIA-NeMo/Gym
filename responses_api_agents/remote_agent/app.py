@@ -273,10 +273,12 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             try:
                 # Never follow redirects: aiohttp re-issues 301/302/303 as a body-less GET and
                 # re-sends 307/308 to an address the user never configured; fail with the 3xx.
+                # One inner attempt: this loop owns retries, and replaying here could start a duplicate rollout.
                 response = await http_request(
                     "POST",
                     remote_url,
                     _max_connection_retries=1,
+                    _server_name="remote_agent_service",
                     data=data,
                     headers=headers,
                     cookies=cookies or {},
@@ -306,7 +308,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 f"Is your service running at {self.config.agent_base_url}?"
             )
 
-        # client.request() returns once headers arrive; the body read can still fail
+        # http_request() returns once headers arrive; the body read can still fail
         # (mid-body disconnect, deadline).
         try:
             content = await response.read()

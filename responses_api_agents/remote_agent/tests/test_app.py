@@ -24,6 +24,7 @@ from fastapi import Response
 from pydantic import BaseModel, ValidationError
 
 import responses_api_agents.remote_agent.app as remote_agent_app
+from nemo_gym import server_utils
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
@@ -184,12 +185,8 @@ class FakeServerClientResponse:
 def mock_remote(monkeypatch: pytest.MonkeyPatch, request_mock: AsyncMock) -> MagicMock:
     client = MagicMock()
     client.request = request_mock
-
-    async def http_request(method, url, _max_connection_retries=None, **kwargs):
-        assert _max_connection_retries == 1
-        return await client.request(method, url, **kwargs)
-
-    monkeypatch.setattr(remote_agent_app, "http_request", http_request)
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: client)
+    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
     monkeypatch.setattr(remote_agent_app, "_REMOTE_RETRY_SLEEP_SECS", 0)
     return client
 
@@ -327,8 +324,9 @@ class TestRunHappyPath:
 
         # The remote service receives ONLY create-params: no verifier_metadata, no row keys
         assert service.received[0]["payload"] == row["responses_create_params"]
-        args, request_kwargs = client.request.call_args
-        assert args == ("POST", "http://localhost:9000/v1/responses")
+        request_kwargs = client.request.call_args.kwargs
+        assert request_kwargs["method"] == "POST"
+        assert request_kwargs["url"] == "http://localhost:9000/v1/responses"
         assert request_kwargs["allow_redirects"] is False
         assert request_kwargs["timeout"].total == 1800.0
 

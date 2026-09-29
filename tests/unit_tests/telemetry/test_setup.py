@@ -28,6 +28,7 @@ from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.setup import (
     get_telemetry,
     init_telemetry,
+    is_metrics_exporting,
     is_telemetry_env_enabled,
     shutdown_telemetry,
 )
@@ -119,6 +120,14 @@ def test_init_builds_an_exporting_handle(enabled_console_env):
     assert handle is not None
     assert handle.is_exporting is True
     assert get_telemetry() is handle
+    assert is_metrics_exporting() is True
+
+
+def test_metrics_exporting_is_false_when_metrics_are_disabled(enabled_console_env):
+    enabled_console_env.setenv("NEMO_GYM_OTEL_METRICS_ENABLED", "0")
+    handle = init_telemetry(server_name="weather")
+    assert handle is not None and handle.is_exporting is True
+    assert is_metrics_exporting() is False
 
 
 def test_enabled_span_groups_follow_the_config(enabled_console_env):

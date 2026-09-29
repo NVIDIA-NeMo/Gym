@@ -23,10 +23,8 @@ import time
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
 from ipaddress import ip_network
-from math import ceil
-from os import environ, getenv, getpid
+from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
@@ -46,7 +44,6 @@ from aiohttp import (
     DummyCookieJar,
     ServerDisconnectedError,
     TCPConnector,
-    TraceConfig,
 )
 from aiohttp.client import _RequestOptions
 from anyio import create_task_group
@@ -84,6 +81,13 @@ from nemo_gym.global_config import (
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
+from nemo_gym.telemetry.connection_pool import (
+    build_connection_pool_trace_configs,
+    connection_pool_capacity,
+    report_connection_pool_capacity,
+    reset_server_name,
+    set_server_name,
+)
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -91,6 +95,7 @@ logger = logging.getLogger(__name__)
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
+_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY: bool = False
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
 # Bound both the raw request prefix and its escaped representation to 4 KiB.
 _VALIDATION_ERROR_LOG_BODY_CHARS = 4096
@@ -243,23 +248,23 @@ class _PickleSafeRequestInfo(NamedTuple):
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit: int = Field(
         default=100 * 1024,
-        gt=0,
-        description="Aggregate connection limit divided across FastAPI workers.",
+        ge=0,
+        description="Per-server connection budget divided across FastAPI workers; 0 is unlimited.",
     )
     global_aiohttp_connector_limit_per_host: int = Field(
         default=1024,
-        gt=0,
-        description="Aggregate per-host connection limit divided across FastAPI workers.",
+        ge=0,
+        description="Per-server, per-host connection budget divided across FastAPI workers; 0 is unlimited.",
     )
     global_aiohttp_intended_concurrency: Optional[int] = Field(
         default=None,
         gt=0,
-        description="Optional aggregate expected concurrent HTTP requests used for capacity warnings.",
+        description="Optional per-server expected concurrent HTTP requests used for capacity warnings.",
     )
     global_aiohttp_intended_concurrency_per_host: Optional[int] = Field(
         default=None,
         gt=0,
-        description="Optional aggregate expected concurrent HTTP requests to one host used for capacity warnings.",
+        description="Optional per-server expected concurrent HTTP requests to one host used for capacity warnings.",
     )
 
     global_aiohttp_client_request_debug: bool = False
@@ -318,242 +323,16 @@ def _make_keepalive_socket_factory(
     return factory
 
 
-class _ConnectionPoolCapacity(NamedTuple):
-    workers: int
-    total: int
-    per_host: int
-    intended: Optional[int]
-    intended_per_host: Optional[int]
-
-
-_REPORTED_CONNECTION_POOL_CAPACITIES: set[tuple] = set()
-
-
-def _ephemeral_port_capacity() -> Optional[int]:
-    """Return Linux's per-destination ephemeral-port budget when available."""
-    try:
-        low, high = (int(value) for value in Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split())
-    except (OSError, ValueError):
-        return None
-    return high - low + 1
-
-
-def _connection_pool_capacity(cfg: GlobalAIOHTTPAsyncClientConfig, workers: int) -> _ConnectionPoolCapacity:
-    if workers < 1:
-        raise ValueError(f"FastAPI worker count must be at least 1, got {workers}.")
-
-    total = cfg.global_aiohttp_connector_limit // workers
-    per_host = cfg.global_aiohttp_connector_limit_per_host // workers
-    if total < 1 or per_host < 1:
-        raise ValueError(
-            "aiohttp connector limits must remain at least 1 after division by FastAPI workers: "
-            f"workers={workers}, aggregate_total={cfg.global_aiohttp_connector_limit}, "
-            f"aggregate_per_host={cfg.global_aiohttp_connector_limit_per_host}, "
-            f"effective_total={total}, effective_per_host={per_host}. Increase the aggregate limits or reduce workers."
-        )
-
-    intended = (
-        ceil(cfg.global_aiohttp_intended_concurrency / workers)
-        if cfg.global_aiohttp_intended_concurrency is not None
-        else None
-    )
-    intended_per_host = (
-        ceil(cfg.global_aiohttp_intended_concurrency_per_host / workers)
-        if cfg.global_aiohttp_intended_concurrency_per_host is not None
-        else None
-    )
-    return _ConnectionPoolCapacity(workers, total, per_host, intended, intended_per_host)
-
-
-def _report_connection_pool_capacity(
-    cfg: GlobalAIOHTTPAsyncClientConfig,
-    capacity: _ConnectionPoolCapacity,
-    *,
-    visible: bool = False,
-) -> None:
-    """Log effective capacity and warn when explicit demand cannot fit."""
-    workers, total, per_host, intended, intended_per_host = capacity
-    report_key = (
-        getpid(),
-        workers,
-        cfg.global_aiohttp_connector_limit,
-        cfg.global_aiohttp_connector_limit_per_host,
-        cfg.global_aiohttp_intended_concurrency,
-        cfg.global_aiohttp_intended_concurrency_per_host,
-    )
-    if report_key in _REPORTED_CONNECTION_POOL_CAPACITIES:
-        return
-    _REPORTED_CONNECTION_POOL_CAPACITIES.add(report_key)
-
-    file_descriptors = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
-    ephemeral_ports = _ephemeral_port_capacity()
-    # aiohttp's `_available_connections` returns min(total_remain, per_host_remain), so a single
-    # host can never exceed the total limit however large `limit_per_host` is configured.
-    enforced_per_host = min(total, per_host)
-    capacity_message = (
-        f"aiohttp connection pool capacity: workers={workers} "
-        f"aggregate_total={cfg.global_aiohttp_connector_limit} "
-        f"aggregate_per_host={cfg.global_aiohttp_connector_limit_per_host} "
-        f"effective_total={total} effective_per_host={enforced_per_host} "
-        f"configured_per_host={per_host} "
-        f"realized_aggregate_total={total * workers} realized_aggregate_per_host={enforced_per_host * workers} "
-        f"intended_per_worker={intended} intended_per_host_per_worker={intended_per_host} "
-        f"file_descriptor_soft_limit={file_descriptors} ephemeral_ports_per_destination={ephemeral_ports}"
-    )
-    if visible:
-        print(capacity_message, flush=True)
-    else:
-        logger.info(capacity_message)
-
-    warnings = []
-    if intended is not None and intended > total:
-        warnings.append(f"intended per-worker concurrency {intended} exceeds effective total limit {total}")
-    if intended_per_host is not None and intended_per_host > enforced_per_host:
-        warnings.append(
-            f"intended per-host concurrency {intended_per_host} exceeds effective per-host limit {enforced_per_host}"
-        )
-    if intended is not None and file_descriptors != resource.RLIM_INFINITY and intended >= file_descriptors:
-        warnings.append(
-            f"intended per-worker concurrency {intended} can exhaust the file-descriptor soft limit "
-            f"{file_descriptors} before accounting for non-HTTP descriptors"
-        )
-    aggregate_intended_per_host = cfg.global_aiohttp_intended_concurrency_per_host
-    if (
-        aggregate_intended_per_host is not None
-        and ephemeral_ports is not None
-        and aggregate_intended_per_host > ephemeral_ports
-    ):
-        warnings.append(
-            f"aggregate intended per-host concurrency {aggregate_intended_per_host} exceeds the approximate "
-            f"per-destination ephemeral-port budget {ephemeral_ports}"
-        )
-    if warnings:
-        logger.warning(
-            "aiohttp connection pool may queue requests: %s. Adjust connector limits or concurrency while accounting "
-            "for file-descriptor, ephemeral-port, and backend connection budgets.",
-            "; ".join(warnings),
-        )
-
-
-class _ConnectionQueueTraceContext:
-    """Low-cardinality state accumulated across one logical request and its retries."""
-
-    def __init__(self, span: Any) -> None:
-        self.span = span
-        self.started_at: Optional[float] = None
-        self.duration_ms = 0.0
-        self.count = 0
-        self.queue_constraints: set[str] = set()
-
-    def queued(self, queue_constraint: str = "unknown") -> None:
-        if self.started_at is not None:
-            return
-        self.started_at = time.perf_counter()
-        self.queue_constraints.add(queue_constraint)
-
-    def released(self) -> None:
-        if self.started_at is None:
-            return
-        self.duration_ms += (time.perf_counter() - self.started_at) * 1000.0
-        self.count += 1
-        self.started_at = None
-        self.update_span()
-
-    def queue_constraint(self) -> str:
-        """Which connector limit caused the waits, as a bounded enum."""
-        if not self.count:
-            return "none"
-        known = self.queue_constraints - {"unknown"}
-        if len(known) > 1:
-            return "mixed"
-        return next(iter(known)) if known else "unknown"
-
-    def update_span(self) -> None:
-        if self.span is None:
-            return
-        safe_set_span_attributes(
-            self.span,
-            {
-                "nemo.gym.http.connection_pool.queued": self.count > 0,
-                "nemo.gym.http.connection_pool.queue_events": self.count,
-                "nemo.gym.http.connection_pool.queue_duration_ms": self.duration_ms,
-                "nemo.gym.http.connection_pool.queue_constraint": self.queue_constraint(),
-            },
-        )
-
-
-_CONNECTION_QUEUE_TRACE_CONTEXT: ContextVar[Optional[_ConnectionQueueTraceContext]] = ContextVar(
-    "nemo_gym_connection_queue_trace_context", default=None
-)
-
-
-def _connector_queue_constraint(session: Any) -> str:
-    """Classify which connector limit caused a queue wait.
-
-    aiohttp's queue callbacks carry no params, but the connector decides in
-    `BaseConnector._available_connections` that the *total* limit binds when no aggregate
-    slots remain, and the per-host limit otherwise. `limit` is public; `_acquired` is not,
-    so fall back to "unknown" if aiohttp's internals move.
-    """
-    connector = getattr(session, "connector", None)
-    limit = getattr(connector, "limit", None)
-    acquired = getattr(connector, "_acquired", None)
-    if not limit or acquired is None:
-        return "unknown"
-    return "total" if limit - len(acquired) <= 0 else "per_host"
-
-
-async def _on_connection_queued_start(session, _trace_config_ctx, _params) -> None:
-    context = _CONNECTION_QUEUE_TRACE_CONTEXT.get()
-    if context is None:
-        return
-    try:
-        context.queued(_connector_queue_constraint(session))
-    except Exception:
-        logger.debug("Failed to start aiohttp connection-queue telemetry", exc_info=True)
-
-
-async def _on_connection_queued_end(_session, _trace_config_ctx, _params) -> None:
-    context = _CONNECTION_QUEUE_TRACE_CONTEXT.get()
-    if context is None:
-        return
-    try:
-        context.released()
-    except Exception:
-        logger.debug("Failed to finish aiohttp connection-queue telemetry", exc_info=True)
-
-
-def _connection_queue_trace_config() -> TraceConfig:
-    trace_config = TraceConfig()
-    trace_config.on_connection_queued_start.append(_on_connection_queued_start)
-    trace_config.on_connection_queued_end.append(_on_connection_queued_end)
-    return trace_config
-
-
-def _queue_telemetry_installed(client: Any) -> bool:
-    """Whether the live session actually carries the queue callbacks.
-
-    The trace configs are fixed when the session is built while the span-group gate is re-read
-    per request, so an enabled-late caller would otherwise emit `queued=False` for requests that
-    really did wait. Derived from the session rather than a module flag so it stays true for any
-    session, however it was constructed.
-    """
-    trace_configs = getattr(client, "_trace_configs", None)
-    if trace_configs is None:
-        # Not a real ClientSession (test double); keep the caller's prior behavior.
-        return True
-    return any(_on_connection_queued_start in tc.on_connection_queued_start for tc in trace_configs)
-
-
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
     assert not is_global_aiohttp_client_setup(), (
         "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
     )
 
     num_workers = get_nemo_gym_fastapi_num_workers()
-    capacity = _connection_pool_capacity(cfg, num_workers)
-    _report_connection_pool_capacity(cfg, capacity)
-    trace_configs = [_connection_queue_trace_config()] if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT) else []
+    capacity = connection_pool_capacity(cfg, num_workers)
+    if not is_nemo_gym_fastapi_worker():
+        report_connection_pool_capacity(cfg, capacity)
+    trace_configs = build_connection_pool_trace_configs()
     client_session = ClientSession(
         connector=TCPConnector(
             limit=capacity.total,
@@ -576,6 +355,9 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     global _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
 
+    global _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
+    _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = bool(trace_configs)
+
     return _GLOBAL_AIOHTTP_CLIENT
 
 
@@ -591,10 +373,11 @@ def global_aiohttp_client_exit():  # pragma: no cover
     if not is_global_aiohttp_client_setup():
         return
 
-    global _GLOBAL_AIOHTTP_CLIENT
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
     asyncio.run(_GLOBAL_AIOHTTP_CLIENT.close())
 
     _GLOBAL_AIOHTTP_CLIENT = None
+    _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = False
 
 
 atexit.register(global_aiohttp_client_exit)
@@ -620,6 +403,7 @@ async def request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _server_name: Optional[str] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -633,6 +417,19 @@ async def request(
         kwargs["data"] = orjson.dumps(kwargs.pop("json"))
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
+
+    if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY:
+        token = set_server_name(_server_name or "external")
+        try:
+            if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
+                return await _traced_request(
+                    method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+                )
+            return await _request_with_retries(
+                method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            )
+        finally:
+            reset_server_name(token)
 
     # Gate first: a disabled site costs one frozenset lookup and nothing else. Gym runs at
     # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
@@ -684,28 +481,9 @@ async def _traced_request(
             }
             safe_set_span_attributes(span, attributes)
 
-        # Without callbacks installed, omit the attributes rather than assert `queued=False`,
-        # which a consumer could not tell apart from a genuinely unqueued request.
-        installed = _queue_telemetry_installed(get_global_aiohttp_client())
-        queue_context = _ConnectionQueueTraceContext(span) if installed else None
-        if queue_context is None:
-            response = await _request_with_retries(
-                method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
-            )
-        else:
-            queue_context.update_span()
-            token = _CONNECTION_QUEUE_TRACE_CONTEXT.set(queue_context)
-            try:
-                response = await _request_with_retries(
-                    method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
-                )
-            finally:
-                # A cancellation while queued does not receive aiohttp's queued-end callback.
-                try:
-                    queue_context.released()
-                except Exception:
-                    logger.debug("Failed to finish aiohttp connection-queue telemetry", exc_info=True)
-                _CONNECTION_QUEUE_TRACE_CONTEXT.reset(token)
+        response = await _request_with_retries(
+            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        )
 
         if span is not None:
             safe_set_span_attributes(span, {"http.response.status_code": response.status})
@@ -810,10 +588,7 @@ Sleeping 0.5s and retrying...
                 if num_tries >= MAX_NUM_TRIES:
                     raise e
 
-            # Counted for every caller: when this lived inside the `not _internal` branch an
-            # internal caller left `num_tries` at 1, so `_max_connection_retries` never tripped
-            # and the loop ran forever.
-            num_tries += 1
+                num_tries += 1
 
             await asyncio.sleep(0.5)
 
@@ -942,7 +717,13 @@ class ServerClient(BaseModel):
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
-        return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
+        return await request(
+            method=method,
+            url=f"{base_url}{url_path}",
+            _internal=True,
+            _server_name=server_name,
+            **kwargs,
+        )
 
     async def get(
         self,
@@ -1494,11 +1275,12 @@ repr(e): {repr(e)}"""
         server.set_ulimit()
         server.prefix_server_logs()
         connection_pool_config = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
-        connection_pool_capacity = _connection_pool_capacity(
+        pool_capacity = connection_pool_capacity(
             connection_pool_config,
             server.config.num_workers or 1,
         )
-        _report_connection_pool_capacity(connection_pool_config, connection_pool_capacity, visible=True)
+        if is_main_fastapi_proc:
+            report_connection_pool_capacity(connection_pool_config, pool_capacity, visible=True)
         server.setup_exception_middleware(app)
         # Register last so cancellation wraps the complete request stack.
         server.setup_cancellation_middleware(app)
