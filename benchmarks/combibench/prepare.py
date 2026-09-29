@@ -31,7 +31,16 @@ compile while 6 Hugging Face statements do not, so ``github`` is the default.
 The source is a preparation argument so a run records which one it measured.
 
 Rows are written without prompts. ``prompt.yaml`` templates ``{formal_statement}``
-at rollout time, so the model sees exactly what upstream's harness shows it.
+at rollout time, with upstream's own prompt strings around it.
+
+One known, scoring-irrelevant difference from what upstream's harness renders:
+``strip_comments`` returns ``text.strip() + "\\n"``, so the stored statement ends
+in a newline, while upstream ``.strip()``s the statement at render time. The
+rendered prompt therefore carries one more blank line before the closing fence
+than upstream's does. It cannot affect a verdict — the statement check strips
+every chunk it compares (``fine_eval.statement_chunks``) — and the stored rows
+are left as they are because every committed ``harness_validation_*.json`` and
+the 3,200-rollout agreement evidence were produced against them.
 """
 
 import argparse

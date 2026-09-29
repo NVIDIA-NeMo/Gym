@@ -39,7 +39,14 @@ Upstream's own prompt, byte-identical, from `evaluation/config/template.json5`:
 a system message ("You are an expert in mathematics and proving theorems in
 Lean 4.") and a user message that shows only the formal statement inside a
 ```` ```lean4 ```` fence. The informal statement is carried in the data as
-`natural_language` but is not shown, matching upstream. Runs are comparable to
+`natural_language` but is not shown, matching upstream. The prompt strings are
+byte-identical; the rendered statement is not quite, and deliberately so —
+`prepare.py` stores each statement with a trailing newline where upstream strips
+it at render time, so the fence closes one blank line later here. It cannot
+affect a verdict (the statement check strips every chunk it compares) and the
+stored rows are what all the committed evidence was measured against, so the
+difference is recorded rather than removed; see `prepare.py`'s module docstring.
+Runs are comparable to
 the paper's protocol in prompt and endpoint style (chat); decoding parameters
 and the token budget are not published, so no run is a reproduction.
 
@@ -275,9 +282,16 @@ that closes goals can.
 
 These were collected before harness faults were masked, so the `combibench`
 row's two `sandbox_error` rollouts are counted as failures in the 1600-rollout
-denominator of its 2.12%. A rerun on the current code would divide by 1598:
-`pass@16` cannot move (a masked rollout scored 0 and so was never what solved a
-problem) and `pass@1` can only move up, by at most 2 / 1600.
+denominator of its 2.12%. A rerun on the current code would divide by 1598, so
+`pass@1` can only move up, by at most 2 / 1600. The **count** of solved problems
+cannot move — a masked rollout scored 0, so it was never what solved anything —
+but the reported `pass@16/accuracy` can: `compute_pass_majority_metrics` skips
+any task with fewer than k rollouts, so a task that loses one rollout to masking
+leaves the pass@16 denominator altogether. So 8 / 100 becomes 8 / 99 or 7 / 99
+if both faults fall on the same problem (7 if that problem was one of the eight
+solved), and 8 / 98, 7 / 98 or 6 / 98 if they fall on two. The committed
+agreement report counts the two faults but does not name their problems, so
+which of those it is cannot be read off the evidence here.
 
 Per source family, problems solved at least once out of 16 attempts:
 

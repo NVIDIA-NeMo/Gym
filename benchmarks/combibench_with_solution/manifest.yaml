@@ -9,7 +9,7 @@ description: 'CombiBench "with solution" setting: the 100 Lean 4 combinatorics p
   compiles the result and the verifier reproduces upstream one-stage Fine-Eval: statement-tamper
   check, no axiom/sorry, answers compared to ground truth by rfl/norm_num.'
 modality: text
-licensing: Apache-2.0
+licensing: Apache-2.0 AND MIT
 authors:
 - rshahbazyan
 reward:
