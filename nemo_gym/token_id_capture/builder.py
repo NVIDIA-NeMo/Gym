@@ -83,9 +83,9 @@ class BuildNotes:
     chains: int = 0
     generated_tokens_captured: int = 0
     generated_tokens_delivered: int = 0
-    # Only one chain is delivered per rollout.
-    # Sub-agent branches and post-compaction chains are dropped.
-    # The delivered fraction exposes this limitation.
+    # Legacy main-chain delivery drops sub-agent and post-compaction chains.
+    # Opt-in all_traces counts each retained generated span once.
+    # The delivered fraction exposes drops in either mode.
     delivered_fraction: float = 0.0
     # These calls have a retry sibling that the harness may not have kept.
     # A final-call retry is unresolved because no later call identifies the survivor.
@@ -275,7 +275,9 @@ class _NullPrefixIndex:
         return None, False
 
 
-def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = None) -> BuildOutput:
+def prefix_merging(
+    entries: list[TokenEntry], terminal_call_id: str | None = None, *, all_traces: bool = False
+) -> BuildOutput:
     # An at-least-once transport can deliver one entry twice.
     # Conflicting payloads for one id are corrupt.
     deduped: dict[str, TokenEntry] = {}
@@ -284,17 +286,29 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
         previous = deduped.get(candidate.model_call_id)
         if previous is None:
             deduped[candidate.model_call_id] = candidate
+        elif all_traces and previous.model_dump(exclude={"created_at"}) != candidate.model_dump(
+            exclude={"created_at"}
+        ):
+            duplicate_conflicts.append(candidate.model_call_id)
         elif (list(previous.prompt_token_ids), list(previous.generation_token_ids)) != (
             list(candidate.prompt_token_ids),
             list(candidate.generation_token_ids),
         ):
             duplicate_conflicts.append(candidate.model_call_id)
     entries = list(deduped.values())
+    captured_full_prompts = {entry.model_call_id for entry in entries if not entry.prompt_is_delta}
 
     # Chain construction assumes full prompts.
     # Materialize delta records before sorting or checking parent digests.
     # Exclude a record when its parent chain cannot be reconstructed exactly.
     entries, unreconstructable = _materialize_delta_prompts(entries)
+    if all_traces:
+        for entry in entries:
+            cumulative = list(entry.prompt_token_ids) + list(entry.generation_token_ids)
+            if (entry.cum_len is not None and entry.cum_len != len(cumulative)) or (
+                entry.digest is not None and entry.digest != compute_digest(cumulative)
+            ):
+                raise ValueError(f"captured cumulative proof mismatch for {entry.model_call_id}")
 
     # A call without generated tokens has no training signal.
     # Its cumulative sequence equals its prompt.
@@ -352,8 +366,20 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
         parent, ambiguous, note = _resolve_parent(node, nodes_by_call_id, prefix_index)
         if note:
             parent_link_failures[note] = parent_link_failures.get(note, 0) + 1
-            # A recovered fallback found a safe parent.
-            if not note.endswith("_recovered"):
+            # A canonical next prompt can rewrite a consumed response or its
+            # template (for example, remove an empty thinking prefix). A complete,
+            # independently verified capture can still train as its own root.
+            # Do not invent a token-prefix join or use this for delta/missing/
+            # unresolved parents. Retry admission below remains unchanged.
+            rewritten_full_prompt = (
+                all_traces
+                and note == "parent_digest_mismatch"
+                and entry.parent_resolution == ParentResolutionStatus.RESOLVED
+                and entry.model_call_id in captured_full_prompts
+                and entry.cum_len is not None
+                and entry.digest is not None
+            )
+            if not note.endswith("_recovered") and not rewritten_full_prompt:
                 node.unresolved_boundary = True
                 unresolved_parent_calls.append(entry.model_call_id)
         if parent is not None:
@@ -408,18 +434,20 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
             if len(retry_group) < 2:
                 continue
             on_terminal_path = [n for n in retry_group if id(n) in terminal_ancestry]
+            extended = [n for n in retry_group if any(not child.quarantined for child in n.children)]
             if on_terminal_path:
-                # The verified terminal identifies the sibling the harness kept.
-                keep = set(on_terminal_path)
+                # In plural delivery, a verified child proves another sibling was
+                # also consumed. Do not discard a real fork just because one
+                # sibling produced the final answer.
+                keep = set(on_terminal_path) | (set(extended) if all_traces else set())
             else:
-                extended = [n for n in retry_group if any(not child.quarantined for child in n.children)]
                 if extended:
                     keep = set(extended)
                 else:
                     keep = {min(retry_group, key=lambda n: n.entry.model_call_id)}
                     # With an attributed terminal, a group off the terminal path
                     # cannot reach the delivered chain, so it never masks.
-                    if terminal_node is None:
+                    if terminal_node is None or all_traces:
                         unresolved_retries.extend(n.entry.model_call_id for n in retry_group)
             for node in retry_group:
                 if node not in keep and not node.quarantined:
@@ -464,6 +492,11 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
             else:
                 terminal_chain = chain_from(terminal_path)
                 terminal_chain_status = "delivered"
+
+    if all_traces:
+        # Terminal attribution resolves retries, but does not select which
+        # independent calls belong to an opt-in complete rollout delivery.
+        terminal_chain = None
 
     # Materialize root-to-leaf chains.
     # A leaf chain through the terminal is represented by the truncated main chain.
@@ -534,11 +567,29 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
         parent_link_failures=parent_link_failures,
         unresolved_parent_calls=unresolved_parent_calls,
     )
+    if all_traces:
+        kept = {link.entry.model_call_id: link.entry for chain in chains for link in chain.links}
+        notes.generated_tokens_delivered = sum(len(entry.generation_token_ids) for entry in kept.values())
+        notes.delivered_fraction = round(notes.generated_tokens_delivered / captured, 4) if captured else 0.0
     return BuildOutput(chains=chains, quarantined=quarantined, notes=notes)
+
+
+def per_request(entries: list[TokenEntry], terminal_call_id: str | None = None) -> BuildOutput:
+    """Emit one full-prompt chain per admitted call using the same retry evidence."""
+    out = prefix_merging(entries, terminal_call_id=terminal_call_id, all_traces=True)
+    kept = {link.entry.model_call_id: link.entry for chain in out.chains for link in chain.links}
+    out.chains = [
+        Chain(chain_id=call_id, root_prompt=list(entry.prompt_token_ids), links=[ChainLink(entry, [])])
+        for call_id, entry in sorted(kept.items())
+    ]
+    out.notes.builder = "per_request"
+    out.notes.chains = len(out.chains)
+    return out
 
 
 _BUILDERS: dict[str, Callable[..., BuildOutput]] = {
     "prefix_merging": prefix_merging,
+    "per_request": per_request,
 }
 
 
@@ -546,6 +597,8 @@ def run_builder(
     entries: list[TokenEntry],
     builder: str = "prefix_merging",
     terminal_call_id: str | None = None,
+    *,
+    all_traces: bool = False,
 ) -> BuildOutput:
     """Chain frozen snapshot entries with the named strategy.
 
@@ -554,8 +607,8 @@ def run_builder(
     if builder not in _BUILDERS:
         raise ValueError(f"unknown builder {builder!r}; known: {sorted(_BUILDERS)}")
     if builder == "prefix_merging":
-        return prefix_merging(entries, terminal_call_id=terminal_call_id)
-    return _BUILDERS[builder](entries)
+        return prefix_merging(entries, terminal_call_id=terminal_call_id, all_traces=all_traces)
+    return _BUILDERS[builder](entries, terminal_call_id=terminal_call_id)
 
 
 # --- Projection to a contiguous, token-bearing response ---

@@ -38,6 +38,7 @@ Failed or masked builds retain their capture evidence.
 from nemo_gym.token_id_capture.builder import (
     Chain,
     assert_prefix_contiguity,
+    per_request,
     prefix_merging,
     project_chain_to_output_items,
     project_main_chain_response,
@@ -160,6 +161,7 @@ __all__ = [
     "assistant_fingerprint",
     "stamp_continuation",
     "prefix_merging",
+    "per_request",
     "project_chain_to_output_items",
     "project_main_chain_response",
     "run_builder",
