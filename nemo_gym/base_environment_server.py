@@ -7,14 +7,20 @@ import asyncio
 import logging
 from abc import abstractmethod
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Generic, TypeVar
 
 from anyio import CancelScope
 from fastapi import Body, FastAPI
-from pydantic import ConfigDict, PositiveFloat, PositiveInt, model_validator
+from pydantic import ConfigDict, JsonValue, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
+from nemo_gym._checkpoint.control import install_participant
+from nemo_gym._checkpoint.environment import EnvironmentParticipant
+from nemo_gym._checkpoint.errors import ControlError
+from nemo_gym._checkpoint.settings import checkpoint_settings
+from nemo_gym._checkpoint.steps import StepMode
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure, EpisodeId
 from nemo_gym.rollout_correlation import rollout_context
@@ -130,6 +136,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     request_model: ClassVar[type[EpisodeRequestT]]
     response_model: ClassVar[type[EpisodeResponseT]]
     _admission: asyncio.Semaphore | None = None
+    _checkpoint: EnvironmentParticipant | None = None
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -141,6 +148,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
+        self.setup_environment_checkpoint(app)
 
         async def run_endpoint(body: Any) -> Any:
             return await self.run_request(body)
@@ -188,6 +196,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             try:
                 try:
                     async with deadline:
+                        if self._checkpoint is not None:
+                            self._checkpoint.begin(request.episode_id, request.task.model_dump(mode="json"), deadline)
                         response = await self.run(request, cleanup)
                 except TimeoutError as error:
                     if deadline.expired():
@@ -200,6 +210,9 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                         )
                     else:
                         response = self._unhandled_failure_response(request, error)
+                except ControlError:
+                    # A checkpoint refused this episode before it started; the caller retries it later.
+                    raise
                 except HandledEpisodeError as error:
                     response = self.failure_response(request, error.failure)
                 except asyncio.CancelledError as error:
@@ -210,6 +223,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 try:
                     with CancelScope(shield=True):
                         await cleanup.aclose()
+                        if self._checkpoint is not None:
+                            await self._checkpoint.end(request.episode_id)
                 finally:
                     if acquired and self._admission is not None:
                         self._admission.release()
@@ -220,9 +235,53 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         self.validate_response_identity(request, response)
         return response
 
+    def setup_environment_checkpoint(self, app: FastAPI) -> None:
+        """Take part in partial-rollout checkpoints when they are enabled.
+
+        Every episode is tracked. A protocol that records boundaries continues after a restore; a
+        protocol that records none blocks a checkpoint until its episodes are retired, so they
+        restart from their input. Call this from any ``setup_webserver`` that builds its own app.
+        """
+        settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
+        if settings is None:
+            return
+        if (self.config.num_workers or 1) != 1:
+            raise ValueError("environment checkpointing requires num_workers=1: episodes live in one process")
+        self._checkpoint = EnvironmentParticipant()
+        install_participant(
+            app,
+            self._checkpoint,
+            auth_token=settings.control_auth_token,
+            lease_grace_seconds=settings.lease_grace_seconds,
+            instance_name=self.config.name,
+        )
+
     @abstractmethod
     async def run(self, request: EpisodeRequestT, cleanup: CleanupContext) -> EpisodeResponseT:
         """Run one concrete environment protocol."""
+
+    def checkpoint_continuation(self, request: EpisodeRequestT) -> dict[str, JsonValue] | None:
+        """Return the protocol state this attempt continues from a checkpoint, once, or ``None``."""
+        return self._checkpoint.continuation(request.episode_id) if self._checkpoint is not None else None
+
+    async def checkpoint_boundary(self, request: EpisodeRequestT, state: dict[str, JsonValue]) -> None:
+        """Record that a protocol step completed; ``state`` names the next step and what it needs.
+
+        While a checkpoint is open the episode parks here until resume. A replacement attempt that
+        continues a checkpoint receives the latest recorded ``state`` from ``checkpoint_continuation``.
+        """
+        if self._checkpoint is not None:
+            await self._checkpoint.boundary(request.episode_id, state)
+
+    def checkpoint_step(self, request: EpisodeRequestT, mode: StepMode) -> AbstractAsyncContextManager[None]:
+        """Run one protocol step in ``wait`` or ``replay`` mode (see ``nemo_gym._checkpoint.steps``).
+
+        Use ``replay`` only for a step that is safe to run again after a crash and does not change
+        checkpointed state; everything else waits.
+        """
+        if self._checkpoint is None:
+            return nullcontext()
+        return self._checkpoint.step(request.episode_id, mode)
 
     def _unhandled_failure_response(self, request: EpisodeRequestT, error: Exception) -> EpisodeResponseT:
         LOGGER.exception(f"Unhandled environment server error: episode_id={request.episode_id}")
