@@ -103,6 +103,29 @@ def _empty_response() -> dict[str, Any]:
     ).model_dump(mode="json")
 
 
+# Tool names each harness uses to spawn a subagent.
+_SUBAGENT_TOOLS = {"agent", "task", "spawn_agent", "delegate_task", "new_task", "use_subagents"}
+
+
+def _rollout_stats(response: dict[str, Any], failed: bool, seconds: float) -> dict[str, float]:
+    output = response.get("output") or []
+    calls = [item for item in output if isinstance(item, dict) and item.get("type") == "function_call"]
+    usage = response.get("usage") or {}
+    return {
+        "harness_failed": float(failed),
+        "harness_seconds": seconds,
+        "harness_tool_calls": float(len(calls)),
+        "harness_subagent_calls": float(
+            sum(1 for c in calls if str(c.get("name") or "").lower() in _SUBAGENT_TOOLS)
+        ),
+        "harness_assistant_messages": float(
+            sum(1 for item in output if isinstance(item, dict) and item.get("type") == "message")
+        ),
+        "harness_input_tokens": float(usage.get("input_tokens") or 0),
+        "harness_output_tokens": float(usage.get("output_tokens") or 0),
+    }
+
+
 def resolve_agent(name: str) -> tuple[str, str, str]:
     try:
         return _AGENTS[name]
@@ -297,6 +320,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             }
             token = _RUN_CONTEXT.set(run_context)
             try:
+                started, failed = time.monotonic(), False
                 try:
                     agent_resp = await self.responses(request, body.responses_create_params)
                     failure_kind = (agent_resp.metadata or {}).get("failure_kind")
@@ -316,6 +340,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                         return masked
                     agent_resp_json = agent_resp.model_dump(mode="json")
                 except Exception:
+                    failed = True
                     if not self.config.score_failed_runs:
                         raise
                     LOG.warning("harness run failed; scoring it as an empty response", exc_info=True)
@@ -328,7 +353,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     cookies=cookies,
                 )
                 await raise_for_status(verify_resp)
-                return HarnessAgentVerifyResponse.model_validate(await get_response_json(verify_resp))
+                stats = _rollout_stats(agent_resp_json, failed, time.monotonic() - started)
+                return HarnessAgentVerifyResponse.model_validate(await get_response_json(verify_resp) | stats)
             except BaseException:
                 await self._close_run_sandbox(run_context)
                 raise
