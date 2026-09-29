@@ -1,0 +1,2 @@
+config_paths:
+- resources_servers/wordle/configs/wordle.yaml
