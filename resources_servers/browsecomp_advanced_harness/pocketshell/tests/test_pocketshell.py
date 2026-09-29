@@ -324,3 +324,43 @@ def test_normal_grep_is_not_slowed_by_the_timeout_wrapper(ws):
     r = run('grep -c "gamma" pages/0003_search_gamma.txt', workspace=ws, timeout=3.0)
     assert r.stdout.strip() == "50"
     assert time.time() - t < 2.0
+
+
+# --- the workspace root must never appear in agent-visible output ----------
+# The shell resolves every argument to an absolute path inside the workspace, and
+# OSError carries that resolved path in `filename`. Formatting the exception then
+# hands the agent the sandbox root -- which names the benchmark and leaks the host
+# layout. The subprocess implementation this replaced ran with cwd=workspace, so
+# its errors quoted only the relative argument the agent had typed. Match that.
+def test_missing_file_error_is_workspace_relative(ws):
+    r = R("grep foo pages/nope.txt", ws)
+    assert ws not in r.stderr, r.stderr
+    assert "pages/nope.txt" in r.stderr
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "grep foo pages/nope.txt",
+        "cat pages/nope.txt",
+        "sed -n 1p pages/nope.txt",
+        "head pages/nope.txt",
+        "wc -l pages/nope.txt",
+        "ls pages/nope.txt",
+        "tr a b < pages/nope.txt",
+    ],
+)
+def test_no_command_leaks_the_workspace_root(cmd, ws):
+    r = R(cmd, ws)
+    assert ws not in r.stdout and ws not in r.stderr, f"{cmd!r} leaked: {r.stderr or r.stdout}"
+
+
+def test_glob_that_matches_nothing_does_not_leak_the_root(ws):
+    # `tr: [Errno 2] ... '/tmp/.../pages/0271_*'` was observed in a real run
+    r = R("cat pages/9999_* ", ws)
+    assert ws not in r.stdout and ws not in r.stderr, r.stderr or r.stdout
+
+
+def test_error_still_names_the_file_so_the_agent_can_retry(ws):
+    r = R("cat pages/nope.txt", ws)
+    assert "nope.txt" in (r.stderr + r.stdout)

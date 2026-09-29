@@ -7,8 +7,8 @@ rolemrc:
       description: RoleMRC role-play MRC scored with reference metrics (ROUGE/BLEU/METEOR/BERTScore); ROUGE-L is the reward.
       value: Improve role-play instruction following and knowledge-grounded responses.
       mode: reference
-      # BERTScore is on by default for parity with the upstream benchmark; it
-      # downloads a roberta-large checkpoint on first use. Set false (and drop
+      # BERTScore is part of the reported reference metrics; it downloads a
+      # roberta-large checkpoint on first use. Set false (and drop
       # bert-score from requirements.txt) for a lightweight reward signal.
       include_bertscore: true
 

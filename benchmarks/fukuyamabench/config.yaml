@@ -1,0 +1,24 @@
+# Chain to the existing resources server + agent config.
+config_paths:
+  - resources_servers/fukuyamabench/configs/fukuyamabench.yaml
+
+fukuyamabench_benchmark_agent:
+  _inherit_from: fukuyamabench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: fukuyamabench
+        type: benchmark
+        jsonl_fpath: benchmarks/fukuyamabench/data/fukuyamabench_benchmark.jsonl
+        prepare_script: benchmarks/fukuyamabench/prepare.py
+        # null: the preparation script already materialises each row, embedding
+        # upstream's system prompt and user template, so there is no row-level
+        # prompt to apply here.
+        prompt_config: null
+        # Upstream reports pass@k for k in {1, 3, 5, 8}, which requires at least
+        # 8 draws per case. A single draw would report a different quantity from
+        # the published one.
+        num_repeats: 8
+        # The corpus is downloaded at runtime and its rights are unresolved; see
+        # resources_servers/fukuyamabench/README.md "Licensing".
+        license: TBD

@@ -122,7 +122,7 @@ class TestApp:
 
     async def test_create_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
         sandbox = MagicMock()
-        sandbox.start = AsyncMock()
+        sandbox.start_with_setup = AsyncMock(side_effect=lambda spec, setup: sandbox)
         monkeypatch.setattr("resources_servers.swebench.app.get_global_config_dict", lambda: {})
         monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_config", lambda *_: MagicMock())
         monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_metadata", lambda *_: {})
@@ -144,7 +144,7 @@ class TestApp:
             )
             server = SwebenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
             await server._create_sandbox(test_spec)
-            return sandbox.start.await_args.args[0]
+            return sandbox.start_with_setup.await_args.args[0]
 
         # Floored to whole cores; explicit sandbox_config.env keys win over the derived caps.
         spec = await created_spec({"resources": {"cpu": 2.7}, "env": {"OMP_NUM_THREADS": "16"}})

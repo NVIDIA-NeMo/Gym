@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as slurm_module
@@ -29,7 +30,7 @@ from nemo_gym.orchestration.executors.slurm import (
     _sbatch_command,
     _validate_mounts,
 )
-from nemo_gym.orchestration.jobs import MANIFEST_NAME, SubmissionRecord
+from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, SubmissionRecord
 
 
 def test_sbatch_command_captures_the_status_of_sbatch_not_the_pipeline():
@@ -170,6 +171,18 @@ def test_run_writes_the_manifest_into_the_run_dir(tmp_path, monkeypatch):
 
     manifest = Path(record.run_dir) / MANIFEST_NAME
     assert SubmissionRecord.load(json.loads(manifest.read_text())) == record
+
+
+def test_run_writes_the_resolved_config_into_the_run_dir(tmp_path, monkeypatch):
+    conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 "])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
+
+    resolved = yaml.safe_load((Path(record.run_dir) / RESOLVED_CONFIG_NAME).read_text())
+    assert resolved["job"]["output_path"] == str(tmp_path / "jobs")
+    assert list(resolved["driver"]["benchmarks"]) == ["bench_a"]
 
 
 def test_run_writes_the_local_index(tmp_path, monkeypatch):

@@ -21,6 +21,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
 from importlib import import_module
+from importlib.metadata import version as distribution_version
 from os import environ, getenv
 from pathlib import Path
 from platform import python_version
@@ -34,7 +35,6 @@ from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
 from omegaconf.errors import InterpolationResolutionError
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
-from ray import __version__ as ray_version
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, legacy_config_path_alias
@@ -68,6 +68,8 @@ from nemo_gym.telemetry.setup import (
 
 
 logger = logging.getLogger(__name__)
+
+ray_version = distribution_version("ray")
 
 _GLOBAL_CONFIG_DICT = None
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
@@ -117,6 +119,10 @@ SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
 ALLOW_UNSUPPORTED_PAIRING_KEY_NAME = "allow_unsupported_pairing"
 ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME = "NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING"
+ENVIRONMENT_SERVER_NAME_KEY_NAME = "environment_server_name"
+ENVIRONMENT_SERVER_ROUTES_KEY_NAME = "environment_server_routes"
+ENVIRONMENT_ROUTING_MODE_KEY_NAME = "environment_routing_mode"
+TASKSETS_KEY_NAME = "tasksets"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -154,9 +160,14 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     SKIP_VERIFICATION_REWARD_KEY_NAME,
     TELEMETRY_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
+    ENVIRONMENT_SERVER_NAME_KEY_NAME,
+    ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
+    ENVIRONMENT_ROUTING_MODE_KEY_NAME,
+    TASKSETS_KEY_NAME,
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
+ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
 # Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
@@ -1752,7 +1763,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     errors = error.errors()
 
     # Identify the actual server type from the error (excluding Union discriminator noise)
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents", "environment_servers"]
     actual_server_type = None
 
     # Example error structure: ('ResponsesAPIAgentServerInstanceConfig', 'responses_api_agents', 'simple_agent', 'datasets', 0, 'license')

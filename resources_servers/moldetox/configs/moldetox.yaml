@@ -1,0 +1,27 @@
+moldetox:
+  resources_servers:
+    moldetox:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: MolDeTox toxicity-aware molecular editing verifier
+      value: Evaluate toxicity-aware molecular editing with the MolDeTox benchmark
+moldetox_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: moldetox
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/moldetox/data/example.jsonl
+        license: Creative Commons Attribution 4.0 International
+      - name: val
+        type: validation
+        jsonl_fpath: resources_servers/moldetox/data/val.jsonl
+        license: Creative Commons Attribution 4.0 International

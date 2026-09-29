@@ -39,6 +39,7 @@ from nemo_gym.config_types import (
     UnsupportedAgentPairingError,
     UnsupportedModelPairingError,
     WANDBConfig,
+    is_almost_server,
 )
 from nemo_gym.global_config import (
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
@@ -1408,6 +1409,18 @@ contested: second_inner
         assert isinstance(exc_info.value, ConfigError)
         # Diagnostics must stay off stdout, which carries the `--json` payload.
         assert all(call.kwargs.get("file") is sys.stderr for call in rich_print_mock.call_args_list)
+
+    def test_environment_server_is_recognized_as_an_almost_server(self) -> None:
+        config = DictConfig(
+            {
+                "environment_servers": {
+                    "first": {"entrypoint": "first.py"},
+                    "second": {"entrypoint": "second.py"},
+                }
+            }
+        )
+
+        assert is_almost_server(config) is True
 
     def test_almost_servers_error_flag_bypasses_value_error(self, monkeypatch: MonkeyPatch) -> None:
         """

@@ -232,6 +232,8 @@ class CVDPAgentVerifyResponse(BaseVerifyResponse):
 class CVDPAgent(SimpleResponsesAPIAgent):
     """CVDP agent for simple and agentic execution."""
 
+    ray_enabled = False
+
     config: CVDPAgentConfig
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
