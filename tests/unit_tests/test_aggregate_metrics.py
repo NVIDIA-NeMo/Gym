@@ -301,8 +301,20 @@ class TestComputeMetricsHook:
         assert calls == [(2, 2)]
         assert result.agent_metrics["mean/reward"] == 11.0
         assert result.key_metrics == {"mean/reward": 11.0}
-        assert all("mean/reward" not in repeat for repeat in result.repeat_level_metrics)
-        assert "mean_across_repeats/mean/reward" not in result.agent_metrics
+        assert [repeat["mean/reward"] for repeat in result.repeat_level_metrics] == [0.5, 0.5]
+        assert result.agent_metrics["mean_across_repeats/mean/reward"] == 0.5
+
+    def test_repeat_only_hook_runs_without_full_run_hook(self) -> None:
+        def compute_repeat_metrics(tasks):
+            return {"repeat_only": float(tasks[0][0][ROLLOUT_INDEX_KEY_NAME])}
+
+        result = compute_aggregate_metrics(
+            _make_verify_responses(tasks=2, rollouts_per_task=2),
+            compute_repeat_metrics_fn=compute_repeat_metrics,
+        )
+
+        assert [repeat["repeat_only"] for repeat in result.repeat_level_metrics] == [0.0, 1.0]
+        assert result.agent_metrics["mean_across_repeats/repeat_only"] == 0.5
 
     @pytest.mark.parametrize(("full_value", "repeat_value"), [(None, 99.0), (99.0, None)])
     def test_custom_suppression_removes_generic_repeat_values_and_stale_aggregates(
@@ -327,7 +339,7 @@ class TestComputeMetricsHook:
         else:
             assert result.agent_metrics["mean/reward"] == full_value
 
-    def test_a_rejected_repeat_does_not_mix_generic_and_custom_estimators(self) -> None:
+    def test_a_rejected_repeat_fails_aggregation(self) -> None:
         def compute_metrics(tasks):
             return {"mean/reward": 11.0}
 
@@ -337,19 +349,26 @@ class TestComputeMetricsHook:
                 raise ValueError("repeat is not independently scoreable")
             return {"mean/reward": 11.0}
 
-        with pytest.warns(UserWarning, match="custom repeat metrics were omitted"):
-            result = compute_aggregate_metrics(
+        with pytest.raises(ValueError, match="repeat is not independently scoreable"):
+            compute_aggregate_metrics(
                 _make_verify_responses(tasks=2, rollouts_per_task=2, reward_fn=lambda _task, _repeat: 4.0),
                 compute_metrics_fn=compute_metrics,
                 compute_repeat_metrics_fn=compute_repeat_metrics,
             )
 
-        assert "mean/reward" not in result.repeat_level_metrics[0]
-        assert result.repeat_level_metrics[1]["mean/reward"] == 11.0
-        assert result.agent_metrics["mean/reward"] == 11.0
-        assert result.agent_metrics["mean_across_repeats/mean/reward"] == 11.0
-        assert "ci_low_95_across_repeats/mean/reward" not in result.agent_metrics
-        assert "ci_high_95_across_repeats/mean/reward" not in result.agent_metrics
+    def test_missing_custom_repeat_does_not_publish_partial_aggregate(self) -> None:
+        def compute_repeat_metrics(tasks):
+            if tasks[0][0][ROLLOUT_INDEX_KEY_NAME] == 0:
+                return {"mean/reward": 11.0}
+            return {}
+
+        result = compute_aggregate_metrics(
+            _make_verify_responses(tasks=2, rollouts_per_task=2),
+            compute_repeat_metrics_fn=compute_repeat_metrics,
+        )
+
+        assert all("mean/reward" not in repeat for repeat in result.repeat_level_metrics)
+        assert "mean_across_repeats/mean/reward" not in result.agent_metrics
 
 
 class TestComputePassMajorityMetrics:

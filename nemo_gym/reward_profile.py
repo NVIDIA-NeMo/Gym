@@ -813,8 +813,8 @@ class AggregateMetricsMixin:
     def compute_repeat_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Override to compute custom metrics independently for one repeat.
 
-        This hook is called once per repeat. Only finite numeric metrics also returned
-        by compute_metrics() are retained and summarized across repeats.
+        Returned names replace matching generic repeat metrics. A metric is summarized
+        only when it is finite for every scored repeat and its full-run value, if any, is finite.
         """
         return {}
 
@@ -1068,35 +1068,32 @@ def _add_custom_repeat_metrics(
     compute_repeat_metrics_fn: Any,
 ) -> None:
     """Recompute benchmark metrics per repeat, replacing generic collisions and their aggregates."""
-    if not custom_metrics or not repeat_level_metrics:
+    if not repeat_level_metrics or compute_repeat_metrics_fn is None:
         return
 
     responses_by_repeat: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     for response in verify_responses:
         responses_by_repeat[response.get(ROLLOUT_INDEX_KEY_NAME, 0)].append(response)
 
-    numeric_metric_names = [name for name, value in custom_metrics.items() if _is_finite_number(value)]
-    for repeat_metrics in repeat_level_metrics:
-        rollout_idx = repeat_metrics[ROLLOUT_INDEX_KEY_NAME]
-        for name in custom_metrics:
-            repeat_metrics.pop(name, None)
-        if compute_repeat_metrics_fn is None:
-            continue
-        try:
-            repeat_custom = compute_repeat_metrics_fn(_group_by_task(responses_by_repeat[rollout_idx]))
-        except Exception as e:
-            warnings.warn(
-                f"Benchmark custom repeat metrics were omitted for repeat {rollout_idx}: {e!r}",
-                stacklevel=2,
-            )
-            continue
-        for name in numeric_metric_names:
-            value = repeat_custom.get(name)
-            if _is_finite_number(value):
-                repeat_metrics[name] = float(value)
+    repeat_custom_metrics = [
+        compute_repeat_metrics_fn(_group_by_task(responses_by_repeat[row[ROLLOUT_INDEX_KEY_NAME]]))
+        for row in repeat_level_metrics
+    ]
+    metric_names = {name for metrics in repeat_custom_metrics for name in metrics}
+    if not metric_names:
+        return
+    for name in metric_names:
+        values = [metrics.get(name) for metrics in repeat_custom_metrics]
+        for row in repeat_level_metrics:
+            row.pop(name, None)
+        if (name not in custom_metrics or _is_finite_number(custom_metrics[name])) and all(
+            _is_finite_number(value) for value in values
+        ):
+            for row, value in zip(repeat_level_metrics, values):
+                row[name] = float(value)
 
     for name in list(agent_metrics):
-        if ACROSS_REPEATS_MARKER in name and name.split(ACROSS_REPEATS_MARKER, 1)[1] in custom_metrics:
+        if ACROSS_REPEATS_MARKER in name and name.split(ACROSS_REPEATS_MARKER, 1)[1] in metric_names:
             agent_metrics.pop(name)
 
     for aggregate in profiler._aggregate_repeat_level_metrics(repeat_level_metrics):
@@ -1206,7 +1203,10 @@ def compute_aggregate_metrics(
     # masks nothing publishes exactly the keys it published before.
     key_metrics.update(coverage)
 
-    if compute_metrics_fn:
+    if (
+        compute_repeat_metrics_fn
+        and getattr(compute_repeat_metrics_fn, "__func__", None) is not AggregateMetricsMixin.compute_repeat_metrics
+    ):
         _add_custom_repeat_metrics(
             rp,
             scored,

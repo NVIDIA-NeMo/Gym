@@ -50,11 +50,6 @@ class Stat(StrEnum):
         return f"{self.value}{ACROSS_REPEATS_MARKER}"
 
 
-# Statistics that describe the spread of an underlying field rather than being an estimate of their own.
-DISPERSION_STATS: Tuple[Stat, ...] = tuple(stat for stat in Stat if stat not in (Stat.MEAN, Stat.HISTOGRAM))
-DISPERSION_PREFIXES: Tuple[str, ...] = tuple(stat.prefix for stat in DISPERSION_STATS)
-
-
 # Companion statistics `compute_pass_majority_metrics` appends to a pass@k metric name.
 class PassMajorityStat(StrEnum):
     STD_DEV_ACROSS_RUNS = "std_dev_across_runs"
@@ -70,7 +65,7 @@ PASS_MAJORITY_STAT_SUFFIXES: Tuple[str, ...] = tuple(stat.suffix for stat in Pas
 
 
 # Existing statistics, uncertainty estimates, and metadata are not primary metrics.
-METRIC_EXCLUDED_PREFIXES = DISPERSION_PREFIXES
+METRIC_EXCLUDED_PREFIXES = tuple(stat.prefix for stat in Stat if stat != Stat.MEAN)
 METRIC_EXCLUDED_SUFFIXES = (
     f"/{Stat.MAX}",
     f"/{Stat.MIN}",
