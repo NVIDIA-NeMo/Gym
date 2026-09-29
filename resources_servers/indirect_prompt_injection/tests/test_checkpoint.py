@@ -239,20 +239,17 @@ async def test_export_and_restore_do_not_alias_nested_state(environment):
     assert snapshot.state["environment"]["patients"]["P001"]["conditions"] == []
 
 
-async def test_restore_batch_replaces_target_and_preserves_other_sessions(environment):
+async def test_restore_batch_activates_all_snapshots(environment):
     server = _server()
-    await _seed(server, environment, attempt_index=1)
-    await _seed(server, environment, rollout_id="other-rollout")
     await server.restore_checkpoint_states(
         [
-            _snapshot({"schema_version": 1, "environment": {"restored": "replacement"}}),
+            _snapshot({"schema_version": 1, "environment": environment}),
             _snapshot({"schema_version": 1, "environment": {"restored": "new"}}, rollout_id="new-rollout"),
         ]
     )
-    assert _environment(server, attempt_index=1) == {"restored": "replacement"}
+    assert _environment(server, attempt_index=1) == environment
     assert _environment(server, rollout_id="new-rollout", attempt_index=1) == {"restored": "new"}
-    assert _environment(server, rollout_id="other-rollout") == environment
-    assert len(server.session_id_to_env) == len(server.execution_to_session) == 3
+    assert len(server.session_id_to_env) == len(server.execution_to_session) == 2
 
 
 @pytest.mark.parametrize(
@@ -264,34 +261,27 @@ async def test_restore_batch_replaces_target_and_preserves_other_sessions(enviro
         {"schema_version": 1, "environment": {"nested": [float("nan")]}},
     ],
 )
-async def test_invalid_restore_batch_does_not_replace_any_live_state(environment, invalid_state):
+async def test_invalid_restore_batch_does_not_activate_partial_state(environment, invalid_state):
     server = _server()
-    await _seed(server, environment, attempt_index=1)
-    await _seed(server, {"untouched": True}, rollout_id="other-rollout")
-    before_env = copy.deepcopy(server.session_id_to_env)
-    before_index = dict(server.execution_to_session)
 
     with pytest.raises(ValidationError):
         await server.restore_checkpoint_states(
             [
-                _snapshot({"schema_version": 1, "environment": {"replacement": True}}),
+                _snapshot({"schema_version": 1, "environment": environment}),
                 _snapshot(invalid_state, rollout_id="new-rollout"),
             ]
         )
-    assert server.session_id_to_env == before_env
-    assert server.execution_to_session == before_index
+    assert server.session_id_to_env == {}
+    assert server.execution_to_session == {}
 
 
-async def test_duplicate_restore_identity_leaves_live_state_unchanged(environment):
+async def test_duplicate_restore_identity_does_not_activate_partial_state(environment):
     server = _server()
-    await _seed(server, environment, attempt_index=1)
-    before_env = copy.deepcopy(server.session_id_to_env)
-    before_index = dict(server.execution_to_session)
-    snapshot = _snapshot({"schema_version": 1, "environment": {"replacement": True}})
+    snapshot = _snapshot({"schema_version": 1, "environment": environment})
     with pytest.raises(ValueError, match="Duplicate IPI checkpoint execution"):
         await server.restore_checkpoint_states([snapshot, snapshot])
-    assert server.session_id_to_env == before_env
-    assert server.execution_to_session == before_index
+    assert server.session_id_to_env == {}
+    assert server.execution_to_session == {}
 
 
 @pytest.mark.parametrize("invalid_value", [object(), float("inf"), ("tuple",)])

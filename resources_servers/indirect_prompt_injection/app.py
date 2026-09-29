@@ -247,24 +247,20 @@ class IPIResourcesServer(SimpleResourcesServer):
     async def export_checkpoint_state(self, rollout_id: str, attempt_index: int) -> dict[str, Any]:
         session_id = self.execution_to_session[(rollout_id, attempt_index)]
         state = IPICheckpointState(schema_version=1, environment=self.session_id_to_env[session_id])
-        return copy.deepcopy(state.model_dump())
+        return state.model_dump()
 
     async def restore_checkpoint_states(self, snapshots: list[ResourceSnapshot]) -> None:
-        environments = dict(self.session_id_to_env)
-        index = dict(self.execution_to_session)
-        restored_identities: set[tuple[str, int]] = set()
+        # Restore runs in a fresh process; activate state only after the entire batch validates.
+        environments = {}
+        index = {}
         for snapshot in snapshots:
             identity = (snapshot.rollout_id, snapshot.attempt_index)
-            if identity in restored_identities:
+            if identity in index:
                 raise ValueError(f"Duplicate IPI checkpoint execution: {identity}")
             state = IPICheckpointState.model_validate(snapshot.state)
             session_id = f"checkpoint:{snapshot.rollout_id}:a{snapshot.attempt_index}"
-            previous_session_id = index.get(identity)
-            if previous_session_id is not None:
-                environments.pop(previous_session_id, None)
-            environments[session_id] = copy.deepcopy(state.environment)
+            environments[session_id] = state.environment
             index[identity] = session_id
-            restored_identities.add(identity)
         self.session_id_to_env = environments
         self.execution_to_session = index
 
