@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import runpy
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import httpx
 import orjson
 import pytest
 from fastapi.testclient import TestClient
@@ -45,8 +48,9 @@ class _Response:
     ok = True
     cookies = {"session": _Cookie()}
 
-    def __init__(self, body: dict) -> None:
+    def __init__(self, body: dict, headers: dict | None = None) -> None:
         self.body = orjson.dumps(body)
+        self.headers = headers or {}
 
     async def read(self) -> bytes:
         return self.body
@@ -84,7 +88,7 @@ class _Client(ServerClient):
             payload["agent_session_id"] = body["agent_session_id"]
         elif url_path == "/close_session":
             payload["resources_session_id"] = body["resources_session_id"]
-        return _Response(payload)
+        return _Response(payload, response.headers)
 
     def _resolve_base_url(self, server_name: str) -> str:
         return f"http://{server_name}:8000"
@@ -319,3 +323,51 @@ async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
     episode_result = await episode_adapter.run_legacy(episode_request.model_dump(mode="json"))
 
     assert episode_result == legacy_result
+
+
+class _BlockingAgentClient(_Client):
+    """Hold the agent invocation until the test releases it."""
+
+    agent_called: asyncio.Event
+    release_agent: asyncio.Event
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
+        if url_path.endswith("/v1/responses"):
+            self.agent_called.set()
+            await self.release_agent.wait()
+        return await super().post(server_name, url_path, **kwargs)
+
+
+async def test_legacy_rows_take_part_in_checkpoints() -> None:
+    environment_server, client = _environment_server()
+    client.global_config_dict["checkpoint"] = {"enabled": True, "control_auth_token": "t"}
+    blocking = _BlockingAgentClient(
+        **client.model_dump(exclude={"calls", "responses"}),
+        calls=[],
+        responses=client.responses,
+        agent_called=asyncio.Event(),
+        release_agent=asyncio.Event(),
+    )
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=blocking)
+    app = adapter.setup_webserver()
+    row = {"responses_create_params": {"input": "task"}, "_ng_task_index": 0, "_ng_rollout_index": 0}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://env", headers={"Authorization": "Bearer t"}
+    ) as http:
+        run = asyncio.create_task(http.post("/run", json=row))
+        await blocking.agent_called.wait()
+        prepared = await http.post(
+            "/ng-control/v1/checkpoint/prepare", json={"checkpoint_id": "c1", "deadline_ts": time.time() + 5}
+        )
+        [record] = adapter._checkpoint.export_records(None)
+        await http.post(
+            "/ng-control/v1/checkpoint/resume", json={"checkpoint_id": "c1", "deadline_ts": time.time() + 5}
+        )
+        blocking.release_agent.set()
+        result = await run
+
+    # The agent invocation is a replay step, so the checkpoint records the boundary before it.
+    assert prepared.json()["phase"] == "prepared"
+    assert record.boundary["next"] == "invoke_agent"
+    assert result.json()["reward"] == 1.0
