@@ -31,4 +31,5 @@ wordle_gymnasium_agent:
           type: example
           jsonl_fpath: resources_servers/wordle/data/example.jsonl
           license: Apache 2.0
-      max_steps: 12  # 6 turns × 2 tool calls max per turn
+      # Lookup tools also use steps, so leave room for all 6 guesses.
+      max_steps: 30
