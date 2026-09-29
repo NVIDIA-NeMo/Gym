@@ -143,6 +143,18 @@ def _extract_patch(repo: Path, index_path: Path, baseline_tree: str) -> bytes:
     ).stdout
 
 
+def _isolate_adapter_python() -> None:
+    """nemo-fabric adapters start in the repo, so /testbed/aiohttp etc. would shadow their deps."""
+    python = os.environ.get("ADAPTER_PYTHON")
+    if not python or not os.path.isfile(python):
+        return
+    # Same dir as the real interpreter, in case fabric derives the env from the path.
+    wrapper = os.path.join(os.path.dirname(python), "python-isolated")
+    Path(wrapper).write_text(f'#!/bin/sh\nexec {python} -E -P "$@"\n')
+    os.chmod(wrapper, 0o755)
+    os.environ["ADAPTER_PYTHON"] = wrapper
+
+
 def main() -> None:
     model_url = os.environ.get("NGSWE_MODEL_URL", "")
     model_name = os.environ["NGSWE_MODEL_NAME"]
@@ -155,6 +167,7 @@ def main() -> None:
     from nemo_gym.server_utils import ServerClient
 
     module = importlib.import_module(os.environ["NGSWE_AGENT_MODULE"])
+    _isolate_adapter_python()
     agent_class = getattr(module, os.environ["NGSWE_AGENT_CLASS"])
     config_class = getattr(module, os.environ["NGSWE_AGENT_CONFIG_CLASS"])
 
