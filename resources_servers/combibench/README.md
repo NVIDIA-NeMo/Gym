@@ -139,18 +139,29 @@ Charged to the model (reward 0.0, `mask_sample: false`, in the denominator):
 | `timeout` | the REPL hit the budget on the submission body — a proof that does not terminate is the model's output, and excusing it would make hanging reward-neutral |
 | `lean_error` | the REPL reported an error string; `/verify` answered 500 from executing this snippet; or the per-item `response` was a `{"message": ...}` Error object — which Kimina's own `ReplResponse.analyze()` would call `repl_error`, but which the REPL produced while running the model's snippet, so it is charged rather than masked (see "A `/verify` reply whose payload is an error object") |
 | `model_header_timeout` | the header that would not load inside the budget is one the model wrote itself |
-| `model_header_error` | the header Kimina could not run at all (500, "Failed to run header on REPL") is one the model wrote itself — `import Foo` is the model's choice, not an outage |
+| `model_header_error` | the header Kimina could not run at all (500, "Failed to run header on REPL") is one the model wrote itself. Narrower than "a bad import": an unresolvable module is *not* this case — the REPL reports it in parseable JSON and it lands in the body diagnostics as `compile_error`. What reaches here is a REPL that died or wrote non-JSON while loading the header, which model code can cause through the `RLIMIT_AS` cap and `native_decide` |
+
+One shape reaches the model without any 5xx at all, and is charged: a header
+that fails at the *Lean* level without raising and without timing out — a
+partially built Mathlib, a bad olean, a module the REPL reports on rather than
+dying on. Kimina's `check.py` guards this with `if prep and prep.error`, but
+`send_timeout` never sets `error`, so the guard is dead code at this pin and the
+body is run against the broken environment anyway. The cascading errors arrive
+as ordinary diagnostics and are scored `compile_error`. Upstream behaves
+identically, and the direction is the conservative one; the systematic version
+of it is what the image's build-time REPL probe and the `lean_version` echo are
+there to catch.
 
 The 500 case is the one worth spelling out, because not every 500 is the
 model's. Kimina answers 5xx for one snippet in four shapes — three
 `HTTPException(500, str(e))` raised in `run_one` (`server/routers/check.py`;
-nothing else under `server/` answers 5xx), plus one the endpoint never catches:
+nothing else in the mounted routers answers 5xx — `server_old/healthcheck.py` raises 503, but `create_app` does not mount it, and 503 is retried as saturation anyway), plus one the endpoint never catches:
 
 | Shape | Raised when | Charged to |
 | --- | --- | --- |
 | `check.py:159` | executing the **body** raised. `server/repl.py` raises `LeanError("Lean process broken pipe")` / `LeanError("Failed to write to REPL stdin")` when the REPL is gone, and `ReplError("JSON decode error")` when its stdout is not JSON — all reachable by model code that kills the REPL, which runs under an `RLIMIT_AS` cap and may use `native_decide` by design | the model → `lean_error` |
 | `check.py:118`, detail `"Failed to start REPL"` | the Lean process would not start (`repl.start()`, which shells out to `lake env`) | the harness → `sandbox_error` |
-| `check.py:118`, detail `"Failed to run header on REPL"` | the **import header** raised. Kimina's header is the submission's own leading `import` run (`server/split.py`), so this can be the model's `import Foo` as easily as a broken toolchain; `manager.prep` normalises every non-timeout header failure to this one string and the reply says nothing more | whoever wrote the header: `sandbox_error` if harness-supplied, `model_header_error` if not |
+| `check.py:118`, detail `"Failed to run header on REPL"` | the **import header** raised. Kimina's header is the submission's own leading `import` run (`server/split.py`), so this can be a header the model wrote as easily as a broken toolchain. Not an unresolvable module, though — the REPL answers that in JSON without raising; what reaches here is the REPL dying or writing non-JSON while loading the header. `manager.prep` normalises every non-timeout header failure to this one string and the reply says nothing more | whoever wrote the header: `sandbox_error` if harness-supplied, `model_header_error` if not |
 | an exception `run_one` never caught | Starlette's default handler answers with a 500 whose body is **not** JSON. Reachable through the prisma writes at `check.py:96-106`/`129-140`/`169-186`, which only run with `LEAN_SERVER_DATABASE_URL` set — the shipped `kimina_image` sets it empty | no `detail` to match, so the model → `lean_error` |
 | `check.py:84` | `manager.get_repl` raised something other than `NoAvailableReplError`. **Not** a failed spawn, despite where it sits: spawning is `repl.start()`, which runs inside `manager.prep`, so a real spawn failure arrives at `:118` as "Failed to start REPL". What `get_repl` can raise is `Repl.create`, which writes through prisma when a database is configured | no `detail` to match, so the model → `lean_error`; near-unreachable, see below |
 

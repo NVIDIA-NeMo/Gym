@@ -114,7 +114,8 @@ VERSION_PROBE_TIMEOUT_SECONDS = 30
 # Kimina answers 5xx for one snippet in four shapes. Three are
 # ``HTTPException(500, str(e))`` raised inside ``run_one`` in
 # ``server/routers/check.py`` (a grep for ``HTTPException`` over ``server/``
-# finds no other 5xx: the rest are 401, 429 and 499), and the fourth is
+# finds no other 5xx in the mounted routers: the rest are 401, 429 and 499, and
+# the 503 in ``server_old/`` is not mounted by ``create_app``), and the fourth is
 # Starlette answering for an exception ``run_one`` never caught:
 #
 # * ``:84``  — ``manager.get_repl`` raised something other than
