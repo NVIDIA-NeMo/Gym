@@ -64,8 +64,7 @@ sandbox:
       template_map: {}
       # Default sandbox lifetime. SandboxSpec.ttl_s overrides this per sandbox.
       timeout_s: 3600.0
-      # null preserves SDK defaults; true pauses/resumes on traffic; false
-      # disables auto-resume and deletes the sandbox at timeout.
+      # true pauses/resumes; false deletes at timeout; null preserves SDK defaults.
       auto_resume: null
       # Secure the sandbox envd service with an access token.
       secure: true
