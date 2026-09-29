@@ -678,7 +678,7 @@ class TestGenRMCompareResourcesServer:
         assert [result.reward for result in first_attempt] == [1.0, 2.0]
         assert [result.reward for result in replacement_attempt] == [3.0, 4.0]
         assert run_compare.await_count == 2
-        assert len(server._verify_cohorts) == 2
+        assert list(server._verify_cohorts) == ["group_id::completed-group::group_attempt::1"]
 
     async def test_partial_old_attempt_does_not_mix_with_completed_replacement(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -701,6 +701,7 @@ class TestGenRMCompareResourcesServer:
             )
         )
         await asyncio.sleep(0)
+        old_cohort = next(iter(server._verify_cohorts.values()))
         replacement = await asyncio.gather(
             server.verify(
                 self._verify_request(
@@ -726,12 +727,11 @@ class TestGenRMCompareResourcesServer:
 
         assert [result.reward for result in replacement] == [3.0, 4.0]
         assert [result.group_attempt for result in replacement] == [1, 1]
-        assert len(server._verify_cohorts) == 2
+        assert len(server._verify_cohorts) == 1
         assert len(old_result) == 1
         assert isinstance(old_result[0], HTTPException)
         assert old_result[0].status_code == 503
         assert "superseded by attempt 1" in str(old_result[0].detail)
-        old_cohort = next(cohort for cohort in server._verify_cohorts.values() if cohort.group_attempt == 0)
         assert old_cohort.phase == "failed"
         assert all(member.response_obj is None and not member.waiters for member in old_cohort.members.values())
 

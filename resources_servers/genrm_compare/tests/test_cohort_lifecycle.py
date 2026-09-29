@@ -192,11 +192,11 @@ async def test_late_judge_result_cannot_publish_after_supersession(server):
     server._run_compare = compare
     old = [asyncio.create_task(server.verify(member(i))) for i in range(2)]
     await asyncio.wait_for(started.wait(), 1)
+    retired = next(iter(server._verify_cohorts.values()))
     new = await asyncio.gather(*(server.verify(member(i, attempt=1)) for i in range(2)))
     old_results = await asyncio.gather(*old, return_exceptions=True)
     assert all(isinstance(r, HTTPException) and r.status_code == 503 for r in old_results)
     assert [r.reward for r in new] == [1.0, 2.0]
-    retired = next(c for c in server._verify_cohorts.values() if c.group_attempt == 0)
     assert retired.phase == "failed" and not retired.rewards
 
 

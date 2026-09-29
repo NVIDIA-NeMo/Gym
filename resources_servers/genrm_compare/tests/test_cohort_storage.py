@@ -222,7 +222,7 @@ async def test_replay_refreshes_watermark_but_not_terminal_expiry(server, clock)
     assert list(server._latest_group_attempts) == ["a"]
 
 
-async def test_count_eviction_uses_completion_order_and_protects_active_attempts(server, clock):
+async def test_count_eviction_uses_completion_order_and_ignores_active_attempts(server, clock):
     server.config.cohort_result_ttl_s = None
     server.config.max_terminal_cohorts = 1
     server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
@@ -231,14 +231,14 @@ async def test_count_eviction_uses_completion_order_and_protects_active_attempts
     clock[0] = 101
     await complete(server, "b")
     clock[0] = 102
+    await complete(server, "c")
     server._prune_terminal_cohorts()
-    assert "a" in server._latest_group_attempts
-    assert "b" not in server._latest_group_attempts
+    assert set(server._latest_group_attempts) == {"a", "c"}
+    assert (await server.verify(member(0, group="c"))).reward == 3
     await server.verify(member(1, group="a"))
     await a
     server._prune_terminal_cohorts()
     assert [c.group_id for c in server._verify_cohorts.values()] == ["a"]
-    assert all(c.phase in ("completed", "failed") for c in server._verify_cohorts.values())
 
 
 async def test_expired_active_watermark_does_not_block_expiry_of_later_completed_group(server, clock):
@@ -331,7 +331,6 @@ async def test_all_indices_retire_superseded_expired_and_legacy_groups(server, c
     server._prune_terminal_cohorts()
     assert not server._verify_cohorts
     assert not server._terminal_cohorts
-    assert all(c.phase in ("completed", "failed") for c in server._verify_cohorts.values())
     assert not server._latest_group_attempts
 
 
@@ -353,13 +352,18 @@ async def test_attempt_bump_refreshes_watermark_order_for_expiry(server, clock):
     await first
 
 
-async def test_new_attempt_preserves_completed_record_and_owns_active_watermark(server):
+async def test_new_attempt_retires_completed_record_and_owns_active_watermark(server):
     server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
     await complete(server, "a")
     completed = next(iter(server._verify_cohorts.values()))
     first = asyncio.create_task(server.verify(member(0, group="a", attempt=1)))
     await asyncio.sleep(0)
     assert completed.phase == "completed" and completed.rewards == {0: 3.0, 1: 3.0}
+    assert completed.key not in server._verify_cohorts
+    assert completed.key not in server._terminal_cohorts
+    with pytest.raises(HTTPException) as error:
+        await server.verify(member(0, group="a"))
+    assert error.value.status_code == 409
     active = server._verify_cohorts[server._group_cohort_key("a", 1)]
     assert active is not completed and active.group_attempt == 1
     assert_cohort_indices_match(server)
@@ -393,7 +397,6 @@ async def test_conversion_failure_fails_identified_group_and_releases_peers(
     cohort = next(iter(server._verify_cohorts.values()))
     assert cohort.phase == "failed" and all(not m.waiters for m in cohort.members.values())
     assert_cohort_indices_match(server)
-    assert all(c.phase in ("completed", "failed") for c in server._verify_cohorts.values())
     assert cohort.collection_timeout_task is None and cohort.evaluation_task is None
 
 

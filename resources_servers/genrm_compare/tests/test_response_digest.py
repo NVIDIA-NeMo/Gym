@@ -39,3 +39,22 @@ def test_digest_preserves_nonstandard_python_values(value):
     digest = GenRMCompareResourcesServer._response_digest
     assert digest({"value": value}) == digest({"value": value})
     assert digest({"value": value}) != digest({"value": None})
+
+
+@pytest.mark.parametrize("output_index", [0, 1])
+def test_digest_keeps_nonfinite_model_values_distinct_and_matches_dictionary(output_index):
+    digest = GenRMCompareResourcesServer._response_digest
+    digests = set()
+    for value in (float("nan"), float("inf"), float("-inf"), -0.5):
+        response = training_member(0).response
+        response.output[output_index].generation_log_probs = [value]
+        assert digest(response) == digest(response.model_dump(mode="json"))
+        digests.add(digest(response))
+    assert len(digests) == 4
+
+
+def test_digest_rejects_cyclic_dictionary():
+    payload = {"id": "response"}
+    payload["self"] = payload
+    with pytest.raises(ValueError, match="Circular reference"):
+        GenRMCompareResourcesServer._response_digest(payload)

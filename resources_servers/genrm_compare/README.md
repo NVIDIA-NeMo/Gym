@@ -398,20 +398,23 @@ restart the entire cohort.
 ### Replacement attempts and retention
 
 To replace a group, the caller increments `_ng_group_attempt` for **every** member and dispatches the entire
-group. Newer attempts retire active older ones. An older judge task cannot publish rewards into a newer
-attempt. An individual rollout's retry counter does not advance this shared group attempt.
+group. Newer attempts retire active older ones and remove their obsolete saved results. An older judge task
+cannot publish rewards into a newer attempt. An individual rollout's retry counter does not advance this
+shared group attempt.
 
 Run the resources server with one HTTP worker. State is process-local. Completed explicit-ID groups and
 failed groups retain compact response digests, rewards when completed, and failure/attempt information;
 full answer bodies and waiters are released. Retention is bounded by `cohort_result_ttl_s` and `max_terminal_cohorts`.
 
-Results expire from completion time. The newest-attempt record remains until at least that result expires;
-an exact replay refreshes the attempt record, without extending the result's lifetime. If Gym still remembers
+Results expire from completion time. Time-based retention of the newest-attempt record also starts at
+completion; an exact replay refreshes that record without extending the result's lifetime. If Gym still remembers
 an attempt but its result has been evicted, another request for that attempt receives 409 immediately.
 Recover by dispatching a complete group with a higher shared `_ng_group_attempt`.
 
-Cleanup visits finished groups only. If the count cap removes a newest-attempt record before its result
-expires, Gym removes that result with it. Active groups keep their attempt records.
+Cleanup visits finished groups only. Active groups keep their attempt records and do not count toward
+`max_terminal_cohorts`. Results and finished-group attempt records are capped separately. An exact retry
+can still replay a retained result after its attempt record is evicted; superseded results are removed
+when a newer attempt is accepted while the prior attempt is tracked.
 
 The count cap can evict state before the TTL. After eviction or restart, replay and stale-attempt detection
 are no longer guaranteed. The caller must enforce accepted attempt identity across those boundaries and

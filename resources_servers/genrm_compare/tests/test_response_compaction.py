@@ -79,11 +79,18 @@ async def test_active_judging_keeps_attempt_watermark_after_other_records_expire
         return [3.0, 3.0], {}, [], []
 
     server._run_compare = compare
-    old = [asyncio.create_task(server.verify(member(i))) for i in range(2)]
+    old_members = [training_member(i) for i in range(2)]
+    new_members = [training_member(i, attempt=1) for i in range(2)]
+    for i, body in enumerate(new_members):
+        body.response.output[1].content[0].text = f"replacement answer {i}"
+    old = [asyncio.create_task(server.verify(body)) for body in old_members]
     assert await asyncio.wait_for(started.get(), 1) == 0
-    latest = [asyncio.create_task(server.verify(member(i, attempt=1, response_id=f"new-{i}"))) for i in range(2)]
+    latest = [asyncio.create_task(server.verify(body)) for body in new_members]
     try:
         assert await asyncio.wait_for(started.get(), 1) == 1
+        assert [[extract_from_response_obj(obj) for obj in call] for call in started_calls] == [
+            [extract_from_response_obj(body.response) for body in members] for members in (old_members, new_members)
+        ]
         old_results = await asyncio.gather(*old, return_exceptions=True)
         assert all(isinstance(r, HTTPException) and r.status_code == 503 for r in old_results)
         clock[0] += 11
@@ -94,8 +101,9 @@ async def test_active_judging_keeps_attempt_watermark_after_other_records_expire
         assert server._verify_cohorts[server._group_cohort_key("group", 1)].phase == "evaluating"
         assert all(not task.done() for task in latest)
         with pytest.raises(HTTPException) as error:
-            await server.verify(member(0))
+            await server.verify(old_members[0])
         assert error.value.status_code == 409
+        assert "superseded by attempt 1" in error.value.detail
         assert_cohort_indices_match(server)
         release.set()
         assert [r.reward for r in await asyncio.gather(*latest)] == [3.0, 3.0]

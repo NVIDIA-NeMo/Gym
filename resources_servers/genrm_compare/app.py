@@ -85,6 +85,26 @@ def _warn_legacy_attempt() -> None:
     logger.warning("GenRM group attempt omitted; treating legacy requests as group attempt zero")
 
 
+def _contains_non_finite(value: object) -> bool:
+    """Check an acyclic JSON payload for NaN or infinities without walking numeric arrays in Python."""
+    pending = [value]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            try:
+                # Training token/log-probability arrays are large; sum checks them in C.
+                # Overflow may conservatively select the compatible JSON fallback too.
+                if not isfinite(sum(value, 0.0)):
+                    return True
+            except (TypeError, OverflowError):
+                pending.extend(value)
+        elif isinstance(value, float) and not isfinite(value):
+            return True
+    return False
+
+
 class CohortEvaluationError(RuntimeError):
     """A failed cohort attempt; replacement policy belongs to the caller."""
 
@@ -391,6 +411,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                         cohort.conversation_history = _input_to_conversation_history(input_messages)
                         cohort.principle = principle
                 except Exception as error:
+                    # Preserve evaluation's whole-group failure policy for malformed direct Python inputs.
                     self._fail_verify_cohort_locked(
                         cohort,
                         f"GenRM cohort input conversion failed: {type(error).__name__}: {str(error)[:1000]}",
@@ -551,7 +572,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         watermark = self._latest_group_attempts.get(group_id)
         if watermark is None:
             return
-        cohort = self._verify_cohorts.get(self._group_cohort_key(group_id, watermark.latest_attempt))
+        key = self._group_cohort_key(group_id, watermark.latest_attempt)
+        cohort = self._verify_cohorts.get(key)
         if cohort is None:
             return
         async with cohort.lock:
@@ -561,6 +583,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 cohort,
                 f"GenRM group {group_id!r} attempt {cohort.group_attempt} was superseded by attempt {new_attempt}",
             )
+        # The new attempt record rejects old requests. Drop the obsolete result too,
+        # so losing that record later cannot make a superseded reward replayable.
+        self._terminal_cohorts.pop(key, None)
+        self._verify_cohorts.pop(key, None)
 
     async def _expire_collecting_cohort(
         self,
@@ -616,22 +642,13 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         """Hash the exact response payload whose tokens will receive the reward."""
         payload = response.model_dump(mode="json") if hasattr(response, "model_dump") else response
         try:
-            if isinstance(response, dict):
-                # Direct Python inputs can contain non-finite numbers. Unlike
-                # validated JSON-mode models, these have not normalized them to null.
-                pending = [payload]
-                while pending:
-                    value = pending.pop()
-                    if isinstance(value, dict):
-                        pending.extend(value.values())
-                    elif isinstance(value, (list, tuple)):
-                        pending.extend(value)
-                    elif isinstance(value, float) and not isfinite(value):
-                        raise TypeError("preserve non-finite Python input")
             canonical = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
         except TypeError:
-            # Preserve support for lone surrogates, wide integers and non-finite
-            # Python inputs; orjson otherwise rejects or normalizes these values.
+            # json.dumps supports lone surrogates and wide integers, and reports cycles clearly.
+            canonical = None
+        # Models can retain NaN/infinities too; orjson would collapse those distinct values to null.
+        # Serialize first so a cyclic Python payload never enters the non-finite scan.
+        if canonical is None or _contains_non_finite(payload):
             canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
 
@@ -810,16 +827,12 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         while self._idle_groups:
             group_id, idle_since = next(iter(self._idle_groups.items()))
             expired = ttl is not None and now - idle_since >= ttl
-            if not expired and len(self._latest_group_attempts) <= limit:
+            # Active groups must not consume the allowance for finished groups.
+            if not expired and len(self._idle_groups) <= limit:
                 break
             self._idle_groups.popitem(last=False)
-            watermark = self._latest_group_attempts.pop(group_id)
-            # Replays refresh idle order, but not result expiry. Count eviction
-            # can therefore select a group whose newest result is still retained.
-            # Remove that result too, rather than expose it without its attempt fence.
-            key = self._group_cohort_key(group_id, watermark.latest_attempt)
-            self._terminal_cohorts.pop(key, None)
-            self._verify_cohorts.pop(key, None)
+            # Results have their own retention order and remain replayable while retained.
+            self._latest_group_attempts.pop(group_id)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()

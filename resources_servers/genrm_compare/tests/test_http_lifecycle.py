@@ -38,6 +38,7 @@ from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.reward_profile import RewardProfiler
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
+from resources_servers.genrm_compare.tests.test_cohort_storage import training_member
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
 
 
@@ -208,10 +209,7 @@ async def test_conversion_failure_releases_http_peer_and_requires_new_attempt(se
     peer_status, peer_body = await asyncio.wait_for(first, 0.5)
     assert peer_status == 503 and "injected conversion failure" in peer_body["detail"]
     assert cohort.phase == "failed" and all(not m.waiters for m in cohort.members.values())
-    assert (
-        all(c.phase in ("failed", "completed") for c in services.resource._verify_cohorts.values())
-        and services.judge_calls == 0
-    )
+    assert services.judge_calls == 0
     monkeypatch.setattr(services.resource, "_comparison_response", original)
     assert (await verify(1))[0] == 503
     results = await asyncio.gather(*(verify(i, attempt=1) for i in range(4)))
@@ -586,3 +584,30 @@ async def test_explicit_judge_failure_requires_new_shared_attempt_over_http(serv
         status == 200 and body["reward"] == 3.0 and "_ng_failure_class" not in body for status, body in recovered
     )
     assert services.judge_calls == calls + 4
+
+
+async def test_http_retry_rejects_changed_nonfinite_training_value(services):
+    payloads = [training_member(i).model_dump(mode="json", by_alias=True) for i in range(4)]
+    for payload in payloads:
+        payload["response"]["output"][1]["content"] = [{"type": "output_text", "text": "4", "annotations": []}]
+    payloads[0]["response"]["output"][1]["generation_log_probs"][0] = float("-inf")
+
+    async def verify(payload):
+        # External clients can send Infinity literals; Gym's normal JSON encoder normalizes them.
+        result = await services.client.post(
+            server_name="resource",
+            url_path="/verify",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        return result.status, await result.json()
+
+    results = await asyncio.gather(*(verify(payload) for payload in payloads))
+    assert all(status == 200 for status, _ in results)
+    calls = services.judge_calls
+    replay_status, replay = await verify(payloads[0])
+    assert replay_status == 200 and replay["reward"] == results[0][1]["reward"]
+    payloads[0]["response"]["output"][1]["generation_log_probs"][0] = float("inf")
+    status, _ = await verify(payloads[0])
+    assert status == 409
+    assert services.judge_calls == calls
