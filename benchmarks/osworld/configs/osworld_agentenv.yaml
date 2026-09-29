@@ -49,8 +49,7 @@ osworld_agentenv:
       template: null
       template_map: {}
       timeout_s: 7200.0
-      # Pause at timeout and resume on the next proxy request. Set false to
-      # delete at timeout instead of leaving an unresumable paused sandbox.
+      # Pause at timeout and resume on traffic; false deletes at timeout.
       auto_resume: true
       # The template fixes CPU/memory, so a SandboxSpec asking for resources is
       # a config error rather than something to silently drop.
