@@ -52,7 +52,12 @@ $miniforge_dir/bin/python -m pip install -q 'packaging==26.0'
 # Install jq as a static binary (avoid conda solver changing other package versions)
 if [ ! -f "$miniforge_dir/bin/jq" ]; then
     echo "Installing jq static binary..."
-    curl -fsSL https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-amd64 -o "$miniforge_dir/bin/jq"
+    case "$(uname -m)" in
+        x86_64|amd64) jq_arch=amd64 ;;
+        aarch64|arm64) jq_arch=arm64 ;;
+        *) echo "No static jq binary for architecture $(uname -m)" >&2; exit 1 ;;
+    esac
+    curl -fsSL "https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-${jq_arch}" -o "$miniforge_dir/bin/jq"
     chmod +x "$miniforge_dir/bin/jq"
 fi
 
@@ -135,14 +140,18 @@ while [ "$attempt" -le "$MAX_MAKE_BUILD_ATTEMPTS" ]; do
         continue
     fi
 
-    if make build; then
+    if timeout "$MAKE_BUILD_TIMEOUT_SECONDS" make build; then
         echo "make build completed successfully."
         break
     else
         exit_code=$?
     fi
 
-    echo "make build failed on the final attempt with exit code $exit_code."
+    if [ "$exit_code" -eq 124 ]; then
+        echo "make build timed out after $MAKE_BUILD_TIMEOUT_MINUTES minutes on the final attempt."
+    else
+        echo "make build failed on the final attempt with exit code $exit_code."
+    fi
     exit "$exit_code"
 done
 
