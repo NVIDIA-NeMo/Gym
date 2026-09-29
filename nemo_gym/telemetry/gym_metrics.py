@@ -36,9 +36,20 @@ default stops at ten seconds and a sandbox start routinely takes a minute.
 Retrying is provider-internal, so each provider that retries records it from its own loop.
 
 All four carry ``nemo.gym.sandbox.provider``.
+
+Rollout outcomes
+----------------
+``gym.rollout.completed_total`` (counter): one per rollout the driver finished handling,
+recorded where the final verdict is known, after the agent's response has been inspected.
+``nemo.gym.rollout.outcome`` is ``scored`` (persisted to the main output) or ``dropped``
+(left out of the score); dropped rollouts also carry Gym's ``nemo.gym.failure_class`` and,
+when it is a bare identifier such as an exception class name, ``nemo.gym.failure_reason``.
+A ``/run`` that answered 200 with an infrastructure error inside is ``dropped`` here, which is
+why this is not recorded around the HTTP call.
 """
 
 import logging
+import re
 import threading
 from collections.abc import Callable, Sequence
 from typing import Any, Optional
@@ -68,6 +79,14 @@ SANDBOX_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
     600_000,
     1_800_000,
 )
+
+ROLLOUT_COMPLETED_INSTRUMENT = "gym.rollout.completed_total"
+ROLLOUT_OUTCOME_ATTRIBUTE = "nemo.gym.rollout.outcome"
+FAILURE_CLASS_ATTRIBUTE = "nemo.gym.failure_class"
+FAILURE_REASON_ATTRIBUTE = "nemo.gym.failure_reason"
+#: A reason is kept as an attribute only when it looks like an identifier (an exception class
+#: name); free-text error messages would fan the series out without bound.
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,79}")
 
 _INSTRUMENT_LOCK = threading.Lock()
 _INSTRUMENTS: dict[int, dict[str, Any]] = {}
@@ -185,6 +204,23 @@ def record_sandbox_create_retry(*, provider: str) -> None:
         "Sandbox-create attempts a provider retried.",
         {SANDBOX_PROVIDER_ATTRIBUTE: provider},
     )
+
+
+def record_rollout_completed(
+    outcome: str, *, failure_class: str | None = None, failure_reason: str | None = None
+) -> None:
+    """Count one finished rollout in ``gym.rollout.completed_total``.
+
+    ``outcome`` is ``"scored"`` or ``"dropped"``. For a dropped rollout pass Gym's failure
+    class and, if known, the failure reason; the reason is recorded only when it is a bare
+    identifier.
+    """
+    attributes: dict[str, Any] = {ROLLOUT_OUTCOME_ATTRIBUTE: outcome}
+    if failure_class:
+        attributes[FAILURE_CLASS_ATTRIBUTE] = failure_class
+    if failure_reason and _IDENTIFIER.fullmatch(failure_reason):
+        attributes[FAILURE_REASON_ATTRIBUTE] = failure_reason
+    _record_counter(ROLLOUT_COMPLETED_INSTRUMENT, "Rollouts the driver finished handling, by outcome.", attributes)
 
 
 def _reset_for_testing() -> None:

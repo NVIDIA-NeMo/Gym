@@ -85,6 +85,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry.gym_metrics import record_rollout_completed
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -869,6 +870,19 @@ _AGENT_DID_NOT_RUN_STATUSES = frozenset({429, 502, 503, 504})
 _MAX_FAILURE_BODY_CHARS = 2000
 
 
+def _record_rollout_outcome(result: Dict[str, Any], failure_class: Optional[str]) -> None:
+    """One ``gym.rollout.completed_total`` increment at the point the verdict is final."""
+    if failure_class is None and not result.get(NG_NO_PERSIST_KEY):
+        record_rollout_completed("scored")
+        return
+    reason = result.get("failure_reason")
+    record_rollout_completed(
+        "dropped",
+        failure_class=failure_class or "no_persist",
+        failure_reason=reason if isinstance(reason, str) else None,
+    )
+
+
 def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dict[str, Any]:
     """One sidecar row for a `/run` call that came back without a result.
 
@@ -1511,6 +1525,8 @@ class RolloutCollectionHelper(BaseModel):
             results.append(result)
             serialized = orjson.dumps(result)
 
+            if is_span_group_enabled(GymSpanGroup.ROLLOUT):
+                _record_rollout_outcome(result, failure_class)
             if no_persist:
                 # kill_shaped: don't write anywhere. Set-difference on resume
                 # naturally re-dispatches; per-task timeout bounds wallclock.
