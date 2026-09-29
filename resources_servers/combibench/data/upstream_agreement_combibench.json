@@ -27,5 +27,5 @@
   "upstream_revision": "c67e4213597b1477351d9ef5ca37fb622084cc78",
   "lean_server_url": "http://localhost:18591",
   "rows": {},
-  "rows_note": "only disagreements are kept; rerun the script for the full per-row detail"
+  "rows_note": "only disagreements are kept; pass --full-rows for every row"
 }

@@ -140,6 +140,31 @@ def row_key(row: dict, index: int) -> str:
     return f"{name}#{row.get('_ng_rollout_index', 0)}"
 
 
+def index_by_key(pairs: list[tuple[str, dict]], what: str) -> dict[str, dict]:
+    """Key the records, failing closed when two of them collide.
+
+    ``_ng_rollout_index`` defaults to 0, so a rollouts file written without that
+    field gives all 16 repeats of a problem the same key. Keeping the last
+    silently would turn 1600 paired comparisons into 100 while still reporting a
+    complete run, and would mis-pair every ``--rescore-with`` verdict. Neither is
+    a result anyone could tell from a real one, so this refuses instead.
+    """
+    keyed: dict[str, dict] = {}
+    collisions: list[str] = []
+    for key, record in pairs:
+        if key in keyed:
+            collisions.append(key)
+        keyed[key] = record
+    if collisions:
+        first = sorted(set(collisions))[:5]
+        raise SystemExit(
+            f"{len(pairs)} {what} collapsed to {len(keyed)} keys: {len(set(collisions))} duplicated, "
+            f"e.g. {', '.join(first)}. Rollouts must carry a distinct theorem_name/_ng_rollout_index pair; "
+            "a file written without _ng_rollout_index cannot be compared row by row."
+        )
+    return keyed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Paired agreement between this verifier and upstream's")
     parser.add_argument("--rollouts", type=Path, required=True, help="rollouts.jsonl from a Gym eval run")
@@ -157,6 +182,11 @@ def main() -> None:
         help="Optional second rollouts.jsonl holding Gym verdicts to compare against, keyed by theorem_name and "
         "rollout index; by default the verdicts already in --rollouts are used",
     )
+    parser.add_argument(
+        "--full-rows",
+        action="store_true",
+        help="write every row into 'rows' rather than only the disagreements",
+    )
     args = parser.parse_args()
 
     Lean4Client, one_stage_verify = import_upstream(fetch_upstream(args.upstream_cache))
@@ -165,14 +195,14 @@ def main() -> None:
     if args.limit is not None:
         rows = rows[: args.limit]
 
-    gym_verdicts: dict[str, dict] = {}
     source = rows
+    what = "rollouts"
     if args.rescore_with is not None:
         source = [
             json.loads(line) for line in args.rescore_with.read_text(encoding="utf-8").splitlines() if line.strip()
         ]
-    for index, row in enumerate(source):
-        gym_verdicts[row_key(row, index)] = row
+        what = "--rescore-with verdicts"
+    gym_verdicts = index_by_key([(row_key(row, index), row) for index, row in enumerate(source)], what)
 
     client = compat_client(Lean4Client, args.lean_server_url, args.lean_server_api_key)
 
@@ -198,7 +228,7 @@ def main() -> None:
         return key, record
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-        per_row = dict(pool.map(one, enumerate(rows)))
+        per_row = index_by_key(list(pool.map(one, enumerate(rows))), "rollouts")
 
     disagreements = {k: v for k, v in per_row.items() if not v["agree"]}
     summary = {
@@ -215,13 +245,18 @@ def main() -> None:
         "gym_status_counts": dict(Counter(v["gym_status"] for v in per_row.values())),
         "upstream_error_type_counts": dict(Counter(v["upstream_error_type"] for v in per_row.values())),
     }
+    # Only the disagreements are written: the agreeing rows are 1600 copies of the same
+    # two fields, and a committed report is read for what did not match. ``--full-rows``
+    # keeps the complete map for an ad-hoc comparison.
     report = {
         "summary": summary,
         "rollouts": str(args.rollouts),
         "upstream_revision": GITHUB_REVISION,
         "lean_server_url": args.lean_server_url,
-        "rows": per_row,
+        "rows": per_row if args.full_rows else disagreements,
     }
+    if not args.full_rows:
+        report["rows_note"] = "only disagreements are kept; pass --full-rows for every row"
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2, ensure_ascii=False))
