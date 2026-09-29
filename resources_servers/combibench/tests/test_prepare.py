@@ -94,6 +94,16 @@ class TestRowShape:
         row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
         assert row["split"] == "test_with_solution"
 
+    def test_with_solution_cli_honours_its_flags(self, tmp_path, monkeypatch) -> None:
+        """Its __main__ used to ignore every flag, writing GitHub rows to the default path."""
+        monkeypatch.setattr(prepare, "load_hf_rows", lambda split: _hundred(split))
+        monkeypatch.setattr(prepare, "load_github_rows", _must_not_fetch)
+        output = tmp_path / "out.jsonl"
+        monkeypatch.setattr(sys, "argv", ["prepare", "--source", "hf", "--output", str(output)])
+        prepare.main(default_split="test_with_solution", default_output=output)
+        row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+        assert row["split"] == "test_with_solution" and row["dataset_source"] == "hf"
+
 
 class TestFailClosed:
     def test_short_corpus_is_rejected_and_nothing_is_written(self, tmp_path, monkeypatch) -> None:
@@ -105,12 +115,32 @@ class TestFailClosed:
         assert not output.exists()
 
     def test_answer_count_must_match_solution_abbrevs(self, tmp_path, monkeypatch) -> None:
+        """Counted with the verifier's own ``answer_tags``, so the two cannot drift apart."""
         rows = _hundred()
         rows[3]["answer"] = ["10", "11"]
         monkeypatch.setattr(prepare, "load_hf_rows", lambda split: rows)
         with pytest.raises(SystemExit) as excinfo:
             prepare.prepare(output=tmp_path / "out.jsonl")
-        assert "1 solution abbrev(s) but 2 answer(s)" in str(excinfo.value)
+        message = str(excinfo.value)
+        assert "1 solution abbrev(s) ['synthetic_gauss_4_3_solution'] but 2 answer(s)" in message
+        assert "zips these positionally" in message
+
+    def test_abbrev_count_matches_the_verifier_on_every_row(self, tmp_path, monkeypatch) -> None:
+        """An ``abbrev`` the verifier does not see as a tag must not be counted as one.
+
+        ``answer_tags`` counts one tag per statement paragraph; a regex over the
+        whole statement would count two here and reject a row the verifier scores
+        fine.
+        """
+        rows = _hundred()
+        rows[3]["formal_statement"] = rows[3]["formal_statement"].replace(
+            "abbrev synthetic_gauss_4_3_solution",
+            "abbrev synthetic_gauss_4_3_solution_helper := 0\nabbrev synthetic_gauss_4_3_solution",
+        )
+        monkeypatch.setattr(prepare, "load_hf_rows", lambda split: rows)
+        output = tmp_path / "out.jsonl"
+        prepare.prepare(output=output)
+        assert output.exists()
 
     def test_statement_without_sorry_is_rejected(self, tmp_path, monkeypatch) -> None:
         rows = _hundred()

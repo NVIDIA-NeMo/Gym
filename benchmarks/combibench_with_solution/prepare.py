@@ -30,10 +30,15 @@ OUTPUT_FPATH = Path(__file__).parent / "data" / "combibench_test_with_solution.j
 
 
 def prepare(**kwargs) -> Path:
+    """``gym eval prepare`` calls this with the manifest's arguments."""
     kwargs.setdefault("split", "test_with_solution")
     kwargs.setdefault("output", OUTPUT_FPATH)
     return base.prepare(**kwargs)
 
 
 if __name__ == "__main__":
-    prepare()
+    # Delegate to the shared parser rather than calling prepare() bare: without it
+    # `python ... --source hf` parsed nothing, silently wrote GitHub rows to the default
+    # path, and produced a file whose provenance did not match what was asked for.
+    # ``--split`` still defaults to this benchmark's own split.
+    base.main(default_split="test_with_solution", default_output=OUTPUT_FPATH)

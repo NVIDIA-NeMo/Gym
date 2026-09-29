@@ -116,8 +116,38 @@ class TestStatementCheck:
         tampered = SOLUTION.replace("abbrev hackmath_1_solution : ℕ := 1716", "abbrev hackmath_1_solution : ℤ := 1716")
         assert missing_chunks(tampered, statement_chunks(STATEMENT)) == ["abbrev hackmath_1_solution : ℕ :="]
 
+    def test_blank_line_is_inserted_before_theorem_without_re_splitting(self) -> None:
+        """Pins upstream's order of operations, which is load-bearing and looks like a bug.
+
+        ``evaluation/util.py`` (lines 100-110 at the pinned revision) splits on
+        ``"\\n\\n"`` *first* and only then maps
+        ``fs.replace("\\ntheorem", "\\n\\ntheorem")`` over the pieces, with no
+        second split. So a statement whose theorem is not already preceded by a
+        blank line yields one chunk that now contains one, and the model's code
+        has to contain that blank line too. Reordering these two steps -- or
+        re-splitting after the replace -- would be a "cleanup" that changes
+        scores relative to the published numbers, which is the one thing this
+        server exists not to do.
+        """
+        statement = "import Mathlib\n\ndef d : Prop := True\ntheorem t : d := by sorry"
+        chunks = statement_chunks(statement)
+        # One chunk, not two: the replace runs after the split and nothing splits again.
+        assert chunks == ["def d : Prop := True\n\ntheorem t : d := by"]
+
+        spaced = "import Mathlib\n\ndef d : Prop := True\n\ntheorem t : d := by trivial"
+        assert missing_chunks(spaced, chunks, normalize_trailing_whitespace=False) == []
+        # Code that copies the statement exactly as published, without the blank line the
+        # replace inserted, is rejected -- by upstream too. Kept so a reorder cannot pass.
+        unspaced = "import Mathlib\n\ndef d : Prop := True\ntheorem t : d := by trivial"
+        assert missing_chunks(unspaced, chunks, normalize_trailing_whitespace=False) == chunks
+
     def test_trailing_whitespace_lines_are_ignored_by_default(self) -> None:
-        """Thirteen pinned statements carry lines of only spaces; copying them without is not tampering."""
+        """Statements carry lines of only spaces; copying them without is not tampering.
+
+        Twelve of the 100 Hugging Face ``test`` statements carry such a line,
+        and 1 of the 100 prepared from the GitHub files, which is the default
+        source.
+        """
         statement = "import Mathlib\n\ndef d : Prop :=\n  ∃ a b, a ≠ b ∧\n  \n  a = b\n\ntheorem t : d := by sorry"
         code = "import Mathlib\n\ndef d : Prop :=\n  ∃ a b, a ≠ b ∧\n\n  a = b\n\ntheorem t : d := by trivial"
         chunks = statement_chunks(statement)

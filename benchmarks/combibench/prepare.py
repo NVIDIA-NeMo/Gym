@@ -46,6 +46,10 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+# The verifier's own definition of "how many answers does this statement need", so
+# preparation and scoring cannot drift into two different counts of the same thing.
+from resources_servers.combibench.fine_eval import answer_tags, statement_chunks
+
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
@@ -65,7 +69,6 @@ SOURCES = ("hf", "github")
 EXPECTED_ROWS = {"test": 100, "test_with_solution": 100}
 OUTPUT_FPATHS = {split: DATA_DIR / f"combibench_{split}.jsonl" for split in SPLITS}
 
-_ABBREV_SOLUTION_RE = re.compile(r"\babbrev\s+\S+_solution\b")
 _BLOCK_COMMENT_RE = re.compile(r"/-[\s\S]*?-/")
 _LINE_COMMENT_RE = re.compile(r"^\s*--.*\n", re.MULTILINE)
 
@@ -144,10 +147,17 @@ def strip_comments(text: str) -> str:
     """Remove doc comments and comment lines the way upstream's HF export did.
 
     The published dataset carries the statements without their ``/-- ... -/``
-    informal docstrings and inline ``--`` notes; the GitHub files keep them.
-    Removing them here keeps the prompt shape identical across sources. Runs of
-    blank lines left behind are collapsed to one so paragraph splitting in the
-    verifier sees the same structure.
+    informal docstrings and their whole-line ``--`` notes; the GitHub files keep
+    them. Removing them here keeps the prompt shape identical across sources.
+    Runs of blank lines left behind are collapsed to one so paragraph splitting
+    in the verifier sees the same structure.
+
+    Only *whole-line* ``--`` comments go: ``_LINE_COMMENT_RE`` is anchored at the
+    start of a line, so a trailing ``-- note`` after code on the same line stays.
+    That is deliberate — ``fine_eval.remove_comments`` is anchored the same way,
+    because upstream's is, and a statement whose comments were stripped more
+    aggressively here than there would no longer be the text the verifier
+    requires the model to reproduce.
     """
     text = _BLOCK_COMMENT_RE.sub("", text)
     text = _LINE_COMMENT_RE.sub("\n", text)
@@ -224,9 +234,12 @@ def validate_rows(rows: list[dict], split: str) -> None:
             problems.append(f"{name}: answers must be null or a list of strings")
             continue
         if split == "test":
-            n_tags = len(_ABBREV_SOLUTION_RE.findall(statement))
-            if n_tags != len(answers or []):
-                problems.append(f"{name}: {n_tags} solution abbrev(s) but {len(answers or [])} answer(s)")
+            tags = answer_tags(statement_chunks(statement))
+            if len(tags) != len(answers or []):
+                problems.append(
+                    f"{name}: {len(tags)} solution abbrev(s) {tags} but {len(answers or [])} answer(s); "
+                    "the verifier zips these positionally"
+                )
     if problems:
         raise SystemExit("Invalid benchmark rows; refusing to write.\n  " + "\n  ".join(problems))
 
@@ -285,9 +298,15 @@ def prepare(
     return output_path
 
 
-def main() -> None:
+def main(default_split: str = "test", default_output: Optional[Path] = None) -> None:
+    """Command line entry point, shared with ``benchmarks/combibench_with_solution``.
+
+    That benchmark is the same preparation with a different split and output
+    path, so it passes them as defaults here rather than growing a second parser
+    that would inevitably accept a different set of flags.
+    """
     parser = argparse.ArgumentParser(description="Download and prepare CombiBench for NeMo Gym")
-    parser.add_argument("--split", choices=SPLITS, default="test")
+    parser.add_argument("--split", choices=SPLITS, default=default_split)
     parser.add_argument(
         "--source",
         choices=SOURCES,
@@ -296,7 +315,10 @@ def main() -> None:
     )
     parser.add_argument("--limit", type=positive_int, default=None, help="Max rows to output (positive integer)")
     parser.add_argument(
-        "--output", type=Path, default=None, help="Output JSONL path (default: data/combibench_<split>.jsonl)"
+        "--output",
+        type=Path,
+        default=default_output,
+        help="Output JSONL path (default: data/combibench_<split>.jsonl)",
     )
     parser.add_argument("--cache-dir", type=Path, default=None, help="Where the GitHub tarball is unpacked")
     parser.add_argument("--source-file", type=Path, default=None, help="Local JSON list of HF-shaped records")
