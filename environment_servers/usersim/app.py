@@ -124,7 +124,7 @@ class _GymModelFacade:
 
     def __init__(self, alias: str, bridge: "_ConversationBridge") -> None:
         self.alias = alias
-        self.model_name = bridge.environment_server.config.target_for_alias(alias).name
+        self.model_name = _configured_model_name(bridge.environment_server, alias)
         self._bridge = bridge
 
     async def acompletion(self, messages: Sequence[Any], **kwargs: Any) -> SimpleNamespace:
@@ -145,6 +145,25 @@ class _GymModelFacade:
                 f"Timed out after {self._bridge.environment_server.config.actor_call_timeout_seconds}s "
                 f"waiting for {self.alias}"
             ) from error
+
+
+def _configured_model_name(environment_server: "UserSimEnvironmentServer", alias: str) -> str:
+    """Resolve the upstream model ID behind a UserSim Agent or Model alias."""
+
+    target = environment_server.config.target_for_alias(alias)
+    target_config = get_first_server_config_dict(environment_server.server_client.global_config_dict, target.name)
+    if isinstance(target, ModelServerRef):
+        return str(target_config.get("model") or target.name)
+
+    model_server = target_config.get("model_server") or {}
+    model_server_name = model_server.get("name")
+    if not model_server_name:
+        return target.name
+    model_config = get_first_server_config_dict(
+        environment_server.server_client.global_config_dict,
+        str(model_server_name),
+    )
+    return str(model_config.get("model") or model_server_name)
 
 
 class _ResourcesOwnedModelFacade:
