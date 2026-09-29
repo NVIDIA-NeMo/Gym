@@ -414,14 +414,7 @@ def _validate_split_datasets_declared(split: str, server_instance_configs: Seque
         f"Declared datasets:\n{declared_str}"
     )
     if example_fpaths:
-        example_fpaths_str = "\n".join(
-            f"  gym eval run --no-serve --input {fpath} --output <out>.jsonl" for fpath in example_fpaths
-        )
-        message += (
-            "\nExample datasets are committed smoke-test samples and are not runnable via --split. "
-            "To run one, start the servers (gym env start ...) and collect against the file directly:\n"
-            f"{example_fpaths_str}"
-        )
+        message += "\nExample datasets are available in this config. To run them end-to-end, use `--split example`."
     raise ConfigError(message)
 
 
