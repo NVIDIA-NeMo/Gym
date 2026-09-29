@@ -144,6 +144,8 @@ class HarborResourcesServerConfig(BaseResourcesServerConfig):
     # the world-writable `/solution` and `/logs` folders Harbor provides through mounts). Keys and values
     # are full image references; task folders stay untouched.
     image_rewrites: dict[str, str] = Field(default_factory=dict)
+    # Registry credentials (`username`, `password`) sent only for sandboxes whose image was rewritten.
+    image_rewrite_auth: dict[str, str] | None = None
     # Recorded OCI configuration for Compose images (`{image_ref: {os, architecture, image, config}}`).
     # None looks for `compose-images.json` next to the taskset's task folders.
     compose_image_configs: Path | None = None
@@ -343,15 +345,19 @@ class HarborResourcesServer(SimpleResourcesServer):
         )
         if self.config.derive_cpu_env:
             env = cpu_cap_env(resources.get("cpu")) | env
+        provider_options = dict(self.config.sandbox_provider_options)
+        resolved_image = self._rewrite_image(image or task.image)
+        if resolved_image != (image or task.image) and self.config.image_rewrite_auth:
+            provider_options["image_auth"] = dict(self.config.image_rewrite_auth)
         return SandboxSpec(
-            image=self._rewrite_image(image or task.image),
+            image=resolved_image,
             ttl_s=ttl,
             ready_timeout_s=self.config.sandbox_ready_timeout_s,
             workdir=workdir,
             env=env,
             metadata=metadata,
             resources=resources,
-            provider_options=dict(self.config.sandbox_provider_options),
+            provider_options=provider_options,
         )
 
     def _rewrite_image(self, image: str | None) -> str | None:

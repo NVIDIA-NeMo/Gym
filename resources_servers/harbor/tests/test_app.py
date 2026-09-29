@@ -888,7 +888,15 @@ def test_image_rewrites_apply_to_agent_and_verifier_images(tmp_path, monkeypatch
     monkeypatch.setattr(
         "resources_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
     )
-    assert server._sandbox_spec(task, "/app").image == "mirror/agent:derived"
+    server.config.image_rewrite_auth = {"username": "u", "password": "p"}
+    spec = server._sandbox_spec(task, "/app")
+    assert spec.image == "mirror/agent:derived" and spec.provider_options["image_auth"] == {
+        "username": "u",
+        "password": "p",
+    }
+    server.config.image_rewrites = {}
+    assert "image_auth" not in server._sandbox_spec(task, "/app").provider_options
+    server.config.image_rewrites = {"org/agent:1": "mirror/agent:derived", "org/verifier:1": "mirror/verifier:derived"}
     verifier = server._sandbox_spec(
         task, None, environment=task.config.verifier.environment, image=_verifier_image(task), role="verifier", ttl=1
     )
