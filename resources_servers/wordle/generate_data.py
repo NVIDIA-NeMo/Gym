@@ -34,6 +34,7 @@ import json
 import sys
 from pathlib import Path
 
+
 # Add parent directories to path for imports
 gym_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(gym_root))
@@ -73,16 +74,11 @@ TOOLS = [
         "description": "Submit a 5-letter word guess. Returns feedback for each letter: G (green) = correct position, Y (yellow) = wrong position but in word, _ (gray) = not in word.",
         "parameters": {
             "type": "object",
-            "properties": {
-                "guess": {
-                    "type": "string",
-                    "description": "A 5-letter English word to guess"
-                }
-            },
+            "properties": {"guess": {"type": "string", "description": "A 5-letter English word to guess"}},
             "required": ["guess"],
-            "additionalProperties": False
+            "additionalProperties": False,
         },
-        "strict": True
+        "strict": True,
     },
     {
         "type": "function",
@@ -90,29 +86,19 @@ TOOLS = [
         "description": "Check if a word is valid before guessing. This is optional and informational only - it won't affect your game.",
         "parameters": {
             "type": "object",
-            "properties": {
-                "word": {
-                    "type": "string",
-                    "description": "A word to check for validity"
-                }
-            },
+            "properties": {"word": {"type": "string", "description": "A word to check for validity"}},
             "required": ["word"],
-            "additionalProperties": False
+            "additionalProperties": False,
         },
-        "strict": True
+        "strict": True,
     },
     {
         "type": "function",
         "name": "get_game_state",
         "description": "Get the current game state including guesses made, feedback received, and accumulated knowledge about the target word.",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False
-        },
-        "strict": True
-    }
+        "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        "strict": True,
+    },
 ]
 
 
@@ -132,20 +118,14 @@ def create_wordle_entry(
     """
     entry = {
         "responses_create_params": {
-            "input": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt}
-            ],
+            "input": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
             "tools": TOOLS,
             "parallel_tool_calls": False,
-            "temperature": 1.0
+            "temperature": 1.0,
         },
         "word_length": word_length,
         "max_turns": max_turns,
-        "agent_ref": {
-            "type": "responses_api_agents",
-            "name": "wordle_gymnasium_agent"
-        },
+        "agent_ref": {"type": "responses_api_agents", "name": "wordle_gymnasium_agent"},
     }
 
     entry["custom_target"] = custom_target
@@ -187,6 +167,7 @@ def generate_validation_data(seed: int = 43) -> list[dict]:
         seed: Random seed for prompt assignment
     """
     import random
+
     random.seed(seed)
 
     # Import validation words from the proper split
@@ -205,9 +186,9 @@ def generate_validation_data(seed: int = 43) -> list[dict]:
 def save_jsonl(entries: list[dict], filepath: Path) -> None:
     """Save entries to a JSONL file."""
     filepath.parent.mkdir(parents=True, exist_ok=True)
-    with open(filepath, 'w') as f:
+    with open(filepath, "w") as f:
         for entry in entries:
-            f.write(json.dumps(entry) + '\n')
+            f.write(json.dumps(entry) + "\n")
     print(f"Saved {len(entries)} entries to {filepath}")
 
 
@@ -223,14 +204,13 @@ Word Split:
 Examples:
   python generate_data.py                          # Default: 1000 train, all 315 val
   python generate_data.py --train_samples 2000     # More training samples
-        """
+        """,
     )
-    parser.add_argument("--train_samples", type=int, default=1000,
-                        help="Number of training samples (default: 1000)")
-    parser.add_argument("--output_dir", type=str, default="data",
-                        help="Output directory for JSONL files (default: data)")
-    parser.add_argument("--seed", type=int, default=886,
-                        help="Random seed (default: 42)")
+    parser.add_argument("--train_samples", type=int, default=1000, help="Number of training samples (default: 1000)")
+    parser.add_argument(
+        "--output_dir", type=str, default="data", help="Output directory for JSONL files (default: data)"
+    )
+    parser.add_argument("--seed", type=int, default=886, help="Random seed (default: 42)")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -240,20 +220,21 @@ Examples:
     save_jsonl(train_data, output_dir / "train.jsonl")
 
     # Generate validation data (fixed target words from VALIDATION_WORDS)
-    print(f"\nGenerating validation samples...")
+    print("\nGenerating validation samples...")
     print("  - Fixed target words from 315 validation words (no overlap with training)")
     val_data = generate_validation_data(seed=args.seed + 1)
     save_jsonl(val_data, output_dir / "validation.jsonl")
 
     # Generate example data (small subset of validation for quick testing)
-    print(f"\nGenerating example samples...")
+    print("\nGenerating example samples...")
     import random
+
     rng = random.Random(args.seed)
     example_data = rng.sample(val_data, 5)
     save_jsonl(example_data, output_dir / "example.jsonl")
 
     print("\nDone!")
-    print(f"\nSummary:")
+    print("\nSummary:")
     print(f"  Training:   {len(train_data)} samples (fixed targets from 2,000 training words)")
     print(f"  Validation: {len(val_data)} samples (fixed targets, 315 unique words)")
     print(f"  Example:    {len(example_data)} samples")
