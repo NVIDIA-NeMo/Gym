@@ -141,6 +141,40 @@ class KiminaLeanClient:
         return self._version
 
 
+# Keys that mark the per-item ``response`` object as something other than a
+# command response. Kimina's ``Error`` TypedDict is ``{"message": str}``
+# (``client/kimina_client/models.py``); ``error`` and ``stderr`` are the two
+# upstream CombiBench's own ``is_error`` looks for in the same object before it
+# reads ``messages`` (``evaluation/client/lean_client.py``).
+PAYLOAD_ERROR_KEYS = ("message", "error", "stderr")
+
+
+def _payload_failure(payload: dict[str, Any]) -> Optional[str]:
+    """Describe a per-item ``response`` that is not a Lean verdict, else None.
+
+    The top-level ``error`` is not the only way ``/verify`` reports a failure.
+    ``server/repl.py`` returns ``ReplResponse(response=cmd_response)`` with
+    ``cmd_response`` taken straight from ``json.loads`` of the REPL's stdout and
+    validated nowhere, and the client's ``extend()`` explicitly admits the
+    ``{"message": ...}`` shape, so a reply can carry an Error object in
+    ``response`` with no top-level ``error`` at all. Reading only the outer key
+    would leave such a reply with no error, no messages and no sorries — which
+    is exactly what a clean compile looks like — and reward it.
+
+    This fails closed, and it fails to ``transport_failure`` (``sandbox_error``,
+    masked) rather than to a model-attributable status: a REPL that answered
+    with an Error object instead of a command response did not evaluate the
+    model's proof, so there is no verdict to charge to the model. Upstream fails
+    the submission on ``error``/``stderr`` instead, which reaches the same reward
+    of 0.0 by a different route; the difference only shows up in whether the
+    rollout is counted in the denominator, and a non-verdict should not be.
+    """
+    for key in PAYLOAD_ERROR_KEYS:
+        if payload.get(key):
+            return f"Lean server reported {key}: {str(payload[key])[:500]}"
+    return None
+
+
 def parse_verify_response(body: Any) -> LeanResult:
     """Turn the ``/verify`` JSON body into a ``LeanResult``.
 
@@ -156,6 +190,11 @@ def parse_verify_response(body: Any) -> LeanResult:
     payload = result.get("response") or {}
     if not isinstance(payload, dict):
         payload = {}
+    if not error:
+        failed = _payload_failure(payload)
+        if failed is not None:
+            LOG.warning("Lean server returned an error payload: %s", failed)
+            return LeanResult(error=failed, transport_failure=True)
     messages = payload.get("messages") or []
     sorries = payload.get("sorries") or []
     return LeanResult(

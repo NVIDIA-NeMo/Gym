@@ -34,7 +34,9 @@ from resources_servers.combibench.app import (
     CombibenchStatus,
     CombibenchVerifyRequest,
 )
+from resources_servers.combibench import lean_client
 from resources_servers.combibench.fine_eval import LeanResult
+from resources_servers.combibench.lean_client import KiminaLeanClient
 
 
 STATEMENT = (
@@ -252,6 +254,54 @@ class TestVerify:
         result = await _make_server().verify(_request("bad \udcff text"))
         assert result.status == CombibenchStatus.FORMAT_ERROR.value
         result.model_dump_json()  # would raise on an unsanitized surrogate
+
+
+class TestErrorPayloadIsNeverRewarded:
+    """End to end through the real Lean client: a ``/verify`` reply whose per-item
+    ``response`` is an Error object carries no messages and no sorries, which is
+    indistinguishable from a clean compile if only the outer ``error`` is read.
+    """
+
+    class _Reply:
+        def __init__(self, body: dict):
+            self.status = 200
+            self._body = body
+
+        async def json(self) -> dict:
+            return self._body
+
+        async def text(self) -> str:
+            return json.dumps(self._body)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            # Live on the pinned Kimina: server/repl.py hands the REPL's parsed
+            # stdout back unvalidated and the client's extend() maps
+            # {"message": ...} to ExtendedError, with no top-level error.
+            {"message": "Failed to start REPL"},
+            # Both guarded by upstream's own is_error before it reads messages.
+            {"error": "no such file or directory"},
+            {"stderr": "libgmp.so.10: cannot open shared object file"},
+        ],
+        ids=["message", "error", "stderr"],
+    )
+    async def test_error_payload_is_not_a_success(self, monkeypatch, payload: dict) -> None:
+        body = {"results": [{"custom_id": "x", "response": {**payload, "time": 0.1}}]}
+
+        async def fake_request(method, url, **kwargs):
+            return self._Reply(body)
+
+        monkeypatch.setattr(lean_client, "request", fake_request)
+        server = _make_server()
+        server._verifier.lean_client = KiminaLeanClient("http://lean:8000")
+        result = await server.verify(_request(_fenced(SOLUTION)))
+        assert result.status != CombibenchStatus.SUCCESS.value
+        assert result.reward == 0.0
+        # A REPL that answered with an Error object never evaluated the proof, so
+        # there is no verdict to charge to the model: harness fault, masked.
+        assert result.status == CombibenchStatus.LEAN_SERVER_ERROR.value
+        assert result.mask_sample is True
 
 
 class TestHttpBoundary:

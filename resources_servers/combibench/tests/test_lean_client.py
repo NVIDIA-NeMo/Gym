@@ -21,7 +21,9 @@ from typing import Any
 import pytest
 
 from resources_servers.combibench import lean_client
+from resources_servers.combibench.fine_eval import classify_lean_result
 from resources_servers.combibench.lean_client import HTTP_TIMEOUT_MARGIN_SECONDS, KiminaLeanClient
+from resources_servers.lean_proof.status import STATUS_COMPILE_ERROR, STATUS_SANDBOX_ERROR
 
 
 class _FakeResponse:
@@ -99,6 +101,34 @@ class TestKiminaLeanClient:
         calls = _patch_request(monkeypatch, _FakeResponse(200, {"results": [{"custom_id": "x", "response": {}}]}))
         await KiminaLeanClient("http://lean:8000").verify("code", 10)
         assert calls[0]["_max_connection_retries"] == 1
+
+
+class TestErrorPayloads:
+    """The per-item ``response`` can itself be an error object, with no outer ``error``."""
+
+    @pytest.mark.parametrize(
+        "payload",
+        [{"message": "Failed to start REPL"}, {"error": "boom"}, {"stderr": "cannot open shared object file"}],
+        ids=["message", "error", "stderr"],
+    )
+    async def test_an_error_payload_is_a_transport_failure(self, monkeypatch, payload: dict) -> None:
+        body = {"results": [{"custom_id": "x", "response": {**payload, "time": 0.1}}]}
+        _patch_request(monkeypatch, _FakeResponse(200, body))
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert result.transport_failure is True
+        assert classify_lean_result(result) == STATUS_SANDBOX_ERROR
+
+    async def test_a_command_response_is_still_a_verdict(self, monkeypatch) -> None:
+        """The guard must not swallow ordinary compiler diagnostics, which live in ``messages``."""
+        body = {
+            "results": [
+                {"custom_id": "x", "response": {"messages": [{"severity": "error", "data": "unknown id"}], "env": 0}}
+            ]
+        }
+        _patch_request(monkeypatch, _FakeResponse(200, body))
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert result.transport_failure is False
+        assert classify_lean_result(result) == STATUS_COMPILE_ERROR
 
 
 class TestConcurrencyBound:

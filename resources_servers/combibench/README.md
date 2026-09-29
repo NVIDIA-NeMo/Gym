@@ -137,10 +137,10 @@ figures the tables below report — and adds `hackmath/`, `brualdi/`, `imo/` and
 figure, so the pooled keys and the inherited `mean/reward` are the headline and
 the per-family keys are supplementary; they are not promoted to `key_metrics`.
 
-### Three deliberate departures from upstream
+### Four deliberate departures from upstream
 
-Two of them can only make this server accept where upstream rejects; the third
-runs the other way. All three are named below.
+Two of them can only make this server accept where upstream rejects; the other
+two run the other way. All four are named below.
 
 **The gold answer is elaborated at the abbreviation's declared type.** Lean's
 `=` elaborates both sides before unifying them, so in upstream's form
@@ -177,6 +177,23 @@ configurable, and it is kept deliberately: rewarding a proof that still contains
 not exercised on the run measured below: all 65 `has_sorry` rollouts there
 (41 + 24) were rejected by upstream too, so Kimina had emitted the warning that
 upstream's `is_error` reads in every one of them.
+
+**A `/verify` reply whose payload is an error object is never a success.** The
+per-item `response` is not always the `{messages, sorries, env, time}` command
+response: Kimina's `server/repl.py` hands back whatever `json.loads` produced
+from the REPL's stdout with nothing validating it, and its client's `extend()`
+maps a `{"message": ...}` body to `ExtendedError`, so `/verify` can answer with
+an Error object in `response` and no top-level `error` at all. Such a reply has
+no messages and no sorries, which is exactly what a clean compile looks like, so
+`parse_verify_response` treats a payload carrying `message`, `error` or `stderr`
+as a failure and fails closed. Guarding `error` and `stderr` restores parity with
+upstream, whose `is_error` checks both before it reads `messages`; guarding
+`message` is an *addition* — upstream has no case for it and would score that
+reply 1.0. The outcome is `sandbox_error` (masked), not a model-attributable
+status: a REPL that returned an Error object instead of a command response never
+evaluated the proof, so there is no verdict to charge to the model. Upstream
+reaches the same 0.0 by failing the submission; the only difference is whether
+the rollout stays in the denominator, and a non-verdict should not.
 
 ### Known blind spots, kept for fidelity
 
@@ -219,9 +236,12 @@ upstream rewrote in the repository for the Lean bump and never pushed to the
 dataset. The Hugging Face gold-answer column is bounded by that: its four
 ascribed failures (`hackmath_6`, `imo_2008_p5`, `imo_2022_p6`, `imo_2023_p5`)
 are all statements that do not compile in the first place, so no answer can be
-checked against them. The unascribed column adds exactly the five problems named
-under "Three deliberate departures", which is the same effect measured on the
-other corpus.
+checked against them. The unascribed column adds four of the five problems named
+under "Four deliberate departures" — `brualdi_ch8_6`, `imo_2014_p2`,
+`imo_2019_p5` and `imo_2022_p1` — the fifth, `imo_2023_p5`, being already in the
+ascribed column because its Hugging Face statement does not compile at all.
+41 → 37 is that same ascription effect, measured on a corpus where one of the
+five problems it affects was already lost for another reason.
 
 Negative controls through `verify()`, all 100 rows, every one scoring 0:
 
@@ -525,9 +545,11 @@ python resources_servers/combibench/scripts/upstream_agreement.py \
 ```
 
 The report keeps only the disagreeing rows under `rows`; pass `--full-rows` for
-the complete per-row map. A disagreement can come from any of the three
+the complete per-row map. A disagreement can come from any of the four
 departures above: the first two make Gym accept where upstream rejects, the
-`sorries` one makes Gym reject where upstream accepts. To measure agreement with
+`sorries` one makes Gym reject where upstream accepts, and the error-payload
+guard takes the row out of the comparison entirely (it is `sandbox_error`, a
+non-verdict). To measure agreement with
 the two configurable ones removed, rescore the same rollouts with
 `answer_check_ascription: false` and `normalize_trailing_whitespace: false` and
 pass that file as `--rescore-with`.
