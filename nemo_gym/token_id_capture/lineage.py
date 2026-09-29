@@ -1047,3 +1047,34 @@ class FileLineageStore(IncrementalLineageStore):
         if rollout_ids:
             self._fsync_ledger_root()
         return {"removed": removed, "absent": absent}
+
+    def export_rows(self, rollout_id: str) -> list[dict]:
+        """Return every ledger row of ``rollout_id`` in commit order, for a checkpoint."""
+        with self._locked(rollout_id):
+            return list(self._read(rollout_id))
+
+    def import_rows(self, rollout_id: str, rows: list[dict]) -> None:
+        """Install checkpointed rows as the complete ledger of an unused ``rollout_id``.
+
+        Importing identical rows again is a no-op; any other existing ledger is an error.
+        """
+        with self._locked(rollout_id):
+            existing = self._read(rollout_id)
+            if existing == rows:
+                return
+            if existing:
+                raise ValueError(f"lineage ledger for {rollout_id} already holds different rows")
+            path = self._ledger_path(rollout_id)
+            payload = b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows)
+            temporary = path.with_name(f".{path.name}.import")
+            with temporary.open("wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            directory_fd = os.open(self._ledger_root, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            self._ledger_cache_pop(rollout_id)
