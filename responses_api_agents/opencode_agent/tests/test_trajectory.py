@@ -96,7 +96,7 @@ def test_native_turns_enable_content_health_without_call_references(tmp_path, pa
     assert not {
         "agent_turn_hollow",
         "rollout_missing_agent_turns",
-        "model_call_failed",
+        "model_call_last_failed",
         "model_call_zero_completion_tokens",
         "model_call_missing_token_counts",
         "trajectory_capture_mismatch",
@@ -109,7 +109,7 @@ def test_native_turns_enable_content_health_without_call_references(tmp_path, pa
 def test_invocation_bound_failed_call_remains_evaluable(tmp_path, parse):
     trajectory, observations = _trajectory(parse, _session_db(tmp_path, [_policy({"type": "text", "text": "known"})]))
     _, _, verdict = _health(tmp_path, trajectory, observations, status_code=503, tokens_out=0)
-    assert {"model_call_failed", "model_call_zero_completion_tokens"} <= {f["check"] for f in verdict["findings"]}
+    assert {"model_call_last_failed", "model_call_zero_completion_tokens"} <= {f["check"] for f in verdict["findings"]}
     assert not {"agent_turn_hollow", "rollout_missing_agent_turns"} & {f["check"] for f in verdict["findings"]}
 
 
@@ -167,7 +167,7 @@ def test_partial_evidence_preserves_known_turns_and_gates_content_checks(tmp_pat
     assert trajectory.turns[0].answer[0]["content"][0]["text"] == "known"
     _, _, verdict = _health(tmp_path, trajectory, observations)
     assert {"agent_turn_hollow", "rollout_missing_agent_turns"} <= set(verdict["unobserved"])
-    assert "model_call_failed" not in verdict["unobserved"]
+    assert "model_call_last_failed" not in verdict["unobserved"]
     assert not {"agent_turn_hollow", "rollout_missing_agent_turns"} & {f["check"] for f in verdict["findings"]}
 
 

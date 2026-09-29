@@ -268,12 +268,13 @@ async def test_real_harbor_decisions_survive_saved_projection(
         assert turn["resolved"] is None
         assert turn["timestamp"] > 0
     assert {
-        "model_call_failed",
         "model_call_zero_completion_tokens",
         "model_call_missing_token_counts",
         "model_call_runaway_generation",
         "trajectory_capture_mismatch",
     }.isdisjoint(health.unobserved)
+    # These synthetic captures omit timestamps, so multiple calls cannot establish a final call.
+    assert ("model_call_last_failed" in health.unobserved) == (call_count > 1 or status == "incomplete")
     assert ("agent_turn_hollow" in health.unobserved) == (turn_count == 0)
     assert "rollout_token_count_mismatch" in health.unobserved
     assert not health.policy_calls_observed
