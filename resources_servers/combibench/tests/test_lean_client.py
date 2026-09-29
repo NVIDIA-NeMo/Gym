@@ -300,14 +300,15 @@ class TestErrorPayloads:
         assert classify_lean_result(result) == STATUS_SANDBOX_ERROR
 
     async def test_a_message_payload_is_charged_to_the_model(self, monkeypatch) -> None:
-        """Kimina's own client reads ``{"message": ...}`` as a Lean error on the snippet.
+        """``{"message": ...}`` is charged even though Kimina calls it a REPL-level error.
 
-        ``client/kimina_client/proof_utils.py::parse_error_message`` turns that
-        payload into a single ``FinalMessage`` of severity ``"error"``, which
-        ``parse_lean_response`` then treats like any other compiler diagnostic.
-        So it is a verdict, not an infrastructure failure, and masking it would
-        take a rollout the model can produce (a bad import in its own header)
-        out of the denominator.
+        ``ReplResponse.analyze()`` (``client/kimina_client/models.py``) tests
+        ``"message" in self.response`` ahead of ``is_error`` and returns
+        ``SnippetStatus.repl_error``, so Kimina itself groups the shape with
+        infrastructure. It is charged anyway: it is the only one of the three
+        payload keys the pinned server emits, and it is emitted while the REPL
+        is running the model's snippet, so masking it would take a failure the
+        model could have caused out of the denominator.
         """
         body = {"results": [{"custom_id": "x", "response": {"message": "unknown package 'Foo'", "time": 0.1}}]}
         _patch_request(monkeypatch, _FakeResponse(200, body))

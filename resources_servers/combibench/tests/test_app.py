@@ -465,16 +465,18 @@ class TestErrorPayloadIsNeverRewarded:
         assert result.mask_sample is True
 
     async def test_message_payload_is_charged_to_the_model(self, monkeypatch) -> None:
-        """Live on the pinned Kimina, and a verdict rather than an outage.
+        """Live on the pinned Kimina, and charged rather than masked.
 
         ``server/repl.py`` hands the REPL's parsed stdout back unvalidated, so a
         ``{"message": ...}`` Error object can arrive in ``response`` with no
-        top-level ``error``; and Kimina's own client reads that shape as a Lean
-        error on the snippet
-        (``client/kimina_client/proof_utils.py::parse_error_message`` →
-        ``FinalMessage(severity="error")``). So it scores 0 and stays in the
-        denominator. Upstream has no case for ``message`` at all and would score
-        this reply 1.0.
+        top-level ``error``. Kimina's own ``ReplResponse.analyze()``
+        (``client/kimina_client/models.py``) would call that shape
+        ``SnippetStatus.repl_error`` — it tests ``"message" in self.response``
+        before ``is_error`` — so this is not "Kimina reads it as a Lean error".
+        It is charged because the REPL produced it while running the model's
+        snippet, and a failure the model could have caused is scored 0 rather
+        than dropped out of the denominator. Upstream has no case for
+        ``message`` at all and would score this reply 1.0.
         """
         result = await self._verify_with_payload(monkeypatch, {"message": "unknown package 'Foo'"})
         assert result.reward == 0.0

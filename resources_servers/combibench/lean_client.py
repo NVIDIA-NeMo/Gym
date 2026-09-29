@@ -458,11 +458,28 @@ class KiminaLeanClient:
 PAYLOAD_ERROR_KEYS = ("message", "error", "stderr")
 
 # Of those three, the one that is charged to the model rather than masked.
-# ``client/kimina_client/proof_utils.py::parse_error_message`` turns a
-# ``{"message": ...}`` payload into a single ``FinalMessage`` of severity
-# ``"error"`` — Kimina's own client reads that shape as a Lean error *on the
-# snippet*, not as an infrastructure failure. ``error`` and ``stderr`` have no
-# such reading; they stay masked. See ``_payload_failure``.
+# Not because Kimina reads it as a Lean error — it does not. Kimina's canonical
+# per-snippet classifier is ``ReplResponse.analyze()``
+# (``client/kimina_client/models.py``), and it tests ``"message" in
+# self.response`` *before* ``is_error``, returning ``SnippetStatus.repl_error``
+# ("Error while running snippet, at REPL level") rather than
+# ``SnippetStatus.lean_error``. So Kimina groups this shape with its
+# infrastructure statuses, not with a diagnostic on the proof.
+#
+# It is charged anyway, and the split from ``error``/``stderr`` is about which
+# of the three the *pinned server can actually emit*. ``message`` is the Lean
+# REPL's own reply shape: it reaches ``response`` through ``server/repl.py``
+# handing back unvalidated ``json.loads`` output, and the client's ``extend()``
+# admits it explicitly — i.e. it is produced while the REPL is running the
+# model's snippet, so it is a failure the model could have caused, and the rule
+# this server keeps is that such a failure is never masked. Masking is the
+# direction that deletes a model-caused failure from the denominator; charging
+# it costs at most a 0 on a rollout the REPL did not finish, which is the 0
+# upstream reaches for the shapes it reads at all. ``error`` and ``stderr``
+# cannot arrive from the pinned Kimina at all (``proof_utils.py``'s own comment:
+# "there is never error or stderr in the feedback"); they are upstream
+# CombiBench's keys and are guarded as defence against a non-Kimina server, so
+# there is no model-caused failure behind them to mask. See ``_payload_failure``.
 PAYLOAD_MODEL_ERROR_KEYS = ("message",)
 
 
@@ -482,11 +499,16 @@ def _payload_failure(payload: dict[str, Any]) -> Optional[tuple[str, str]]:
     ``stderr`` fail to ``transport_failure`` (``sandbox_error``, masked): a REPL
     that answered with one of those instead of a command response did not
     evaluate the model's proof, so there is no verdict to charge to the model.
-    ``message`` is charged (``lean_error``) — Kimina's own client maps that
-    payload to a ``FinalMessage(severity="error")``
-    (``client/kimina_client/proof_utils.py::parse_error_message``), i.e. reads
-    it as Lean erroring on the snippet, and a model-authored bad import is one
-    way to produce it. See ``PAYLOAD_MODEL_ERROR_KEYS``. Upstream fails the
+    ``message`` is charged (``lean_error``). Not because Kimina reads it as a
+    Lean error: ``ReplResponse.analyze()``
+    (``client/kimina_client/models.py``) tests ``"message" in self.response``
+    ahead of ``is_error`` and calls the shape ``SnippetStatus.repl_error``, "at
+    REPL level" — the opposite classification. It is charged because it is the
+    one of the three the pinned server can emit at all, and it is emitted while
+    the REPL is running the model's own snippet, so it is a failure the model
+    could have caused; the rule here is that such a failure is never masked,
+    because masking is the direction that removes a model-caused failure from
+    the denominator. See ``PAYLOAD_MODEL_ERROR_KEYS``. Upstream fails the
     submission on ``error``/``stderr`` and has no case for ``message`` at all
     (it would score such a reply 1.0); for the two it does read, it reaches the
     same reward of 0.0 by a different route, and the difference only shows up in
@@ -500,14 +522,13 @@ def _payload_failure(payload: dict[str, Any]) -> Optional[tuple[str, str]]:
     reward precisely the reply upstream rejects. A genuine command response
     carries neither key, so nothing legitimate is caught by this.
 
-    Earlier rounds left "can a *model-authored* bad import reach this path, and
-    is masking it therefore wrong?" open, because the Lean REPL's own behaviour
-    on an unknown module could not be read (``leanprover-community/repl`` is not
-    vendored in the pinned Kimina tree, only referenced by URL from its
-    ``Dockerfile``/``setup.sh``). It is settled now, from Kimina's side rather
-    than the REPL's: ``proof_utils.parse_error_message`` classifies a ``message``
-    payload as a severity-``error`` Lean message, so Kimina itself treats that
-    shape as the snippet failing. That is why ``message`` is charged.
+    What exactly a ``message`` payload means to Lean is still not readable from
+    the pinned tree — ``leanprover-community/repl`` is not vendored in it, only
+    referenced by URL from its ``Dockerfile``/``setup.sh``, so whether an unknown
+    module produces this shape cannot be confirmed here. The direction does not
+    depend on knowing: an unidentified failure produced by the REPL that was
+    running the model's snippet is exactly the case the "never mask what the
+    model could have caused" rule is for.
     """
     for key in PAYLOAD_ERROR_KEYS:
         if key in payload:

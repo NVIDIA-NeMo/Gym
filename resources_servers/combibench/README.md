@@ -120,8 +120,9 @@ outcomes a whole-file benchmark has no equivalent for.
    `compile_error`; a `sorry` warning or REPL `sorries` entry → `has_sorry`;
    the REPL timing out on the submission → `timeout`; any other REPL error
    string, a 500 raised from executing this snippet, and a `{"message": ...}`
-   payload → `lean_error`, which is charged to the model because upstream's
-   `is_error` fails the submission on the shapes it reads at all.
+   payload → `lean_error`, charged to the model because every one of those is a
+   failure the REPL reported while running the model's own snippet, and a
+   failure the model could have caused is scored 0 rather than masked.
 
 ### Who a failure is charged to
 
@@ -136,7 +137,7 @@ Charged to the model (reward 0.0, `mask_sample: false`, in the denominator):
 | Status | When |
 | --- | --- |
 | `timeout` | the REPL hit the budget on the submission body — a proof that does not terminate is the model's output, and excusing it would make hanging reward-neutral |
-| `lean_error` | the REPL reported an error string; `/verify` answered 500 from executing this snippet; or the per-item `response` was a `{"message": ...}` Error object, which Kimina's own client reads as a Lean error on the snippet |
+| `lean_error` | the REPL reported an error string; `/verify` answered 500 from executing this snippet; or the per-item `response` was a `{"message": ...}` Error object — which Kimina's own `ReplResponse.analyze()` would call `repl_error`, but which the REPL produced while running the model's snippet, so it is charged rather than masked (see "A `/verify` reply whose payload is an error object") |
 | `model_header_timeout` | the header that would not load inside the budget is one the model wrote itself |
 | `model_header_error` | the header Kimina could not run at all (500, "Failed to run header on REPL") is one the model wrote itself — `import Foo` is the model's choice, not an outage |
 
@@ -292,22 +293,37 @@ carrying `{"error": null}` or `{"stderr": ""}` fails here exactly as it does
 there; guarding `message` is an *addition* — upstream has no case for it and
 would score that reply 1.0.
 
-Which of the two fail-closed directions each key takes was settled in review, in
-Kimina rather than in the Lean REPL. `error` and `stderr` are masked
-(`sandbox_error`): a REPL that returned one of those instead of a command
-response never evaluated the proof, so there is no verdict to charge to the
-model, and upstream reaching the same 0.0 by failing the submission differs only
-in whether the rollout stays in the denominator. `message` is **charged**
-(`lean_error`): `client/kimina_client/proof_utils.py::parse_error_message` maps
-that payload to a `FinalMessage(severity="error")`, which `parse_lean_response`
-then treats like any other compiler diagnostic — Kimina's own client reads the
-shape as a Lean error on the snippet, not as infrastructure. A model-authored
-bad import is one way to produce it, so masking it would put a model-caused
-failure outside the denominator. Earlier rounds left this open because the
-`leanprover-community/repl` source that would show what an unknown module does
-is not vendored in the pinned Kimina tree (only referenced by URL from its
-`Dockerfile`/`setup.sh`); the client's own reading answers the question without
-it.
+Which of the two fail-closed directions each key takes is a choice this harness
+makes, not one Kimina makes for it. Kimina's own per-snippet classifier,
+`ReplResponse.analyze()` in `client/kimina_client/models.py`, groups all three
+with infrastructure rather than with a verdict: it tests `"message" in
+self.response` **before** `is_error(...)` and returns
+`SnippetStatus.repl_error` ("Error while running snippet, at REPL level"), so
+Kimina would call a `message` payload a REPL-level failure, not a Lean error on
+the snippet.
+
+`error` and `stderr` are masked (`sandbox_error`): a REPL that returned one of
+those instead of a command response never evaluated the proof, so there is no
+verdict to charge to the model, and upstream reaching the same 0.0 by failing
+the submission differs only in whether the rollout stays in the denominator. On
+top of that, neither key can arrive from the pinned Kimina at all — its own
+`client/kimina_client/proof_utils.py` says so in a comment ("there is never
+error or stderr in the feedback") — so they are guarded as defence against a
+non-Kimina server and there is no model-caused failure behind them to mask.
+
+`message` is **charged** (`lean_error`) despite Kimina's `repl_error` reading,
+because it is the one of the three the pinned server actually produces, and it
+is produced while the REPL is running the model's own snippet: it reaches
+`response` through `server/repl.py` handing back unvalidated `json.loads`
+output, and the client's `extend()` admits the shape explicitly. That makes it a
+failure the model could have caused, and the rule this harness keeps is that
+such a failure is never masked — masking is the direction that deletes a
+model-caused failure from the denominator, while charging it costs at most a 0
+on a rollout the REPL did not finish, which is the same 0 upstream reaches for
+the shapes it reads at all. What a `message` payload means to Lean is still not
+readable at the pin (`leanprover-community/repl` is not vendored in the Kimina
+tree, only referenced by URL from its `Dockerfile`/`setup.sh`), and the choice
+of direction does not depend on knowing.
 
 **A result carrying neither an `error` nor a `response` is not a verdict
 either.** `{"results": [{"custom_id": "x"}]}` and the same with
