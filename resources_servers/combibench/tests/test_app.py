@@ -434,20 +434,7 @@ class TestErrorPayloadIsNeverRewarded:
         async def text(self) -> str:
             return json.dumps(self._body)
 
-    @pytest.mark.parametrize(
-        "payload",
-        [
-            # Live on the pinned Kimina: server/repl.py hands the REPL's parsed
-            # stdout back unvalidated and the client's extend() maps
-            # {"message": ...} to ExtendedError, with no top-level error.
-            {"message": "Failed to start REPL"},
-            # Both guarded by upstream's own is_error before it reads messages.
-            {"error": "no such file or directory"},
-            {"stderr": "libgmp.so.10: cannot open shared object file"},
-        ],
-        ids=["message", "error", "stderr"],
-    )
-    async def test_error_payload_is_not_a_success(self, monkeypatch, payload: dict) -> None:
+    async def _verify_with_payload(self, monkeypatch, payload: dict):
         body = {"results": [{"custom_id": "x", "response": {**payload, "time": 0.1}}]}
 
         async def fake_request(method, url, **kwargs):
@@ -456,13 +443,44 @@ class TestErrorPayloadIsNeverRewarded:
         monkeypatch.setattr(lean_client, "request", fake_request)
         server = _make_server()
         server._verifier.lean_client = KiminaLeanClient("http://lean:8000")
-        result = await server.verify(_request(_fenced(SOLUTION)))
+        return await server.verify(_request(_fenced(SOLUTION)))
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            # Both guarded by upstream's own is_error before it reads messages.
+            {"error": "no such file or directory"},
+            {"stderr": "libgmp.so.10: cannot open shared object file"},
+        ],
+        ids=["error", "stderr"],
+    )
+    async def test_error_payload_is_not_a_success(self, monkeypatch, payload: dict) -> None:
+        result = await self._verify_with_payload(monkeypatch, payload)
         assert result.status != CombibenchStatus.SUCCESS.value
         assert result.reward == 0.0
-        # A REPL that answered with an Error object never evaluated the proof, so
-        # there is no verdict to charge to the model: harness fault, masked.
+        # A REPL that answered with one of these instead of a command response
+        # never evaluated the proof, so there is no verdict to charge to the
+        # model: harness fault, masked.
         assert result.status == CombibenchStatus.LEAN_SERVER_ERROR.value
         assert result.mask_sample is True
+
+    async def test_message_payload_is_charged_to_the_model(self, monkeypatch) -> None:
+        """Live on the pinned Kimina, and a verdict rather than an outage.
+
+        ``server/repl.py`` hands the REPL's parsed stdout back unvalidated, so a
+        ``{"message": ...}`` Error object can arrive in ``response`` with no
+        top-level ``error``; and Kimina's own client reads that shape as a Lean
+        error on the snippet
+        (``client/kimina_client/proof_utils.py::parse_error_message`` →
+        ``FinalMessage(severity="error")``). So it scores 0 and stays in the
+        denominator. Upstream has no case for ``message`` at all and would score
+        this reply 1.0.
+        """
+        result = await self._verify_with_payload(monkeypatch, {"message": "unknown package 'Foo'"})
+        assert result.reward == 0.0
+        assert result.status == CombibenchStatus.LEAN_ERROR.value
+        assert result.mask_sample is False
+        assert result.harness_failure == 0.0
 
 
 class TestHttpBoundary:

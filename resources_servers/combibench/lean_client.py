@@ -457,9 +457,17 @@ class KiminaLeanClient:
 # reads ``messages`` (``evaluation/client/lean_client.py``).
 PAYLOAD_ERROR_KEYS = ("message", "error", "stderr")
 
+# Of those three, the one that is charged to the model rather than masked.
+# ``client/kimina_client/proof_utils.py::parse_error_message`` turns a
+# ``{"message": ...}`` payload into a single ``FinalMessage`` of severity
+# ``"error"`` — Kimina's own client reads that shape as a Lean error *on the
+# snippet*, not as an infrastructure failure. ``error`` and ``stderr`` have no
+# such reading; they stay masked. See ``_payload_failure``.
+PAYLOAD_MODEL_ERROR_KEYS = ("message",)
 
-def _payload_failure(payload: dict[str, Any]) -> Optional[str]:
-    """Describe a per-item ``response`` that is not a Lean verdict, else None.
+
+def _payload_failure(payload: dict[str, Any]) -> Optional[tuple[str, str]]:
+    """The key and description of a per-item ``response`` that is not a Lean verdict, else None.
 
     The top-level ``error`` is not the only way ``/verify`` reports a failure.
     ``server/repl.py`` returns ``ReplResponse(response=cmd_response)`` with
@@ -470,13 +478,20 @@ def _payload_failure(payload: dict[str, Any]) -> Optional[str]:
     would leave such a reply with no error, no messages and no sorries — which
     is exactly what a clean compile looks like — and reward it.
 
-    This fails closed, and it fails to ``transport_failure`` (``sandbox_error``,
-    masked) rather than to a model-attributable status: a REPL that answered
-    with an Error object instead of a command response did not evaluate the
-    model's proof, so there is no verdict to charge to the model. Upstream fails
-    the submission on ``error``/``stderr`` instead, which reaches the same reward
-    of 0.0 by a different route; the difference only shows up in whether the
-    rollout is counted in the denominator, and a non-verdict should not be.
+    This fails closed either way; which way depends on the key. ``error`` and
+    ``stderr`` fail to ``transport_failure`` (``sandbox_error``, masked): a REPL
+    that answered with one of those instead of a command response did not
+    evaluate the model's proof, so there is no verdict to charge to the model.
+    ``message`` is charged (``lean_error``) — Kimina's own client maps that
+    payload to a ``FinalMessage(severity="error")``
+    (``client/kimina_client/proof_utils.py::parse_error_message``), i.e. reads
+    it as Lean erroring on the snippet, and a model-authored bad import is one
+    way to produce it. See ``PAYLOAD_MODEL_ERROR_KEYS``. Upstream fails the
+    submission on ``error``/``stderr`` and has no case for ``message`` at all
+    (it would score such a reply 1.0); for the two it does read, it reaches the
+    same reward of 0.0 by a different route, and the difference only shows up in
+    whether the rollout is counted in the denominator, where a non-verdict
+    should not be.
 
     The test is key *presence*, not truthiness, because that is what upstream's
     ``is_error`` does: ``if "error" in feedback`` / ``if "stderr" in feedback``
@@ -485,18 +500,14 @@ def _payload_failure(payload: dict[str, Any]) -> Optional[str]:
     reward precisely the reply upstream rejects. A genuine command response
     carries neither key, so nothing legitimate is caught by this.
 
-    Open question, deliberately not acted on: whether a *model-authored* bad
-    import (``import Foo`` in the submission, which Kimina's split turns into
-    the pooled REPL's header) can reach this path. If it produces an Error
-    payload rather than a command response with an error message, masking it
-    puts a model-caused failure outside the denominator. Settling it needs the
-    Lean REPL's own behaviour on an unknown module, and the ``leanprover-
-    community/repl`` source is not vendored in the pinned Kimina tree — only
-    referenced by URL from its ``Dockerfile``/``setup.sh`` — so it was not
-    checked here rather than guessed. What would settle it: one ``/verify`` call
-    with ``import Foo`` against a live server at the pinned image, recorded in
-    the README. Note the direction is in any case strictly better than upstream,
-    which reads only the outer ``error`` key and scores such a reply 1.0.
+    Earlier rounds left "can a *model-authored* bad import reach this path, and
+    is masking it therefore wrong?" open, because the Lean REPL's own behaviour
+    on an unknown module could not be read (``leanprover-community/repl`` is not
+    vendored in the pinned Kimina tree, only referenced by URL from its
+    ``Dockerfile``/``setup.sh``). It is settled now, from Kimina's side rather
+    than the REPL's: ``proof_utils.parse_error_message`` classifies a ``message``
+    payload as a severity-``error`` Lean message, so Kimina itself treats that
+    shape as the snippet failing. That is why ``message`` is charged.
     """
     for key in PAYLOAD_ERROR_KEYS:
         if key in payload:
@@ -504,7 +515,7 @@ def _payload_failure(payload: dict[str, Any]) -> Optional[str]:
             # ``{"stderr": ""}`` read as themselves rather than as a blank message.
             value = payload[key]
             shown = str(value)[:500] if value else repr(value)
-            return f"Lean server reported {key}: {shown}"
+            return key, f"Lean server reported {key}: {shown}"
     return None
 
 
@@ -526,15 +537,20 @@ def parse_verify_response(body: Any) -> LeanResult:
         # Neither a verdict nor a failure: ``{"custom_id": "x"}`` and
         # ``{"custom_id": "x", "response": null}`` used to fall through to "no
         # error, no messages, no sorries" — which is exactly what a clean
-        # compile looks like — and were rewarded 1.0. Both shapes are
-        # reachable: ``/verify`` is declared ``response_model_exclude_none=True``
-        # (``server/routers/check.py``), so a ``ReplResponse`` with both fields
-        # None serialises to neither key, and the client's ``extend()`` returns
-        # None when the REPL's stdout parsed to JSON ``null``. This is the same
-        # class of bug as ``_payload_failure`` one level up — an under-specified
-        # reply read as a success — so it fails closed the same way, and to the
-        # same masked ``sandbox_error``: a reply carrying no verdict is not a
-        # verdict on the model's proof.
+        # compile looks like — and were rewarded 1.0.
+        #
+        # Defence against a malformed or non-Kimina server, not a shape the
+        # pinned server produces: ``ReplResponse``
+        # (``client/kimina_client/models.py``) carries a ``@model_validator``
+        # ``require_error_or_response`` that raises when neither field is set, so
+        # a well-behaved Kimina cannot construct one. ``/verify`` being declared
+        # ``response_model_exclude_none=True`` (``server/routers/backward.py``)
+        # is what would *serialise* such an object to neither key if one ever
+        # existed. Kept anyway: this is the same class of bug as
+        # ``_payload_failure`` one level up — an under-specified reply read as a
+        # success — so it fails closed the same way, and to the same masked
+        # ``sandbox_error``: a reply carrying no verdict is not a verdict on the
+        # model's proof.
         LOG.warning("Lean server result carried neither an error nor a response: %r", result)
         return LeanResult(error="Lean server result carried neither an error nor a response", transport_failure=True)
     if not isinstance(payload, dict):
@@ -542,8 +558,10 @@ def parse_verify_response(body: Any) -> LeanResult:
     if not error:
         failed = _payload_failure(payload)
         if failed is not None:
-            LOG.warning("Lean server returned an error payload: %s", failed)
-            return LeanResult(error=failed, transport_failure=True)
+            key, description = failed
+            LOG.warning("Lean server returned an error payload: %s", description)
+            charged = key in PAYLOAD_MODEL_ERROR_KEYS
+            return LeanResult(error=description, transport_failure=not charged, server_error=charged)
     messages = payload.get("messages") or []
     sorries = payload.get("sorries") or []
     return LeanResult(

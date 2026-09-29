@@ -119,9 +119,9 @@ outcomes a whole-file benchmark has no equivalent for.
 7. **Compile** through the Lean server with a 60 s timeout. Any error message →
    `compile_error`; a `sorry` warning or REPL `sorries` entry → `has_sorry`;
    the REPL timing out on the submission → `timeout`; any other REPL error
-   string, and a 500 raised from executing this snippet → `lean_error`, which is
-   charged to the model because upstream's `is_error` fails the submission on it
-   too.
+   string, a 500 raised from executing this snippet, and a `{"message": ...}`
+   payload → `lean_error`, which is charged to the model because upstream's
+   `is_error` fails the submission on the shapes it reads at all.
 
 ### Who a failure is charged to
 
@@ -290,34 +290,41 @@ as a failure and fails closed. The test is key *presence*, matching upstream's
 `is_error` (`if "error" in feedback` / `if "stderr" in feedback`), so a payload
 carrying `{"error": null}` or `{"stderr": ""}` fails here exactly as it does
 there; guarding `message` is an *addition* — upstream has no case for it and
-would score that reply 1.0. The outcome is `sandbox_error` (masked), not a model-attributable
-status: a REPL that returned an Error object instead of a command response never
-evaluated the proof, so there is no verdict to charge to the model. Upstream
-reaches the same 0.0 by failing the submission; the only difference is whether
-the rollout stays in the denominator, and a non-verdict should not.
+would score that reply 1.0.
 
-One thing that guard does *not* settle, recorded rather than guessed at: whether
-a **model-authored** bad import (`import Foo`, which Kimina's split turns into
-the pooled REPL's header) can produce an Error payload rather than a command
-response carrying an error message. If it can, masking it puts a model-caused
-failure outside the denominator — the opposite of the rule above. Settling it
-needs the Lean REPL's own behaviour on an unknown module, and
-`leanprover-community/repl` is not vendored in the pinned Kimina tree, only
-referenced by URL from its `Dockerfile`/`setup.sh`, so it is left open here.
-What would settle it: one `/verify` call carrying `import Foo` against a live
-server at the pinned image, recorded here. In either direction this is strictly
-better than upstream, which reads only the outer `error` key and scores such a
-reply 1.0.
+Which of the two fail-closed directions each key takes was settled in review, in
+Kimina rather than in the Lean REPL. `error` and `stderr` are masked
+(`sandbox_error`): a REPL that returned one of those instead of a command
+response never evaluated the proof, so there is no verdict to charge to the
+model, and upstream reaching the same 0.0 by failing the submission differs only
+in whether the rollout stays in the denominator. `message` is **charged**
+(`lean_error`): `client/kimina_client/proof_utils.py::parse_error_message` maps
+that payload to a `FinalMessage(severity="error")`, which `parse_lean_response`
+then treats like any other compiler diagnostic — Kimina's own client reads the
+shape as a Lean error on the snippet, not as infrastructure. A model-authored
+bad import is one way to produce it, so masking it would put a model-caused
+failure outside the denominator. Earlier rounds left this open because the
+`leanprover-community/repl` source that would show what an unknown module does
+is not vendored in the pinned Kimina tree (only referenced by URL from its
+`Dockerfile`/`setup.sh`); the client's own reading answers the question without
+it.
 
 **A result carrying neither an `error` nor a `response` is not a verdict
 either.** `{"results": [{"custom_id": "x"}]}` and the same with
 `"response": null` have no error, no messages and no sorries — indistinguishable
-from a clean compile — and both are reachable: `/verify` is declared
-`response_model_exclude_none=True`, so a `ReplResponse` with both fields None
-serialises to neither key, and the client's `extend()` returns None when the
-REPL's stdout parsed to JSON `null`. `parse_verify_response` fails closed on
-both, to the masked `sandbox_error`, for the same reason as the error payload
-above: this is the same under-specified-reply-read-as-success bug one level up.
+from a clean compile — and `parse_verify_response` fails closed on both, to the
+masked `sandbox_error`, for the same reason as the error payload above: this is
+the same under-specified-reply-read-as-success bug one level up. Unlike that
+one, this guard is **defence against a malformed or non-Kimina server rather
+than a shape the pinned server produces**: `ReplResponse`
+(`client/kimina_client/models.py`) carries a `@model_validator`
+`require_error_or_response` that raises unless exactly one of the two fields is
+set, so a well-behaved Kimina cannot build such a result in the first place.
+(`/verify` is declared `response_model_exclude_none=True` in
+`server/routers/backward.py`, which is what would serialise such an object to
+neither key if one ever existed.) It is kept because failing closed costs
+nothing and a reply nothing on the wire guarantees must not be able to score
+1.0.
 
 **Extracted code longer than `max_code_characters` is rejected unsent.**
 Upstream's extraction has no length bound at all, so this is a departure, but it

@@ -288,15 +288,33 @@ class TestErrorPayloads:
 
     @pytest.mark.parametrize(
         "payload",
-        [{"message": "Failed to start REPL"}, {"error": "boom"}, {"stderr": "cannot open shared object file"}],
-        ids=["message", "error", "stderr"],
+        [{"error": "boom"}, {"stderr": "cannot open shared object file"}],
+        ids=["error", "stderr"],
     )
-    async def test_an_error_payload_is_a_transport_failure(self, monkeypatch, payload: dict) -> None:
+    async def test_an_error_or_stderr_payload_is_a_transport_failure(self, monkeypatch, payload: dict) -> None:
+        """Neither key has a reading as a verdict, so neither is charged to the model."""
         body = {"results": [{"custom_id": "x", "response": {**payload, "time": 0.1}}]}
         _patch_request(monkeypatch, _FakeResponse(200, body))
         result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
-        assert result.transport_failure is True
+        assert result.transport_failure is True and result.server_error is False
         assert classify_lean_result(result) == STATUS_SANDBOX_ERROR
+
+    async def test_a_message_payload_is_charged_to_the_model(self, monkeypatch) -> None:
+        """Kimina's own client reads ``{"message": ...}`` as a Lean error on the snippet.
+
+        ``client/kimina_client/proof_utils.py::parse_error_message`` turns that
+        payload into a single ``FinalMessage`` of severity ``"error"``, which
+        ``parse_lean_response`` then treats like any other compiler diagnostic.
+        So it is a verdict, not an infrastructure failure, and masking it would
+        take a rollout the model can produce (a bad import in its own header)
+        out of the denominator.
+        """
+        body = {"results": [{"custom_id": "x", "response": {"message": "unknown package 'Foo'", "time": 0.1}}]}
+        _patch_request(monkeypatch, _FakeResponse(200, body))
+        result = await KiminaLeanClient("http://lean:8000").verify("code", 10)
+        assert result.transport_failure is False and result.server_error is True
+        assert "unknown package 'Foo'" in result.error
+        assert classify_lean_result(result) == "lean_error"
 
     @pytest.mark.parametrize(
         "payload",
@@ -326,11 +344,14 @@ class TestErrorPayloads:
     async def test_a_result_with_neither_error_nor_response_fails_closed(self, monkeypatch, result: dict) -> None:
         """Both shapes used to read as a clean compile and score 1.0.
 
-        ``/verify`` is declared ``response_model_exclude_none=True``, so a
-        ``ReplResponse`` whose ``error`` and ``response`` are both None
-        serialises to neither key; and the client's ``extend()`` yields None
-        when the REPL's stdout parsed to JSON ``null``. Same class as the error
-        payload guard above, one level up.
+        Defence against a malformed or non-Kimina server rather than a shape the
+        pinned server emits: ``ReplResponse``
+        (``client/kimina_client/models.py``) has a ``@model_validator``
+        ``require_error_or_response`` that raises unless exactly one of the two
+        is set. ``/verify`` being declared ``response_model_exclude_none=True``
+        (``server/routers/backward.py``) is what would serialise such an object
+        to neither key if one ever existed. Kept because failing closed is the
+        right default: same class as the error payload guard above, one level up.
         """
         _patch_request(monkeypatch, _FakeResponse(200, {"results": [result]}))
         parsed = await KiminaLeanClient("http://lean:8000").verify("code", 10)
