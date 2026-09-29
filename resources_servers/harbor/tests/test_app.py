@@ -192,7 +192,7 @@ class TestSeed:
             "workdir": "/app",
         }
         assert created == [("hello", "/app")]
-        assert sandbox.execs[0]["command"].startswith("mkdir -p /app /logs/agent /logs/verifier /logs/artifacts")
+        assert sandbox.execs[0]["command"] == "mkdir -p /app"
 
         # Re-seeding the same session is idempotent.
         again = client.post("/seed_session", json=seed_body(task))
@@ -270,8 +270,8 @@ class TestSetupCommands:
         response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
         assert response.status_code == 200, response.text
         commands = [call["command"] for call in sandbox.execs]
-        assert commands[0].startswith("mkdir -p /app /logs/agent")
-        assert commands[1:3] == server.config.sandbox_setup_commands
+        assert commands[0] == "mkdir -p /app"
+        assert commands[2:4] == server.config.sandbox_setup_commands
         assert all(call["user"] == "root" for call in sandbox.execs[1:3])
 
     def test_failing_setup_command_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
@@ -297,9 +297,10 @@ class TestSeedWorkdirAndResources:
             "resources_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
         )
         assert TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task)).status_code == 200
-        prepare = sandbox.execs[0]["command"]
-        assert "mkdir -p /app /logs/agent /logs/verifier /logs/artifacts" in prepare
-        assert "chmod 777 /logs/agent /logs/verifier /logs/artifacts" in prepare
+        commands = [c["command"] for c in sandbox.execs]
+        assert commands[0] == "mkdir -p /app"
+        logs = next(c for c in sandbox.execs if "/logs/artifacts" in c["command"])
+        assert "chmod 777 /logs/agent /logs/verifier /logs/artifacts" in logs["command"] and logs["user"] == "root"
         spec = server._sandbox_spec(task, "/app")
         assert spec.env["CIRCLE_NODE_TOTAL"] == "3" and "X" not in spec.env
 
@@ -877,3 +878,18 @@ class TestComposeAndRouting:
         response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
         assert response.status_code == 503 and "Healthcheck failed" in response.json()["detail"]
         assert compose.stopped
+
+
+def test_image_rewrites_apply_to_agent_and_verifier_images(tmp_path, monkeypatch):
+    server, task, _, _ = make_server(tmp_path, monkeypatch)
+    (task.path / "task.toml").write_text(SEPARATE_TOML)
+    task = load_task(task.path)
+    server.config.image_rewrites = {"org/agent:1": "mirror/agent:derived", "org/verifier:1": "mirror/verifier:derived"}
+    monkeypatch.setattr(
+        "resources_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+    )
+    assert server._sandbox_spec(task, "/app").image == "mirror/agent:derived"
+    verifier = server._sandbox_spec(
+        task, None, environment=task.config.verifier.environment, image=_verifier_image(task), role="verifier", ttl=1
+    )
+    assert verifier.image == "mirror/verifier:derived"
