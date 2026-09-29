@@ -163,6 +163,11 @@ class TokenIdCaptureSettings(BaseModel):
     # ``False`` keeps the sample when terminal attribution delivered its chain whole, which
     # places the uncaptured call outside the trajectory the verifier scored.
     mask_incomplete_when_attributed: bool = True
+    # Admit a continuation whose parent cannot be resolved (e.g. the harness
+    # rewrote its history) as a new text root instead of poisoning the
+    # rollout. Earlier generations then become prompt for the new root, so
+    # only enable this for trainers that train every captured call chain.
+    unresolved_as_root: bool = False
     # Abort when the finalized-rollout masked fraction exceeds this limit.
     # Enforcement begins after ``mask_fraction_min_samples`` observations.
     # ``None`` disables the kill switch.
