@@ -230,10 +230,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 await self.shutdown()
 
         app.router.lifespan_context = lifespan
-        app.post("/close_session")(self.close_session)
         return app
 
-    async def close_session(
+    async def close_resources_session(
         self,
         request: Request,
         body: Annotated[dict[str, Any] | None, Body()] = None,
