@@ -8,6 +8,9 @@
   `mini.yaml` prompts, native bash tool calls through Gym's Responses model
   adapter, and task-local MCP CLI.
 
+- `terminal_bench_4/opencode`: sandboxed OpenCode using the prepared task prompt
+  and TB4-owned provisioning, separate verification, and cleanup.
+
 ## Artificial Analysis comparison
 
 The version, prompts, 500-step limit, and 30-second command timeout follow
@@ -84,9 +87,8 @@ gym eval run --benchmark terminal_bench_4/miniswe \
   ++use_absolute_ip=true ++tb4_split_sandbox_endpoints=true
 ```
 
-mini-SWE's loop runs in the resources process, using its existing sandbox and
-calling the Gym model server. The agent endpoint forwards the collector's run
-request and returns the result; it does not manage task environments.
+The selected agent runs its harness in the task sandbox and calls the Gym model
+server. Resources owns task provisioning, grading, and cleanup.
 MCP tasks also need Python venv/pip
 for its pinned task-local `mcp==1.29.0` client.
 

@@ -22,6 +22,7 @@ import uvicorn
 from dotenv import dotenv_values
 from omegaconf import OmegaConf
 
+from benchmarks.terminal_bench_4.prepare import load_instructions
 from nemo_gym import global_config, server_utils
 from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
 from nemo_gym.rollout_collection import _attach_trajectory_record
@@ -29,6 +30,7 @@ from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.server_utils import BaseServerConfig, GlobalAIOHTTPAsyncClientConfig, ServerClient
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
 from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
+from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent, OpenCodeSandboxedAgentConfig
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
 
@@ -61,6 +63,8 @@ async def main(args):
         source_root / path
         for path in [
             "nemo_gym/sandbox/api.py",
+            "responses_api_agents/opencode_sandboxed_agent/app.py",
+            "benchmarks/terminal_bench_4/prepare.py",
             "resources_servers/terminal_bench_4/models.py",
             "nemo_gym/sandbox/adapters/docker_compose.py",
             "nemo_gym/sandbox/providers/opensandbox/provider.py",
@@ -114,6 +118,16 @@ async def main(args):
     agent_name = "terminal_bench_4_" + args.harness
     profile = OmegaConf.load(root / f"{args.harness}.yaml")
     del profile["config_paths"]
+    if args.harness == "opencode":
+        base = OmegaConf.load(
+            source_root / "responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml"
+        )
+        overrides = profile[agent_name]
+        del overrides["_inherit_from"]
+        profile[agent_name] = OmegaConf.merge(base.opencode_sandboxed_agent, overrides)
+        profile[agent_name].responses_api_agents.opencode_sandboxed_agent.opencode_config.agent = {
+            "build": {"steps": args.steps}
+        }
     config = OmegaConf.merge(config, profile)
     ports = {name: free_port() for name in ["terminal_bench_4", agent_name, "policy_model"]}
     resource_config = config.terminal_bench_4.resources_servers.terminal_bench_4
@@ -140,8 +154,13 @@ async def main(args):
         config=TerminalBench4Config.model_validate(OmegaConf.to_container(resource_config, resolve=True)),
         server_client=client,
     )
-    agent = MiniSWESandboxedAgent(
-        config=MiniSWESandboxedConfig.model_validate(OmegaConf.to_container(agent_config, resolve=True)),
+    agent_type, config_type = (
+        (OpenCodeSandboxedAgent, OpenCodeSandboxedAgentConfig)
+        if args.harness == "opencode"
+        else (MiniSWESandboxedAgent, MiniSWESandboxedConfig)
+    )
+    agent = agent_type(
+        config=config_type.model_validate(OmegaConf.to_container(agent_config, resolve=True)),
         server_client=client,
     )
     model = SimpleModelServer(config=SimpleModelServerConfig.model_validate(model_config), server_client=client)
@@ -171,6 +190,7 @@ async def main(args):
                 "model": args.model,
             }
             try:
+                instructions = await load_instructions([task], str(args.task_cache))
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
                     async with session.post(
                         f"http://{host}:{ports[agent_name]}/run",
@@ -179,11 +199,13 @@ async def main(args):
                             "task_name": "terminal-bench/" + task["name"],
                             "task_ref": task["ref"],
                             "dataset_ref": manifest["ref"],
-                            "rollout_id": f"{args.output.name}-{task['name']}",
                             "_ng_rollout_id": f"{args.output.name}-{task['name']}",
                             "_ng_task_index": manifest["tasks"].index(task),
                             "_ng_rollout_index": 0,
-                            "responses_create_params": {"input": [], "max_output_tokens": 16384},
+                            "responses_create_params": {
+                                "input": [{"role": "user", "content": instructions[task["name"]]}],
+                                "max_output_tokens": 16384,
+                            },
                         },
                     ) as response:
                         text = await response.text()
@@ -256,7 +278,7 @@ async def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1", help="Service bind address reachable from the sandboxes")
-    parser.add_argument("--harness", choices=["miniswe"], default="miniswe")
+    parser.add_argument("--harness", choices=["miniswe", "opencode"], default="miniswe")
     parser.add_argument("--tasks", nargs="*")
     parser.add_argument("--exclude-tasks", nargs="*", default=[])
     parser.add_argument("--category", choices=["cpu", "compose", "gpu"])

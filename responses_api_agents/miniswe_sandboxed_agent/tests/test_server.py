@@ -61,7 +61,9 @@ async def fixture(tmp_path, monkeypatch):
         rollout_id="rollout",
         responses_create_params={"input": [{"role": "user", "content": "Solve task"}]},
     )
-    request = SimpleNamespace(session={SESSION_ID_KEY: "owner"}, cookies={"session": "incoming"}, headers={"Idempotency-Key": "seed-request"})
+    request = SimpleNamespace(
+        session={SESSION_ID_KEY: "owner"}, cookies={"session": "incoming"}, headers={"Idempotency-Key": "seed-request"}
+    )
     task = SimpleNamespace(
         config=TaskSettings.model_validate(
             {
@@ -873,12 +875,14 @@ async def test_tb4_seed_serializes_shared_sandbox_access(fixture, monkeypatch):
 
 async def test_seed_idempotency_key_is_independent_of_rollout_fields(fixture):
     f = fixture
-    body = TerminalBench4RunRequest.model_validate({
-        "task_name": f.body.task_name,
-        "task_ref": f.body.task_ref,
-        "dataset_ref": f.body.dataset_ref,
-        "responses_create_params": f.body.responses_create_params.model_dump(),
-    })
+    body = TerminalBench4RunRequest.model_validate(
+        {
+            "task_name": f.body.task_name,
+            "task_ref": f.body.task_ref,
+            "dataset_ref": f.body.dataset_ref,
+            "responses_create_params": f.body.responses_create_params.model_dump(),
+        }
+    )
     first_request = SimpleNamespace(session={SESSION_ID_KEY: "first-cookie"}, headers={"Idempotency-Key": "attempt-1"})
     retry_request = SimpleNamespace(session={SESSION_ID_KEY: "lost-cookie"}, headers={"Idempotency-Key": "attempt-1"})
     first, retry = await asyncio.gather(

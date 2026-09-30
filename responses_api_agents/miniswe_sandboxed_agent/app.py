@@ -397,7 +397,11 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/seed_session",
-                headers={"Idempotency-Key": uuid5(NAMESPACE_URL, f"{payload['client_session_id']}:{payload['rollout_id']}").hex},
+                headers={
+                    "Idempotency-Key": uuid5(
+                        NAMESPACE_URL, f"{payload['client_session_id']}:{payload['rollout_id']}"
+                    ).hex
+                },
                 json=payload,
                 cookies=cookies,
             )

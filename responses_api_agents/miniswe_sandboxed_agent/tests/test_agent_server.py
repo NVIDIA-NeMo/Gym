@@ -37,7 +37,11 @@ async def fixture(tmp_path, monkeypatch):
     request = Request(
         {"type": "http", "session": {SESSION_ID_KEY: "owner"}, "headers": [(b"cookie", b"session=incoming")]}
     )
-    body = MiniSWERunRequest(responses_create_params={"input": [{"role": "user", "content": "Prepared instruction"}]}, problem={"id": 42}, rollout_id="rollout")
+    body = MiniSWERunRequest(
+        responses_create_params={"input": [{"role": "user", "content": "Prepared instruction"}]},
+        problem={"id": 42},
+        rollout_id="rollout",
+    )
     seed = dict(
         session_id="resource-session",
         task_id="problem-42",

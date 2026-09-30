@@ -532,7 +532,7 @@ class TestOpenCodeSandboxedAgent:
             wall_time_s=2.0,
         )
 
-        async def post(server_name, url_path, json=None, cookies=None):
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
             if url_path == "/seed_session":
                 return Response({"sandbox_handle": "seed-sandbox"})
             assert url_path == "/verify"
@@ -625,10 +625,12 @@ async def test_resource_selected_provider_and_legacy_fallback(monkeypatch, mode)
     elif mode == "named":
         kwargs.update(
             sandbox_provider={"invalid": {}},
-            sandbox_access=SandboxAccess.model_validate({
-                "connection": {"provider_config_ref": "gpu", "descriptor": {"sandbox_id": "selected"}},
-                "workdir": "/resource",
-            }),
+            sandbox_access=SandboxAccess.model_validate(
+                {
+                    "connection": {"provider_config_ref": "gpu", "descriptor": {"sandbox_id": "selected"}},
+                    "workdir": "/resource",
+                }
+            ),
         )
         expected_provider = configs["gpu"]
         expected_descriptor = {"sandbox_id": "selected", "workdir": "/resource"}
@@ -639,6 +641,7 @@ async def test_resource_selected_provider_and_legacy_fallback(monkeypatch, mode)
 
 async def test_invalid_resource_provider_does_not_fall_back(monkeypatch):
     import pytest
+
     from nemo_gym.sandbox.access import SandboxAccess
 
     monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {"harness": {"local": {}}})
@@ -648,8 +651,105 @@ async def test_invalid_resource_provider_does_not_fall_back(monkeypatch):
     config.sandbox_provider = "harness"
     server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
     with pytest.raises(ValueError, match="not defined"):
-        await server._start_sandbox(sandbox_access=SandboxAccess.model_validate({
-            "connection": {"provider_config_ref": "missing", "descriptor": {"sandbox_id": "box"}},
-            "workdir": "/task",
-        }))
+        await server._start_sandbox(
+            sandbox_access=SandboxAccess.model_validate(
+                {
+                    "connection": {"provider_config_ref": "missing", "descriptor": {"sandbox_id": "box"}},
+                    "workdir": "/task",
+                }
+            )
+        )
     create.assert_not_called()
+
+
+@mark.parametrize("failure", [False, True])
+async def test_resource_episode_verifies_after_disconnect_without_stopping_sandbox(monkeypatch, failure):
+    from starlette.requests import Request
+
+    from resources_servers.terminal_bench_4.models import SandboxedVerifyRequest
+
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    client = MagicMock(spec=ServerClient)
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
+    sandbox = SimpleNamespace(disconnect=AsyncMock(), stop=AsyncMock())
+    server._start_sandbox = AsyncMock(return_value=sandbox)
+    request = Request({"type": "http", "session": {SESSION_ID_KEY: "owner"}, "headers": []})
+    body = OpenCodeSandboxedAgentRunRequest(
+        responses_create_params={"input": [{"role": "user", "content": "Prepared task"}]}
+    )
+    seed = {
+        "session_id": "resource-session",
+        "sandbox_descriptor": {"sandbox_id": "box"},
+        "sandbox_provider": {"local": {}},
+    }
+    calls = []
+
+    async def post(**kwargs):
+        calls.append(kwargs)
+        if kwargs["url_path"] == "/seed_session":
+            assert kwargs["headers"]["Idempotency-Key"]
+            value = seed
+        else:
+            sandbox.disconnect.assert_awaited_once()
+            sandbox.stop.assert_not_awaited()
+            verify = SandboxedVerifyRequest.model_validate(kwargs["json"])
+            assert verify.session_id == "resource-session"
+            assert verify.agent_started is (not failure)
+            assert verify.termination.reason == ("infrastructure_error" if failure else "completed")
+            assert verify.responses_create_params.input[0].content == "Prepared task"
+            value = kwargs["json"] | {"reward": 0.0, "evaluation_completed": not failure}
+        return SimpleNamespace(json=AsyncMock(return_value=value), value=value, cookies={})
+
+    async def respond(request, params):
+        if failure:
+            raise RuntimeError("setup failed")
+        request.state._ng_opencode_started = True
+        request.state._ng_opencode_termination = {"reason": "completed", "exit_code": 0}
+        return NeMoGymResponse(
+            id="resp",
+            created_at=0,
+            object="response",
+            model="test",
+            output=[],
+            parallel_tool_calls=True,
+            tools=[],
+            tool_choice="auto",
+        )
+
+    client.post = AsyncMock(side_effect=post)
+    monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app_module, "get_response_json", AsyncMock(side_effect=lambda r: r.value))
+    monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", AsyncMock(side_effect=respond))
+    result = await server.run(request, body)
+    assert result.evaluation_completed is (not failure)
+    assert len(calls) == 2
+    assert not server._sandbox_id_to_sandbox
+
+
+async def test_unacknowledged_process_cleanup_blocks_verification(monkeypatch):
+    import pytest
+    from starlette.requests import Request
+
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    client = MagicMock(spec=ServerClient)
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
+    sandbox = SimpleNamespace(disconnect=AsyncMock(), stop=AsyncMock())
+    server._start_sandbox = AsyncMock(return_value=sandbox)
+    request = Request({"type": "http", "session": {SESSION_ID_KEY: "owner"}, "headers": []})
+    body = OpenCodeSandboxedAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "task"}]})
+    client.post = AsyncMock(
+        return_value=SimpleNamespace(json=AsyncMock(return_value={"session_id": "session"}), cookies={})
+    )
+    monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+
+    async def respond(request, params):
+        request.state._ng_opencode_cleanup_pending = True
+        raise RuntimeError("cleanup acknowledgement lost")
+
+    monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", AsyncMock(side_effect=respond))
+    with pytest.raises(RuntimeError, match="cleanup acknowledgement"):
+        await server.run(request, body)
+    assert client.post.await_count == 1
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+    assert not server._sandbox_id_to_sandbox

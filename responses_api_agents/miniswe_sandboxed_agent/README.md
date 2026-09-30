@@ -33,7 +33,8 @@ includes the resource session's `x-session-id` header. Set
 the sandbox. The TB4 override is `++tb4_sandbox_model_base_url=...`; an optional
 `/v1` suffix is accepted and any reverse-proxy path is preserved.
 
-The caller supplies the task instruction, task user and working directory,
+Prepared rows supply the task instruction in `responses_create_params.input`.
+The resources seed supplies the task user and working directory,
 setup/execution budgets, optional skills/MCP configuration, and artifact path.
 Setup has a separate 360-second budget. Execution uses the smaller of the task's
 budget and `agent_max_timeout_sec`. Default artifacts are written to

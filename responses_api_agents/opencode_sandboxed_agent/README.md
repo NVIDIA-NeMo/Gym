@@ -1,5 +1,23 @@
 # OpenCode Sandboxed Agent
 
+Resources can select the sandbox provider per task by returning `sandbox_access`
+with a named provider reference and descriptor, or the legacy inline
+`sandbox_provider` and `sandbox_descriptor`. Shared provider names must be defined
+in the agent's Gym configuration too. When neither is supplied, the agent uses
+its configured `sandbox_provider` and the resource's `sandbox_handle`.
+Invalid resource-supplied providers fail without falling back.
+
+For session-based resources such as TB4, OpenCode returns the seed's `session_id`
+and execution outcome to `/verify`, after stopping its process group and
+releasing its connection. Resources owns sandbox destruction. Each seed attempt
+carries an `Idempotency-Key`; transport retries reuse it. The task prompt comes
+from the prepared input. Set `sandbox_model_base_url` if the configured Gym model
+address is not reachable from the sandbox.
+
+TB4's profile is `benchmarks/terminal_bench_4/opencode.yaml`. Prepare with
+`gym eval prepare --benchmark terminal_bench_4/opencode`, then use that same
+benchmark selector with `gym eval run` and your model settings.
+
 ## Prerequisites
 
 Complete [OpenSandbox access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#setup)
