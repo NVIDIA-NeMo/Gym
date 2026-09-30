@@ -1,0 +1,87 @@
+---
+title: "Evaluate SWE-bench Pro with Hermes"
+description: "Prepare SWE-bench Pro tasks and run Hermes through the EnvironmentServer."
+position: 4
+---
+
+# Evaluate SWE-bench Pro with Hermes
+
+Use [hermes.yaml](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/swebench/pro/hermes.yaml)
+to connect Hermes to the SWE-bench Pro Resources Server through the `single_agent_turn`
+EnvironmentServer. The EnvironmentServer owns session setup, agent execution, verification,
+and cleanup. Hermes performs its multi-turn model/tool loop inside the task sandbox that
+Resources created. Resources extracts the resulting patch and grades it in a clean sandbox.
+
+## Configure the model and sandbox
+
+Run the commands below from the Gym repository root with Gym and the SWE-bench Pro
+preparation dependencies installed. Create a `model-provider.yaml` configuration that supplies:
+
+- `policy_model`: the Gym Model Server deployment used by Hermes.
+- `sandbox`: the sandbox provider and its connection credentials.
+- `swebench_pro_hermes_agent.responses_api_agents.hermes_agent.model`: the served model ID.
+
+The task sandbox must be able to reach the Gym Model Server. Use a Linux sandbox with exec
+support and one Hermes agent-server worker; the recipe sets `num_workers: 1` and enables
+the terminal toolset. Installing the pinned Hermes runtime also requires outbound access
+to GitHub and the Python package index unless that runtime is already present in the image.
+
+## Prepare the tasks
+
+First prepare the benchmark rows, including the pinned task images and verifier assets.
+Skip this step if you already have the prepared JSONL:
+
+```bash
+python benchmarks/swebench/pro/prepare.py
+```
+
+Then convert the prepared rows into the task format consumed by the EnvironmentServer:
+
+```bash
+python benchmarks/swebench/pro/materialize_single_agent_tasks.py \
+  benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+  benchmarks/swebench/data/swebench_pro_tasks.jsonl
+```
+
+Each output row separates `task_id` from `task_input`. The latter contains
+`responses_create_params` for the model input and `task_data` for the benchmark's fields,
+including verifier assets. Conversion does not call the model or start a sandbox.
+It works for the full dataset or a selected subset; already-converted tasks need no further conversion.
+
+The default taskset is `swebench_pro`, matching `environment_server_routes` in `hermes.yaml`.
+If you pass `--taskset`, add the same key to your routing configuration. Pass the converted
+task JSONL to evaluation: this recipe does not accept the flat rows produced by `prepare.py`.
+
+## Start servers and run evaluation
+
+Start the composed servers:
+
+```bash
+gym env start --config benchmarks/swebench/pro/hermes.yaml --config model-provider.yaml
+```
+
+While those servers are running, collect rollouts from another terminal using the same
+configuration. `--no-serve` does not inherit routing settings from the running head server:
+
+```bash
+gym eval run --no-serve \
+  --config benchmarks/swebench/pro/hermes.yaml --config model-provider.yaml \
+  -i benchmarks/swebench/data/swebench_pro_tasks.jsonl -o rollouts.jsonl
+```
+
+## Session behavior and limits
+
+Each session accepts one agent activation, which may contain multiple model/tool turns.
+Agent process cleanup must be confirmed before verification. EnvironmentServer assigns
+session IDs before seeding, so cleanup can be requested even when a seed response is lost.
+Identical retries reuse a session; mismatched requests and closed IDs are rejected.
+
+Abandoned agent sessions expire after `session_lifetime_seconds` (default 21600).
+Failed cleanup retains its handle for retry. Close receipts are process-local and expire
+separately from closed-ID tombstones; set `session_close_retry_window_seconds` to cover
+request timeouts and retry backoff. Expired sessions return 409, without falling back to host execution.
+
+Requests support text input and instructions; output limits apply per model call.
+Unsupported settings return 422. Final response usage counters remain zero pending
+aggregation support. This sandbox integration is for evaluation: the model can modify
+its runner's result file, so it is not yet suitable for producing RL training data.
