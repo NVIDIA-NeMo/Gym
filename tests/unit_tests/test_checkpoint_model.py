@@ -66,7 +66,7 @@ def make_app() -> tuple[FastAPI, PolicyModelParticipant, asyncio.Event]:
     install_participant(app, participant, auth_token="t", instance_name="policy", lease_grace_seconds=60)
     # Stands in for the model server's capture middleware, which strips the rollout prefix.
     app.add_middleware(RolloutContextMiddleware)
-    app.add_middleware(PolicyAdmissionMiddleware, participant=participant)
+    app.add_middleware(PolicyAdmissionMiddleware, gate=participant.gate)
     return app, participant, release
 
 
@@ -96,7 +96,7 @@ async def test_started_stream_drains_before_prepare_is_ready_and_new_calls_are_p
     assert health.status_code == 200
     assert streamed.content == b"first last"
     assert prepared["phase"] == "prepared"
-    assert reopened.json()["phase"] == "idle" and participant.accepting
+    assert reopened.json()["phase"] == "idle" and participant.gate.accepting
 
 
 async def test_undelivered_generation_does_not_block_prepare_and_is_held_until_resume() -> None:
@@ -165,7 +165,7 @@ async def test_restored_ledger_lets_the_next_attempt_resolve_its_parent(tmp_path
     assert (resolution.match.model_call_id, resolution.match.staging_chain) == ("c1", ("r/c1",))
     assert [record.model_call_id for record in manifest.records] == ["c1"]
     with pytest.raises(StaleAttemptError):
-        restored.admit("r")
+        restored.gate.admit("r")
 
 
 async def test_model_commit_requires_the_continued_episodes(tmp_path: Path) -> None:
@@ -194,7 +194,7 @@ async def test_restore_refuses_to_merge_into_a_foreign_ledger(tmp_path: Path) ->
 
 
 def _held_call(participant: PolicyModelParticipant, capture_key: str, model_call_id: str, request_items: list) -> None:
-    ticket = participant.enter(capture_key)
+    ticket = participant.gate.enter(capture_key)
     ticket.backend = "http://worker-0/v1"
     ticket.capture = CaptureContext(
         rollout_id=capture_key, model_call_id=model_call_id, token_sink=None, request_items=request_items
@@ -315,7 +315,7 @@ def _captured_app(participant: PolicyModelParticipant, ledger: FileLineageStore 
 
     # Stands in for the model server's capture middleware, which strips the rollout prefix.
     app.add_middleware(RolloutContextMiddleware)
-    app.add_middleware(PolicyAdmissionMiddleware, participant=participant)
+    app.add_middleware(PolicyAdmissionMiddleware, gate=participant.gate)
     return app
 
 
