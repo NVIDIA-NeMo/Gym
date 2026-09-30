@@ -236,12 +236,7 @@ def _sidecar_containers(
         if service.use_ray_serve:
             raise ValueError(f"Service '{name}': use_ray_serve is not supported by the kubernetes executor yet.")
         is_multi_node = total_nodes > 1 and service.number_of_instances > 1
-        if service.number_of_instances > 1 and total_nodes == 1:
-            raise ValueError(
-                f"Service '{name}': number_of_instances={service.number_of_instances} needs multiple nodes on the "
-                "kubernetes executor -- set compute.nodes > 1 for a multi-node data-parallel deployment (v1 does "
-                "not support multiple engine replicas sharing a single pod)."
-            )
+        is_single_node_multi_instance = total_nodes == 1 and service.number_of_instances > 1
         _reject_unsupported_mounts(service.mounts)
         gpu_count = service.tensor_parallel_size * service.pipeline_parallel_size
         if is_multi_node:
@@ -256,6 +251,14 @@ def _sidecar_containers(
             command = _vllm_multi_node_command(
                 service, service.port, total_nodes=total_nodes, head_service_fqdn=head_service_fqdn
             )
+        elif is_single_node_multi_instance:
+            # vLLM's plain single-node data-parallel mode: all replicas run as local ranks inside
+            # one process, sharing this one pod/port -- no --headless/--data-parallel-address
+            # split, no head Service, no Indexed Job needed. Only viable when the whole
+            # replica*TP*PP footprint fits this one node's GPUs (already enforced by
+            # SubmitConfig._resolve_and_validate_placements' gpus_per_node check).
+            gpu_count *= service.number_of_instances
+            command = _vllm_command(service, service.port) + ["--data-parallel-size", str(service.number_of_instances)]
         else:
             command = _vllm_command(service, service.port)
         container: dict[str, Any] = {

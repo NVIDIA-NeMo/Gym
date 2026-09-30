@@ -286,7 +286,9 @@ def _multi_node_job(tmp_path):
     )
 
 
-def test_number_of_instances_greater_than_one_rejected_on_single_node_job(tmp_path):
+def test_single_node_multi_instance_uses_plain_data_parallel_flag(tmp_path):
+    # Fits one node's GPUs (TP2 x 4 instances = 8 GPUs), so no head/worker split, no head Service,
+    # no Indexed Job is needed -- just vLLM's plain single-process --data-parallel-size mode.
     from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
 
     services = {
@@ -294,25 +296,31 @@ def test_number_of_instances_greater_than_one_rejected_on_single_node_job(tmp_pa
             "type": "vllm",
             "container": "vllm/vllm-openai:latest",
             "model": "org/model",
-            "number_of_instances": 2,
+            "tensor_parallel_size": 2,
+            "number_of_instances": 4,
         }
     }
-    config = _submit_config(tmp_path, ["bench_a"], services=services)
+    config = _submit_config(tmp_path, ["bench_a"], services=services, compute_overrides={"gpus_per_node": 8})
     compute = next(iter(config.compute.values()))
     benchmark = config.driver.benchmarks["bench_a"]
 
-    with pytest.raises(ValueError, match="compute.nodes > 1"):
-        build_job_manifest(
-            config,
-            "bench_a",
-            benchmark,
-            compute,
-            tmp_path / "run",
-            name="gym-test-bench-a",
-            gym_job_id="gym-job-test",
-            resolved_config="",
-            manifest="",
-        )
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    sidecar = job["spec"]["template"]["spec"]["initContainers"][0]
+    assert sidecar["command"][-2:] == ["--data-parallel-size", "4"]
+    assert sidecar["resources"]["limits"]["nvidia.com/gpu"] == 8
+    assert "httpGet" in sidecar["startupProbe"]  # plain probe, no JOB_COMPLETION_INDEX branching
+    assert "completionMode" not in job["spec"]  # still a plain single-pod Job, not Indexed
 
 
 def test_multi_node_job_uses_indexed_completion_mode(tmp_path):
