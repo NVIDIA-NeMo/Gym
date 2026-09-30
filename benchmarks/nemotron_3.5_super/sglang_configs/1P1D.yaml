@@ -58,7 +58,8 @@ roles:
     gpus: 4
     env:
       CUDA_VISIBLE_DEVICES: 0,1,2,3
-      UCX_NET_DEVICES: eth0
+      # UCX_NET_DEVICES: eth0  # Original
+      UCX_NET_DEVICES: mlx5_0,mlx5_1,mlx5_3,mlx5_4
       SGLANG_DISAGGREGATION_NIXL_BACKEND: UCX
       UCX_TLS: tcp,cuda_copy,cuda_ipc,sm,self
       SGLANG_MOONCAKE_CUSTOM_MEM_POOL: NVLINK
