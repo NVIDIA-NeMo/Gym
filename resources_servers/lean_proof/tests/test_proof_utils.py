@@ -208,7 +208,7 @@ def test_check_statement_preserved_across_multiple_holes():
         # `sorry` and `admit` are off the list: the file is allowed to keep the open
         # conjecture it sanity-checks.
         ("theorem open_conj : True := by sorry\ntheorem t : True := trivial", [], "other holes are legal"),
-        ("axiom cheat : False", ["axiom"], "an added axiom is still cheating"),
+        ("axiom cheat : False", ["axiom"], "an added axiom is still a shortcut"),
         ("unsafe def f := 1", ["unsafe"], "so is unsafe"),
         # Declaration-anchored, so the word inside an identifier or mid-line is fine.
         ("theorem t : True := by exact Classical.axiom_of_choice", [], "axiom inside a name"),

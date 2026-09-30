@@ -23,7 +23,7 @@ exercises, and formalized `research solved` results). `extract.py` strips such a
 `prepare.py` keeps only the tasks whose reference version was **observed to compile**.
 
 The scoring question is *"is this particular declaration proved?"*, and that is what makes this
-server differ from the other Lean benchmarks, `leancat` and `math_formal_lean`:
+server distinctive:
 
 * **The file may legitimately contain other `sorry`s.** An FC file typically pairs a proved
   lemma with the open conjecture it sanity-checks, and the task keeps every declaration before
@@ -36,8 +36,8 @@ server differ from the other Lean benchmarks, `leancat` and `math_formal_lean`:
   dataset validation this rejected upstream FC "proofs" that were not actually proofs.
 * **The statement still has to survive.** The whole-file format lets a model weaken the theorem
   and hand back something that compiles, so `check_target_statement_preserved` runs first. It
-  is the target-signature variant, not LeanCat's split-the-file-on-`sorry` variant, for the
-  same reason as the first bullet: the hole is not textually unique here.
+  compares the target's signature rather than splitting the file on `sorry`, for the same
+  reason as the first bullet: the hole is not textually unique here.
 
 Everything that is not FC-specific -- the sandbox, the toolchain probe, the text checks and the
 status vocabulary -- comes from `resources_servers/lean_proof`, the library the Lean benchmarks

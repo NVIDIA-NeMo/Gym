@@ -1,13 +1,12 @@
 # Formal Conjectures
 
 [Formal Conjectures](https://github.com/google-deepmind/formal-conjectures) is a Google DeepMind library of
-formalized mathematics in Lean 4. Most of it is **open**: the headline conjectures carry a `sorry` nobody on earth
-can fill, and as a benchmark that is worthless — every model scores zero and the number says nothing.
+formalized mathematics in Lean 4. Most of it is **open** (the conjecture carries a `sorry`), so it has no
+reference proof and cannot be scored.
 
-What is scored here is the other half of the repo. Alongside each open conjecture sit theorems that ship with **real
-Lean proofs**: `@[category test]` sanity checks, `@[category API]` supporting lemmas, textbook exercises, and the
-`research solved` results that have been formalized. Those have ground truth, so "did the model prove it?" is a
-decidable question. `extract.py` strips such a proof off and hands back the file with a hole in it.
+What is scored here is the theorems that ship with Lean proofs: `@[category test]` sanity checks,
+`@[category API]` supporting lemmas, textbook exercises, and formalized `research solved` results. `extract.py`
+strips such a proof off and hands back the file with a hole in it.
 
 The result is **1,526 tasks drawn from 323 upstream files**, against Lean/Mathlib **v4.33.1** —
 1,526 of 1,788 extractable candidates, the rest dropped by the validation sweep below:
@@ -21,10 +20,6 @@ The result is **1,526 tasks drawn from 323 upstream files**, against Lean/Mathli
 
 The gradient is the point: `test` is near-solved and `research solved` is not, so the pooled number is the least
 interesting one this server reports.
-
-This complements [`leancat`](../leancat): both are whole-file Lean 4 tasks, but LeanCat is 100 curated
-category-theory problems where models score near zero, while this is a wide, library-grounded sweep across ordinary
-mathematics with a real difficulty gradient.
 
 ## Task format
 
@@ -58,13 +53,13 @@ not cost a Mathlib compile.
 
 Reward is 1.0 only if every check passes, else 0.0.
 
-Three of these differ deliberately from `leancat`, all for the same reason — the file is allowed to keep holes the
-model was not asked to fill:
+Three of these are specific to this server, because the file is allowed to keep holes the model was not asked to
+fill:
 
 - **Check 2 bans declarations, not tokens.** `sorry` and `admit` are *not* on the list, and `axiom`/`unsafe` only
-  count when they open a declaration — `Classical.axiom_of_choice` is an ordinary reference, not cheating.
+  count when they open a declaration — `Classical.axiom_of_choice` is an ordinary reference.
 - **Lean's "declaration uses `sorry`" warning is not an error** here (`determine_proof_status(…,
-  sorry_is_error=False)`). Treating it as one, as LeanCat correctly does, would score every real FC task 0.
+  sorry_is_error=False)`). Treating it as one would score every real FC task 0.
 - **Check 6 stands in for it.** An incomplete Lean proof depends on `sorryAx`, and `#print axioms` reports that per
   declaration. The probe is appended by the server, never trusted to the model. It also catches indirection a
   textual scan cannot: a proof that leans on a sorry'd lemma earlier in the file. During dataset validation this

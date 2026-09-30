@@ -240,7 +240,7 @@ def find_banned_declarations(
     """Return the shortcut keywords present in ``code``, ignoring comments and strings.
 
     ``tokens`` and ``declarations_only`` exist because the benchmarks disagree on what counts
-    as cheating: a single-hole task bans ``sorry`` outright, while a task whose file keeps
+    as a shortcut: a single-hole task bans ``sorry`` outright, while a task whose file keeps
     other holes on purpose can only ban a *declaration* the model added. See
     ``DECLARED_SHORTCUT_TOKENS``.
     """
