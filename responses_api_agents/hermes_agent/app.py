@@ -680,7 +680,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             raise RuntimeError(install.stderr or install.stdout or "Hermes sandbox installation failed")
 
     async def _terminate_sandbox_runner(self, state: HermesAgentSessionState) -> None:
-        """Require the subreaper's receipt, not merely an exited exec, before verification."""
+        """Fence an unstarted launch, or require the running subreaper's cleanup receipt."""
         if state.runner_cleanup in (RunnerCleanup.IDLE, RunnerCleanup.CONFIRMED):
             return
         receipt_path = f"{state.session_dir}/cleanup.json"
@@ -691,10 +691,19 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if receipt.get("cleanup_confirmed") is not True:
             pid_path = quote(f"{state.session_dir}/runner.pid")
             stop_path = quote(f"{state.session_dir}/runner.stop")
+            claim_path = quote(f"{state.session_dir}/launch.claim")
+            temporary_receipt = quote(f"{receipt_path}.{uuid4().hex}.tmp")
+            # The symlink atomically records who won the launch/stop race. A stop-owned claim
+            # also lets a retry finish publishing its receipt if the first close was interrupted.
+            stopped_receipt = quote(json.dumps({"cleanup_confirmed": True, "error": None}))
             # A launch whose response was lost must still be stopped. Never kill the
             # supervisor with SIGKILL: only it can reap detached tools and acknowledge cleanup.
             script = (
-                f"touch {stop_path}; "
+                f"touch {stop_path} || exit 1; "
+                f"ln -s stop {claim_path} 2>/dev/null || true; "
+                f'if [ "$(readlink {claim_path})" = stop ]; then '
+                f"printf '%s' {stopped_receipt} > {temporary_receipt} && "
+                f"mv {temporary_receipt} {quote(receipt_path)}; exit $?; fi; "
                 f'if [ -s {pid_path} ]; then kill -TERM "$(cat {pid_path})" 2>/dev/null || true; fi; '
                 f"for _ in $(seq 1 {max(1, int(self.config.session_close_timeout_seconds))}); do "
                 f"[ -f {quote(receipt_path)} ] && exit 0; sleep 1; done; exit 1"
@@ -727,8 +736,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     raise
                 # An activation error is not proof of cleanup; confirm it below.
         await self._terminate_sandbox_runner(state)
+        # Retire the path atomically before deleting its launch fence. Otherwise a delayed
+        # exec could claim the directory between rm unlinking launch.claim and removing the directory.
+        retired_dir = f"{state.session_dir}.closed"
         removed = await state.sandbox.exec(
-            f"rm -rf {quote(state.session_dir)}",
+            f"if [ -d {quote(state.session_dir)} ]; then "
+            f"mv {quote(state.session_dir)} {quote(retired_dir)} || exit 1; fi; "
+            f"rm -rf {quote(retired_dir)}",
             cwd=state.workdir,
             timeout_s=self.config.session_close_timeout_seconds,
         )
@@ -871,7 +885,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         stdout_path = f"{state.session_dir}/stdout.log"
         stderr_path = f"{state.session_dir}/stderr.log"
         pid_path = f"{state.session_dir}/runner.pid"
-        stop_path = f"{state.session_dir}/runner.stop"
+        claim_path = f"{state.session_dir}/launch.claim"
         mcp_accesses = [
             access for access in self.effective_tool_accesses(state.request) if isinstance(access, MCPToolAccess)
         ]
@@ -906,9 +920,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "user_message": user_message,
         }
         await self._upload_json(state.sandbox, input_path, payload)
-        # The shell records its PID and then becomes the runner, so an interrupted activation can stop it.
+        # Only the claim winner can launch. Do not recreate the session directory: a delayed exec
+        # must remain fenced even after close removes it. Ignore TERM across exec until the Python
+        # supervisor installs its handler; it checks runner.stop before starting the worker.
         command = (
-            f"[ -e {quote(stop_path)} ] && exit 0; echo $$ > {quote(pid_path)} && "
+            f"trap '' TERM; ln -s launch {quote(claim_path)} 2>/dev/null || exit 0; "
+            f"echo $$ > {quote(pid_path)} && "
             f"exec {quote(_SANDBOX_PYTHON)} {quote(_SANDBOX_RUNNER)} {quote(input_path)} {quote(output_path)} "
             f">{quote(stdout_path)} 2>{quote(stderr_path)}"
         )

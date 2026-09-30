@@ -358,7 +358,7 @@ def test_supervisor_reaps_detached_tools_before_acknowledging_close(tmp_path, en
         "import responses_api_agents; "
         f"responses_api_agents.__path__ = [{str(Path(root) / 'responses_api_agents')!r}]; "
         "from responses_api_agents.hermes_agent.sandbox_runner import _supervise; "
-        "receipt=_supervise(json.loads(sys.argv[1]),cleanup_timeout=2); "
+        "receipt=_supervise(json.loads(sys.argv[1]),cleanup_timeout=2,stop_path=pathlib.Path('runner.stop')); "
         "pathlib.Path('cleanup.json').write_text(json.dumps(receipt))"
     )
     process = subprocess.Popen(
