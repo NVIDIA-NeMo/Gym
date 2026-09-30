@@ -1081,6 +1081,63 @@ class TestValidationSummary:
         assert report.ok is False and "no rollouts written" in report.text
 
 
+class TestDatasetConfig:
+    """`dataset.toml`'s [gym] table beside the task folders shapes the effective task.toml."""
+
+    def test_absent_or_foreign_file_leaves_the_task_alone(self, tmp_path):
+        folder = tmp_path / "ds"
+        plain = load_task(write_task(folder / "hello"))
+        (folder / "dataset.toml").write_text('[dataset]\nname = "x"\nversion = "1.0"\n')
+        again = load_task(folder / "hello")
+        assert again.config == plain.config and again.digest == plain.digest
+
+    def test_per_task_override_merges_env_and_replaces_fields(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(
+            folder / "hello", toml=HELLO_TOML.replace("[environment]", '[environment]\nenv = { A = "1", B = "2" }')
+        )
+        write_task(folder / "other")
+        (folder / "dataset.toml").write_text(
+            '[gym.tasks."hello".environment]\nenv = { B = "override", CIRCLE_NODE_TOTAL = "3" }\ngpu_types = ["H100"]\n'
+        )
+        hello, other = load_task(folder / "hello"), load_task(folder / "other")
+        assert hello.env == {"A": "1", "B": "override", "CIRCLE_NODE_TOTAL": "3"}
+        assert hello.config.environment.gpu_types == ["H100"]
+        assert other.env == {} and other.config.environment.gpu_types is None
+        # The digest pins the task folder's content; the dataset file is not part of it.
+        assert hello.digest == content_hash(folder / "hello")
+
+    def test_defaults_scale_timeouts_and_resources(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "hello")
+        (folder / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\nresource_multiplier = 1.5\n")
+        task = load_task(folder / "hello")
+        assert (task.config.agent.timeout_sec, task.config.verifier.timeout_sec) == (240.0, 240.0)
+        environment = task.config.environment
+        assert (environment.cpus, environment.memory_mb, environment.storage_mb, environment.gpus) == (
+            2,
+            3072,
+            15360,
+            0,
+        )
+
+    @pytest.mark.parametrize(
+        "text,match",
+        [
+            ('[gym.tasks."hello".environment]\nimage_tag = "x"\n', "image_tag"),
+            ('[gym.tasks."hello"]\ncommands = ["rm -rf /"]\n', "commands"),
+            ("[gym.defaults]\ntimeout_multiplier = 0\n", "timeout_multiplier"),
+            ("[gym\n", "dataset.toml"),
+        ],
+    )
+    def test_bad_dataset_files_are_rejected_with_the_file_named(self, tmp_path, text, match):
+        folder = tmp_path / "ds"
+        write_task(folder / "hello")
+        (folder / "dataset.toml").write_text(text)
+        with pytest.raises(HarborTaskError, match=match):
+            load_task(folder / "hello")
+
+
 def test_harbor_task_data_schema_names_the_digest_key():
     """The schema module may import only pydantic, so the key is spelled out; keep it equal to DIGEST_KEY."""
     from resources_servers.harbor.task_data import TaskData

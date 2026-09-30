@@ -53,7 +53,6 @@ from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxExecResul
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.compose_config import adapt_non_root_sidecars, opensandbox_shm_labels, resolve_compose
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.models import HarborArtifact, HarborEnvironment
@@ -133,30 +132,10 @@ class HarborResourcesServerConfig(BaseResourcesServerConfig):
     # Replaces the task's declared cpus, memory_mb and storage_mb when set (keys: cpu, memory_mib, disk_gib).
     # Used to run a benchmark at fixed resources, for example to compare against another server.
     sandbox_resources_override: dict[str, Any] | None = None
-    # Export CPU-count env vars (OMP_NUM_THREADS and friends) matching the sandbox CPU limit.
-    derive_cpu_env: bool = True
-    # Environment for one task's sandbox only, keyed by task id; a task's own `[environment.env]` wins.
-    sandbox_env_by_task: dict[str, dict[str, str]] = Field(default_factory=dict)
-    # Operator environment for every sandbox; a task's own `[environment.env]` wins.
-    sandbox_env: dict[str, str] = Field(default_factory=dict)
-    # Shell commands run as root in every new sandbox before the agent sees it, for repairs the
-    # operator owns rather than the task (for example pointing an end-of-life distro at an archive).
-    # A failing command fails the seed with a retryable 503.
-    sandbox_setup_commands: list[str] = Field(default_factory=list)
     # Provider block for tasks that declare GPUs (agent or verifier); None runs them on `sandbox_provider`.
     gpu_sandbox_provider: str | None = None
     # Pass a task's `gpu_types` to the provider. Off: deployments without that filter reject it.
     request_gpu_type: bool = False
-    # Replace a task's image reference with another (for example a mirror, or a derived image that adds
-    # the world-writable `/solution` and `/logs` folders Harbor provides through mounts). Keys and values
-    # are full image references; task folders stay untouched.
-    image_rewrites: dict[str, str] = Field(default_factory=dict)
-    # Registry credentials (`username`, `password`) sent only for sandboxes whose image was rewritten.
-    image_rewrite_auth: dict[str, str] | None = None
-    # Recorded OCI configuration for Compose images (`{image_ref: {os, architecture, image, config}}`).
-    # None looks for `compose-images.json` next to the taskset's task folders.
-    compose_image_configs: Path | None = None
-    sandbox_setup_timeout_s: float = Field(default=600, gt=0)
     # Extra seconds granted to `test.sh` beyond `[verifier].timeout_sec` before the in-container `timeout` kills it.
     verifier_grace_s: float = Field(default=30, ge=0)
     # Verifier logs are downloaded here, one folder per resources session.
@@ -389,26 +368,16 @@ class HarborResourcesServer(SimpleResourcesServer):
         resources = _sandbox_resources(environment, request_gpu_type=self.config.request_gpu_type) | (
             self.config.sandbox_resources_override or {}
         )
-        env = dict(self.config.sandbox_env) | self.config.sandbox_env_by_task.get(task.task_id, {}) | dict(task_env)
-        if self.config.derive_cpu_env:
-            env = cpu_cap_env(resources.get("cpu")) | env
-        provider_options = dict(self.config.sandbox_provider_options)
-        resolved_image = self._rewrite_image(image or task.image)
-        if resolved_image != (image or task.image) and self.config.image_rewrite_auth:
-            provider_options["image_auth"] = dict(self.config.image_rewrite_auth)
         return SandboxSpec(
-            image=resolved_image,
+            image=image or task.image,
             ttl_s=ttl,
             ready_timeout_s=self.config.sandbox_ready_timeout_s,
             workdir=workdir,
-            env=env,
+            env=dict(task_env),
             metadata=metadata,
             resources=resources,
-            provider_options=provider_options,
+            provider_options=dict(self.config.sandbox_provider_options),
         )
-
-    def _rewrite_image(self, image: str | None) -> str | None:
-        return self.config.image_rewrites.get(image, image) if image else image
 
     def _provider_ref(self, task: HarborTask) -> str:
         """Which top-level sandbox block runs this task: the GPU one when the task declares GPUs."""
@@ -423,16 +392,14 @@ class HarborResourcesServer(SimpleResourcesServer):
         return sandbox
 
     def _compose_image_configs(self, task: HarborTask) -> dict[str, Any]:
-        path = self.config.compose_image_configs
-        if path is None:
-            candidate = task.path.parent / "compose-images.json"
-            if not candidate.is_file():
-                raise RuntimeError(
-                    f"Compose task {task.task_id!r} needs recorded image configurations: set "
-                    f"`compose_image_configs` or place compose-images.json at {candidate}"
-                )
-            path = candidate
-        return json.loads(Path(path).read_text())
+        """The image configurations `gym dataset fetch` recorded next to the task folders."""
+        path = task.path.parent / "compose-images.json"
+        if not path.is_file():
+            raise RuntimeError(
+                f"Compose task {task.task_id!r} needs recorded image configurations at {path}; "
+                "prepare the dataset again to record them"
+            )
+        return json.loads(path.read_text())
 
     def _compose_document(self, task: HarborTask) -> dict[str, Any]:
         """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
@@ -562,15 +529,6 @@ class HarborResourcesServer(SimpleResourcesServer):
             )
         return workdir
 
-    async def _run_setup_commands(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
-        for command in self.config.sandbox_setup_commands:
-            result = await sandbox.exec(command, cwd="/", timeout_s=self.config.sandbox_setup_timeout_s, user="root")
-            if result.return_code != 0:
-                raise RuntimeError(
-                    f"Sandbox setup command failed for {task.task_id!r} (exit {result.return_code}): "
-                    f"{(result.stderr or result.stdout or '')[-500:]}"
-                )
-
     async def _sandbox_access(self, session: HarborSession) -> SandboxAccess:
         return SandboxAccess(
             connection=DirectSandboxConnection(
@@ -631,7 +589,6 @@ class HarborResourcesServer(SimpleResourcesServer):
             )
             try:
                 session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
-                await self._run_setup_commands(sandbox, task)
                 await self._wait_healthy(sandbox, task)
                 await self._write_task_context(sandbox, task)
                 access = await self._sandbox_access(session)
