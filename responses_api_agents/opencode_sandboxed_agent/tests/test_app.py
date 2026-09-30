@@ -401,6 +401,20 @@ class TestOpenCodeSandboxedAgent:
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
 
+    @mark.parametrize("nested", [False, True])
+    async def test_output_limit_preserves_context_capacity(self, monkeypatch: MonkeyPatch, nested: bool) -> None:
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model-server")
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "base_url_for_run", lambda self, **kw: kw["base_url"])
+        server.config.opencode_max_context_window = 131072
+        payload = {"input": "solve", "max_output_tokens": 1024}
+        request = MagicMock()
+        request.json = AsyncMock(return_value={"responses_create_params": payload} if nested else payload)
+        config = await server._create_opencode_config(request)
+        limits = config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"]
+        assert limits["output"] == 1024
+        assert limits["context"] == server.config.opencode_max_context_window
+
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,

@@ -564,12 +564,15 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         )
 
     async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
+        payload = await request.json()
+        params = payload.get("responses_create_params", payload)
+        output_limit = params.get("max_output_tokens") or self.config.opencode_max_context_window
         base_url = (
             self.base_url_for_run(
                 base_url=(self.config.sandbox_model_base_url or get_server_url(self.config.model_server.name))
                 .rstrip("/")
                 .removesuffix("/v1"),
-                body=await request.json(),
+                body=payload,
             )
             + "/v1"
         )
@@ -591,7 +594,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                                 "context": self.config.opencode_max_context_window,
                                 "input": self.config.opencode_max_context_window,
                                 # See the OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX flag below for more information.
-                                "output": self.config.opencode_max_context_window,
+                                "output": min(output_limit, self.config.opencode_max_context_window),
                             },
                         },
                     },
