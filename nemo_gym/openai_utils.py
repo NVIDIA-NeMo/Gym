@@ -60,9 +60,6 @@ from openai.types.chat.completion_create_params import (
     ResponseFormat,
     WebSearchOptions,
 )
-from openai.types.chat.completion_create_params import (
-    Moderation as ChatCompletionModeration,
-)
 from openai.types.responses import (
     FunctionToolParam,
     Response,
@@ -151,6 +148,12 @@ from nemo_gym.server_utils import (
     raise_for_status,
     request,
 )
+
+
+class ChatCompletionModeration(TypedDict, total=False):
+    """Chat moderation shape omitted by some OpenAI SDK artifacts."""
+
+    model: Required[str]
 
 
 ########################################
@@ -1139,8 +1142,8 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
-    # Allow incoming responses with reasoning_content=None. This field should not be used.
-    reasoning_content: Annotated[None, Field(exclude=True)]
+    # Some harnesses replay reasoning on assistant history in Chat Completions.
+    reasoning_content: str | None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(

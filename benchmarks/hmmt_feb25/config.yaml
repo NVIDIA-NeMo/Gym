@@ -25,3 +25,10 @@ hmmt_feb25_math_with_judge_simple_agent:
         prompt_config: benchmarks/prompts/generic/math.yaml
         prepare_script: benchmarks/hmmt_feb25/prepare.py
         num_repeats: 4
+
+hmmt_feb25_math_with_judge_environment_server:
+  _inherit_from: math_with_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: hmmt_feb25_math_with_judge_simple_agent

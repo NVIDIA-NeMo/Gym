@@ -52,3 +52,11 @@ gdp_pdf_simple_agent:
         jsonl_fpath: resources_servers/gdp_pdf/data/example.jsonl
         num_repeats: 1
         license: MIT
+
+gdp_pdf_simple_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: gdp_pdf_simple_agent

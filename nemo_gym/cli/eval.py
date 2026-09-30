@@ -486,6 +486,8 @@ def e2e_rollout_collection():  # pragma: no cover
             asyncio.run(rch.run_from_config(rollout_collection_config))
         collection_completed = True
     except KeyboardInterrupt:
+        if rollout_collection_config.require_complete:
+            raise RuntimeError("EVAL FAILED: rollout collection interrupted; partial artifacts retained.") from None
         pass
     finally:
         rh.shutdown()

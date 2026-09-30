@@ -46,3 +46,10 @@ financebench_simple_agent:
           prepare_script: benchmarks/financebench/prepare.py
           num_repeats: 1
           license: Creative Commons Attribution-NonCommercial 4.0 International
+
+financebench_environment_server:
+  _inherit_from: equivalence_llm_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: financebench_simple_agent
