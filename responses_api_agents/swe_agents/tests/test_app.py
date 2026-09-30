@@ -53,8 +53,10 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchWrapperInstanceConfig,
     SWEBenchWrapperServerConfig,
     SWERebenchDatasetProcessor,
+    _classify_agent_error,
     _extract_instance_dict,
     _extract_replay_system_content,
+    _last_segment_per_session,
     _parse_replay_messages,
     _render_opencode_user_message,
     _resolve_opencode_workspace_path,
@@ -425,6 +427,21 @@ class TestSWEBenchVerifyResponse:
         assert "patch_exists" in fields
         assert "instance_config" in fields
         assert "subagent_trajectories" in fields
+        assert "responses" in fields
+
+    def test_responses_defaults_to_empty_list(self) -> None:
+        assert SWEBenchVerifyResponse.model_fields["responses"].default_factory() == []
+
+
+class TestClassifyAgentError:
+    def test_max_compaction(self) -> None:
+        assert _classify_agent_error("RuntimeError: maximum compactions reached") == "max_compaction"
+
+    def test_existing_kinds_unchanged(self) -> None:
+        assert _classify_agent_error(None) is None
+        assert _classify_agent_error("hit maximum iteration") == "max_iteration"
+        assert _classify_agent_error("ContextWindowExceeded") == "context_window"
+        assert _classify_agent_error("boom") == "other"
 
 
 ########################################
@@ -1383,6 +1400,31 @@ class TestOpenCodeHarnessProcessor:
             script = self._read_agent_script(config)
             assert "ENABLE_SUBAGENTS=1" in script
 
+    def test_get_run_command_compaction_knobs_default(self, _stub_model_server_lookup) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+            script = self._read_agent_script(config)
+            assert "ENABLE_COMPACTION=0" in script
+            assert "OPENCODE_CONTEXT_LIMIT" not in script
+            assert "OPENCODE_MAX_COMPACTIONS" not in script
+
+    def test_get_run_command_compaction_knobs_set(self, _stub_model_server_lookup) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(
+                tmpdir,
+                opencode_compaction_enabled=True,
+                opencode_context_limit_tokens=8192,
+                opencode_max_compactions=0,
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+            script = self._read_agent_script(config)
+            assert "ENABLE_COMPACTION=1" in script
+            assert "export OPENCODE_CONTEXT_LIMIT=8192 && " in script
+            assert "export OPENCODE_MAX_COMPACTIONS=0 && " in script
+
     def test_get_run_command_does_not_export_removed_legacy_envs(self, _stub_model_server_lookup) -> None:
         """Opencode path no longer wires DIVERSIFY/CAMEL_CASE/NG_OPENCODE_LOG_LEVEL —
         bench/cli.ts and language-model.ts don't honor them."""
@@ -1906,6 +1948,197 @@ class TestGetAllSessionTrajectories:
     def test_returns_empty_when_dir_missing(self, tmp_path) -> None:
         w = self._wrapper(tmp_path)
         assert w.get_all_session_trajectories_from_completions(tmp_path, "nope") == []
+
+
+class TestCompactionSegments:
+    """Plural-responses support: one trajectory per (session_id, segment_index).
+
+    Ported from legacy Gym 9dd3a4f6c / d58a2d4a0 (plural responses).
+    """
+
+    def _agent(self, tmpdir) -> RunOpenHandsAgent:
+        opencode_setup_dir = Path(tmpdir) / "opencode_setup"
+        opencode_setup_dir.mkdir(parents=True, exist_ok=True)
+        cfg = _make_instance_config(
+            tmpdir,
+            agent_framework="opencode",
+            opencode_setup_dir=opencode_setup_dir,
+            agent_framework_repo="https://example.invalid/opencode.git",
+            agent_framework_commit="deadbeef",
+        )
+        return RunOpenHandsAgent(config=cfg)
+
+    @staticmethod
+    def _wrapper() -> SWEBenchWrapper:
+        class _Stub(SWEBenchWrapper):
+            def model_post_init(self, *_args, **_kwargs):
+                return None
+
+        return _Stub.model_construct()
+
+    def test_copy_keeps_latest_per_segment_and_stamps_first_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._agent(tmpdir)
+            eval_dir = Path(agent.config.opencode_setup_dir) / "opencode" / agent.config.eval_dir_in_openhands
+            eval_dir.mkdir(parents=True, exist_ok=True)
+            inst = agent.config.problem_info["instance_id"]
+            comp_root = eval_dir / inst / "bench_run" / "llm_completions" / inst
+
+            def msgs(n):
+                return [{"role": "user", "content": f"m{i}"} for i in range(n)]
+
+            # main seg 0: turns 0,1 ; main seg 1 (post_compaction): turns 2,3 ; sub: turn 0
+            specs = [
+                ("m-0000.json", "ses_main", None, 0, 0, None, 2),
+                ("m-0001.json", "ses_main", None, 1, 0, None, 4),
+                ("m-0002.json", "ses_main", None, 2, 1, "post_compaction", 3),
+                ("m-0003.json", "ses_main", None, 3, 1, None, 5),
+                ("s-0000.json", "ses_sub", "ses_main", 0, None, None, 2),
+            ]
+            now = time.time()
+            for i, (name, sid, parent, turn, seg, reason, n) in enumerate(specs):
+                extra = {"messages": msgs(n)}
+                if seg is not None:
+                    extra["segment_index"] = seg
+                extra["segment_boundary_reason"] = reason
+                _write_completion(comp_root / name, session_id=sid, parent_session_id=parent, turn=turn, **extra)
+                os.utime(comp_root / name, (now - 100 + i, now - 100 + i))
+
+            (eval_dir / "output.jsonl").write_text("{}\n")
+            agent.config.prediction_path.parent.mkdir(parents=True, exist_ok=True)
+            agent._openhands_dir_copy_from_host(output_file_path=str(eval_dir / "output.jsonl"))
+
+            copied_dir = agent.config.trajectories_root / "llm_completions" / inst
+            copied = {p.name: json.loads(p.read_text()) for p in copied_dir.glob("*.json")}
+            assert set(copied) == {"m-0001.json", "m-0003.json", "s-0000.json"}
+            assert copied["m-0001.json"]["prefix_message_count"] == 2
+            assert copied["m-0001.json"]["segment_boundary_reason"] is None
+            # prefix count + boundary reason come from the segment's FIRST turn
+            assert copied["m-0003.json"]["prefix_message_count"] == 3
+            assert copied["m-0003.json"]["segment_boundary_reason"] == "post_compaction"
+            assert copied["s-0000.json"]["prefix_message_count"] == 2
+
+    def test_get_all_sessions_groups_by_segment_and_backfills_parent(self, tmp_path) -> None:
+        inst = "seg"
+        comp_dir = tmp_path / inst / "llm_completions" / inst
+        _write_completion(comp_dir / "m0.json", session_id="ses_main", parent_session_id=None, turn=1)
+        _write_completion(
+            comp_dir / "m1.json",
+            session_id="ses_main",
+            parent_session_id=None,
+            turn=5,
+            segment_index=1,
+            segment_boundary_reason="post_compaction",
+            prefix_message_count=3,
+        )
+        _write_completion(comp_dir / "s0.json", session_id="ses_sub", parent_session_id="ses_main", turn=1)
+        # Fork's compaction (summary) call drops parent_session_id.
+        _write_completion(
+            comp_dir / "s1.json",
+            session_id="ses_sub",
+            parent_session_id=None,
+            turn=4,
+            segment_index=1,
+            segment_boundary_reason="compaction",
+        )
+        out = self._wrapper().get_all_session_trajectories_from_completions(tmp_path, inst)
+        by_key = {(e["session_id"], e["segment_index"]): e for e in out}
+        assert set(by_key) == {("ses_main", 0), ("ses_main", 1), ("ses_sub", 0), ("ses_sub", 1)}
+        assert by_key[("ses_main", 0)]["parent_session_id"] is None
+        assert by_key[("ses_main", 1)]["parent_session_id"] is None
+        assert by_key[("ses_main", 1)]["segment_boundary_reason"] == "post_compaction"
+        assert by_key[("ses_main", 1)]["prefix_message_count"] == 3
+        assert by_key[("ses_sub", 1)]["parent_session_id"] == "ses_main"
+        assert by_key[("ses_sub", 1)]["segment_boundary_reason"] == "compaction"
+
+    def test_main_selection_ignores_parentless_subagent_summary(self, tmp_path) -> None:
+        inst = "sel"
+        comp_dir = tmp_path / inst / "llm_completions" / inst
+        _write_completion(
+            comp_dir / "a-main.json", session_id="a_main", parent_session_id=None, turn=3, content_text="MAIN"
+        )
+        _write_completion(
+            comp_dir / "z-sub-0.json", session_id="z_sub", parent_session_id="a_main", turn=1, content_text="SUB"
+        )
+        _write_completion(
+            comp_dir / "z-sub-1.json",
+            session_id="z_sub",
+            parent_session_id=None,
+            turn=2,
+            segment_index=1,
+            content_text="SUMMARY",
+        )
+        messages, _, _, _ = self._wrapper().get_openhands_trajectory_from_completions(tmp_path, inst)
+        joined = json.dumps(messages)
+        assert "MAIN" in joined and "SUMMARY" not in joined
+
+    def test_last_segment_per_session_strips_segment_keys(self) -> None:
+        entries = [
+            {
+                "session_id": "a",
+                "parent_session_id": "r",
+                "segment_index": 0,
+                "prefix_message_count": 2,
+                "messages": [0],
+            },
+            {
+                "session_id": "a",
+                "parent_session_id": "r",
+                "segment_index": 1,
+                "prefix_message_count": 4,
+                "messages": [1],
+            },
+            {
+                "session_id": "b",
+                "parent_session_id": "r",
+                "segment_index": 0,
+                "segment_boundary_reason": None,
+                "messages": [2],
+            },
+        ]
+        out = _last_segment_per_session(entries)
+        assert out == [
+            {"session_id": "a", "parent_session_id": "r", "messages": [1]},
+            {"session_id": "b", "parent_session_id": "r", "messages": [2]},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_skip_eval_never_starts_eval_container(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._agent(tmpdir)
+            agent.config.skip_eval = True
+            agent.config.generation_apptainer_spinup_timestamp_fpath.write_text(str(time.time()))
+            out_file = Path(tmpdir) / "out.jsonl"
+            out_file.write_text(
+                json.dumps(
+                    {
+                        "instance_id": agent.config.instance_id,
+                        "test_result": {"git_patch": "diff --git a/x b/x\n"},
+                        "metadata": {"llm_config": {"model": "m"}},
+                        "metrics": {},
+                    }
+                )
+            )
+            started = []
+
+            async def fake_start(cmd, apptainer_str):
+                started.append(cmd)
+                return MagicMock()
+
+            with (
+                patch.object(RunOpenHandsAgent, "_start_container_command", side_effect=fake_start),
+                patch.object(RunOpenHandsAgent, "_finish_container_command", new_callable=AsyncMock),
+                patch.object(RunOpenHandsAgent, "_apply_watchdog_stats"),
+                patch.object(RunOpenHandsAgent, "_openhands_dir_copy_from_host", return_value=str(out_file)),
+            ):
+                result = await agent.process_single_datapoint()
+
+            assert result is None
+            assert len(started) == 1  # agent container only
+            metrics = json.loads(agent.config.metrics_fpath.read_text())
+            assert metrics["patch_exists"] is True
+            assert metrics.get("final_eval_time") is None
+            assert "resolved" not in metrics or not metrics["resolved"]
 
 
 ########################################
@@ -2986,6 +3219,170 @@ class TestSWEBenchWrapperRun:
             assert result.reward == 1.0
             assert result.subagent_trajectories == subagents
             assert json.loads(result.responses_create_params.metadata["subagent_trajectories"]) == subagents
+
+    @pytest.mark.asyncio
+    async def test_run_emits_plural_responses_per_session_segment(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        tmpdir = tempfile.mkdtemp()
+        instance_config = _make_instance_config(tmpdir, agent_framework="opencode")
+        inst = instance_config.instance_id
+        comp_dir = instance_config.persistent_dir / "trajectories" / inst / "llm_completions" / inst
+
+        def asst(text, ptoks, gtoks):
+            return {
+                "role": "assistant",
+                "content": text,
+                "prompt_token_ids": ptoks,
+                "generation_token_ids": gtoks,
+                "generation_log_probs": [-0.5] * len(gtoks),
+            }
+
+        def dump(name, *, session_id, parent, seg, reason, prefix, messages, final_text, final_toks):
+            comp_dir.mkdir(parents=True, exist_ok=True)
+            (comp_dir / name).write_text(
+                json.dumps(
+                    {
+                        "messages": messages,
+                        "response": {
+                            "id": f"resp-{name}",
+                            "choices": [{"message": {"role": "assistant", "content": final_text}}],
+                        },
+                        "provider_specific_fields": {
+                            "prompt_token_ids": [1, 2, 3],
+                            "generation_token_ids": final_toks,
+                            "generation_log_probs": [-0.1] * len(final_toks),
+                        },
+                        "kwargs": {"tools": []},
+                        "session_id": session_id,
+                        "parent_session_id": parent,
+                        "segment_index": seg,
+                        "segment_boundary_reason": reason,
+                        "prefix_message_count": prefix,
+                    }
+                )
+            )
+
+        sys_user = [{"role": "system", "content": "s"}, {"role": "user", "content": "fix"}]
+        dump(
+            "m-0001.json",
+            session_id="ses_main",
+            parent=None,
+            seg=0,
+            reason=None,
+            prefix=2,
+            messages=sys_user + [asst("a1", [1, 2], [10]), {"role": "user", "content": "obs"}],
+            final_text="a2",
+            final_toks=[11],
+        )
+        dump(
+            "m-0003.json",
+            session_id="ses_main",
+            parent=None,
+            seg=1,
+            reason="post_compaction",
+            prefix=3,
+            messages=sys_user + [{"role": "user", "content": "summary"}],
+            final_text="a3",
+            final_toks=[12],
+        )
+        dump(
+            "s-0000.json",
+            session_id="ses_sub",
+            parent="ses_main",
+            seg=0,
+            reason=None,
+            prefix=2,
+            messages=sys_user,
+            final_text="sub",
+            final_toks=[13],
+        )
+
+        mock_response = NeMoGymResponse(
+            id="swebench-test",
+            created_at=123,
+            model="test-model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+            metadata={
+                "input": "[]",
+                "metrics": json.dumps({"resolved": True, "patch_exists": True}),
+                "instance_config": instance_config.model_dump_json(),
+            },
+        )
+
+        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
+            from nemo_gym.base_resources_server import BaseRunRequest
+
+            body = BaseRunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(model="test-model", input=[])
+            )
+            result = await wrapper.run(body)
+
+        assert result.reward == 1.0
+        assert result.response is not None  # singular field kept for back-compat
+        assert [r.metadata for r in result.responses] == [
+            {"session_id": "ses_main", "parent_session_id": "", "segment_index": "0", "segment_boundary_reason": ""},
+            {
+                "session_id": "ses_main",
+                "parent_session_id": "",
+                "segment_index": "1",
+                "segment_boundary_reason": "post_compaction",
+            },
+            {
+                "session_id": "ses_sub",
+                "parent_session_id": "ses_main",
+                "segment_index": "0",
+                "segment_boundary_reason": "",
+            },
+        ]
+        assert [r.id for r in result.responses] == [
+            f"swebench-{inst}-ses_main-seg0",
+            f"swebench-{inst}-ses_main-seg1",
+            f"swebench-{inst}-ses_sub-seg0",
+        ]
+        # Output is split at prefix_message_count: seg0 = a1, obs, a2 ; seg1 = a3 only.
+        seg0 = [o.model_dump() for o in result.responses[0].output]
+        assert [o.get("role") for o in seg0] == ["assistant", "user", "assistant"]
+        assert [o.get("generation_token_ids") for o in seg0 if o.get("role") == "assistant"] == [[10], [11]]
+        assert all(
+            "generation_log_probs" in o and "prompt_token_ids" in o for o in seg0 if o.get("role") == "assistant"
+        )
+        seg1 = [o.model_dump() for o in result.responses[1].output]
+        assert [o.get("generation_token_ids") for o in seg1] == [[12]]
+        # Round-trips through JSON as a list of plain response dicts.
+        dumped = json.loads(result.model_dump_json())
+        assert len(dumped["responses"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_run_falls_back_to_single_response_without_session_dumps(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        mock_response = NeMoGymResponse(
+            id="swebench-test",
+            created_at=123,
+            model="test-model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+            metadata={
+                "input": "[]",
+                "metrics": json.dumps({"resolved": False}),
+                "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
+            },
+        )
+        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
+            from nemo_gym.base_resources_server import BaseRunRequest
+
+            body = BaseRunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(model="test-model", input=[])
+            )
+            result = await wrapper.run(body)
+        assert len(result.responses) == 1
+        assert result.responses[0].id == "swebench-test"
 
     @pytest.mark.asyncio
     async def test_run_not_resolved(self, monkeypatch) -> None:

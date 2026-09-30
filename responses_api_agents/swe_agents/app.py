@@ -274,6 +274,58 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         ),
     )
 
+    skip_eval: bool = Field(
+        default=False,
+        description=(
+            "If True, run the agent normally but skip the eval container "
+            "entirely. The reward is forced to 0 since the patch is never "
+            "graded. Useful for collecting agent trajectories without paying "
+            "the eval cost."
+        ),
+    )
+
+    opencode_compaction_enabled: bool = Field(
+        default=False,
+        description=(
+            "If True (opencode harness only), enable opencode's auto-compaction "
+            "(context summarization). Each compaction event starts a new "
+            "on-policy segment (segment_index in the dumped completion JSON) "
+            "since the post-compaction prompt is not a token-level continuation "
+            "of what came before; see get_all_session_trajectories_from_completions "
+            "and SWEBenchVerifyResponse.responses."
+        ),
+    )
+
+    opencode_context_limit_tokens: Optional[int] = Field(
+        default=None,
+        description=(
+            "Testing knob (opencode harness only): override the model's registered "
+            "context window (fork default 131072) so compaction triggers after a "
+            "handful of turns instead of ~99K tokens of real usage. Leave unset in "
+            "production — this shrinks the agent's real usable context, not just "
+            "the compaction threshold. Exported to the harness as OPENCODE_CONTEXT_LIMIT."
+        ),
+    )
+
+    opencode_max_compactions: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Maximum number of automatic compactions per opencode SESSION (the root "
+            "session and each subagent count separately). None (default) = unlimited, "
+            "i.e. upstream opencode behaviour. Once a session has compacted N times, its "
+            "next context overflow ends the run with agent_error_kind='max_compaction' "
+            "instead of summarising again. NOTE: opencode_compaction_enabled=false only "
+            "disables PROACTIVE compaction — a vLLM context-overflow error still triggers "
+            "a reactive summarize-and-continue (session/processor.ts halt()); set this to "
+            "0 to make overflow end the session instead. The rollout is NOT masked: the "
+            "patch on disk is evaluated and the (usually 0) reward trains normally, so "
+            "exceeding the budget costs the policy something. "
+            "Exported to the harness as OPENCODE_MAX_COMPACTIONS -> bench --max-compactions "
+            "-> opencode config compaction.max_compactions."
+        ),
+    )
+
 
 class SWEBenchWrapperServerConfig(BaseModel):
     ng_global_config_dict_str: str
@@ -403,8 +455,22 @@ class SWEBenchMetrics(BaseModel):
 
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: SWEBenchWrapperInstanceConfig
+    # Legacy/replay channel: subagent sessions as raw chat trajectories (with
+    # optional replay-manifest keys). Kept for replay users; trainers should
+    # read `responses` instead.
     subagent_trajectories: Optional[List[Dict[str, Any]]] = None
     terminal_response_id: Optional[str] = None
+    # Every on-policy-contiguous trajectory produced by this task: one entry
+    # per (session, segment) — root session segments plus every subagent
+    # session's segments, sorted by (session_id, segment_index). Each entry's
+    # `metadata` is {session_id, parent_session_id ("" for root),
+    # segment_index (str), segment_boundary_reason ("" / "compaction" /
+    # "post_compaction")}. `response` (inherited, required by core
+    # BaseVerifyResponse) is still the main session's aggregate, kept for
+    # consumers that haven't moved to `responses` yet. All entries share this
+    # task's single terminal `reward` — there is no per-segment verifier
+    # signal, only one `git diff` eval per task.
+    responses: List[NeMoGymResponse] = Field(default_factory=list)
 
 
 ########################################
@@ -2470,6 +2536,17 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
                 f") >/tmp/sanitize_refs.log 2>&1 && echo 1 > {refs_flag_path} || echo 0 > {refs_flag_path}; }} && "
             )
 
+        context_limit_export_cmd = (
+            f"export OPENCODE_CONTEXT_LIMIT={self.config.opencode_context_limit_tokens} && "
+            if self.config.opencode_context_limit_tokens is not None
+            else ""
+        )
+        max_compactions_export_cmd = (
+            f"export OPENCODE_MAX_COMPACTIONS={self.config.opencode_max_compactions} && "
+            if self.config.opencode_max_compactions is not None
+            else ""
+        )
+
         agent_main_cmd = (
             "mkdir -p /tmp/ && "
             "export PATH=/opencode_setup/bun/bin:$PATH && "
@@ -2484,6 +2561,9 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             # bench/cli.ts decides how to extract the model patch; 'worktree'
             # (its own default) reproduces the historical `git diff` capture.
             f"export PATCH_MODE={shlex.quote(self.config.opencode_patch_mode)} && "
+            f"export ENABLE_COMPACTION={'1' if self.config.opencode_compaction_enabled else '0'} && "
+            f"{context_limit_export_cmd}"
+            f"{max_compactions_export_cmd}"
             "export OPENCODE_DISABLE_MODELS_FETCH=1 && "
             "mkdir -p /root/.cache/opencode && "
             "echo '{}' >/root/.cache/opencode/models.json && "
@@ -2572,6 +2652,30 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
 ########################################
 
 
+_SEGMENT_ENTRY_KEYS = ("segment_index", "segment_boundary_reason", "prefix_message_count")
+
+
+def _last_segment_per_session(entries: list[dict]) -> list[dict]:
+    """Collapse per-(session, segment) trajectory entries to one per session.
+
+    The legacy/replay `subagent_trajectories` channel is keyed by session_id
+    (the replay manifest rejects duplicates), and each session's latest
+    segment is what it carried before segment-aware grouping existed. The
+    segment-only bookkeeping keys are dropped so this channel's shape is
+    unchanged; per-segment data rides on `SWEBenchVerifyResponse.responses`.
+    """
+    by_session: dict[str, dict] = {}
+    order: list[str] = []
+    for entry in entries:
+        sess_id = entry["session_id"]
+        if sess_id not in by_session:
+            order.append(sess_id)
+            by_session[sess_id] = entry
+        elif int(entry.get("segment_index") or 0) >= int(by_session[sess_id].get("segment_index") or 0):
+            by_session[sess_id] = entry
+    return [{k: v for k, v in by_session[s].items() if k not in _SEGMENT_ENTRY_KEYS} for s in order]
+
+
 def _classify_agent_error(err: Optional[str]) -> Optional[str]:
     if not err:
         return None
@@ -2580,6 +2684,11 @@ def _classify_agent_error(err: Optional[str]) -> Optional[str]:
         return "max_iteration"
     if "ContextWindow" in s or "context window" in s.lower():
         return "context_window"
+    if "maximum compactions" in s:
+        # Deliberate stop (compaction.max_compactions budget exhausted, see the
+        # opencode_max_compactions field): NOT masked — the patch on disk is
+        # evaluated and the reward trains normally.
+        return "max_compaction"
     if "stuck in a loop" in s.lower():
         return "stuck_in_loop"
     return "other"
@@ -2843,27 +2952,76 @@ class RunOpenHandsAgent(BaseModel):
             recursive=True,
         )
         # When subagents are enabled (opencode) we get multiple sessions, each
-        # writing its own per-turn JSONs. Group by session_id (from the file
-        # payload) and copy each session's most recent turn — that file's
-        # `messages` field carries the full cumulative history for the session.
+        # writing its own per-turn JSONs. When compaction is also enabled, a
+        # single session can span multiple on-policy segments (segment_index —
+        # see nv-opencode language-model.ts _nextSegment): each compaction
+        # event rewrites the session's prompt, so a segment's own most-recent
+        # turn file is the only one whose cumulative `messages` is still a
+        # valid contiguous trajectory for that segment. Group by
+        # (session_id, segment_index) — not session_id alone — and copy each
+        # group's most recent turn. segment_index absent (pre-compaction
+        # dumps) collapses to 0, so a plain session still yields one file.
+        #
+        # We also stamp `prefix_message_count` — the message count of the
+        # GROUP'S OWN first turn — onto the copied file. This is the correct
+        # input/output split point for run(): a naive "split at the first
+        # assistant-like message" (split_responses_input_output_items) is only
+        # valid for a segment's very first live turn ever; a compaction call's
+        # `messages` is mostly a RESENT prior-segment history (not this
+        # segment's own generation) and would otherwise get double-counted as
+        # freshly-generated output both here and in the segment that
+        # originally produced it.
+        #
+        # segment_boundary_reason is only non-null on the SPECIFIC turn a
+        # boundary occurs on (e.g. "post_compaction" marks just the first turn
+        # of the new segment). Since we keep the group's LAST turn, pull the
+        # reason from the group's FIRST turn instead, alongside prefix_count.
         if completion_candidates:
-            latest_per_session: dict[str, str] = {}
-            session_mtime: dict[str, float] = {}
+            latest_per_group: dict[tuple[str, int], str] = {}
+            group_mtime: dict[tuple[str, int], float] = {}
+            group_min_turn: dict[tuple[str, int], int] = {}
+            group_prefix_count: dict[tuple[str, int], int] = {}
+            group_boundary_reason: dict[tuple[str, int], Optional[str]] = {}
             for path_str in completion_candidates:
                 sess_id = "main"
+                segment_index = 0
+                turn = 0
+                msg_count = 0
+                boundary_reason = None
                 try:
                     with open(path_str, "r") as f:
                         payload = orjson.loads(f.read())
-                    if isinstance(payload, dict) and payload.get("session_id"):
-                        sess_id = str(payload["session_id"])
-                except (OSError, orjson.JSONDecodeError):
+                    if isinstance(payload, dict):
+                        if payload.get("session_id"):
+                            sess_id = str(payload["session_id"])
+                        segment_index = int(payload.get("segment_index") or 0)
+                        turn = int(payload.get("turn") or 0)
+                        msg_count = len(payload.get("messages") or [])
+                        boundary_reason = payload.get("segment_boundary_reason")
+                except (OSError, orjson.JSONDecodeError, TypeError, ValueError):
                     pass
+                group = (sess_id, segment_index)
                 mtime = os.path.getmtime(path_str)
-                if mtime > session_mtime.get(sess_id, -1):
-                    session_mtime[sess_id] = mtime
-                    latest_per_session[sess_id] = path_str
-            for path_str in latest_per_session.values():
-                shutil.copy2(path_str, llm_completions_dir / Path(path_str).name)
+                if mtime > group_mtime.get(group, -1):
+                    group_mtime[group] = mtime
+                    latest_per_group[group] = path_str
+                if group not in group_min_turn or turn < group_min_turn[group]:
+                    group_min_turn[group] = turn
+                    group_prefix_count[group] = msg_count
+                    group_boundary_reason[group] = boundary_reason
+            for group, path_str in latest_per_group.items():
+                dest_path = llm_completions_dir / Path(path_str).name
+                try:
+                    with open(path_str, "r") as f:
+                        payload = orjson.loads(f.read())
+                    if not isinstance(payload, dict):
+                        raise ValueError("completion payload is not a JSON object")
+                    payload["prefix_message_count"] = group_prefix_count.get(group, 0)
+                    payload["segment_boundary_reason"] = group_boundary_reason.get(group)
+                    with open(dest_path, "wb") as f:
+                        f.write(orjson.dumps(payload))
+                except (OSError, orjson.JSONDecodeError, TypeError, ValueError):
+                    shutil.copy2(path_str, dest_path)
 
         shutil.rmtree(eval_dir_on_host, ignore_errors=True)
         try:
@@ -3026,8 +3184,10 @@ class RunOpenHandsAgent(BaseModel):
         openhands_active_command = await self._start_container_command(
             self.config.agent_command, self.config.agent_apptainer_command_str
         )
-        eval_active_command = await self._start_container_command(
-            self.config.eval_command, self.config.eval_apptainer_command_str
+        eval_active_command = (
+            None
+            if self.config.skip_eval
+            else await self._start_container_command(self.config.eval_command, self.config.eval_apptainer_command_str)
         )
 
         try:
@@ -3110,13 +3270,26 @@ class RunOpenHandsAgent(BaseModel):
             metrics.patch_exists = False
             metrics.final_eval_apptainer_spinup_time = None
 
-            await self._kill_active_command(eval_active_command)
+            if eval_active_command is not None:
+                await self._kill_active_command(eval_active_command)
 
             update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
             return
 
         with open(self.config.model_patch_path, "w") as f:
             f.write(patch)
+
+        if self.config.skip_eval:
+            # Eval is intentionally skipped — record that the patch exists,
+            # leave eval timings unset, and return None so the caller treats
+            # this sample as unresolved (reward = 0).
+            metrics.patch_exists = True
+            metrics.final_eval_apptainer_spinup_time = None
+            metrics.final_eval_time = None
+            update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
+            if self.config.debug:
+                profiler.stop()
+            return None
 
         metrics.final_eval_time = -time.time()
         metrics.evaluation_start_timestamp = datetime.now(timezone.utc).isoformat()
@@ -3354,15 +3527,33 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         # Prefer the main session (no parent_session_id). Fall back to the
         # last file if the payload predates session tagging (openhands).
-        main_data = None
+        #
+        # With compaction, one main-session file is kept per segment; files
+        # sort by (session, zero-padded turn) and turns increase across
+        # segment boundaries, so the lexically-last main file is the main
+        # session's LAST segment. A subagent's compaction (summary) call can
+        # be dumped without parent_session_id, so a session is only a main
+        # candidate if NONE of its files carries a parent.
+        main_candidates: list[dict] = []
+        parented_sessions: set[str] = set()
         for fpath in completion_files:
             try:
                 with open(fpath, "r") as f:
                     data = orjson.loads(f.read())
             except (OSError, orjson.JSONDecodeError):
                 continue
-            if "session_id" in data and data.get("parent_session_id") in (None, ""):
+            if not isinstance(data, dict) or "session_id" not in data:
+                continue
+            if data.get("parent_session_id") in (None, ""):
+                main_candidates.append(data)
+            else:
+                parented_sessions.add(str(data.get("session_id")))
+        main_data = None
+        for data in main_candidates:
+            if str(data.get("session_id")) not in parented_sessions:
                 main_data = data
+        if main_data is None and main_candidates:
+            main_data = main_candidates[-1]
         if main_data is None:
             with open(completion_files[-1], "r") as f:
                 main_data = orjson.loads(f.read())
@@ -3373,32 +3564,63 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return messages, tools, first_prefix_count, terminal_response_id
 
     def get_all_session_trajectories_from_completions(self, trajectories_dir: Path, instance_id: str) -> list[dict]:
-        """All per-session trajectories on disk (opencode subagent capture).
+        """All per-(session, segment) trajectories on disk (opencode subagent +
+        compaction capture).
 
-        Returns one entry per session_id with its full message history, tools,
-        and parent_session_id link. Empty list when no session-tagged dumps
-        exist (e.g. openhands path).
+        A session can span multiple on-policy segments when compaction is
+        enabled (see nv-opencode language-model.ts _nextSegment): each
+        compaction event rewrites the session's prompt, so turns before vs.
+        after it are not token-contiguous and must be surfaced as independent
+        trajectories. `_openhands_dir_copy_from_host` already keeps one file
+        per (session_id, segment_index) group on disk — segment_index absent
+        (pre-compaction dumps) collapses to 0, so a plain session (no
+        compaction) still yields exactly one entry.
+
+        Returns one entry per (session_id, segment_index) with its full message
+        history, tools, parent_session_id link, segment_index (int),
+        segment_boundary_reason, and `prefix_message_count` — the message count
+        of the GROUP'S OWN first turn (stamped by `_openhands_dir_copy_from_host`),
+        i.e. the input/output split point used by `run()`. Optional replay
+        keys are passed through when the harness emits them. Empty list when
+        no session-tagged dumps exist (e.g. openhands path).
         """
         out: list[dict] = []
         completions_dir = trajectories_dir / instance_id / "llm_completions" / instance_id
         if not completions_dir.exists():
             return out
-        by_session: dict[str, dict] = {}
+        by_group: dict[tuple[str, int], dict] = {}
         for fpath in sorted(completions_dir.glob("*.json")):
             try:
                 with open(fpath, "r") as f:
                     data = orjson.loads(f.read())
             except (OSError, orjson.JSONDecodeError):
                 continue
+            if not isinstance(data, dict):
+                continue
             sess_id = data.get("session_id")
             if not sess_id:
                 continue
-            by_session[sess_id] = data
-        for sess_id, data in by_session.items():
+            try:
+                segment_index = int(data.get("segment_index") or 0)
+            except (TypeError, ValueError):
+                segment_index = 0
+            by_group[(str(sess_id), segment_index)] = data
+        # The fork's compaction (summary) call does not forward the session's
+        # parent_session_id, so a subagent's summary segment can be dumped
+        # parent-less. Backfill from sibling segments of the SAME session so
+        # every segment of a subagent session reports its parent.
+        session_parent: dict[str, str] = {}
+        for (sess_id, _), data in by_group.items():
+            if data.get("parent_session_id"):
+                session_parent.setdefault(sess_id, str(data["parent_session_id"]))
+        for (sess_id, segment_index), data in by_group.items():
             messages, tools = self._materialize_trajectory(data)
             entry = {
                 "session_id": sess_id,
-                "parent_session_id": data.get("parent_session_id"),
+                "parent_session_id": data.get("parent_session_id") or session_parent.get(sess_id),
+                "segment_index": segment_index,
+                "segment_boundary_reason": data.get("segment_boundary_reason"),
+                "prefix_message_count": data.get("prefix_message_count"),
                 "messages": messages,
                 "tools": tools,
             }
@@ -4259,11 +4481,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         }
         replay_subagent_manifest = parse_replay_subagent_manifest(params.problem_info)
         if params.opencode_subagents_enabled or replay_subagent_manifest:
-            captured_subagents = [
-                entry
-                for entry in self.get_all_session_trajectories_from_completions(trajectories_dir, params.instance_id)
-                if entry.get("parent_session_id")
-            ]
+            captured_subagents = _last_segment_per_session(
+                [
+                    entry
+                    for entry in self.get_all_session_trajectories_from_completions(
+                        trajectories_dir, params.instance_id
+                    )
+                    if entry.get("parent_session_id")
+                ]
+            )
             if captured_subagents:
                 captured_manifest = build_replay_subagent_manifest(
                     chat_completions_trajectory,
@@ -4291,6 +4517,67 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             tools=tools,
             metadata=metadata,
         )
+
+    def _build_segment_responses(
+        self, instance_config: SWEBenchWrapperInstanceConfig, response: NeMoGymResponse
+    ) -> List[NeMoGymResponse]:
+        """One NeMoGymResponse per (session, segment) for `SWEBenchVerifyResponse.responses`.
+
+        `run()` has no direct handle on `params`/`trajectories_dir`, so both
+        are reconstructed from the round-tripped instance_config and every
+        (session, segment) trajectory is re-read from the completion files
+        `responses()` already consumed (rather than threading a second copy
+        of this data through `.metadata`).
+
+        Falls back to `[response]` when no session-tagged dumps exist
+        (openhands / pre-session-tagging harnesses).
+        """
+        trajectories_dir = instance_config.persistent_dir / "trajectories"
+        out: List[NeMoGymResponse] = []
+        for entry in self.get_all_session_trajectories_from_completions(trajectories_dir, instance_config.instance_id):
+            # prefix_message_count (stamped by _openhands_dir_copy_from_host)
+            # is this GROUP'S OWN first-turn message count — the correct split
+            # point. A role-based split (split_responses_input_output_items)
+            # is only valid for a segment's very first live turn ever: a
+            # compaction call's `messages` mostly RESENDS a prior segment's
+            # history as its prompt, and a role-based split would count that
+            # resent history as fresh output here too — double-counting it
+            # against the segment that generated it. Fall back to the
+            # role-based split only for dumps that lack the stamp.
+            prefix_count = entry.get("prefix_message_count")
+            if prefix_count is not None:
+                entry_output = self._vllm_converter.chat_completions_messages_to_responses_items(
+                    entry["messages"][int(prefix_count) :]
+                )
+            else:
+                entry_items = self._vllm_converter.chat_completions_messages_to_responses_items(entry["messages"])
+                _, entry_output = split_responses_input_output_items(entry_items)
+            entry_tools = [
+                FunctionTool.model_validate(tool["function"] | {"type": "function"})
+                for tool in entry.get("tools") or []
+            ]
+            out.append(
+                NeMoGymResponse(
+                    id=f"swebench-{instance_config.instance_id}-{entry['session_id']}-seg{entry['segment_index']}",
+                    created_at=int(time.time()),
+                    model=response.model,
+                    object="response",
+                    output=entry_output,
+                    parallel_tool_calls=response.parallel_tool_calls,
+                    tool_choice=response.tool_choice,
+                    tools=entry_tools,
+                    metadata={
+                        "session_id": str(entry["session_id"]),
+                        "parent_session_id": str(entry.get("parent_session_id") or ""),
+                        "segment_index": str(entry["segment_index"]),
+                        "segment_boundary_reason": str(entry.get("segment_boundary_reason") or ""),
+                    },
+                )
+            )
+        out.sort(key=lambda r: (r.metadata["session_id"], int(r.metadata["segment_index"])))
+        if not out:
+            out = [response]
+        return out
 
     async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
         async with self._sem:
@@ -4320,9 +4607,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             instance_config = SWEBenchWrapperInstanceConfig.model_validate_json(metadata["instance_config"])
 
+            responses = self._build_segment_responses(instance_config, response)
+
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
                 response=response,
+                responses=responses,
                 reward=1.0 if metrics.resolved else 0.0,
                 # Report it on the contract as well; `instance_config.mask_sample` stays
                 # for one release so existing consumers keep working.
