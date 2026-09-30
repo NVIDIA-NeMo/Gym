@@ -19,6 +19,10 @@ leancat:
           memory_mib: 16384
           disk_gib: 30
         provider_options:
+          # Lean needs no network and the image is self-contained. OpenSandbox only (other
+          # providers ignore the key): the server must have an egress sidecar configured.
+          network_policy:
+            default_action: deny
           # Scheduling reservations, well under the burst limits above: every verify imports
           # Mathlib, so these are not minimal, but reserving the limits would occupy the
           # capacity of ~30 ordinary sandboxes.
