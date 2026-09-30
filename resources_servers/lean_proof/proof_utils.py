@@ -31,6 +31,22 @@ import re
 from typing import List, Optional, Tuple
 
 
+# A Lean char literal: `'a'`, `'\n'`, `'\x41'`, `'\u03b1'`, and `'"'` / `'\"'`. Without this the scanner
+# reads the quote inside `'"'` as a string opener and blanks everything up to the next `"`.
+_CHAR_LITERAL_RE = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|.)|[^\\'\n])'", re.DOTALL)
+
+# `r"..."` and `r#"..."#`: no escapes, so `r"\"` is a complete string, not an open one.
+_RAW_STRING_OPEN_RE = re.compile(r'r(#*)"')
+
+
+def _is_ident_char(ch: str) -> bool:
+    return ch.isalnum() or ch in "_'"
+
+
+def _blank(text: str) -> str:
+    return "".join("\n" if c == "\n" else " " for c in text)
+
+
 def strip_comments_and_strings(code: str) -> str:
     """Blank out comment and string-literal contents with spaces, preserving offsets and line structure.
 
@@ -87,6 +103,14 @@ def strip_comments_and_strings(code: str) -> str:
                 in_line_comment = True
                 out.append("  ")
                 i += 2
+            elif ch == "'" and not (i and _is_ident_char(code[i - 1])) and (m := _CHAR_LITERAL_RE.match(code, i)):
+                out.append(_blank(m.group(0)))
+                i = m.end()
+            elif ch == "r" and not (i and _is_ident_char(code[i - 1])) and (m := _RAW_STRING_OPEN_RE.match(code, i)):
+                close = code.find('"' + m.group(1), m.end())
+                end = n if close < 0 else close + 1 + len(m.group(1))
+                out.append(_blank(code[i:end]))
+                i = end
             elif ch == '"':
                 in_string = True
                 out.append(" ")

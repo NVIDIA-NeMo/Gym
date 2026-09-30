@@ -57,6 +57,12 @@ class CompilerOutput(BaseModel):
 # resolve against it.
 DEFAULT_LEAN_PROJECT_DIR = "/opt/mathlib"
 
+# Compiles run as this unprivileged user, which lean_image/ creates. `#eval` executes during
+# elaboration, so a submission can run arbitrary IO; as root it could rewrite the toolchain that
+# every later rollout is scored against. Set `sandbox_config.compile_user: null` for an image
+# without the user.
+DEFAULT_COMPILE_USER = "lean"
+
 # OpenSandbox requires an entry process when creating from an image; the image's own CMD is
 # `sleep infinity`, and this is the same thing made explicit for providers that need it.
 DEFAULT_ENTRYPOINT = ["sleep", "infinity"]
@@ -141,7 +147,8 @@ class LeanSandbox:
         verifies, hence the unique filename.
         """
         sandbox = await self.start()
-        path = f"attempt_{uuid.uuid4().hex}.lean"
+        # /tmp, not the project dir: the toolchain is read-only to the compile user.
+        path = f"/tmp/attempt_{uuid.uuid4().hex}.lean"
         delimiter = f"LEAN_EOF_{uuid.uuid4().hex}"
         # `timeout` bounds Lean itself at the documented budget, as upstream does
         # (subprocess.run(..., timeout=300)); the exec budget below is headroom on top, so the
@@ -157,6 +164,7 @@ class LeanSandbox:
             cwd=self._project_dir,
             # Let the sandbox, not the client, report the timeout.
             timeout_s=timeout_s + 30,
+            user=self._config.get("compile_user", DEFAULT_COMPILE_USER),
         )
 
     async def check_toolchain(

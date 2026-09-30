@@ -86,6 +86,17 @@ def test_extract_lean_code(text, expected):
         ('def msg := "sorry"', []),
         # `\b` must not match inside a snake_case identifier.
         ("theorem no_sorry_needed : True := trivial", []),
+        # A char literal is not a string opener: `'"'` must not hide what follows it.
+        ("def c := '\"'\naxiom cheat : False\ndef d := \"x\"", ["axiom"]),
+        ("def c := '\\\"'\naxiom cheat : False\ndef d := \"x\"", ["axiom"]),
+        ("def c := '\"'\ntheorem t : True := by sorry", ["sorry"]),
+        # A raw string has no escapes: `r"\"` is complete, so the axiom after it is code.
+        ('def s := r"\\"\naxiom cheat : False\ndef d := "x"', ["axiom"]),
+        ('def s := r#"a"b"#\naxiom cheat : False', ["axiom"]),
+        # ...and what is inside a char or raw string is still not code.
+        ("def c := 'a'\ndef s := r\"sorry\"", []),
+        # A prime ending an identifier is not a char literal.
+        ("theorem h' (x' : Nat) : x' = x' := rfl\ndef d := \"sorry\"", []),
     ],
 )
 def test_find_banned_declarations(code, expected):

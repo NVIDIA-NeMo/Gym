@@ -42,10 +42,10 @@ async def test_compile_writes_the_file_and_removes_it():
     await lean.compile('theorem t : "α ≫ β" := by\n  sorry', timeout_s=300)
 
     command = exec_mock.await_args.args[0]
-    assert "cat > attempt_" in command
+    assert "cat > /tmp/attempt_" in command
     assert 'theorem t : "α ≫ β" := by' in command
     assert "lake env lean" in command
-    assert "rm -f attempt_" in command, "a long-lived sandbox must not accumulate one file per rollout"
+    assert "rm -f /tmp/attempt_" in command, "a long-lived sandbox must not accumulate one file per rollout"
     assert exec_mock.await_args.kwargs["cwd"] == DEFAULT_LEAN_PROJECT_DIR
 
 
@@ -59,6 +59,19 @@ async def test_compile_gives_the_sandbox_headroom_over_the_lean_budget():
     await lean.compile("import Mathlib", timeout_s=300)
 
     assert exec_mock.await_args.kwargs["timeout_s"] > 300
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overrides,expected", [({}, "lean"), ({"compile_user": None}, None)])
+async def test_compile_runs_as_an_unprivileged_user(overrides, expected):
+    """`#eval` runs during elaboration; as root a submission could rewrite the toolchain."""
+    lean = _sandbox(**overrides)
+    exec_mock = AsyncMock()
+    lean.start = AsyncMock(return_value=type("S", (), {"exec": exec_mock})())
+
+    await lean.compile("import Mathlib", timeout_s=10)
+
+    assert exec_mock.await_args.kwargs["user"] == expected
 
 
 @pytest.mark.asyncio
