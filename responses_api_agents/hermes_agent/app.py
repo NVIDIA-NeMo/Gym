@@ -22,14 +22,12 @@ import shutil
 import sys
 import tempfile
 from asyncio import Semaphore
-from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from shlex import quote
-from time import monotonic, time
+from time import time
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
@@ -40,16 +38,14 @@ from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
-    AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
-    AgentSeedSessionResponse,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import get_first_server_config_dict, get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -188,7 +184,6 @@ _SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
 _SANDBOX_SUPERVISOR = f"{_SANDBOX_RUNTIME_DIR}/process_supervisor.py"
 _SANDBOX_OBSERVER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_observer.py"
 _SANDBOX_MODEL_KWARGS = f"{_SANDBOX_RUNTIME_DIR}/model_kwargs.py"
-_AGENT_SESSION_ID_KEY = "agent_session_id"
 
 
 class SessionPhase(Enum):
@@ -208,8 +203,7 @@ class RunnerCleanup(Enum):
 
 
 @dataclass
-class HermesAgentSessionState:
-    request: AgentSeedSessionRequest
+class HermesAgentSessionState(AgentSessionState):
     sandbox: AsyncSandbox
     workdir: str | None
     session_dir: str
@@ -218,7 +212,6 @@ class HermesAgentSessionState:
     task: asyncio.Task[NeMoGymResponse] | None = None
     phase: SessionPhase = SessionPhase.READY
     runner_cleanup: RunnerCleanup = RunnerCleanup.IDLE
-    close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 # if ray close sys.stderr mid-request, write to the original fd
@@ -288,13 +281,6 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_install_timeout_seconds: float = 900.0
     sandbox_runner_timeout_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = 30.0
-    session_close_retry_window_seconds: float = Field(
-        default=300.0,
-        gt=0,
-        allow_inf_nan=False,
-        description="Keep successful close receipts for this many seconds; cover the caller's retry horizon.",
-    )
-    session_lifetime_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
     compression_threshold: float = 0.85
@@ -329,30 +315,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
     sigterm_installed: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    @asynccontextmanager
-    async def _locked_agent_session(self, session_id: str) -> AsyncIterator[None]:
-        lock = self._agent_session_locks.setdefault(session_id, asyncio.Lock())
-        self._session_lock_users[session_id] = self._session_lock_users.get(session_id, 0) + 1
-        try:
-            async with lock:
-                yield
-        finally:
-            self._session_lock_users[session_id] -= 1
-            if not self._session_lock_users[session_id]:
-                del self._session_lock_users[session_id]
-                if session_id not in self._agent_sessions and session_id not in self._closed_agent_session_ids:
-                    self._agent_session_locks.pop(session_id, None)
-
-    async def seed_agent_session(
-        self,
-        request: Request,
-        body: AgentSeedSessionRequest,
-    ) -> AgentSeedSessionResponse:
-        """Idempotently initialize the caller's session with an immutable seed binding."""
-        # Sessions live in this worker's memory, so every call for a session must reach this worker.
-        # The legacy /run path keeps no session and still supports several workers.
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Hermes Agent sessions require num_workers=1")
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> HermesAgentSessionState:
         tool_accesses = self.effective_tool_accesses(body)
         unsupported = [
             access.name for access in tool_accesses if access.required and not isinstance(access, MCPToolAccess)
@@ -369,127 +332,22 @@ class HermesAgent(SimpleResponsesAPIAgent):
         ]
         if colliding:
             raise ValueError("MCP tool grants collide with Hermes toolsets: " + ", ".join(sorted(colliding)))
-        self._expire_closed_agent_sessions()
-        agent_session_id = body.agent_session_id
-        current = self._agent_session_id_from_request(request)
-        if current is not None and current != agent_session_id:
-            raise HTTPException(409, "agent_session_id does not match the session cookie")
-        async with self._locked_agent_session(agent_session_id):
-            if agent_session_id in self._closed_agent_session_ids:
-                raise HTTPException(409, "Agent session is already closed")
-            state = self._agent_sessions.get(agent_session_id)
-            if state is not None:
-                if state.request != body:
-                    raise HTTPException(409, "agent_session_id is already bound to another seed request")
-                if state.phase is SessionPhase.CLOSING:
-                    raise HTTPException(409, "Agent session is closing")
-            else:
-                if current is not None:
-                    raise HTTPException(409, "Agent session cookie has expired")
-                state = await self._initialize_agent_session_state(agent_session_id, body)
-                self._agent_sessions[agent_session_id] = state
-                self._session_reapers[agent_session_id] = asyncio.create_task(
-                    self._expire_agent_session(agent_session_id, body)
-                )
-            request.session[_AGENT_SESSION_ID_KEY] = agent_session_id
-            return AgentSeedSessionResponse(agent_session_id=agent_session_id)
-
-    async def _expire_agent_session(self, session_id: str, seed: AgentSeedSessionRequest) -> None:
-        try:
-            await asyncio.sleep(self.config.session_lifetime_seconds)
-            await self.close_agent_session(
-                Request({"type": "http", "session": {}}),
-                AgentCloseSessionRequest(agent_session_id=session_id, episode_id=seed.episode_id),
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            LOG.exception("Could not close expired Hermes session %s; owner recovery required", session_id)
-        finally:
-            if self._session_reapers.get(session_id) is asyncio.current_task():
-                self._session_reapers.pop(session_id, None)
-
-    async def close_agent_session(
-        self,
-        request: Request,
-        body: AgentCloseSessionRequest,
-    ) -> AgentCloseSessionResponse:
-        """Close by caller identity even if the seed response and its cookie were lost."""
-        self._expire_closed_agent_sessions()
-        agent_session_id = body.agent_session_id
-        current = self._agent_session_id_from_request(request)
-        if current is not None and current != agent_session_id:
-            raise HTTPException(409, "agent_session_id does not match the session cookie")
-        async with self._locked_agent_session(agent_session_id):
-            closed = self._closed_agent_sessions.get(agent_session_id)
-            if closed is not None:
-                if body.episode_id != closed[0]:
-                    raise HTTPException(409, "episode_id does not match the seeded agent session")
-                return closed[1]
-            if agent_session_id in self._closed_agent_session_ids:
-                raise HTTPException(409, "Agent close receipt has expired")
-            state = self._agent_sessions.get(agent_session_id)
-            if state is None:
-                if current is not None:
-                    raise HTTPException(409, "Agent close receipt has expired")
-                result = AgentCloseSessionResponse(agent_session_id=agent_session_id)
-            else:
-                if body.episode_id != state.request.episode_id:
-                    raise HTTPException(409, "episode_id does not match the seeded agent session")
-                async with state.close_lock:
-                    state.phase = SessionPhase.CLOSING
-                    observations = await self._close_agent_session_state(state)
-                result = AgentCloseSessionResponse(agent_session_id=agent_session_id, agent_observations=observations)
-                del self._agent_sessions[agent_session_id]
-            # This receipt also prevents a delayed seed after an unknown close.
-            request.session[_AGENT_SESSION_ID_KEY] = agent_session_id
-            self._closed_agent_sessions[agent_session_id] = (
-                body.episode_id,
-                result,
-                monotonic() + self.config.session_close_retry_window_seconds,
-            )
-            self._closed_agent_session_ids[agent_session_id] = monotonic() + max(
-                self.config.session_lifetime_seconds, self.config.session_close_retry_window_seconds
-            )
-            reaper = self._session_reapers.pop(agent_session_id, None)
-            if reaper is not None and reaper is not asyncio.current_task():
-                reaper.cancel()
-            return result
-
-    def _expire_closed_agent_sessions(self) -> None:
-        """Prune receipts and idle locks by close time, never retry access order."""
-        now = monotonic()
-        while self._closed_agent_sessions:
-            if next(iter(self._closed_agent_sessions.values()))[2] > now:
-                break
-            self._closed_agent_sessions.popitem(last=False)
-        while self._closed_agent_session_ids:
-            if next(iter(self._closed_agent_session_ids.values())) > now:
-                break
-            session_id, _ = self._closed_agent_session_ids.popitem(last=False)
-            if not self._session_lock_users.get(session_id):
-                self._agent_session_locks.pop(session_id, None)
+        return await self._initialize_agent_session_state(body.agent_session_id, body)
 
     def _require_agent_session(self, agent_session_id: str) -> HermesAgentSessionState:
-        try:
-            return self._agent_sessions[agent_session_id]
-        except KeyError as error:
-            raise HTTPException(409, f"Unknown agent_session_id: {agent_session_id}") from error
+        state = super()._require_agent_session(agent_session_id)
+        if not isinstance(state, HermesAgentSessionState):
+            raise TypeError("Expected Hermes agent session state")
+        return state
 
-    @staticmethod
-    def _agent_session_id_from_request(request: Request | None) -> str | None:
-        if request is None:
-            return None
-        try:
-            session = request.session
-        except (AssertionError, AttributeError):
-            return None
-        if not isinstance(session, Mapping) or _AGENT_SESSION_ID_KEY not in session:
-            return None
-        agent_session_id = session[_AGENT_SESSION_ID_KEY]
-        if not isinstance(agent_session_id, str) or not agent_session_id:
-            raise HTTPException(409, "Invalid Hermes agent session marker")
-        return agent_session_id
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, HermesAgentSessionState):
+            raise TypeError("Expected Hermes agent session state")
+        state.phase = SessionPhase.CLOSING
+        observations = await self._cleanup_sandbox_session(state)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id, agent_observations=observations
+        )
 
     def _ensure_sigterm_handler(self) -> None:
         """Install exactly one SIGTERM handler on the event loop that interrupts *every* in-flight
@@ -557,14 +415,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
         self.sem = Semaphore(self.config.concurrency)
         self.active_agents = set()
         self.interrupted_agents = set()
-        self._agent_sessions: dict[str, HermesAgentSessionState] = {}
-        self._agent_session_locks: dict[str, asyncio.Lock] = {}
-        self._closed_agent_session_ids: OrderedDict[str, float] = OrderedDict()
-        self._session_lock_users: dict[str, int] = {}
-        self._session_reapers: dict[str, asyncio.Task[None]] = {}
-        self._closed_agent_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse, float]] = (
-            OrderedDict()
-        )
         # hermes-agent reads these from env (cli.py / batch_runner.py); env vars are
         # process-global, so multiple HermesAgent instances in one process share them
         os.environ["TERMINAL_ENV"] = self.config.terminal_backend
@@ -621,7 +471,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             session_dir=session_dir,
             owns_sandbox=owns_sandbox,
         )
-        self._agent_sessions[agent_session_id] = state
+        self._session_records[agent_session_id].state = state
         try:
             prepare = await sandbox.exec(
                 f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(session_dir)}",
@@ -639,14 +489,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
         except BaseException:
             state.phase = SessionPhase.CLOSING
             try:
-                await self._close_agent_session_state(state)
+                await self._cleanup_sandbox_session(state)
             except BaseException:
                 LOG.exception("Could not clean failed Hermes setup %s; retaining session for close", agent_session_id)
-                self._session_reapers[agent_session_id] = asyncio.create_task(
-                    self._expire_agent_session(agent_session_id, body)
-                )
             else:
-                self._agent_sessions.pop(agent_session_id, None)
+                self._session_records[agent_session_id].state = None
             raise
         return state
 
@@ -721,7 +568,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 raise RuntimeError(f"Hermes descendant cleanup was not confirmed: {receipt.get('error')}")
         state.runner_cleanup = RunnerCleanup.CONFIRMED
 
-    async def _close_agent_session_state(
+    async def _cleanup_sandbox_session(
         self,
         state: HermesAgentSessionState,
     ) -> AgentObservationBundle:

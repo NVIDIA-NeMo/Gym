@@ -4,11 +4,7 @@
 config_paths:
   - resources_servers/swebench_pro/configs/swebench_pro.yaml
   - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
-  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
-
-environment_routing_mode: taskset
-environment_server_routes:
-  swebench_pro: swebench_pro_hermes
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
 swebench_pro_hermes_resources_server:
   _inherit_from: swebench_pro_resources_server
@@ -33,9 +29,9 @@ swebench_pro_hermes_agent:
       enabled_toolsets: [terminal]
 
 swebench_pro_hermes:
-  _inherit_from: single_agent_turn
+  _inherit_from: single_agent_turn_legacy
   environment_servers:
-    single_agent_turn:
+    single_agent_turn_legacy:
       resources_server:
         type: resources_servers
         name: swebench_pro_hermes_resources_server
