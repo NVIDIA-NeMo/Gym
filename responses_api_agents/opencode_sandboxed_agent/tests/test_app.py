@@ -56,6 +56,11 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 )
 
 
+@fixture(autouse=True)
+def runtime_python(monkeypatch: MonkeyPatch):
+    monkeypatch.setattr(app_module, "ensure_python", AsyncMock(return_value="python3"))
+
+
 class TestOpenCodeSandboxedAgent:
     def test_import_only_loads_shared_opencode_observability(self) -> None:
         code = (

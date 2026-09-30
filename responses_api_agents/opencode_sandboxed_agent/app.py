@@ -74,6 +74,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
 )
 from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
+from responses_api_agents.opencode_sandboxed_agent.bootstrap import ensure_python
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -625,10 +626,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             config["tools"] = dict(config.get("tools", {})) | {"skill": True}
         return config
 
-    async def _stop_process_group(self, sandbox: AsyncSandbox, pidfile: str, exec_options: dict) -> bool:
+    async def _stop_process_group(
+        self, sandbox: AsyncSandbox, pidfile: str, exec_options: dict, python_executable: str = "python3"
+    ) -> bool:
         """Stop the borrowed sandbox's harness process group before verification."""
-        # Minimal task images may not include procps/ps. Python is already
-        # required for sandbox networking and OpenCode artifact collection.
+        # Minimal task images may not include procps/ps. Use the bootstrapped
+        # Python shared by cleanup and OpenCode artifact collection.
         script = r"""
 import os, signal, sys, time
 from pathlib import Path
@@ -664,7 +667,9 @@ while True:
         raise RuntimeError("OpenCode processes did not exit")
     time.sleep(0.1)
 """
-        result = await sandbox.exec(f"python3 -c {quote(script)} {quote(pidfile)}", timeout_s=20, **exec_options)
+        result = await sandbox.exec(
+            f"{quote(python_executable)} -c {quote(script)} {quote(pidfile)}", timeout_s=20, **exec_options
+        )
         if result.return_code or result.error_type:
             raise RuntimeError(f"OpenCode process cleanup was not acknowledged: {result.stderr}")
         return "started" in (result.stdout or "")
@@ -771,6 +776,7 @@ while True:
                     query = input_item.content[0]["text"]
 
         assert query, body.input
+        python_executable = await ensure_python(sandbox, exec_options)
 
         opencode_debug_str = ""
         if self.config.debug:
@@ -804,7 +810,7 @@ while True:
                 installer=$(mktemp) && curl -fL -o "$installer" https://opencode.ai/install \
                     && VERSION={quote(self.config.opencode_version)} bash "$installer"
             else
-                python3 {quote(installer_path)} {quote(self.config.opencode_version)}
+                {quote(python_executable)} {quote(installer_path)} {quote(self.config.opencode_version)}
             fi; }}"""
 
         opencode_config_content = json.dumps(await self._create_opencode_config(request))
@@ -870,7 +876,9 @@ while True:
 
         finally:
             if pidfile is not None:
-                cleanup = asyncio.create_task(self._stop_process_group(sandbox, pidfile, exec_options))
+                cleanup = asyncio.create_task(
+                    self._stop_process_group(sandbox, pidfile, exec_options, python_executable)
+                )
                 while not cleanup.done():
                     try:
                         await asyncio.shield(cleanup)
@@ -942,7 +950,7 @@ while True:
                 )
                 snapshot_result = await sandbox.exec(
                     command=(
-                        f"python3 -c {quote(snapshot_script)} "
+                        f"{quote(python_executable)} -c {quote(snapshot_script)} "
                         f"{quote(observations_remote_fpath)} {quote(snapshot_remote_fpath)}"
                     ),
                     **exec_options,
