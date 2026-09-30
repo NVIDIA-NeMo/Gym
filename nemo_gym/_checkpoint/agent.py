@@ -78,14 +78,24 @@ class RestoredAgentSession:
 
 
 class AgentSessionHooks(Protocol):
-    """Agent-owned session state, exported and restored by the participant."""
+    """Agent-owned session state, exported and restored by the participant.
 
-    def export_agent_session(self, session_key: str) -> dict[str, JsonValue]: ...
+    The hooks are asynchronous and exporting takes every session at once, so an agent whose session state
+    lives outside the process, such as a sandbox it runs tools or a harness in, can checkpoint all of it
+    concurrently. Export runs at commit, while every session is parked at a boundary: no tool call is using
+    the sandbox. Return what a restore needs to rebuild the sandbox as of the checkpoint, not a descriptor
+    of the live sandbox, which keeps changing afterwards. A restore runs in a fresh process after a crash
+    and rebuilds every session or raises; the crashed process's sandboxes are still running and can be
+    stopped there. Retire stops a discarded attempt's sandbox.
+    """
 
-    def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
+    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+        """Return the state of every session in ``session_keys``."""
+
+    async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
         """Validate every session, then install all of them; never install a partial set."""
 
-    def retire_agent_session(self, session_key: str) -> None: ...
+    async def retire_agent_session(self, session_key: str) -> None: ...
 
 
 @dataclass
@@ -280,21 +290,31 @@ class AgentSessionParticipant(CheckpointParticipant):
                 session.task.cancel()
             self._restored_episodes.pop(session.key, None)
             await self.legacy_episodes.retire(session.key)
-            self.hooks.retire_agent_session(session.key)
+            await self.hooks.retire_agent_session(session.key)
 
-    def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         legacy = self.legacy_episodes.exported()
+        sessions = list(self._sessions.values())
+        # Every session is parked, so its boundary cannot move while the hooks are awaited.
+        boundaries = [self._export_boundary(session) for session in sessions]
+        states = await self.hooks.export_agent_sessions([session.key for session in sessions])
+        missing = [session.key for session in sessions if session.key not in states]
+        if missing:
+            raise ControlError(f"the agent did not export sessions {missing}")
         return [
             AgentSessionRecord(
                 session_key=session.key,
                 episode_id=session.episode_id,
-                session=self.hooks.export_agent_session(session.key),
-                boundary=self._export_boundary(session),
+                session=states[session.key],
+                boundary=boundary,
                 # A restored legacy episode whose replacement /run has not started keeps its restored step.
                 episode=legacy.get(session.key, self._restored_episodes.get(session.key)),
             )
-            for session in self._sessions.values()
+            for session, boundary in zip(sessions, boundaries)
         ]
+
+    def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+        raise NotImplementedError("agent sessions export through export(), which awaits the agent's hooks")
 
     @staticmethod
     def _export_boundary(session: _Session) -> Optional[dict[str, JsonValue]]:
@@ -303,7 +323,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         # A restored session that no activation has claimed yet still continues from its restored boundary.
         return session.continuation
 
-    def restore_records(self, records: list[CheckpointRecord]) -> None:
+    async def install(self, records: list[CheckpointRecord]) -> None:
         if self._sessions:
             raise ControlError("agent restore requires a process without live sessions")
         restored = [
@@ -312,13 +332,16 @@ class AgentSessionParticipant(CheckpointParticipant):
             )
             for record in records
         ]
-        self.hooks.restore_agent_sessions(restored)
+        await self.hooks.restore_agent_sessions(restored)
         for record, session in zip(records, restored):
             self._sessions[session.session_key] = _Session(
                 key=session.session_key, episode_id=session.episode_id, continuation=record.boundary
             )
             if record.episode is not None:
                 self._restored_episodes[session.session_key] = record.episode
+
+    def restore_records(self, records: list[CheckpointRecord]) -> None:
+        raise NotImplementedError("agent sessions restore through install(), which awaits the agent's hooks")
 
     def status_extra(self) -> dict[str, Any]:
         return {"accepting": self.accepting}
