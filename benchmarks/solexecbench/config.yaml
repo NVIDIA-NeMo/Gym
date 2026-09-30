@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - resources_servers/sol_execbench/configs/sol_execbench.yaml
+
+# Runtime-only values are validated by the resources server, after data preparation.
+solexecbench_manifest_sha256: ""
+solexecbench_sandbox_image: ""
+
+solexecbench_resources_server:
+  _inherit_from: sol_execbench
+  resources_servers:
+    sol_execbench:
+      problem_manifest_path: benchmarks/solexecbench/data/problem_manifest.json
+      problem_manifest_sha256: ${solexecbench_manifest_sha256}
+      sandbox_image: ${solexecbench_sandbox_image}
+      artifact_root: benchmarks/solexecbench/data/artifacts
+      samples_per_task: 1
+
+solexecbench_simple_agent:
+  _inherit_from: sol_execbench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: solexecbench_resources_server
+      datasets:
+        - name: solexecbench
+          type: benchmark
+          jsonl_fpath: benchmarks/solexecbench/data/solexecbench_cuda_cpp.jsonl
+          prepare_script: benchmarks/solexecbench/prepare.py
+          num_repeats: 1
+        - name: solexecbench_example
+          type: example
+          jsonl_fpath: benchmarks/solexecbench/data/example_cuda_cpp.jsonl
+
+solexecbench_environment_server:
+  _inherit_from: sol_execbench_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: solexecbench_simple_agent

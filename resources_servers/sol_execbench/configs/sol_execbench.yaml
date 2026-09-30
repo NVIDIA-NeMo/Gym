@@ -1,0 +1,44 @@
+sol_execbench:
+  resources_servers:
+    sol_execbench:
+      entrypoint: app.py
+      num_workers: 1
+      domain: coding
+      verified: false
+      description: Native SOL-ExecBench correctness and GPU latency in isolated OpenSandbox sandboxes
+      problem_manifest_path: ???
+      problem_manifest_sha256: ???
+      artifact_root: ???
+      sandbox_provider: sandbox
+      sandbox_image: ???
+      target_hardware: B200
+      compile_timeout_s: 120
+      evaluation_timeout_s: 600
+      runner_timeout_s: 900
+      sandbox_ready_timeout_s: 300
+      samples_per_task: 1
+      benchmark:
+        warmup_runs: 10
+        iterations: 50
+        lock_clocks: false
+        benchmark_reference: false
+        seed: 200
+
+sol_execbench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: sol_execbench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+sol_execbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: sol_execbench_simple_agent
