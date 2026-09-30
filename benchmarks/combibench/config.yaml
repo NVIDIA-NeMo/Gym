@@ -7,10 +7,13 @@ combibench_resources_server:
   resources_servers:
     combibench:
       datasets:
-      # "without solution": the model must fill every `sorry`, answers included.
+      # Prepared with `split=test` by default: the paper's "without solution" setting.
+      # `gym eval prepare --benchmark combibench +prepare_script_args.split=<x>` picks
+      # `test_with_solution` (answers substituted, only the proof missing) or `both`,
+      # which holds the two settings side by side; rows are tagged by `split`.
       - name: combibench
         type: benchmark
-        jsonl_fpath: benchmarks/combibench/data/combibench_test.jsonl
+        jsonl_fpath: benchmarks/combibench/data/combibench.jsonl
         prepare_script: benchmarks/combibench/prepare.py
         prompt_config: benchmarks/combibench/prompt.yaml
         # The paper reports Pass@1/8/16 from 16 samples per problem.

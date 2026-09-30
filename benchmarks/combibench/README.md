@@ -7,7 +7,8 @@ evaluation protocol).
 
 - **Tasks**: 100 problems — 45 fill-in-the-blank (the model supplies the answer
   in an `abbrev <name>_solution` and proves the theorem about it) and 55
-  proof-only.
+  proof-only — available in the paper's two settings, "without solution" (the
+  default) and "with solution"; see "Settings" below.
 - **Source**: [MoonshotAI/CombiBench](https://github.com/MoonshotAI/CombiBench)
   `lean/CombiBench/*.lean` + `metadata.csv` at `c67e4213597b1477351d9ef5ca37fb622084cc78`
   (MIT). The Hugging Face dataset `AI-MO/CombiBench` at `882ba08b` is available
@@ -21,9 +22,39 @@ evaluation protocol).
 - **Lean**: the server needs a Kimina Lean Server built for Lean/Mathlib
   v4.24.0, the toolchain upstream pins. See the server README.
 
-This directory is the paper's **"without solution"** setting. The
-**"with solution"** setting, where the published answers are already
-substituted into the statements, is [`benchmarks/combibench_with_solution`](../combibench_with_solution/).
+## Settings
+
+The paper evaluates the same 100 problems two ways. Each row carries its setting in
+a `split` field, and one benchmark serves both:
+
+| `split` | Setting | What the model must produce |
+| --- | --- | --- |
+| `test` (default) | **without solution** | the answer *and* the proof |
+| `test_with_solution` | **with solution** | the proof only; the published answer is already in the statement |
+
+The two differ only in the 45 fill-in-the-blank problems. For example,
+`hackmath_1`:
+
+```lean
+-- test: the model must replace both `sorry`s, choosing the value of the abbrev itself
+abbrev hackmath_1_solution : ℕ := sorry
+theorem hackmath_1 ... : sols.card = hackmath_1_solution := by sorry
+
+-- test_with_solution: the answer 1716 is given, only the proof is missing
+theorem hackmath_1 ... : sols.card = ((1716) : ℕ ) := by sorry
+```
+
+- **Without solution** measures finding the answer as well as proving it. Besides
+  the compile and statement-tamper checks, the verifier compares the model's
+  `abbrev` value with the ground truth by `rfl`/`norm_num`.
+- **With solution** measures the proof alone. There is no abbrev, so there is no
+  answer check. The statement-tamper check still applies.
+- The other 55 problems are proof-only and their statements are **identical** in
+  both settings (verified: 55 of 100 statements equal, exactly the 45 that declare
+  an `abbrev` differ). Preparing `both` therefore asks those 55 prompts twice.
+
+Metrics are always reported per setting; nothing pools the two, because neither of
+the paper's tables does.
 
 ## Preparation
 
@@ -33,10 +64,28 @@ gym eval prepare --benchmark combibench
 
 Downloads the pinned repository tarball, joins each `.lean` statement with its
 `metadata.csv` row, strips doc comments so the prompt shape matches the
-published dataset, and writes `data/combibench_test.jsonl` (100 rows, fails
-closed on any other count). Rows carry `theorem_name`, `formal_statement`,
-`answers` (list or null), `natural_language`, `tag`, `source`, `split`,
-`dataset_source`, `dataset_revision`; prompts are applied at rollout time.
+published dataset, and writes `data/combibench.jsonl`. With no arguments that is
+the 100 "without solution" rows; it fails closed on any other count. Choose the
+setting with `split`:
+
+```bash
+# without solution (the default)
+gym eval prepare --benchmark combibench +prepare_script_args.split=test
+# with solution
+gym eval prepare --benchmark combibench +prepare_script_args.split=test_with_solution
+# both, 200 rows: `test` first, then `test_with_solution`
+gym eval prepare --benchmark combibench +prepare_script_args.split=both
+```
+
+Every choice writes the same file, `data/combibench.jsonl`, which is the path
+`config.yaml` reads. Preparing again replaces it, so re-prepare to switch setting;
+`use_cached_prepared_benchmarks` skips preparation and keeps whichever setting is
+already on disk. `--limit` applies to each setting, so a subset of `both` still
+holds both.
+
+Rows carry `theorem_name`, `formal_statement`, `answers` (list or null),
+`natural_language`, `tag`, `source`, `split`, `dataset_source`,
+`dataset_revision`; prompts are applied at rollout time.
 
 ```bash
 # The published dataset instead of the repository files:
@@ -75,11 +124,19 @@ COMBIBENCH_LEAN_SERVER_URL=http://127.0.0.1:12332 gym env start \
 ```bash
 gym eval run --no-serve \
     --agent combibench_agent \
-    --input benchmarks/combibench/data/combibench_test.jsonl \
+    --input benchmarks/combibench/data/combibench.jsonl \
     --output results/combibench_rollouts.jsonl \
     --num-repeats 16 \
     --prompt-config benchmarks/combibench/prompt.yaml
 ```
+
+The run scores whichever setting was prepared. The server reports metrics under the
+row's `split`, so a file holding one setting still gets the plain `pass@16/accuracy`
+keys, while a `both` file (3,200 rollouts at 16 samples) gets
+`test/pass@16/accuracy` and `test_with_solution/pass@16/accuracy` (and
+`<split>/<family>/...` for the source families). The headline `mean/reward` of a
+`both` run pools the two settings and is not a figure the paper reports; read the
+per-setting keys.
 
 The paper reports Pass@1/8/16 from 16 samples per problem; it does not state
 the temperature or token budget used, and upstream's shipped config defaults to

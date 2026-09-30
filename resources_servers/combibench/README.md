@@ -20,12 +20,17 @@ benchmark README explains why it is not the default.
 
 ## Scope
 
-Two benchmarks share this server:
+One benchmark, [`benchmarks/combibench`](../../benchmarks/combibench/), uses this server. It
+prepares either or both of the paper's settings (default `test`), told apart by each row's
+`split`. They differ only in the 45 fill-in-the-blank problems: without solution the model
+supplies the `abbrev <name>_solution` answers and the proof, and the answer is checked; with
+solution the published answer is already in the statement and only the proof is checked. The
+other 55 (proof-only) statements are identical in both.
 
-| Benchmark | Setting | Rows |
+| `split` | Setting | Rows |
 | --- | --- | --- |
-| [`benchmarks/combibench`](../../benchmarks/combibench/) | "without solution": answer and proof both withheld | 100 |
-| [`benchmarks/combibench_with_solution`](../../benchmarks/combibench_with_solution/) | "with solution": published answers substituted, proof withheld | 100 |
+| `test` | "without solution": answer and proof both withheld | 100 |
+| `test_with_solution` | "with solution": published answers substituted, proof withheld | 100 |
 
 Upstream also ships a two-stage Fine-Eval that, when the filled-in answer is not
 proved equal to the ground truth by `rfl`/`norm_num`, asks the model for that
@@ -232,6 +237,12 @@ figures the tables below report — and adds `hackmath/`, `brualdi/`, `imo/` and
 `math_competitions/` pass rates keyed on `tag`. Upstream reports one pooled
 figure, so the pooled keys and the inherited `mean/reward` are the headline and
 the per-family keys are supplementary; they are not promoted to `key_metrics`.
+When the rows hold both settings (`split=both` at prepare time), pooling a
+problem's two settings would give a figure neither paper table contains, so every
+key is instead prefixed by its `split` (`test/pass@16/accuracy`,
+`test_with_solution/imo/pass@1/accuracy`) and `get_key_metrics` promotes each
+setting's `pass@1`, `pass@8` and `pass@16`. `mean/reward` still pools the two.
+A file of one setting keeps the unprefixed keys described above.
 `get_key_metrics` does promote the `coverage/` block alongside `mean/*`: because
 masking keeps a harness fault out of `mean/reward`, a Lean-server outage shrinks
 the corpus the score was computed from instead of lowering it, and a run that
@@ -616,10 +627,10 @@ pull request. The reports are not committed, so the numbers are stated here and
 reproduced by the `upstream_agreement.py` command at the end of this section,
 which needs both those rollouts and a Lean server:
 
-| Benchmark | Rollouts | Scored by both | This verifier | Upstream | Agreement |
+| Setting | Rollouts | Scored by both | This verifier | Upstream | Agreement |
 | --- | --- | --- | --- | --- | --- |
-| `combibench` | 1600 | 1598 | 34 | 34 | **1598 / 1598** |
-| `combibench_with_solution` | 1600 | 1600 | 31 | 31 | **1600 / 1600** |
+| `test` | 1600 | 1598 | 34 | 34 | **1598 / 1598** |
+| `test_with_solution` | 1600 | 1600 | 31 | 31 | **1600 / 1600** |
 
 The same rollouts pass under both, not merely the same number of them.
 

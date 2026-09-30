@@ -73,11 +73,15 @@ GITHUB_TARBALL_URL = f"https://codeload.github.com/{GITHUB_REPO}/tar.gz/{GITHUB_
 DOWNLOAD_TIMEOUT_SECONDS = 120
 
 SPLITS = ("test", "test_with_solution")
+# ``both`` writes every split into one file, so one run scores the two settings side by side.
+BOTH = "both"
+SPLIT_CHOICES = (*SPLITS, BOTH)
 SOURCES = ("hf", "github")
 # Both splits hold every problem; a shorter file silently changes the
 # denominator of every score, so preparation fails closed against this.
 EXPECTED_ROWS = {"test": 100, "test_with_solution": 100}
-OUTPUT_FPATHS = {split: DATA_DIR / f"combibench_{split}.jsonl" for split in SPLITS}
+# The one path the benchmark config reads, whichever splits were prepared into it.
+OUTPUT_FPATH = DATA_DIR / "combibench.jsonl"
 
 _BLOCK_COMMENT_RE = re.compile(r"/-[\s\S]*?-/")
 _LINE_COMMENT_RE = re.compile(r"^\s*--.*\n", re.MULTILINE)
@@ -277,35 +281,47 @@ def prepare(
     cache_dir: Optional[Path] = None,
     source_file: Optional[Path] = None,
 ) -> Path:
-    """Write one split as Gym task rows and return the output path.
+    """Write the selected split(s) as Gym task rows and return the output path.
+
+    ``split`` is ``test`` (the default: answers withheld), ``test_with_solution``
+    (published answers substituted) or ``both``: the paper's two settings, ``test``
+    rows first. Every row keeps its own ``split`` value, which is what the server
+    groups its per-setting metrics on. ``limit`` applies to each split, so a
+    subset of ``both`` still holds both settings.
 
     ``source_file`` bypasses both upstream sources and reads Hugging-Face-shaped
     records from a local JSON list; it exists for synthetic example data and
     tests, and is exempt from the row-count manifest.
     """
-    if split not in SPLITS:
-        raise ValueError(f"split must be one of {SPLITS}, got {split!r}")
+    if split not in SPLIT_CHOICES:
+        raise ValueError(f"split must be one of {SPLIT_CHOICES}, got {split!r}")
     if source not in SOURCES:
         raise ValueError(f"source must be one of {SOURCES}, got {source!r}")
     if limit is not None and limit < 1:
         raise ValueError(f"limit must be a positive integer, got {limit}")
 
-    if source_file is not None:
-        records = json.loads(Path(source_file).read_text(encoding="utf-8"))
-    elif source == "hf":
-        records = load_hf_rows(split)
-    else:
-        records = load_github_rows(split, cache_dir or Path(tempfile.gettempdir()) / "combibench")
+    rows = []
+    for name in SPLITS if split == BOTH else (split,):
+        if source_file is not None:
+            records = json.loads(Path(source_file).read_text(encoding="utf-8"))
+        elif source == "hf":
+            records = load_hf_rows(name)
+        else:
+            records = load_github_rows(name, cache_dir or Path(tempfile.gettempdir()) / "combibench")
 
-    # Synthetic rows are labelled as such so they can never be mistaken for the benchmark.
-    rows = [format_row(record, split, "synthetic" if source_file is not None else source) for record in records]
-    if limit is not None:
-        rows = rows[:limit]
-    validate_rows(rows)
-    if limit is None and source_file is None:
-        check_corpus_complete(rows, split)
+        # Synthetic rows are labelled as such so they can never be mistaken for the benchmark.
+        split_rows = [
+            format_row(record, name, "synthetic" if source_file is not None else source) for record in records
+        ]
+        if limit is not None:
+            split_rows = split_rows[:limit]
+        # Per split: the same problem legitimately appears once in each.
+        validate_rows(split_rows)
+        if limit is None and source_file is None:
+            check_corpus_complete(split_rows, name)
+        rows.extend(split_rows)
 
-    output_path = Path(output) if output is not None else OUTPUT_FPATHS[split]
+    output_path = Path(output) if output is not None else OUTPUT_FPATH
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as handle:
         for row in rows:
@@ -314,27 +330,24 @@ def prepare(
     return output_path
 
 
-def main(default_split: str = "test", default_output: Optional[Path] = None) -> None:
-    """Command line entry point, shared with ``benchmarks/combibench_with_solution``.
-
-    That benchmark is the same preparation with a different split and output
-    path, so it passes them as defaults here rather than growing a second parser
-    that would inevitably accept a different set of flags.
-    """
+def main() -> None:
+    """Command line entry point."""
     parser = argparse.ArgumentParser(description="Download and prepare CombiBench for NeMo Gym")
-    parser.add_argument("--split", choices=SPLITS, default=default_split)
+    parser.add_argument("--split", choices=SPLIT_CHOICES, default="test")
     parser.add_argument(
         "--source",
         choices=SOURCES,
         default="github",
         help="github: pinned .lean files (compile on Mathlib v4.24.0); hf: pinned dataset upstream's harness loads",
     )
-    parser.add_argument("--limit", type=positive_int, default=None, help="Max rows to output (positive integer)")
+    parser.add_argument(
+        "--limit", type=positive_int, default=None, help="Max rows to output per split (positive integer)"
+    )
     parser.add_argument(
         "--output",
         type=Path,
-        default=default_output,
-        help="Output JSONL path (default: data/combibench_<split>.jsonl)",
+        default=None,
+        help="Output JSONL path (default: data/combibench.jsonl, the path the benchmark config reads)",
     )
     parser.add_argument("--cache-dir", type=Path, default=None, help="Where the GitHub tarball is unpacked")
     parser.add_argument("--source-file", type=Path, default=None, help="Local JSON list of HF-shaped records")
