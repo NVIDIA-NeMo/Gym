@@ -36,6 +36,10 @@
         "Max": 0.0,
         "Standard deviation": 0.0
     },
+    "source_sentence": {
+        "unique_count": 5,
+        "total_count": 5
+    },
     "solution": {
         "unique_count": 5,
         "total_count": 5

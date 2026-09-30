@@ -183,10 +183,14 @@ class TranslationWithJudgeRunRequest(BaseRunRequest):
     # Mirrors the curriculum dataset's own row schema (see
     # prepare_translation_curriculum.py) rather than inventing separate field
     # names -- ``prompt`` is the same messages list wrapped into
-    # ``responses_create_params.input``, kept here too so verify() can pull
-    # the raw source segment back out for the judge prompt.
+    # ``responses_create_params.input``, kept here too for provenance.
     prompt: List[Dict[str, Any]]
     solution: str
+    # The raw sentence to translate, with no instruction wrapping -- verify() sends this
+    # (not `prompt`) as the judge's "Source segment", since `prompt` may wrap it in
+    # arbitrary instruction text (see `prompt_style`) that the judge should not see as
+    # source content.
+    source_sentence: str
     src_lang: str  # FLORES-200 code, e.g. "eng_Latn" -- language of `prompt`
     tgt_lang: str  # FLORES-200 code, e.g. "kan_Knda" -- language of `solution`
     direction: Optional[str] = None  # "src2tgt" | "tgt2src" -- provenance only, not used
@@ -224,6 +228,7 @@ class TranslationWithJudgeVerifyResponse(TranslationWithJudgeVerifyRequest, Base
 
 
 class TranslationWithJudgeResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     # Adapted from Arena Hard / math_with_judge's equivalence-judge prompts,
     # rewritten as a direct 0-100 quality rating for translation adequacy +
     # fluency instead of a binary equivalence verdict.
@@ -284,9 +289,8 @@ Candidate translation:
         bleu = sentence_bleu(generation, [body.solution], tokenize=tokenize).score
         chrf = sentence_chrf(generation, [body.solution]).score
 
-        source_text = body.prompt[-1]["content"] if body.prompt else ""
         judge_score, judge_evaluation = await self._judge_translation(
-            source_text=source_text,
+            source_text=body.source_sentence,
             reference_translation=body.solution,
             candidate_translation=generation,
             source_lang_name=_lang_name(body.src_lang),

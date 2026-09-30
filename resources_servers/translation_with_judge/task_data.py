@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the translation_with_judge server.
 
-Mirrors ``TranslationWithJudgeRunRequest`` (app.py:181): fields ride at the row top level, no
-``verifier_metadata`` bucket. ``prompt`` and ``solution`` feed both the judge prompt and the
-diagnostic sentence-BLEU/chrF computation in verify(); ``src_lang``/``tgt_lang`` (FLORES-200
-codes) additionally key compute_metrics()'s per-language-pair aggregation. ``direction``,
+Mirrors ``TranslationWithJudgeRunRequest`` (app.py:182): fields ride at the row top level, no
+``verifier_metadata`` bucket. ``source_sentence`` and ``solution`` feed both the judge prompt
+and the diagnostic sentence-BLEU/chrF computation in verify(); ``src_lang``/``tgt_lang``
+(FLORES-200 codes) additionally key compute_metrics()'s per-language-pair aggregation.
+``prompt`` is what the policy model actually sees (which may wrap ``source_sentence`` in
+arbitrary instruction text per ``prompt_style``) and is never read by verify(). ``direction``,
 ``prompt_style``, and ``dataset_type`` ride along for provenance only and are never read.
 """
 
@@ -18,8 +20,13 @@ class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     prompt: List[Dict[str, Any]] = Field(
-        description="Instruction-wrapped source segment; its last message's content is the judge's source_text.",
-        json_schema_extra={"consumed_by": ["verify", "prompt"]},
+        description="Instruction-wrapped source segment sent to the policy model -- provenance only, not read by "
+        "verify() (which reads `source_sentence` instead).",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
+    source_sentence: str = Field(
+        description="The raw sentence to translate, with no instruction wrapping; the judge's source_text.",
+        json_schema_extra={"consumed_by": ["verify"]},
     )
     solution: str = Field(
         description="Reference translation; the judge's reference and the sentence-BLEU/chrF ground truth.",

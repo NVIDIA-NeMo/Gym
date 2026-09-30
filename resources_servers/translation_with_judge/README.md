@@ -25,10 +25,11 @@ Each row in `data/*.jsonl` (see `TranslationWithJudgeRunRequest` in `app.py`):
 
 | Field | Meaning |
 | --- | --- |
-| `prompt` | `[{"role": "user", "content": "..."}]` — the instruction-wrapped source segment |
+| `prompt` | `[{"role": "user", "content": "..."}]` — the instruction-wrapped source segment sent to the policy model; provenance only, not read by `verify()` |
+| `source_sentence` | The raw sentence to translate, with no instruction wrapping — sent to the judge as its source segment |
 | `responses_create_params` | `{"input": prompt}` — required by nemo_gym, sent to the policy model |
 | `solution` | Reference translation |
-| `src_lang` / `tgt_lang` | FLORES-200 codes (e.g. `eng_Latn`, `kan_Knda`) for `prompt`'s language / `solution`'s language |
+| `src_lang` / `tgt_lang` | FLORES-200 codes (e.g. `eng_Latn`, `kan_Knda`) for `source_sentence`'s language / `solution`'s language |
 | `direction` | `src2tgt` \| `tgt2src` — provenance only, not read by `verify()` |
 | `prompt_style` | Which instruction template wrapped the segment — provenance only |
 | `agent_ref` | `{"type": "responses_api_agents", "name": "translation_with_judge_simple_agent"}` — required by nemo_gym, routes the row to the agent |
@@ -117,7 +118,7 @@ gym eval run --no-serve \
 ```
 
 `data/example_rollouts.jsonl` was generated this way against a live
-`openai/gpt-oss-120b` judge+policy endpoint (SGLang), scoring 94-100/100 on
+`openai/gpt-oss-120b` judge+policy endpoint (SGLang), scoring 85-100/100 on
 the 5 example rows.
 
 ## Config

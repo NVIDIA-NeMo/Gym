@@ -127,6 +127,7 @@ class TestApp:
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=prompt),
             response=_response_with_text("policy_response", generation_text),
             prompt=prompt,
+            source_sentence="The weather is lovely today.",
             solution="Das Wetter ist heute schön.",
             src_lang="eng_Latn",
             tgt_lang="deu_Latn",
@@ -174,6 +175,9 @@ class TestApp:
         _, kwargs = server_mock.post.await_args
         assert kwargs["server_name"] == "translation_judge_model"
         assert kwargs["url_path"] == "/v1/responses"
+        judge_prompt_content = kwargs["json"].input[1].content
+        assert "The weather is lovely today." in judge_prompt_content
+        assert "Translate into German" not in judge_prompt_content
 
     async def test_verify_unparseable_judge_response_masks_sample(
         self, config: TranslationWithJudgeResourcesServerConfig
