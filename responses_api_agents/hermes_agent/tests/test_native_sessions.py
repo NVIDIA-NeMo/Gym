@@ -18,7 +18,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest, _AgentSessionRecord
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
@@ -136,7 +136,7 @@ def test_http_close_retry_and_stale_activation_never_fall_back(agent, state):
 
 
 async def test_invalid_activation_keeps_session_ready(agent: HermesAgent, state: HermesAgentSessionState) -> None:
-    agent._agent_sessions["session"] = state
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     agent._run_sandbox_episode = AsyncMock(return_value=episode(agent))
     with pytest.raises(HTTPException) as error:
         await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task", top_p=0.9))
@@ -151,10 +151,10 @@ async def test_invalid_activation_keeps_session_ready(agent: HermesAgent, state:
 
 
 def test_http_close_retry_survives_other_session_closes(agent, state, monkeypatch):
-    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: 100.0)
+    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: 100.0)
 
     async def initialize(agent_session_id, body):
-        return replace(state, request=body, close_lock=asyncio.Lock())
+        return replace(state, request=body)
 
     agent._initialize_agent_session_state = AsyncMock(side_effect=initialize)
     with TestClient(agent.setup_webserver()) as client:
@@ -186,9 +186,9 @@ def test_http_close_retry_survives_other_session_closes(agent, state, monkeypatc
 
 async def test_close_receipt_expires_without_extending_on_retry(agent, state, monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
-    agent._agent_sessions["session"] = state
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
     first = await agent.close_agent_session(request(state), close)
     clock[0] = 109.0
@@ -197,7 +197,7 @@ async def test_close_receipt_expires_without_extending_on_retry(agent, state, mo
     with pytest.raises(HTTPException) as error:
         await agent.close_agent_session(request(state), close)
     assert error.value.status_code == 409
-    assert not agent._closed_agent_sessions
+    assert not agent._closed_session_records
     agent._create_episode = AsyncMock(side_effect=AssertionError("host fallback"))
     with pytest.raises(HTTPException) as error:
         await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task"))
@@ -207,9 +207,9 @@ async def test_close_receipt_expires_without_extending_on_retry(agent, state, mo
 
 async def test_close_retry_window_starts_after_cleanup(agent, state, monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
-    agent._agent_sessions["session"] = state
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
 
     async def disconnect():
         clock[0] = 200.0  # Cleanup itself takes longer than the retry window.
@@ -240,7 +240,7 @@ async def test_close_cancels_activation_and_rejects_duplicate(agent, state):
         finally:
             stopped.set()
 
-    agent._agent_sessions["session"] = state
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     agent._run_sandbox_episode = AsyncMock(side_effect=activate)
     body = NeMoGymResponseCreateParamsNonStreaming(input="task")
     running = asyncio.create_task(agent.responses(request(state), body))
@@ -265,7 +265,7 @@ async def test_close_cancels_activation_and_rejects_duplicate(agent, state):
 async def test_close_failure_keeps_session_for_retry(
     agent: HermesAgent, state: HermesAgentSessionState, runner_started: bool
 ) -> None:
-    agent._agent_sessions["session"] = state
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     if runner_started:
         state.runner_cleanup = RunnerCleanup.UNCONFIRMED
         agent._download_json = AsyncMock(return_value={"cleanup_confirmed": True})
@@ -273,7 +273,7 @@ async def test_close_failure_keeps_session_for_retry(
     close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
     with pytest.raises(RuntimeError, match="session files"):
         await agent.close_agent_session(request(state), close)
-    assert agent._agent_sessions["session"] is state
+    assert agent._session_records["session"].state is state
     assert state.phase is SessionPhase.CLOSING
     assert state.runner_cleanup is (RunnerCleanup.CONFIRMED if runner_started else RunnerCleanup.IDLE)
     state.sandbox.disconnect.assert_not_awaited()
@@ -291,7 +291,7 @@ async def test_owned_close_stops_without_receipt_or_filesystem_cleanup(agent, st
     state.owns_sandbox = True
     state.runner_cleanup = runner_cleanup
     state.observations = AgentObservationBundle(source="hermes")
-    agent._agent_sessions["session"] = state
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     agent._download_json = AsyncMock(return_value=receipt)
     if receipt is None:
         agent._download_json.side_effect = FileNotFoundError("missing cleanup receipt")
@@ -301,7 +301,7 @@ async def test_owned_close_stops_without_receipt_or_filesystem_cleanup(agent, st
     response = await agent.close_agent_session(request(state), close)
     assert response.agent_observations == state.observations
     assert state.runner_cleanup is RunnerCleanup.CONFIRMED
-    assert "session" not in agent._agent_sessions
+    assert agent._session_records["session"].state is None
     assert await agent.close_agent_session(request(state), close) == response
     state.sandbox.stop.assert_awaited_once()
     state.sandbox.disconnect.assert_not_awaited()
@@ -313,17 +313,17 @@ async def test_owned_close_stops_without_receipt_or_filesystem_cleanup(agent, st
 async def test_owned_stop_failure_keeps_close_retryable(agent, state, failure):
     state.owns_sandbox = True
     state.runner_cleanup = RunnerCleanup.UNCONFIRMED
-    agent._agent_sessions["session"] = state
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     state.sandbox.stop.side_effect = [failure("stop failed"), None]
     agent._download_json = AsyncMock(side_effect=FileNotFoundError("missing cleanup receipt"))
     close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
 
     with pytest.raises(failure, match="stop failed"):
         await agent.close_agent_session(request(state), close)
-    assert agent._agent_sessions["session"] is state
+    assert agent._session_records["session"].state is state
     assert state.phase is SessionPhase.CLOSING
     assert state.runner_cleanup is RunnerCleanup.UNCONFIRMED
-    assert "session" not in agent._closed_agent_sessions
+    assert "session" not in agent._closed_session_records
     response = await agent.close_agent_session(request(state), close)
     assert await agent.close_agent_session(request(state), close) == response
     assert state.sandbox.stop.await_count == 2
@@ -460,7 +460,7 @@ async def test_close_fences_a_launch_that_never_reached_the_shell(agent, state, 
     # A delayed delivery cannot launch, before or after close removes the session directory.
     assert (await local_runner(commands[0])).return_code == 0
     assert not (directory / "runner.pid").exists()
-    agent._agent_sessions["session"] = state
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
     first = await agent.close_agent_session(request(state), close)
     assert await agent.close_agent_session(request(state), close) == first
@@ -749,76 +749,24 @@ async def test_seed_binds_full_payload_and_is_serialized(agent, state):
     close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
     result = await agent.close_agent_session(SimpleNamespace(session={}), close)
     assert await agent.close_agent_session(SimpleNamespace(session={}), close) == result
-    assert not agent._agent_sessions
+    assert all(record.state is None for record in agent._session_records.values())
     state.sandbox.disconnect.assert_awaited_once()
-
-
-async def test_unknown_close_tombstone_and_locks_expire(agent, state, monkeypatch):
-    agent.config.session_lifetime_seconds = 20
-    clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: clock[0])
-    agent.config.session_close_retry_window_seconds = 10
-    close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
-    stale_request = SimpleNamespace(session={})
-    await agent.close_agent_session(stale_request, close)
-    with pytest.raises(HTTPException, match="already closed"):
-        await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
-    clock[0] = 110.0
-    agent._expire_closed_agent_sessions()
-    assert not agent._closed_agent_sessions
-    with pytest.raises(HTTPException, match="already closed"):
-        await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
-    with pytest.raises(HTTPException, match="expired"):
-        await agent.close_agent_session(SimpleNamespace(session={}), close)
-    clock[0] = 120.0
-    agent._expire_closed_agent_sessions()
-    assert not agent._closed_agent_session_ids
-    assert not agent._agent_session_locks
-    with pytest.raises(HTTPException, match="expired"):
-        await agent.seed_agent_session(stale_request, state.request)
-    with pytest.raises(HTTPException, match="expired"):
-        await agent.close_agent_session(stale_request, close)
 
 
 @pytest.mark.parametrize("marker", [None, "", 0, [], {}])
 async def test_malformed_cookie_cannot_fall_back_or_seed(agent, state, marker):
     malformed = SimpleNamespace(session={"agent_session_id": marker})
     agent._create_response = AsyncMock(side_effect=AssertionError("host fallback"))
-    with pytest.raises(HTTPException, match="Invalid Hermes"):
+    with pytest.raises(HTTPException, match="Invalid agent"):
         await agent.responses(malformed, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    with pytest.raises(HTTPException, match="Invalid Hermes"):
+    with pytest.raises(HTTPException, match="Invalid agent"):
         await agent.seed_agent_session(malformed, state.request)
-    with pytest.raises(HTTPException, match="Invalid Hermes"):
+    with pytest.raises(HTTPException, match="Invalid agent"):
         await agent.close_agent_session(
             malformed, AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
         )
-    with pytest.raises(HTTPException, match="Invalid Hermes"):
+    with pytest.raises(HTTPException, match="Invalid agent"):
         await agent.run(malformed, HermesAgentRunRequest(responses_create_params={"input": "task"}))
-
-
-@pytest.mark.parametrize("cleanup_fails", [False, True])
-async def test_abandoned_session_is_closed_or_retained_fail_closed(agent, state, cleanup_fails, caplog):
-    agent.config.session_lifetime_seconds = 0.001
-    agent._initialize_agent_session_state = AsyncMock(return_value=state)
-    await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
-    if cleanup_fails:
-        state.sandbox.disconnect.side_effect = RuntimeError("disconnect unavailable")
-    reaper = agent._session_reapers["session"]
-    await asyncio.wait_for(asyncio.shield(reaper), timeout=1)
-    if cleanup_fails:
-        assert agent._agent_sessions["session"].phase is SessionPhase.CLOSING
-        assert "owner recovery required" in caplog.text
-        with pytest.raises(HTTPException):
-            await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task"))
-        state.sandbox.disconnect.side_effect = None
-        await agent.close_agent_session(
-            SimpleNamespace(session={}),
-            AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id),
-        )
-    assert not agent._agent_sessions
-    assert not agent._session_reapers
-    assert "session" in agent._closed_agent_sessions
-    state.sandbox.stop.assert_not_awaited()
 
 
 @pytest.mark.parametrize("owns_sandbox", [False, True])
@@ -851,11 +799,11 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
     with pytest.raises(RuntimeError, match="installer failed"):
         await agent.seed_agent_session(SimpleNamespace(session={}), body)
     if cleanup_fails:
-        assert agent._agent_sessions["session"].phase is SessionPhase.CLOSING
+        assert agent._session_records["session"].state.phase is SessionPhase.CLOSING
         with pytest.raises(HTTPException, match="closing"):
             await agent.seed_agent_session(SimpleNamespace(session={}), body)
     else:
-        assert not agent._agent_sessions
+        assert all(record.state is None for record in agent._session_records.values())
     sandbox.exec.side_effect = None
     cleanup.side_effect = None
     receipt = await agent.close_agent_session(
@@ -863,8 +811,7 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
         AgentCloseSessionRequest(agent_session_id="session", episode_id=body.episode_id),
     )
     assert receipt.agent_session_id == "session"
-    assert not agent._agent_sessions
-    assert not agent._session_reapers
+    assert all(record.state is None for record in agent._session_records.values())
     if owns_sandbox:
         sandbox.disconnect.assert_not_awaited()
     else:

@@ -24,7 +24,9 @@ from fastapi import HTTPException
 
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    _AgentSessionRecord,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import (
@@ -135,6 +137,7 @@ class TestSanity:
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: provider)
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.AsyncSandbox.connect", connect)
 
+        hermes._session_records["session"] = _AgentSessionRecord()
         state = await hermes._initialize_agent_session_state(
             "session",
             AgentSeedSessionRequest(
@@ -188,6 +191,7 @@ class TestSanity:
         )
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.shutil.which", lambda _name: "/usr/bin/uv")
 
+        hermes._session_records["session"] = _AgentSessionRecord()
         await hermes._initialize_agent_session_state(
             "session",
             AgentSeedSessionRequest(
@@ -229,6 +233,7 @@ class TestSanity:
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: provider)
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.AsyncSandbox", sandbox_factory)
 
+        hermes._session_records["session"] = _AgentSessionRecord()
         state = await hermes._initialize_agent_session_state(
             "session",
             AgentSeedSessionRequest(
@@ -254,7 +259,9 @@ class TestSanity:
             episode_id=EpisodeId(rollout_id="rollout"),
             task_id=TaskId(taskset="test", task_id="task"),
         )
-        hermes._agent_sessions["session"] = MagicMock(request=seeded)
+        hermes._session_records["session"] = _AgentSessionRecord(
+            state=MagicMock(request=seeded), episode_id=seeded.episode_id
+        )
         hermes._close_agent_session_state = AsyncMock()
         request = SimpleNamespace(session={"agent_session_id": "session"})
 
@@ -278,7 +285,9 @@ class TestSanity:
         )
         state = MagicMock(request=body)
         hermes._initialize_agent_session_state = AsyncMock(return_value=state)
-        hermes._close_agent_session_state = AsyncMock(return_value=None)
+        hermes._close_agent_session_state = AsyncMock(
+            return_value=AgentCloseSessionResponse(agent_session_id="session")
+        )
         request = SimpleNamespace(session={})
 
         first = await hermes.seed_agent_session(request, body)
@@ -369,8 +378,9 @@ class TestSanity:
             task_id=TaskId(taskset="test", task_id="task"),
             tool_accesses=list(tool_accesses),
         )
-        hermes._agent_sessions["session"] = HermesAgentSessionState(
-            request=seed, sandbox=sandbox, workdir=None, session_dir="/session"
+        hermes._session_records["session"] = _AgentSessionRecord(
+            state=HermesAgentSessionState(request=seed, sandbox=sandbox, workdir=None, session_dir="/session"),
+            episode_id=seed.episode_id,
         )
         request = SimpleNamespace(
             session={"agent_session_id": "session"},
@@ -534,7 +544,7 @@ class TestSanity:
 
         stop = [command for command in sandbox.commands if "runner.stop" in command and "kill -TERM" in command]
         assert len(stop) == 1
-        assert "session" not in hermes._agent_sessions
+        assert hermes._session_records["session"].state is None
         with pytest.raises(asyncio.CancelledError):
             await activation
 

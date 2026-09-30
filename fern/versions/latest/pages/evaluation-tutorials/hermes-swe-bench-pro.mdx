@@ -7,10 +7,12 @@ position: 4
 # Evaluate SWE-bench Pro with Hermes
 
 Use [hermes.yaml](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/swebench/pro/hermes.yaml)
-to connect Hermes to the SWE-bench Pro Resources Server through the `single_agent_turn`
+to connect Hermes to the SWE-bench Pro Resources Server through the `single_agent_turn_legacy`
 Environment Server. The Environment Server owns session setup, agent execution, verification,
 and cleanup. Hermes performs its multi-turn model/tool loop inside the task sandbox that
 the Resources Server created. The Resources Server extracts the resulting patch and grades it in a clean sandbox.
+The adapter accepts prepared benchmark rows and uses the same session lifecycle as `single_agent_turn`;
+it does not call the agent's `/run` endpoint.
 
 ## Configure the model and sandbox
 
@@ -38,22 +40,12 @@ Skip this step if you already have the prepared JSONL:
 python benchmarks/swebench/pro/prepare.py
 ```
 
-Then convert the prepared rows into the task format consumed by the Environment Server:
+No separate task-conversion step is required. The standard benchmark command prepares
+and collates the rows automatically:
 
 ```bash
-python benchmarks/swebench/pro/materialize_single_agent_tasks.py \
-  benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
-  benchmarks/swebench/data/swebench_pro_tasks.jsonl
+gym eval run --benchmark swebench/pro/hermes --config model-provider.yaml -o rollouts.jsonl
 ```
-
-Each output row separates `task_id` from `task_input`. The latter contains
-`responses_create_params` for the model input and `task_data` for the benchmark's fields,
-including verifier assets. Conversion does not call the model or start a sandbox.
-It works for the full dataset or a selected subset; already-converted tasks need no further conversion.
-
-The default taskset is `swebench_pro`, matching `environment_server_routes` in `hermes.yaml`.
-If you pass `--taskset`, add the same key to your routing configuration. Pass the converted
-task JSONL to evaluation: this recipe does not accept the flat rows produced by `prepare.py`.
 
 ## Start servers and run evaluation
 
@@ -69,7 +61,8 @@ configuration. `--no-serve` does not inherit routing settings from the running h
 ```bash
 gym eval run --no-serve \
   --config benchmarks/swebench/pro/hermes.yaml --config model-provider.yaml \
-  -i benchmarks/swebench/data/swebench_pro_tasks.jsonl -o rollouts.jsonl
+  -i benchmarks/swebench/data/swebench_pro_benchmark.jsonl -o rollouts.jsonl \
+  +agent_name=swebench_pro_hermes_agent
 ```
 
 ## Session limits
