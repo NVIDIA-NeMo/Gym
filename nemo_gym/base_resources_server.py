@@ -312,14 +312,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         if self._checkpoint is not None and session_id is not None:
             self._checkpoint.ended(session_id)
 
-    def export_session_state(self, session_id: str) -> JsonValue:
-        """Return a session's state for a checkpoint; raise ``KeyError`` if this server no longer holds it."""
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        """Return each session's state for a checkpoint, leaving out sessions this server no longer holds."""
         raise NotImplementedError
 
-    def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        """Validate every state, then install all of them; never install a partial set."""
         raise NotImplementedError
 
-    def retire_session_state(self, session_id: str) -> None:
+    async def retire_session_state(self, session_id: str) -> None:
+        """Discard a session whose attempt was retired."""
         raise NotImplementedError
 
     def normalize_tool_name(self, name: str) -> str:

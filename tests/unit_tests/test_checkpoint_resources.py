@@ -51,15 +51,19 @@ class CounterServer(SimpleResourcesServer):
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
-    def export_session_state(self, session_id: str) -> JsonValue:
-        return {"count": self.counters[session_id]}
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        return {
+            session_id: {"count": self.counters[session_id]}
+            for session_id in session_ids
+            if session_id in self.counters
+        }
 
-    def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
         if any(not isinstance(state.get("count"), int) for state in states.values()):
             raise ValueError("invalid counter state")
         self.counters.update({session_id: state["count"] for session_id, state in states.items()})
 
-    def retire_session_state(self, session_id: str) -> None:
+    async def retire_session_state(self, session_id: str) -> None:
         self.counters.pop(session_id, None)
 
 
@@ -200,7 +204,7 @@ def _response() -> dict:
 class StatelessServer(CounterServer):
     checkpoint_mode: ClassVar[str] = "stateless"
 
-    def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
         raise NotImplementedError
 
 
