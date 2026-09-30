@@ -15,9 +15,8 @@
 
 """Build the Formal Conjectures dataset from a pinned upstream revision.
 
-The conversion lives here rather than in the source repo because upstream is third party and
-not ours to modify -- the same exception under which ``math_formal_lean/prepare_minif2f.py``
-is kept in tree.
+The conversion lives here rather than in the source repo because upstream is a third-party
+repository.
 
 ``extract.py`` can pull ~1600 candidate tasks out of the repo, but candidacy is not the same
 as answerability: a statement can reference a definition that does not survive the rewrite to

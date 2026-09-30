@@ -19,8 +19,8 @@ Ported from NeMo-Skills:
 https://github.com/NVIDIA-NeMo/NeMo-Skills/blob/main/nemo_skills/code_execution/proof_utils.py
 
 ``strip_thinking`` and ``strip_lean_comments_and_strings`` are not from NeMo-Skills; they are
-shared with the whole-file Lean servers (``leancat``), whose extraction must skip a reasoning
-model's thinking and whose text checks must ignore comments and string literals.
+shared with the whole-file Lean servers: extraction must skip a reasoning model's thinking and
+text checks must ignore comments and string literals.
 """
 
 import re

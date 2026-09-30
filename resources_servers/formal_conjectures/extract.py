@@ -16,17 +16,14 @@
 """Turn Formal Conjectures source files into self-contained Lean 4 proof tasks.
 
 Formal Conjectures (https://github.com/google-deepmind/formal-conjectures) is a library of
-formalized mathematical statements, most of them **open** -- the headline conjectures carry a
-``sorry`` that nobody on earth can fill. Those are useless as a benchmark: every model scores
-zero and the number says nothing.
+formalized mathematical statements, most of them open (the conjecture carries a ``sorry``).
+Open statements have no reference proof, so they are not usable as tasks.
 
-What is usable is the other half of the repo. Alongside each open conjecture sit theorems that
-ship with **real Lean proofs**: ``@[category test]`` sanity checks, ``@[category API]``
-supporting lemmas, textbook exercises, and the handful of ``research solved`` results that have
-been formalized. Those have ground truth, so "did the model prove it?" is a decidable question.
-This module strips the proof off such a theorem and hands back the statement with a hole.
+The usable part is the theorems that ship with Lean proofs: ``@[category test]`` sanity checks,
+``@[category API]`` supporting lemmas, textbook exercises, and formalized ``research solved``
+results. This module strips the proof off such a theorem and returns the statement with a hole.
 
-Three things make an FC file harder to turn into a task than a LeanCat one:
+Three properties of FC files shape the conversion:
 
 1. **Files are not self-contained.** They ``import FormalConjecturesUtil`` and 760 of 1268 of
    them declare ``def``s that the target theorem depends on. So a task is a *whole file*, not a
@@ -34,10 +31,8 @@ Three things make an FC file harder to turn into a task than a LeanCat one:
 
 2. **One file holds several declarations, and the others may legitimately contain ``sorry``.**
    A file typically pairs a proved ``test`` lemma with the open conjecture it sanity-checks.
-   A LeanCat-style "no ``sorry`` anywhere" check would reject a correct answer. Rather than
-   teach the verifier to scope its check to one declaration, we emit a task containing exactly
-   one declaration -- everything else is dropped -- so the file has exactly one hole and the
-   simple check is the correct check.
+   A "no ``sorry`` anywhere" check would reject a correct answer, so the verifier instead asks
+   Lean whether the target declaration is proved (see the note on prefix declarations below).
 
 3. **``FormalConjecturesUtil`` would have to be in the sandbox.** It exists for FC's own
    metadata tooling: the ``@[category ...]``/``@[AMS ...]`` attributes and ``answer(...)``
@@ -230,7 +225,7 @@ def extract_file(path: str, text: str, fc_only_names: Set[str]) -> List[Task]:
 
         # Keep every declaration BEFORE the target and drop everything after it.
         #
-        # Dropping the earlier ones too was the obvious simplification and it is wrong:
+        # Dropping the earlier ones too is not viable:
         # `@[category API]` declarations exist to "construct basic theory around a new
         # definition", and proofs lean on them. Measured on a 32-task sample, deleting them
         # broke 14 of 32 reference files -- `unsolved goals`, `Function expected at`,

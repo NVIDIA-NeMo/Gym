@@ -91,7 +91,7 @@ class ToolchainCheck:
                 LOG.error(
                     "SANDBOX MATHLIB MISMATCH: sandbox is Lean/Mathlib %s, but these tasks are written "
                     "against %s. Statements may fail to compile regardless of the model, so scores from "
-                    "this run are not comparable to published ones.",
+                    "this run are not reliable.",
                     found,
                     want,
                 )

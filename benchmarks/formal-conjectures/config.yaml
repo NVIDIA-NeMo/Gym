@@ -15,6 +15,5 @@ formal_conjectures_benchmark_agent:
         prepare_script: benchmarks/formal-conjectures/prepare.py
         prompt_config: benchmarks/prompts/eval/formal-conjectures/default.yaml
         license: Apache 2.0
-        # Smoke-test budget. Raise for a real baseline; these tasks are cheap to verify
-        # (~5s per compile) compared with LeanCat's ~90s.
+        # Smoke-test budget. Raise for a real baseline.
         num_repeats: 8

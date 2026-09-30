@@ -53,7 +53,7 @@ def has_unterminated_block_comment(code: str) -> bool:
     Worth asking separately: when a model mangles a closing delimiter (writing ``- /`` for
     ``-/``, which happened 48 times in a 12k-rollout run) the rest of the file is swallowed by
     the comment. Every later check then sees an empty file and reports "statement modified",
-    which blames the model for cheating when it actually produced malformed output.
+    which misreports malformed output as a modified statement.
     """
     i, n, depth = 0, len(code), 0
     while i < n:

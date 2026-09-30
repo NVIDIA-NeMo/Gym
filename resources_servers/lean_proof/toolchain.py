@@ -15,14 +15,9 @@
 
 """Confirm the sandbox is running the Mathlib a benchmark's statements were written against.
 
-This exists because the failure is otherwise invisible. Each Lean benchmark pins a different
-Mathlib -- miniF2F v4.12.0, LeanCat v4.19.0, Formal Conjectures v4.33.1 -- and the sandbox
-carries exactly one. Point a benchmark at the wrong one and it does not error at startup: it
-fails individual tasks with ordinary-looking "unknown identifier" and "invalid field" errors,
-indistinguishable at a glance from a model that could not do the problem. Measured on LeanCat
-against a v4.12.0 sandbox: 36 of the 100 reference statements fail to compile *with their
-`sorry` still intact*, so those score 0 no matter what the model writes and the run reports a
-plausible number that is not a model result.
+Each Lean benchmark pins a specific Mathlib version and the sandbox carries exactly one. A
+mismatch does not error at startup: individual tasks fail with ordinary-looking "unknown
+identifier" and "invalid field" errors that look like model failures.
 
 ``/execute`` takes no project parameter and NeMo-Skills hardcodes the project path, so the
 Mathlib version is fixed when the container starts. This check is what turns that from a silent
@@ -98,7 +93,7 @@ class ToolchainCheck:
                     "SANDBOX MATHLIB MISMATCH: sandbox is Lean/Mathlib %s, these tasks target %s. "
                     "An older Mathlib does NOT fail loudly -- it fails individual statements with "
                     "ordinary-looking errors, so the run reports a plausible but meaningless number. "
-                    "Scores from this run are not comparable to published ones.",
+                    "Scores from this run are not reliable.",
                     found,
                     want,
                 )
