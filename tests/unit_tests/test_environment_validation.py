@@ -6,7 +6,9 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
+from nemo_gym.config_types import ConfigInterpolationError
 from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
     EnvironmentValidationError,
@@ -16,9 +18,110 @@ from nemo_gym.environment.validation import (
     _infer_profile,
     _only_delegates_to_super,
     _only_raises_not_implemented,
+    _resolve_manifest_composition,
     _with_component_root,
     validate_environment,
 )
+
+
+@pytest.mark.parametrize(
+    "name", ["terminal_bench_4/miniswe", "deepsearchqa", "widesearch", "fukuyamabench", "moldetox", "scicodepile"]
+)
+def test_current_benchmark_manifests_match_runtime_composition(name: str) -> None:
+    from nemo_gym.environment.manifest import resolve_manifest_config_path
+    from nemo_gym.environment.validation import _mirror_differences
+
+    path = Path(__file__).parents[2] / "benchmarks" / name / "manifest.yaml"
+    manifest = load_manifest(path)
+    composition = _resolve_manifest_composition(
+        resolve_manifest_config_path(path, manifest), dataset_owner=manifest.dataset_owner
+    )
+    assert _mirror_differences(manifest, composition) == {}
+
+
+@pytest.mark.parametrize("source", ["prepared", "agent"])
+def test_benchmark_prompt_ownership_preserves_prepared_rows(tmp_path: Path, source: str) -> None:
+    path = _asset(tmp_path, kind="benchmark")
+    raw = yaml.safe_load(path.read_text())
+    raw["prompt_source"] = source
+    raw.pop("standard_prompt_config")
+    path.write_text(yaml.safe_dump(raw))
+    data = path.parent / "data/example.jsonl"
+    original = json.dumps({"responses_create_params": {"input": [{"role": "user", "content": "Already rendered"}]}})
+    data.write_text(original + "\n")
+
+    report = validate_environment(path)
+
+    assert report.datasets[0].rows == 1
+    assert report.datasets[0].prompt_config is None
+    assert data.read_text() == original + "\n"
+
+
+def test_agent_prompt_is_checked_but_not_applied_to_dataset_rows(tmp_path: Path) -> None:
+    path = _asset(tmp_path, kind="benchmark")
+    raw = yaml.safe_load(path.read_text())
+    raw["prompt_source"] = "agent"
+    path.write_text(yaml.safe_dump(raw))
+    prompt = path.parent / "prompts/default.yaml"
+    prompt.write_text("user: '{runtime_step}'\n")
+    (path.parent / "data/example.jsonl").write_text('{"responses_create_params": {"input": []}}\n')
+    assert validate_environment(path).datasets[0].rows == 1
+    prompt.unlink()
+    with pytest.raises(EnvironmentValidationError, match="prompt"):
+        validate_environment(path)
+
+
+def test_prepared_prompt_source_rejects_rows_without_input(tmp_path: Path) -> None:
+    path = _asset(tmp_path, kind="benchmark")
+    raw = yaml.safe_load(path.read_text())
+    raw.update(prompt_source="prepared")
+    raw.pop("standard_prompt_config")
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(EnvironmentValidationError, match="prepared.*input"):
+        validate_environment(path)
+
+
+def test_manifest_selects_named_config_and_dataset_owner(tmp_path: Path) -> None:
+    path = _asset(tmp_path, kind="benchmark")
+    config = path.with_name("config.yaml")
+    config.rename(path.with_name("variant.yaml"))
+    selected_config = path.with_name("variant.yaml")
+    raw_config = yaml.safe_load(selected_config.read_text())
+    raw_config["other_agent"] = raw_config["demo_agent"]
+    raw_config["other_environment_server"] = {
+        "environment_servers": {
+            "legacy_agent": {
+                "entrypoint": "app.py",
+                "agent_server": {"type": "responses_api_agents", "name": "other_agent"},
+            }
+        }
+    }
+    selected_config.write_text(yaml.safe_dump(raw_config))
+    raw = yaml.safe_load(path.read_text())
+    raw.update(config_path="variant.yaml", dataset_owner="demo_agent")
+    path.write_text(yaml.safe_dump(raw))
+
+    report = validate_environment(path)
+
+    assert report.config_path == str(selected_config)
+    assert next(c.name for c in report.components if c.role == "agent_server") == "demo_agent"
+    with pytest.raises(EnvironmentValidationError, match="exactly one"):
+        _resolve_manifest_composition(selected_config)
+    with pytest.raises(EnvironmentValidationError, match="dataset_owner"):
+        _resolve_manifest_composition(selected_config, dataset_owner="missing")
+
+
+def test_manifest_accepts_external_agent_without_resources(tmp_path: Path) -> None:
+    path = _asset(tmp_path, kind="benchmark", profile="external-agent-loop")
+    raw = yaml.safe_load(path.read_text())
+    raw.update(resources_server=None, grading_mode=None, model_server="policy_model")
+    path.write_text(yaml.safe_dump(raw))
+    config = yaml.safe_load(path.with_name("config.yaml").read_text())
+    del config["demo_resources"]
+    del config["demo_agent"]["responses_api_agents"]["simple_agent"]["resources_server"]
+    path.with_name("config.yaml").write_text(yaml.safe_dump(config))
+    report = validate_environment(path)
+    assert all(c.role != "resources_server" for c in report.components)
 
 
 def _manifest(*, kind: str = "environment", profile: str = "custom-gym-verifier") -> dict:
@@ -370,6 +473,21 @@ def test_benchmark_uses_root_prompt_without_executing_prepare(tmp_path: Path) ->
 
     assert report.datasets[0].type == "benchmark"
     assert report.datasets[0].prompt_config.endswith("prompts/default.yaml")
+
+
+def test_unresolved_interpolation_is_reported_cleanly_not_as_a_traceback(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path)
+    config_path = manifest_path.with_name("config.yaml")
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "jsonl_fpath: environments/demo/data/example.jsonl",
+            "jsonl_fpath: environments/demo/data/example.jsonl\n      num_repeats: ${undefined_key}",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigInterpolationError, match="undefined_key"):
+        validate_environment(manifest_path)
 
 
 def test_malformed_benchmark_prompt_is_an_actionable_validation_error(tmp_path: Path) -> None:

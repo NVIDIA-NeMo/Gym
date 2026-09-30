@@ -58,6 +58,12 @@ from resources_servers.swe_rebench.verification import (
     verification_files,
 )
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
+from resources_servers.swebench.patch_capture import (
+    PatchCapture,
+    PatchCaptureMode,
+    capture_model_patch,
+    prepare_git_for_commits,
+)
 
 
 # Gradle only auto-loads init scripts from $GRADLE_USER_HOME/init.d, so the mirror script
@@ -75,6 +81,9 @@ JVM_MIRROR_ENV = {
 
 class SWERebenchResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
+    # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
+    patch_capture_mode: PatchCaptureMode = "worktree"
+    include_model_patch_in_response: bool = True
     evaluation_timeout: int | None = 3600
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
@@ -129,9 +138,19 @@ class SWERebenchVerifyResponse(BaseVerifyResponse):
     eval_sandbox_start_time_taken: float
     patch_verification_time_taken: float
     test_patch_failed: bool = False
+    # Patch-capture provenance; see resources_servers/swebench/patch_capture.py.
+    patch_source: str = "none"
+    patch_branch: str | None = None
+    patch_commits: int = 0
+    worktree_dirty: bool = False
+    model_patch_bytes: int = 0
+    model_patch: str | None = None
+    model_patch_sha256: str = ""
+    model_patch: str | None = None
 
 
 class SWERebenchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: SWERebenchResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -221,22 +240,19 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
             print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
             return frozenset()
 
-    async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> str:
-        """Diff the agent's own sandbox against ``base_commit``, then stop it.
-
-        ``git add -N`` (intent-to-add) is what makes brand-new files show up in ``git diff`` too,
-        not just edits to already-tracked files -- without it, a task an agent solves entirely by
-        adding new files would extract as an empty patch.
-        """
+    async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
+        """Capture the agent's patch per ``config.patch_capture_mode``, then stop its sandbox."""
         original_sandbox = self._session_id_to_sandbox.pop(session_id)
         pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
         try:
-            result = await original_sandbox.exec(
-                f"git -C {quote(workdir)} add -N . && git -C {quote(workdir)} --no-pager diff {quote(base_commit)}"
+            return await capture_model_patch(
+                original_sandbox,
+                workdir,
+                base_commit,
+                mode=self.config.patch_capture_mode,
+                pristine_untracked=pristine_untracked,
+                drop_sections=drop_patch_sections,
             )
-            if result.return_code != 0:
-                raise RuntimeError(result.stderr or "git diff failed")
-            return drop_patch_sections(result.stdout or "", pristine_untracked)
         finally:
             await self._stop_sandbox(original_sandbox)
 
@@ -250,6 +266,8 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
         sandbox = await self._create_sandbox(body)
         if self.config.apply_anti_cheating:
             await apply_anti_cheat_setup(sandbox, repo_directory(body.repo), body.instance_id, "swe_rebench")
+        # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
+        await prepare_git_for_commits(sandbox, repo_directory(body.repo), "swe_rebench")
         self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
             sandbox, repo_directory(body.repo)
         )
@@ -259,14 +277,16 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: SWERebenchVerifyRequest) -> SWERebenchVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         extraction_error = None
+        mode = self.config.patch_capture_mode
         if self.config.is_verifying_golden_patch:
-            patch = body.patch
+            capture = PatchCapture.static(body.patch, mode, "golden")
         else:
             try:
-                patch = await self._extract_model_patch(session_id, repo_directory(body.repo), body.base_commit)
+                capture = await self._extract_model_patch(session_id, repo_directory(body.repo), body.base_commit)
             except Exception as exc:
-                patch = ""
+                capture = PatchCapture.static("", mode, "none")
                 extraction_error = f"Failed to extract model patch: {exc}"
+        patch = capture.patch
 
         inputs = self._inputs(body, patch)
         log_dir = Path(__file__).parent / "logs" / body.instance_id
@@ -362,6 +382,7 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
                 "eval_sandbox_start_time_taken": start_time_taken,
                 "patch_verification_time_taken": verification_time_taken,
                 "test_patch_failed": result.test_patch_failed,
+                **capture.response_fields(self.config.include_model_patch_in_response),
             }
         )
 

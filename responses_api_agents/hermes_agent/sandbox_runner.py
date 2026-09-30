@@ -55,16 +55,32 @@ def _use_model_server(base_url: str) -> None:
     AIAgent.__init__ = initialize_without_streaming
 
 
-def _run(payload: dict[str, Any], exchange_dir: Path) -> dict[str, Any]:
+def _connect_mcp_servers(required: list[str]) -> None:
+    """Connect the MCP servers config.yaml lists for this episode and register their tools.
+
+    Hermes discovers MCP servers when ``run_agent`` is imported, which is before this episode's config exists.
+    """
+    from tools.mcp_tool import discover_mcp_tools, get_mcp_status
+
+    discover_mcp_tools()
+    connected = {server["name"] for server in get_mcp_status() if server["connected"]}
+    missing = sorted(set(required) - connected)
+    if missing:
+        raise RuntimeError("Required MCP servers did not connect: " + ", ".join(missing))
+
+
+def _run(payload: dict[str, Any], session_dir: Path) -> dict[str, Any]:
     from run_agent import AIAgent
 
-    hermes_home = exchange_dir / "hermes-home"
+    hermes_home = session_dir / "hermes-home"
     hermes_home.mkdir(parents=True, exist_ok=True)
     (hermes_home / "config.yaml").write_text(payload["config_yaml"])
     os.environ["HERMES_HOME"] = str(hermes_home)
     os.environ["TERMINAL_ENV"] = "local"
     os.environ["TERMINAL_TIMEOUT"] = str(payload["terminal_timeout"])
     _use_model_server(payload["model_base_url"])
+    if payload["mcp_servers"]:
+        _connect_mcp_servers(payload["required_mcp_servers"])
 
     agent = AIAgent(
         base_url=payload["model_base_url"],
