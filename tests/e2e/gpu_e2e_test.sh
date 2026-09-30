@@ -140,6 +140,11 @@ export NEMO_GYM_VLLM_TRANSPORT_LOG="$RESULTS_DIR/vllm-transport.jsonl"
 
 nvidia-smi | tee "$RESULTS_DIR/nvidia-smi.txt"
 bash "$ROOT_DIR/docker/install_codec_deps.sh"
+# Keep pycountry out of the shipped image; vLLM 0.29 imports it through
+# Transformers MistralCommonBackend even for non-Mistral models. Install only
+# for this test, bypassing the project exclusion (version pinned in uv.lock).
+uv pip install --no-config --no-deps "pycountry==26.2.16"
+python -c "from transformers import MistralCommonBackend"
 
 vllm serve "$MODEL" \
   --revision "$MODEL_REVISION" \

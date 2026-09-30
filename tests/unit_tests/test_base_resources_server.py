@@ -15,6 +15,8 @@
 import asyncio
 from unittest.mock import MagicMock
 
+from fastapi.testclient import TestClient
+
 from nemo_gym.base_resources_server import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
@@ -71,6 +73,29 @@ class TestBaseResourcesServer:
 
     def test_reverify_mode(self) -> None:
         assert asyncio.run(_resources_server().get_reverify_mode()) == ReverifyMode.UNKNOWN
+
+    def test_stateless_server_answers_typed_and_legacy_session_calls(self) -> None:
+        """A server with no per-rollout state serves an Environment Server's seed and close without overrides."""
+        client = TestClient(_resources_server().setup_webserver())
+        identity = {"episode_id": {"rollout_id": "rollout", "attempt": 0}}
+
+        typed_seed = client.post(
+            "/seed_session",
+            json={
+                "resources_session_id": "resources-session",
+                "task_id": {"taskset": "tasks", "task_id": "task"},
+                "task_data": {"question": "2+2"},
+            }
+            | identity,
+        )
+        # An Agent's /run seeds with its legacy row, which keeps the empty response.
+        legacy_seed = client.post("/seed_session", json={"responses_create_params": {"input": "2+2"}})
+        typed_close = client.post("/close_session", json={"resources_session_id": "resources-session"} | identity)
+
+        assert typed_seed.status_code == 200
+        assert typed_seed.json()["resources_session_id"] == "resources-session"
+        assert (legacy_seed.status_code, legacy_seed.json()) == (200, {})
+        assert (typed_close.status_code, typed_close.json()) == (200, {"resources_session_id": "resources-session"})
 
 
 class TestVerifyResponseFailureReporting:

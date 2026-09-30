@@ -178,6 +178,8 @@ def render_driver_entrypoint(
     ref: str | None,
     prepare_cmd: str | None,
     command: str | None = None,
+    *,
+    extras: tuple[str, ...] = (),
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
@@ -187,8 +189,14 @@ def render_driver_entrypoint(
     `command` replaces the `gym eval run` invocation for a benchmark whose harness
     is not Gym's own runner. It is emitted verbatim, so it may be a multi-line
     script; everything before it (the install, and prepare) is unchanged.
+
+    `extras` are optional-dependency groups installed with the checkout; the server
+    venvs Gym builds copy their telemetry packages from this process, so the driver
+    is where `telemetry` has to be installed for any server to have it.
     """
     preamble: list[str] = []
+    # Double quotes: the whole preamble ends up inside a single-quoted `bash -c` block.
+    install_target = f'".[{",".join(extras)}]"' if extras else "."
 
     if repo and ref:
         # Clone to /tmp rather than the job directory: a checkout plus its .venv
@@ -208,7 +216,7 @@ def render_driver_entrypoint(
             # EXTERNALLY-MANAGED (PEP 668), so no --break-system-packages override needed either.
             "uv venv --seed .venv",
             "source .venv/bin/activate",
-            "uv pip install -e .",
+            f"uv pip install -e {install_target}",
         ]
 
     if prepare_cmd:
