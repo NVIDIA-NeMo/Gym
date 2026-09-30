@@ -4,33 +4,19 @@ This environment runs population-grounded, multi-turn user simulation with
 NeMo UserSim. It includes one example task for each first-party UserSim probe;
 the examples exercise the environment's supported interaction shapes.
 
-Environment preparation delegates persona sampling to NeMo UserSim and treats
-the resulting panel Parquet as the immutable prepared artifact. Preparation
-runs the pinned UserSim package in its own isolated dependency environment, so
-it does not alter the Gym or Resources Server environments:
+Environment preparation runs the pinned UserSim package in an isolated
+dependency environment and asks its canonical sampler to materialize one fully
+resolved input for every registered probe:
 
 ```bash
 gym eval prepare --config environments/usersim/config.yaml
 ```
 
-Preparation invokes `usersim panel`, validates the resulting Parquet, and
-writes its checksum manifest under:
-
-```text
-environments/usersim/data/personas/
-└── 0.0.2/
-    └── panels/
-        ├── en_US.parquet
-        └── en_US.manifest.json
-```
-
-The 14 tracked templates in `resources_servers/usersim/data/example_source.jsonl`
-provide one example for every first-party UserSim probe. Preparation resolves
-each template against the generated panel and writes the ignored
-`environments/usersim/data/example.jsonl` consumed by the dataset config.
-Every prepared row contains its persona, locale, seed, probe, theme, goal,
-probe data, and panel/UserSim provenance. The Resources Server validates that
-resolved row against the prepared panel and uses it unchanged.
+The generated `environments/usersim/data/example.jsonl` wraps each UserSim row
+in a Gym task envelope without changing the resolved content. UserSim owns
+persona, probe, theme, toolset, locale, configuration, trajectory identity, and
+provenance selection; Gym does not maintain sampling templates or persona
+panels.
 
 While UserSim is private, the Environment Server installs the pinned source
 revision over Git+SSH from `github.com/NVIDIA-NeMo/UserSim`; the host therefore
