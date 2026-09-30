@@ -9,7 +9,7 @@ import sys
 from types import ModuleType
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, JsonValue
 
 from resources_servers.sol_execbench import native_runner
 from resources_servers.sol_execbench.problem_store import NATIVE_REVISION
@@ -18,6 +18,21 @@ from resources_servers.sol_execbench.problem_store import NATIVE_REVISION
 class NativeSchemaStub(BaseModel):
     name: str = "synthetic"
     definition: str = "synthetic"
+
+
+class NativeToleranceStub(BaseModel):
+    max_atol: float = 0.01
+
+
+class NativeWorkloadStub(BaseModel):
+    uuid: str = "synthetic"
+    axes: dict[str, int] = Field(default_factory=dict)
+    inputs: dict[str, dict[str, JsonValue]] = Field(default_factory=dict)
+    tolerance: NativeToleranceStub = Field(default_factory=NativeToleranceStub)
+
+
+class NativeTraceStub(BaseModel):
+    workload: NativeWorkloadStub = Field(default_factory=NativeWorkloadStub)
 
 
 @pytest.fixture
@@ -29,8 +44,10 @@ def runner(tmp_path, monkeypatch):
     module = ModuleType("sol_execbench")
     module.__file__ = str(source)
     core = ModuleType("sol_execbench.core")
-    for name in ("Definition", "Solution", "Trace", "Workload"):
+    for name in ("Definition", "Solution"):
         setattr(core, name, NativeSchemaStub)
+    core.Trace = NativeTraceStub
+    core.Workload = NativeWorkloadStub
     monkeypatch.setitem(sys.modules, "sol_execbench", module)
     monkeypatch.setitem(sys.modules, "sol_execbench.core", core)
     root = tmp_path / "attempt"
@@ -99,6 +116,7 @@ def test_native_cli_invoked_once_with_pinned_timeouts_and_validated_exit_one(run
     assert kwargs["env"]["FLASHINFER_TRACE_DIR"] == str(root / "assets")
     assert json.loads((root / "execution.json").read_text())["return_code"] == 1
     assert json.loads((root / "execution.json").read_text())["native_schema_validated"] is True
+    assert json.loads((root / "execution.json").read_text())["native_workloads_validated"] is True
     assert (root / "native.stderr").read_text() == "native stderr"
     assert json.loads((root / "hardware.json").read_text())["native_revision"] == NATIVE_REVISION
 
@@ -152,3 +170,46 @@ def test_b200_requires_exact_product_name(runner, monkeypatch, hardware_name, ac
             native_runner.main()
         assert len(calls) == 1
         assert not (root / "execution.json").exists()
+
+
+@pytest.mark.parametrize(
+    "workload",
+    [
+        {"uuid": "different"},
+        {"axes": {"N": 2}},
+        {"inputs": {"x": {"type": "scalar", "value": 1}}},
+        {"tolerance": {"max_atol": 1.0}},
+    ],
+)
+def test_native_trace_payload_mismatch_never_attests_success(runner, monkeypatch, workload):
+    root, _, _, _ = runner
+    original_run = native_runner.subprocess.run
+
+    def run(command, **kwargs):
+        result = original_run(command, **kwargs)
+        if command[0] != "nvidia-smi":
+            (root / "trace.jsonl").write_text(json.dumps({"workload": workload}) + "\n")
+        return result
+
+    monkeypatch.setattr(native_runner.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="workload payload differs"):
+        native_runner.main()
+    assert not (root / "execution.json").exists()
+
+
+@pytest.mark.parametrize("trusted", [{}, {"tolerance": {"required_match_ratio": 1.0}}])
+def test_native_workload_defaults_are_compared_after_schema_normalization(runner, monkeypatch, trusted):
+    root, _, _, _ = runner
+    (root / "problem/workload.jsonl").write_text(json.dumps(trusted) + "\n")
+    original_run = native_runner.subprocess.run
+
+    def run(command, **kwargs):
+        result = original_run(command, **kwargs)
+        if command[0] != "nvidia-smi":
+            payload = {"uuid": "synthetic", "axes": {}, "inputs": {}, "tolerance": {"max_atol": 0.01}}
+            (root / "trace.jsonl").write_text(json.dumps({"workload": payload}) + "\n")
+        return result
+
+    monkeypatch.setattr(native_runner.subprocess, "run", run)
+    native_runner.main()
+    assert json.loads((root / "execution.json").read_text())["native_workloads_validated"] is True

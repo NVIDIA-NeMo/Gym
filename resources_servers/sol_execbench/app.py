@@ -390,6 +390,8 @@ class SolExecBenchResourcesServer(SimpleResourcesServer):
             execution = json.loads((attempt / "execution.json").read_bytes())
             if execution.get("native_schema_validated") is not True:
                 raise ValueError("Missing complete native-schema-validated traces")
+            if execution.get("native_workloads_validated") is not True:
+                raise ValueError("Missing native-normalized workload payload validation")
             traces = [json.loads(line) for line in (attempt / "trace.jsonl").read_text().splitlines() if line.strip()]
             result = classify_native_result(
                 problem=problem,

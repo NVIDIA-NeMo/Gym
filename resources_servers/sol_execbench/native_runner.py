@@ -66,8 +66,11 @@ def main() -> None:
         )
     )
     definition = Definition.model_validate_json((ROOT / "problem/definition.json").read_text())
+    # Preserve the pinned native schema's defaults and ignored-field behavior.
+    workloads = {}
     for line in (ROOT / "problem/workload.jsonl").read_text().splitlines():
-        Workload.model_validate_json(line)
+        workload = Workload.model_validate_json(line)
+        workloads[workload.uuid] = json.dumps(workload.model_dump(mode="json"), sort_keys=True, allow_nan=False)
     try:
         solution = Solution.model_validate_json((ROOT / "solution.json").read_text())
         if solution.definition != definition.name:
@@ -100,8 +103,12 @@ def main() -> None:
     trace = ROOT / "trace.jsonl"
     if trace.exists():
         for line in trace.read_text().splitlines():
-            Trace.model_validate_json(line)
+            native_trace = Trace.model_validate_json(line)
+            payload = json.dumps(native_trace.workload.model_dump(mode="json"), sort_keys=True, allow_nan=False)
+            if payload != workloads.get(native_trace.workload.uuid):
+                raise RuntimeError("Native trace workload payload differs from the trusted input")
         record["native_schema_validated"] = True
+        record["native_workloads_validated"] = True
     (ROOT / "execution.json").write_text(json.dumps(record))
 
 

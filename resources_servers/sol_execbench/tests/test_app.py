@@ -125,6 +125,7 @@ class FakeSandbox:
             "execution.json": {
                 "return_code": 1 if self.mode == "candidate_failure" else 0,
                 "native_schema_validated": True,
+                "native_workloads_validated": True,
             },
         }
         for name, data in records.items():
@@ -306,3 +307,16 @@ def test_manifest_digest_and_safe_asset_paths(tmp_path):
 async def test_verifier_fixture_contract():
     cases = await exercise_verifier_fixture(VERIFIER_FIXTURE, reward_range=[0, 1], determinism="unknown")
     assert [case.kind for case in cases] == ["full_reward", "zero_reward", "malformed"]
+
+
+async def test_missing_workload_payload_validation_is_unresolved(server):
+    response = await server.verify(request())
+    attempt = Path(response.artifact_path)
+    execution = json.loads((attempt / "execution.json").read_text())
+    del execution["native_workloads_validated"]
+    (attempt / "execution.json").write_text(json.dumps(execution))
+    solution = json.loads((attempt / "solution.json").read_text())
+    result = server._read_result(attempt, synthetic_problem(), solution)
+    assert result.infrastructure_error
+    assert result.outcome == "INVALID_NATIVE_RESULT"
+    assert "workload payload validation" in result.detail
