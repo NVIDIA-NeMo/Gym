@@ -3,7 +3,7 @@
 This image supplies OpenCode and offline scientific tools. Scientific Python and
 Sage both use Python 3.13.14, with separate dependency locks. The dedicated agent
 runs Gym on the host; no Gym installation or source upload is needed inside the
-sandbox. Pi adds its CLI in a [small runtime layer](../../../fern/versions/latest/pages/evaluation/harness.mdx#reproducible-offline-images).
+sandbox. Pi adds its CLI in a [small runtime layer](../README.md#reproducible-offline-images).
 
 Build from this directory:
 

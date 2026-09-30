@@ -122,7 +122,7 @@ Exclusion JSON uses `notices[].properties[]` entries of type `domain` or
 `url_substring`; domain matches include subdomains. Provider error bodies are
 neither forwarded to models nor logged.
 
-These changes apply to existing Tavily configurations as well as HLE:
+These behaviors apply to all Tavily configurations:
 
 - Search requests disable Tavily's aggregate answer, and returned aggregate answers
   are discarded. The former `Search Answer` output section is removed because its
@@ -150,7 +150,3 @@ These changes apply to existing Tavily configurations as well as HLE:
   `max_cached_page_chars` limits stored page content and applies only when caching
   is enabled (including the initial response). `max_scroll_words` caps each response
   independently of caching.
-
-The HLE search preset supplies the public HLE exclusion list. Deployments requiring
-an additional policy must supply their combined policy file through
-`exclude_domains_file_path`; keep private policies outside the public repository.
