@@ -24,6 +24,7 @@ from traceback import format_exc
 from typing import Any, Dict, List, Optional
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+import certifi
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, JsonValue
@@ -796,7 +797,10 @@ while True:
             )
             installer_path = f"/tmp/nemo-gym-install-opencode-{uuid4().hex}.py"
             await sandbox.upload(Path(__file__).with_name("install_opencode.py"), installer_path)
-            install_str = f"""{{ if command -v curl >/dev/null 2>&1; then
+            certificates_path = installer_path + ".pem"
+            await sandbox.upload(Path(certifi.where()), certificates_path)
+            install_str = f"""{{ export SSL_CERT_FILE={quote(certificates_path)} CURL_CA_BUNDLE={quote(certificates_path)};
+            if command -v curl >/dev/null 2>&1; then
                 installer=$(mktemp) && curl -fL -o "$installer" https://opencode.ai/install \
                     && VERSION={quote(self.config.opencode_version)} bash "$installer"
             else
