@@ -65,6 +65,7 @@ from nemo_gym.rollout_reverification import (
     _recovery_rollout_predicate,
     _resources_server_exposes_tools_over_mcp,
     _rollout_verify_debug_summary,
+    _rs_for_row,
     _run_verification_payloads,
     _seed_output_with_successes,
     _yield_inputs_and_rollouts_paired,
@@ -801,6 +802,50 @@ class TestBuildVerifyPayload:
         result = _build_verify_payload(pair)
 
         assert result == {"task": "q1", "verifier_metadata": {"answer": 42}, "response": {"output": "hello"}}
+
+    def test_materialized_task_rebuilds_the_verify_body_from_its_task_input(self) -> None:
+        pair = InputRolloutPair(
+            input={
+                "task_id": {"taskset": "swe_pro", "task_id": "a"},
+                "task_input": {"responses_create_params": {"input": "q1"}, "task_data": {"instance_id": "a"}},
+                "_ng_task_index": 0,
+                "_ng_environment_server": "environment",
+            },
+            rollout={"response": {"output": "hello"}, "reward": 1.0},
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert result == {
+            "_ng_task_index": 0,
+            "_ng_environment_server": "environment",
+            "instance_id": "a",
+            "responses_create_params": {"input": "q1"},
+            "response": {"output": "hello"},
+        }
+
+    def test_rows_stamped_with_an_environment_server_route_to_its_resources_server(self) -> None:
+        config = {
+            "environment": {
+                "environment_servers": {
+                    "single_agent_turn": {
+                        "agent_server": {"type": "responses_api_agents", "name": "hermes"},
+                        "resources_server": {"type": "resources_servers", "name": "swe"},
+                    }
+                }
+            },
+        }
+
+        assert _rs_for_row({"_ng_environment_server": "environment"}, {}, config) == "swe"
+
+    def test_rollout_without_a_response_names_its_result_type(self) -> None:
+        pair = InputRolloutPair(
+            input={"task": "q1"},
+            rollout={"_ng_task_index": 3, "_ng_rollout_index": 1, "_ng_result_type": "user_simulation", "reward": 1.0},
+        )
+
+        with pytest.raises(ConfigError, match="result type 'user_simulation' has no `response`"):
+            _build_verify_payload(pair)
 
     def test_response_key_overwrites_any_existing_response_in_input(self) -> None:
         pair = InputRolloutPair(
