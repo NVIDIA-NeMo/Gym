@@ -607,6 +607,16 @@ class E2BProvider:
         headers["E2b-Sandbox-Port"] = str(port)
         return SandboxEndpoint(endpoint=base_url, headers=headers)
 
+    async def pause(self, handle: SandboxHandle) -> None:
+        """Pause the sandbox through the E2B SDK without replaying failed requests."""
+        await self._sandbox(handle).pause(**self._request_params())
+
+    async def resume(self, handle: SandboxHandle) -> None:
+        """Resume the sandbox and replace its SDK handle only after success."""
+        self._sandbox(handle)
+        e2b = _require_e2b_sdk()
+        handle.raw = await e2b.AsyncSandbox.connect(handle.sandbox_id, **self._api_params())
+
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         e2b = _require_e2b_sdk()
         sandbox = self._sandbox(handle)
