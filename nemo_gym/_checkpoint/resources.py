@@ -56,15 +56,33 @@ class ResourcesSessionRecord(CheckpointRecord):
 
 
 class ResourcesSessionHooks(Protocol):
-    """Session state owned by an ``exported`` resources server."""
+    """Session state owned by an ``exported`` resources server.
 
-    def export_session_state(self, session_id: str) -> JsonValue:
-        """Return the session's state; raise ``KeyError`` if the server no longer holds it."""
+    The hooks are asynchronous and exporting takes every session at once, so a server whose state lives
+    outside the process, such as a sandbox per session, can checkpoint all of it concurrently.
 
-    def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+    A sandbox per session plugs in here:
+
+    - ``export_session_states`` runs at commit. Prepare stops agents before resources servers, so no episode
+      step is using a sandbox by then. Return what a restore needs to rebuild each sandbox as of this
+      checkpoint, such as a snapshot id. A descriptor of the live sandbox is not enough on its own: the
+      sandbox keeps changing after the checkpoint.
+    - ``restore_session_states`` runs in a fresh process after a crash. Rebuild every session's sandbox or
+      raise; the controller then restarts those rollouts from their inputs. The crashed process's sandboxes
+      are still running and can be stopped here.
+    - ``retire_session_state`` runs when an attempt is discarded. Stop its sandbox.
+
+    Whatever a checkpoint keeps outside Gym, such as snapshots, is the server's to delete once no checkpoint
+    the controller may restore refers to it.
+    """
+
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        """Return the state of each session; leave out a session the server no longer holds."""
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
         """Validate every state, then install all of them; never install a partial set."""
 
-    def retire_session_state(self, session_id: str) -> None: ...
+    async def retire_session_state(self, session_id: str) -> None: ...
 
 
 class ResourcesParticipant(CheckpointParticipant):
@@ -132,38 +150,45 @@ class ResourcesParticipant(CheckpointParticipant):
                 del self._sessions[session_id]
                 self._retired_sessions.add(session_id)
                 if self.mode == "exported":
-                    self.hooks.retire_session_state(session_id)
+                    await self.hooks.retire_session_state(session_id)
 
-    def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         if self.mode != "exported":
             return []
+        sessions = self._checkpointed_sessions()
+        states = await self.hooks.export_session_states([session_id for session_id, _ in sessions])
         records = []
-        for session_id, episode_id in self._checkpointed_sessions():
-            try:
-                state = self.hooks.export_session_state(session_id)
-            except KeyError:
+        for session_id, episode_id in sessions:
+            if session_id not in states:
                 # The server already dropped this session, for example when a failed verification cleaned
                 # it up. There is nothing to continue, so stop tracking it rather than fail the commit.
                 LOGGER.warning("resources session %s of %s is gone; not exported", session_id, episode_id.capture_key)
                 self._sessions.pop(session_id, None)
                 continue
+            state = states[session_id]
             records.append(ResourcesSessionRecord(session_id=session_id, episode_id=episode_id, state=state))
         return records
+
+    def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+        raise NotImplementedError("resources sessions export through export(), which awaits the server's hooks")
 
     def _checkpointed_sessions(self) -> list[tuple[str, EpisodeId]]:
         return [
             (key, episode_id) for key, episode_id in self._sessions.items() if key not in self._seeded_while_closed
         ]
 
-    def restore_records(self, records: list[CheckpointRecord]) -> None:
+    async def install(self, records: list[CheckpointRecord]) -> None:
         if self._sessions or self.inflight:
             raise ControlError("resources restore requires a process that has not served sessions")
         if records and self.mode != "exported":
             raise ControlError(f"a {self.mode} resources server cannot restore session state")
         if records:
-            self.hooks.restore_session_states({record.session_id: record.state for record in records})
+            await self.hooks.restore_session_states({record.session_id: record.state for record in records})
         for record in records:
             self._sessions[record.session_id] = next_attempt(record.episode_id)
+
+    def restore_records(self, records: list[CheckpointRecord]) -> None:
+        raise NotImplementedError("resources sessions restore through install(), which awaits the server's hooks")
 
     def status_extra(self) -> dict[str, Any]:
         return {"mode": self.mode, "verify": self.verify_mode}
