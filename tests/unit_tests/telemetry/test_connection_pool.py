@@ -110,9 +110,12 @@ async def _lazy_client(monkeypatch, *, metrics_enabled: bool = True, workers: in
 
 
 async def _get(url: str, **kwargs) -> None:
-    response = await server_utils.request("GET", url, _server_name="model", **kwargs)
-    assert response.status == 200
-    await response.read()
+    try:
+        response = await server_utils.request("GET", url, _server_name="model", **kwargs)
+        assert response.status == 200
+        await response.read()
+    finally:
+        assert connection_pool._SERVER_NAME.get() == "external"
 
 
 def _points(collected_metrics):
@@ -137,11 +140,14 @@ async def test_no_queue_records_no_histogram_sample(collected_metrics, monkeypat
 
 
 @pytest.mark.parametrize("metrics_enabled", [False, True])
+@pytest.mark.parametrize("tracing_enabled", [False, True])
 @pytest.mark.parametrize("server_name", ["policy_model", "remote_agent_service", None])
 @pytest.mark.parametrize("workers", [1, 4])
 async def test_lazy_client_labels_first_and_subsequent_attempts(
-    collected_metrics, monkeypatch, metrics_enabled: bool, server_name: str | None, workers: int
+    collected_metrics, monkeypatch, metrics_enabled: bool, tracing_enabled: bool, server_name: str | None, workers: int
 ):
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+
     async def immediate(_request):
         return web.json_response({"ok": True})
 
@@ -163,6 +169,25 @@ async def test_lazy_client_labels_first_and_subsequent_attempts(
                 assert type(server_utils._GLOBAL_AIOHTTP_CLIENT.connector) is TCPConnector
             assert _points(collected_metrics) == []
             assert connection_pool._SERVER_NAME.get() == "external"
+
+
+async def test_request_restores_the_callers_destination_label(collected_metrics, monkeypatch):
+    async def immediate(_request):
+        return web.json_response({"ok": True})
+
+    async with _lazy_client(monkeypatch), _serve(immediate) as url:
+        token = connection_pool.set_server_name("outer")
+        try:
+            for name in ("policy_model", None):
+                response = await server_utils.request("GET", url, _server_name=name)
+                assert response.status == 200
+                await response.read()
+                assert connection_pool._SERVER_NAME.get() == "outer"
+        finally:
+            connection_pool.reset_server_name(token)
+
+    points = collected_metrics()[CONNECT_TOTAL]
+    assert {point.attributes[SERVER]: point.value for point in points} == {"policy_model": 1, "external": 1}
 
 
 async def test_lazy_client_preserves_concurrent_destination_labels(collected_metrics, monkeypatch):
@@ -311,6 +336,10 @@ async def test_queued_timeout_and_retry_record_separate_attempts(collected_metri
 
     points = _points(collected_metrics)
     assert _expanded_attribute(points, OUTCOME) == ["abandoned", "ok"]
+    assert all(point.attributes[SERVER] == "model" for point in points)
+    (connect_point,) = collected_metrics()[CONNECT_TOTAL]
+    assert connect_point.value == 3
+    assert connect_point.attributes == {SERVER: "model"}
     timeout_point = next(point for point in points if point.attributes[OUTCOME] == "abandoned")
     assert 50 <= timeout_point.sum <= 250
     assert timeout_point.attributes[CONSTRAINT] == "total"

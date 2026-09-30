@@ -416,30 +416,24 @@ async def request(
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
 
-    # Lazy client creation sets the metrics flag; read it only after initialization so
-    # the first outbound attempt receives the caller's destination label too.
-    get_global_aiohttp_client()
-    if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY:
-        token = set_server_name(_server_name or "external")
-        try:
-            if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
-                return await _traced_request(
-                    method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
-                )
-            return await _request_with_retries(
-                method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
-            )
-        finally:
-            reset_server_name(token)
-
     # Gate first: a disabled site costs one frozenset lookup and nothing else. Gym runs at
     # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
     if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
         return await _traced_request(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_connection_retries=_max_connection_retries,
+            _server_name=_server_name,
+            **kwargs,
         )
     return await _request_with_retries(
-        method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        method,
+        url,
+        _internal=_internal,
+        _max_connection_retries=_max_connection_retries,
+        _server_name=_server_name,
+        **kwargs,
     )
 
 
@@ -448,6 +442,7 @@ async def _traced_request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _server_name: Optional[str] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -483,7 +478,12 @@ async def _traced_request(
             safe_set_span_attributes(span, attributes)
 
         response = await _request_with_retries(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_connection_retries=_max_connection_retries,
+            _server_name=_server_name,
+            **kwargs,
         )
 
         if span is not None:
@@ -532,66 +532,73 @@ async def _request_with_retries(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _server_name: Optional[str] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
-    num_tries = 1
-    retries = 0
-    retry_start = time.monotonic()
-    while True:
-        try:
-            return await client.request(method=method, url=url, **kwargs)
-        except ServerDisconnectedError:
-            global _NUM_SERVER_DISCONNECTED_ERROR
-            _NUM_SERVER_DISCONNECTED_ERROR += 1
-            retries += 1
-            if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
-                print(
-                    f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
-                    f"Hit {_NUM_SERVER_DISCONNECTED_ERROR} global `ServerDisconnectedError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
-                    flush=True,
-                )
+    # Initialization stays inside the client span and sets the metrics flag before it is read.
+    token = set_server_name(_server_name or "external") if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY else None
+    try:
+        num_tries = 1
+        retries = 0
+        retry_start = time.monotonic()
+        while True:
+            try:
+                return await client.request(method=method, url=url, **kwargs)
+            except ServerDisconnectedError:
+                global _NUM_SERVER_DISCONNECTED_ERROR
+                _NUM_SERVER_DISCONNECTED_ERROR += 1
+                retries += 1
+                if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
+                    print(
+                        f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
+                        f"Hit {_NUM_SERVER_DISCONNECTED_ERROR} global `ServerDisconnectedError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
+                        flush=True,
+                    )
 
-            # Retrying forever is wrong if the endpoint is expected to sometimes die and move.
-            if _max_connection_retries is not None and retries >= _max_connection_retries:
-                raise
+                # Retrying forever is wrong if the endpoint is expected to sometimes die and move.
+                if _max_connection_retries is not None and retries >= _max_connection_retries:
+                    raise
 
-            await asyncio.sleep(0.5)
-        except ClientOSError:
-            global _NUM_CLIENT_OS_ERROR
-            _NUM_CLIENT_OS_ERROR += 1
-            retries += 1
-            if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
-                print(
-                    f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
-                    f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
-                    flush=True,
-                )
+                await asyncio.sleep(0.5)
+            except ClientOSError:
+                global _NUM_CLIENT_OS_ERROR
+                _NUM_CLIENT_OS_ERROR += 1
+                retries += 1
+                if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
+                    print(
+                        f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
+                        f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
+                        flush=True,
+                    )
 
-            if _max_connection_retries is not None and retries >= _max_connection_retries:
-                raise
+                if _max_connection_retries is not None and retries >= _max_connection_retries:
+                    raise
 
-            await asyncio.sleep(0.5)
-        except Exception as e:
-            if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
-                print_exc()
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+                    print_exc()
 
-            if _max_connection_retries is not None and num_tries >= _max_connection_retries:
-                raise
+                if _max_connection_retries is not None and num_tries >= _max_connection_retries:
+                    raise
 
-            # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
-            if not _internal:
-                print(
-                    f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
+                # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
+                if not _internal:
+                    print(
+                        f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...
 """
-                )
-                if num_tries >= MAX_NUM_TRIES:
-                    raise e
+                    )
+                    if num_tries >= MAX_NUM_TRIES:
+                        raise e
 
-                num_tries += 1
+                    num_tries += 1
 
-            await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5)
+    finally:
+        if token is not None:
+            reset_server_name(token)
 
 
 async def raise_for_status(response: ClientResponse, content: Optional[bytes] = None) -> None:  # pragma: no cover

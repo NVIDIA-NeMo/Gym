@@ -263,6 +263,42 @@ async def test_client_span_records_method_and_status(two_gym_servers, traces):
     assert client.attributes["http.response.status_code"] == 200
 
 
+@pytest.mark.parametrize("tracing_enabled", [False, True])
+async def test_lazy_client_initialization_failure_is_inside_the_client_span(
+    traces, monkeypatch, tracing_enabled: bool
+):
+    from nemo.lens.state import set_enabled_span_groups
+    from opentelemetry.trace import StatusCode
+
+    from nemo_gym.telemetry import connection_pool
+
+    if not tracing_enabled:
+        set_enabled_span_groups(frozenset())
+    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
+    monkeypatch.setattr(server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 4)
+    monkeypatch.setattr(server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
+    monkeypatch.setattr(
+        server_utils,
+        "get_global_config_dict",
+        lambda **_kwargs: {"global_aiohttp_connector_limit": 1, "global_aiohttp_connector_limit_per_host": 1},
+    )
+
+    with pytest.raises(ValueError, match="must remain at least 1"):
+        await server_utils.request("GET", "http://127.0.0.1/work", _server_name="policy_model")
+
+    assert server_utils._GLOBAL_AIOHTTP_CLIENT is None
+    assert connection_pool._SERVER_NAME.get() == "external"
+    client_spans = _by_kind(traces(), "CLIENT")
+    if tracing_enabled:
+        (client,) = client_spans
+        assert client.status.status_code == StatusCode.ERROR
+        assert client.attributes["http.request.method"] == "GET"
+        assert any(event.name == "exception" for event in client.events)
+    else:
+        assert client_spans == []
+
+
 async def test_client_span_url_attribute_drops_the_query_string(traces, loop_local_aiohttp_client, monkeypatch):
     """Query strings carry API keys and task content; they must not reach a span."""
     from nemo.lens.contrib.fastapi import instrument_fastapi
