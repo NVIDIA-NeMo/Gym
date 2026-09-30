@@ -75,6 +75,7 @@ from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
+    ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
@@ -195,6 +196,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     turns: list[TrajectoryTurn] = []
     tools: list[TrajectoryToolCall] = []
     model_calls: list[TrajectoryModelCall] = []
+    observed_compactions: list[ContextCompactionObservation] = []
 
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
     if isinstance(raw_trajectory, dict):
@@ -258,6 +260,9 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                         tools.append(projected)
                     else:
                         tools[position] = projected
+            observed_compactions = [
+                record for record in observations.records if isinstance(record, ContextCompactionObservation)
+            ]
         except Exception as exc:
             gaps.append(ObservationGap(code="agent_observations_invalid", detail=type(exc).__name__))
 
@@ -334,6 +339,73 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     if not any(invocation.conversation for invocation in invocations):
         gaps.append(ObservationGap(code="conversation_unavailable"))
 
+    if any(call.model_call_purpose is None for call in model_calls):
+        compaction_ids = {
+            ref.model_call_id for comp in observed_compactions for ref in comp.model_calls if ref.model_call_id
+        }
+        call_purpose: dict[str, str] = {
+            ref.model_call_id: ("agent_step" if inv.parent_invocation_id is None else "subagent_step")
+            for inv in invocations
+            for ref in inv.model_calls
+            if ref.model_call_id
+        }
+        call_purpose.update({cid: "compaction_summary" for cid in compaction_ids})
+        model_calls = [
+            call.model_copy(update={"model_call_purpose": call_purpose[call.model_call_id]})
+            if call.model_call_purpose is None and call.model_call_id in call_purpose
+            else call
+            for call in model_calls
+        ]
+
+    # Enrich compaction records that are missing completed_at / tokens_before / tokens_after.
+    # For TB these are already populated by the harness; for SWE we derive them from the
+    # compaction_summary model calls captured by the model server.
+    if observed_compactions and any(
+        c.completed_at is None or c.tokens_before is None or c.tokens_after is None for c in observed_compactions
+    ):
+        summary_calls = sorted(
+            [
+                c
+                for c in model_calls
+                if c.model_call_purpose in ("compaction_summary", "compaction_question") and c.started_at is not None
+            ],
+            key=lambda c: c.started_at,
+        )
+        agent_calls = sorted(
+            [
+                c
+                for c in model_calls
+                if c.started_at is not None
+                and c.model_call_purpose not in ("compaction_summary", "compaction_question")
+            ],
+            key=lambda c: c.started_at,
+        )
+        compactions_by_time = sorted(
+            enumerate(observed_compactions),
+            key=lambda x: x[1].observed_at or 0.0,
+        )
+        for j, (i, compaction) in enumerate(compactions_by_time):
+            if compaction.observed_at is None:
+                continue
+            upper = compactions_by_time[j + 1][1].observed_at if j + 1 < len(compactions_by_time) else float("inf")
+            comp_calls = [c for c in summary_calls if compaction.observed_at <= c.started_at < upper]
+            if not comp_calls:
+                continue
+            if compaction.completed_at is None:
+                last = max(comp_calls, key=lambda c: c.completed_at or 0.0)
+                if last.completed_at is not None:
+                    observed_compactions[i].completed_at = last.completed_at
+            if compaction.tokens_before is None:
+                first = min(comp_calls, key=lambda c: c.started_at)
+                if first.token_stats.prompt_tokens is not None:
+                    observed_compactions[i].tokens_before = first.token_stats.prompt_tokens
+            if compaction.tokens_after is None:
+                cutoff = observed_compactions[i].completed_at
+                if cutoff is not None:
+                    next_agent = next((c for c in agent_calls if c.started_at > cutoff), None)
+                    if next_agent is not None and next_agent.token_stats.prompt_tokens is not None:
+                        observed_compactions[i].tokens_after = next_agent.token_stats.prompt_tokens
+
     return TrajectoryRecord(
         task_id=task_id,
         rollout_id=rollout_id,
@@ -341,6 +413,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         turns=turns,
         model_calls=model_calls,
         tool_calls=tools,
+        compactions=observed_compactions,
         gaps=list({(gap.code, gap.invocation_id, gap.detail): gap for gap in gaps}.values()),
     )
 

@@ -66,10 +66,10 @@ class TrajectoryModelCall(ObservationModel):
     response: Optional[Any] = None
     response_metadata: TrajectoryResponseMetadata = Field(default_factory=TrajectoryResponseMetadata)
     token_stats: TrajectoryTokenStats = Field(default_factory=TrajectoryTokenStats)
-    model_call_purpose: Optional[Literal["agent_step", "subagent_step", "compaction_summary", "compaction_question"]] = None
+    model_call_purpose: Optional[
+        Literal["agent_step", "subagent_step", "compaction_summary", "compaction_question"]
+    ] = None
     model_response_kind: Optional[Literal["tool_call", "text", "other"]] = None
-    attempts_total: Optional[int] = Field(default=None, ge=1)
-    time_lost_to_retries_ms: Optional[float] = Field(default=None, ge=0)
 
 
 class TrajectoryTurn(ObservationModel):
@@ -256,6 +256,7 @@ class TrajectoryRecord(ObservationModel):
     turns: list[TrajectoryTurn] = Field(default_factory=list)
     model_calls: list[TrajectoryModelCall] = Field(default_factory=list)
     tool_calls: list[TrajectoryToolCall] = Field(default_factory=list)
+    compactions: list[ContextCompactionObservation] = Field(default_factory=list)
     gaps: list[ObservationGap] = Field(default_factory=list)
 
     @model_validator(mode="after")

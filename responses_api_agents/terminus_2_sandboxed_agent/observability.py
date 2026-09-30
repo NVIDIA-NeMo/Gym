@@ -73,8 +73,6 @@ class TerminusObservations:
         model_call_id: str | None = None,
         started_at: float | None = None,
         model_call_purpose: str | None = None,
-        attempts_total: int | None = None,
-        time_lost_to_retries_ms: float | None = None,
     ) -> ObservedResponse:
         observed = ObservedResponse(
             question=question, response=response, timestamp=timestamp, model_call_id=model_call_id
@@ -86,10 +84,14 @@ class TerminusObservations:
         if not response.id:
             self.gap("model_response_id_unavailable")
         ref = (
-            ModelCallRef(model_call_id=model_call_id, model_ref=self.model_ref, response_id=response.id)
-            if model_call_id
-            else ModelCallRef(model_ref=self.model_ref, response_id=response.id)
-        ) if response.id else None
+            (
+                ModelCallRef(model_call_id=model_call_id, model_ref=self.model_ref, response_id=response.id)
+                if model_call_id
+                else ModelCallRef(model_ref=self.model_ref, response_id=response.id)
+            )
+            if response.id
+            else None
+        )
         if self.compaction is not None and ref is not None:
             self.compaction.model_calls.append(ref)
         if model_call_id is not None and started_at is not None:
@@ -106,9 +108,7 @@ class TerminusObservations:
                     ),
                     total_tokens=usage.total_tokens,
                     cached_tokens=(
-                        usage.input_tokens_details.cached_tokens
-                        if usage.input_tokens_details is not None
-                        else None
+                        usage.input_tokens_details.cached_tokens if usage.input_tokens_details is not None else None
                     ),
                 )
             self.trajectory.model_calls.append(
@@ -124,8 +124,6 @@ class TerminusObservations:
                     token_stats=token_stats,
                     model_call_purpose=model_call_purpose,
                     model_response_kind=self._response_kind(response),
-                    attempts_total=attempts_total,
-                    time_lost_to_retries_ms=time_lost_to_retries_ms,
                 )
             )
         return observed
@@ -175,4 +173,21 @@ class TerminusObservations:
             self.gap("auxiliary_model_calls", "Some model responses were not selected as main-agent decisions.")
         if not self.trajectory.turns:
             self.trajectory.gaps.append(ObservationGap(code="turns_unavailable", invocation_id=self.invocation_id))
+
+        for compaction in self.compactions:
+            if compaction.completed_at is None:
+                continue
+            next_agent_call = next(
+                (
+                    m
+                    for m in self.trajectory.model_calls
+                    if m.started_at is not None
+                    and m.started_at > compaction.completed_at
+                    and m.model_call_purpose not in ("compaction_summary", "compaction_question")
+                ),
+                None,
+            )
+            if next_agent_call is not None and next_agent_call.token_stats.prompt_tokens is not None:
+                compaction.tokens_after = next_agent_call.token_stats.prompt_tokens
+
         return self.trajectory

@@ -122,8 +122,6 @@ class NeMoGymSandboxEnvironment:
         self.default_user = None
         self.trial_paths = SimpleNamespace(agent_dir=logs_dir)
         self.session_id = session_id
-        self._invocation_id: str | None = None
-        self._tool_records: list[TrajectoryToolCall] = []
 
     async def exec(
         self,
@@ -134,25 +132,7 @@ class NeMoGymSandboxEnvironment:
         env: dict[str, str] | None = None,
         **_: Any,
     ) -> Any:
-        started_at = time()
         result = await self._sandbox.exec(command, timeout_s=timeout_sec, cwd=cwd, user=user, env=env)
-        completed_at = time()
-
-        if self._invocation_id is not None:
-            self._tool_records.append(
-                TrajectoryToolCall(
-                    invocation_id=self._invocation_id,
-                    tool_call_id=f"cmd_{uuid4().hex[:12]}",
-                    tool_name="terminal",
-                    operation=command[:512] if command else None,
-                    started_at=started_at,
-                    completed_at=completed_at,
-                    duration_ms=(completed_at - started_at) * 1000,
-                    timing_source="harness",
-                    status="completed" if result.return_code == 0 else "failed",
-                )
-            )
-
         return SimpleNamespace(
             stdout=result.stdout or "",
             stderr=result.stderr or "",
@@ -245,10 +225,7 @@ class NeMoGymLLM(BaseLLM):
         started_at = time()
         start_perf = perf_counter()
         max_attempts = 10  # Harbor does 3 by default and Litellm does 3 by default. Hardcode 10 attempts for now.
-        attempts_total = 0
-        time_lost_to_retries_ms = 0.0
         for _ in range(max_attempts):
-            attempt_perf = perf_counter()
             try:
                 async with asyncio.timeout(delay=self._llm_request_timeout):
                     response = NeMoGymResponse.model_validate(
@@ -257,16 +234,12 @@ class NeMoGymLLM(BaseLLM):
                             input=request_input,
                         )
                     )
-                    attempts_total += 1
                     break
             except TimeoutError:
-                attempts_total += 1
-                time_lost_to_retries_ms += (perf_counter() - attempt_perf) * 1000
                 self._model_calls_gt_10min += 1
                 if self.observations is not None:
                     self.observations.gap("model_attempt_without_response", "TimeoutError")
             except BaseException as exc:
-                attempts_total += 1
                 if self.observations is not None:
                     self.observations.gap("model_attempt_without_response", type(exc).__name__)
                 raise
@@ -286,8 +259,6 @@ class NeMoGymLLM(BaseLLM):
                 model_call_id=model_call_id,
                 started_at=started_at,
                 model_call_purpose=model_call_purpose,
-                attempts_total=attempts_total,
-                time_lost_to_retries_ms=time_lost_to_retries_ms if time_lost_to_retries_ms > 0 else None,
             )
             if self.observations is not None
             else None
@@ -378,11 +349,32 @@ class NeMoGymTerminus2(Terminus2):
         return response
 
     async def _execute_commands(self, commands, session):
+        observations = self._nemo_gym_llm.observations
+        batch_started_at = time() if (observations is not None and commands) else None
         start_time = perf_counter()
         res = await super()._execute_commands(commands, session)
+        elapsed = perf_counter() - start_time
         if commands:
             self._completed_command_batches += 1
-        self._times_spent.append(perf_counter() - start_time)
+        self._times_spent.append(elapsed)
+
+        if observations is not None and commands and batch_started_at is not None:
+            batch_completed_at = time()
+            timeout_occurred = res[0]
+            for command in commands:
+                observations.trajectory.tool_calls.append(
+                    TrajectoryToolCall(
+                        invocation_id=observations.invocation_id,
+                        tool_call_id=f"cmd_{uuid4().hex[:12]}",
+                        tool_name="terminal",
+                        operation=command.keystrokes.rstrip("\r\n")[:512] if command.keystrokes else None,
+                        started_at=batch_started_at,
+                        completed_at=batch_completed_at,
+                        duration_ms=(batch_completed_at - batch_started_at) * 1000,
+                        timing_source="harness",
+                        status="timeout" if timeout_occurred else "completed",
+                    )
+                )
 
         return res
 
@@ -406,9 +398,7 @@ class NeMoGymTerminus2(Terminus2):
         observations = self._nemo_gym_llm.observations
         if observations is not None:
             observations.gap("compaction_outside_main_turns")
-            tokens_before = (
-                self._nemo_gym_llm.usages[-1].total_tokens if self._nemo_gym_llm.usages else None
-            )
+            tokens_before = self._nemo_gym_llm.usages[-1].total_tokens if self._nemo_gym_llm.usages else None
             observations.compaction = ContextCompactionObservation(
                 invocation_id=observations.invocation_id,
                 observed_at=time(),
@@ -527,8 +517,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                     file=sys.stderr,
                 )
             await agent.setup(environment)
-            # Enable per-command timing after setup so setup execs are not attributed to agent tool calls.
-            environment._invocation_id = invocation_id
 
             try:
                 async with asyncio.timeout(self.config.sandbox_timeout):
@@ -553,9 +541,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 invocation_status = "failed"
                 error_type = type(exc).__name__
                 print(f"Hit exception while running Terminus2: {format_exc()}", file=sys.stderr)
-            finally:
-                if observations is not None and environment._tool_records:
-                    observations.trajectory.tool_calls.extend(environment._tool_records)
 
         usage = NeMoGymResponseUsage(
             input_tokens=context.n_input_tokens or 0,
