@@ -839,6 +839,36 @@ def test_duplicate_rollout_identity_counts_once_at_task_scope(tmp_path: Path) ->
     assert ignored.summary["tasks"]["7"]["repeats"] == 1
 
 
+def test_duplicate_rollout_identity_is_scoped_to_stage(tmp_path: Path) -> None:
+    stage_0 = {**_record(7, 0, usage={"input_tokens": 3, "output_tokens": 2}), "stage_index": 0}
+    stage_1 = {**deepcopy(stage_0), "stage_index": 1}
+    rollout_path = _write_fixture(
+        tmp_path,
+        [
+            (stage_0, [_call()]),
+            (stage_1, [_call()]),
+            (deepcopy(stage_1), [_call()]),
+        ],
+    )
+
+    result = run_health_checks(rollout_path, workers=1)
+
+    flagged = {
+        digest.stage_index: [finding.check for finding in digest.findings]
+        for digest in result.rollouts
+        if digest.findings
+    }
+    assert flagged == {1: ["rollout_duplicate_identity"]}
+    assert result.summary["run"]["verdicts"] == {"healthy": 1, "unhealthy": 2, "unobserved": 0}
+    assert result.summary["run"]["issues"]["rollout_duplicate_identity"] == 2
+    verdict_rows = [json.loads(line) for line in result.verdicts_path.read_text().splitlines()]
+    assert [(row["stage_index"], row["verdict"]) for row in verdict_rows] == [
+        (0, "healthy"),
+        (1, "unhealthy"),
+        (1, "unhealthy"),
+    ]
+
+
 def test_zero_token_call_is_flagged_and_nonempty_length_response_is_exempt(tmp_path: Path) -> None:
     rollout_path = _write_fixture(
         tmp_path,

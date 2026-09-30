@@ -84,6 +84,8 @@ class Finding(BaseModel):
 class RolloutDigest(BaseModel):
     task_index: int | str
     rollout_index: int | str
+    # Multi-stage drivers (e.g. gdpval) persist one row per (task, rollout) per stage.
+    stage_index: int | str | None = None
     rollout_id: str
     verdict: Verdict
     findings: list[Finding]

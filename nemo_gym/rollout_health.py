@@ -203,6 +203,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     return RolloutDigest(
         task_index=task_index,
         rollout_index=rollout_index,
+        stage_index=record.get("stage_index"),
         rollout_id=rollout_id,
         verdict=verdict,
         findings=findings,
@@ -275,9 +276,9 @@ def _mark_duplicate_identities(digests: list[RolloutDigest], ignored_checks: fro
     if "rollout_duplicate_identity" in ignored_checks:
         return
 
-    grouped: dict[tuple[int | str, int | str], list[RolloutDigest]] = defaultdict(list)
+    grouped: dict[tuple[int | str | None, int | str, int | str], list[RolloutDigest]] = defaultdict(list)
     for digest in digests:
-        grouped[(digest.task_index, digest.rollout_index)].append(digest)
+        grouped[(digest.stage_index, digest.task_index, digest.rollout_index)].append(digest)
 
     for copies in grouped.values():
         if len(copies) < 2:
@@ -410,11 +411,11 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
     }
 
 
-def _sort_key(digest: RolloutDigest) -> tuple[tuple[int, Any], tuple[int, Any]]:
-    def part(value: int | str) -> tuple[int, Any]:
+def _sort_key(digest: RolloutDigest) -> tuple[tuple[int, Any], ...]:
+    def part(value: int | str | None) -> tuple[int, Any]:
         return (0, value) if isinstance(value, int) else (1, str(value))
 
-    return part(digest.task_index), part(digest.rollout_index)
+    return part(digest.task_index), part(digest.rollout_index), part(digest.stage_index)
 
 
 def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output_dir: Path) -> tuple[Path, Path]:
@@ -435,6 +436,8 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
                 "findings": findings,
                 "unobserved": digest.unobserved,
             }
+            if digest.stage_index is not None:
+                row["stage_index"] = digest.stage_index
             handle.write(orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE))
     return summary_path, verdicts_path
 
