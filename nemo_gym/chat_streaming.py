@@ -29,17 +29,26 @@ its existing non-streaming backend call and re-emitting it as an SSE stream. Thi
   ``chat.completion.chunk`` SSE sequence a streaming client expects, terminated by ``data: [DONE]``.
 
 Only the SSE envelope is synthesized -- there is no true token-by-token streaming. The backend
-call completes before the first byte is emitted, so the model server's retry and
-error-normalization behavior is fully preserved on this path. This path is intended for eval-only
+call completes before completion chunks are emitted. While it runs, SSE comments keep the
+connection active. Validation happens before streaming; backend failures become terminal SSE
+error events once response headers have been sent. This path is intended for eval-only
 streaming clients: token ids and logprobs from the backend response are not carried in the
 ``chat.completion.chunk`` schema, and a client that does not set ``stream_options.include_usage``
 gets no usage chunk, so a model-call record reconstructed from this stream will lack token counts.
 """
 
+import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from typing import Any, Iterator
+
+import anyio
+from fastapi import HTTPException
+from pydantic import BaseModel
+from starlette.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 
@@ -155,3 +164,56 @@ def synthesize_chat_completion_sse(completion: dict[str, Any], include_usage: bo
         yield _sse_data(_chunk(completion, [], usage=usage))
 
     yield "data: [DONE]\n\n"
+
+
+CHAT_KEEPALIVE_SECONDS = 15.0
+
+
+class BufferedChatStreamingResponse(StreamingResponse):
+    """Keep a buffered model call alive and own its lifetime through disconnects."""
+
+    def __init__(self, invoke: Callable[[], Awaitable[Any]], *, include_usage: bool):
+        super().__init__(
+            self._stream(invoke, include_usage),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async def _stream(self, invoke: Callable[[], Awaitable[Any]], include_usage: bool):
+        pending = asyncio.ensure_future(invoke())
+        try:
+            yield ": keepalive\n\n"
+            while not pending.done():
+                done, _ = await asyncio.wait({pending}, timeout=CHAT_KEEPALIVE_SECONDS)
+                if not done:
+                    yield ": keepalive\n\n"
+            try:
+                completion = pending.result()
+                payload = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
+            except Exception as exc:
+                LOG.exception("chat_completions() failed while serving a streaming request")
+                detail = exc.detail if isinstance(exc, HTTPException) else str(exc) or type(exc).__name__
+                error = {
+                    "message": detail if isinstance(detail, str) else json.dumps(detail),
+                    "type": type(exc).__name__,
+                    "code": exc.status_code if isinstance(exc, HTTPException) else "internal_error",
+                }
+                yield "event: error\n" + _sse_data({"error": error})
+                return
+            for chunk in synthesize_chat_completion_sse(payload, include_usage=include_usage):
+                yield chunk
+        finally:
+            pending.cancel()
+            # Starlette's disconnect listener cancels its AnyIO task group. Shield
+            # cleanup so the model task cannot outlive a disconnected request.
+            with anyio.CancelScope(shield=True):
+                await asyncio.gather(pending, return_exceptions=True)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # A failed ASGI send can leave the iterator suspended at a yield.
+            # Close it explicitly instead of waiting for async-generator GC.
+            with anyio.CancelScope(shield=True):
+                await self.body_iterator.aclose()

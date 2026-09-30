@@ -21,20 +21,24 @@ response is re-emitted as a synthesized ``chat.completion.chunk`` SSE stream. No
 requests keep the historical strict-validation behavior.
 """
 
+import asyncio
 import json
 from time import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
+    ModelCallCaptureConfig,
     SimpleResponsesAPIModel,
     _parse_sse_events,
     _reconstruct_chat_sse,
+    install_model_call_capture,
 )
 from nemo_gym.chat_streaming import (
     sanitize_streaming_chat_body,
@@ -417,3 +421,199 @@ class TestSynthesizeSystemFingerprint:
         events = _events("".join(synthesize_chat_completion_sse(completion)))
         assert events
         assert all(event.get("system_fingerprint") == "fp_abc123" for event in events)
+
+
+_ASGI_SCOPE = {
+    "type": "http",
+    "asgi": {"version": "3.0", "spec_version": "2.4"},
+    "http_version": "1.1",
+    "method": "POST",
+    "scheme": "http",
+    "path": "/v1/chat/completions",
+    "raw_path": b"/v1/chat/completions",
+    "query_string": b"",
+    "headers": [],
+    "server": ("test", 80),
+    "client": ("test", 1),
+}
+_STREAM_BODY = {
+    "stream": True,
+    "stream_options": {"include_usage": True},
+    "messages": [{"role": "user", "content": "hello"}],
+}
+
+
+async def _never_receive():
+    await asyncio.Event().wait()
+
+
+async def _dispatch_fake(invoke):
+    return await SimpleResponsesAPIModel.chat_completions_dispatch(
+        SimpleNamespace(_invoke_chat_completions=invoke),
+        Request(_ASGI_SCOPE),
+        _STREAM_BODY,
+    )
+
+
+async def test_delayed_chat_sends_headers_and_periodic_comments_before_completion(monkeypatch):
+    import nemo_gym.chat_streaming as streaming
+
+    monkeypatch.setattr(streaming, "CHAT_KEEPALIVE_SECONDS", 0.01)
+    release = asyncio.Event()
+    started = asyncio.Event()
+    calls = 0
+    expected = _completion(content="hello", reasoning="reason", tool_calls=[_TOOL_CALL], usage=_USAGE)
+
+    async def invoke(request, params):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return expected
+
+    response = await asyncio.wait_for(_dispatch_fake(invoke), timeout=1)
+    sent = asyncio.Queue()
+    task = asyncio.create_task(response(_ASGI_SCOPE, _never_receive, sent.put))
+    try:
+        first = await asyncio.wait_for(sent.get(), timeout=1)
+        assert first["type"] == "http.response.start"
+        assert first["status"] == 200
+        await asyncio.wait_for(started.wait(), timeout=1)
+        chunks = [(await asyncio.wait_for(sent.get(), timeout=1))["body"] for _ in range(3)]
+        assert all(chunk == b": keepalive\n\n" for chunk in chunks)
+        assert not release.is_set()
+        release.set()
+        await asyncio.wait_for(task, timeout=1)
+        while not sent.empty():
+            chunks.append((await sent.get()).get("body", b""))
+        body = b"".join(chunks)
+        rebuilt = _reconstruct_chat_sse(_parse_sse_events(body))
+        assert rebuilt["choices"][0]["message"]["content"] == "hello"
+        assert rebuilt["choices"][0]["message"]["tool_calls"][0]["function"] == _TOOL_CALL["function"]
+        assert {key: rebuilt["usage"][key] for key in _USAGE} == _USAGE
+        assert body.count(b"data: [DONE]") == 1
+        assert calls == 1
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("spec", ["2.3", "2.4"])
+async def test_chat_disconnect_cancels_pending_model_call(monkeypatch, spec):
+    from starlette.requests import ClientDisconnect
+
+    import nemo_gym.chat_streaming as streaming
+
+    monkeypatch.setattr(streaming, "CHAT_KEEPALIVE_SECONDS", 0.01)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def invoke(request, params):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    async def receive():
+        await started.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if spec == "2.4" and started.is_set() and message["type"] == "http.response.body":
+            raise OSError("client disconnected")
+
+    response = await _dispatch_fake(invoke)
+    scope = {**_ASGI_SCOPE, "asgi": {"version": "3.0", "spec_version": spec}}
+    if spec == "2.4":
+        with pytest.raises(ClientDisconnect):
+            await asyncio.wait_for(response(scope, receive, send), timeout=1)
+    else:
+        await asyncio.wait_for(response(scope, receive, send), timeout=1)
+    assert cancelled.is_set()
+
+
+@pytest.mark.parametrize(
+    "failure", [None, RuntimeError("backend failed"), TimeoutError(), HTTPException(400, detail={"error": "too long"})]
+)
+def test_chat_keepalive_preserves_capture_and_terminal_errors(tmp_path, failure):
+    calls = []
+
+    async def invoke(request, params):
+        calls.append(params)
+        await asyncio.sleep(0)
+        if failure is not None:
+            raise failure
+        return _completion(content="hello", usage=_USAGE)
+
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def route(request: Request, body: dict):
+        return await SimpleResponsesAPIModel.chat_completions_dispatch(
+            SimpleNamespace(_invoke_chat_completions=invoke),
+            request,
+            body,
+        )
+
+    install_model_call_capture(
+        app, ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=tmp_path)
+    )
+    with TestClient(app) as client:
+        response = client.post("/ng-rollout/1-0/v1/chat/completions", json=_STREAM_BODY)
+    assert response.status_code == 200
+    assert response.text.startswith(": keepalive\n\n")
+    records = [json.loads(line) for line in (tmp_path / "1-0.capture.jsonl").read_text().splitlines()]
+    assert len(records) == len(calls) == 1
+    record = records[0]
+    if failure is None:
+        assert record["error_category"] is None
+        assert {key: record["response"]["usage"][key] for key in _USAGE} == _USAGE
+        assert record["response"]["choices"][0]["message"]["content"] == "hello"
+    else:
+        assert record["error_category"] == "upstream_error"
+        assert "[DONE]" not in response.text
+        error = _events(response.text)[0]["error"]
+        assert error["type"] == type(failure).__name__
+        assert error["message"]
+        assert error["code"] == (400 if isinstance(failure, HTTPException) else "internal_error")
+
+
+def test_capture_ttft_ignores_split_sse_comments(tmp_path, monkeypatch):
+    from starlette.responses import StreamingResponse
+
+    import nemo_gym.base_responses_api_model as capture
+
+    clock = [0.0]
+    monkeypatch.setattr(capture.time, "perf_counter", lambda: clock[0])
+    app = FastAPI()
+
+    async def chunks():
+        clock[0] = 0.2
+        yield b": keep"
+        clock[0] = 0.4
+        yield b"alive\n\ndata: \n\n"
+        clock[0] = 0.6
+        yield b": another comment\n\n"
+        clock[0] = 1.0
+        for chunk in synthesize_chat_completion_sse(
+            _completion(content="ok", usage=_USAGE).model_dump(), include_usage=True
+        ):
+            yield chunk[:2]
+            yield chunk[2:]
+
+    @app.post("/v1/chat/completions")
+    async def route():
+        return StreamingResponse(chunks(), media_type="text/event-stream")
+
+    install_model_call_capture(
+        app, ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=tmp_path)
+    )
+    with TestClient(app) as client:
+        response = client.post("/ng-rollout/1-0/v1/chat/completions", json=_STREAM_BODY)
+    assert response.status_code == 200
+    record = json.loads((tmp_path / "1-0.capture.jsonl").read_text())
+    assert record["latency_ttft_ms"] == 1000.0
+    assert record["error_category"] is None
+    assert record["response"]["usage"]["total_tokens"] == 10

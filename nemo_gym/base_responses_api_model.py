@@ -47,7 +47,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
+from nemo_gym.chat_streaming import BufferedChatStreamingResponse, sanitize_streaming_chat_body
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -291,7 +291,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         ``nemo_gym.chat_streaming``), validated identically, delegated to the same
         ``chat_completions()``, and the complete response is buffered and re-emitted as a
         synthesized ``chat.completion.chunk`` SSE stream. This is buffer-then-replay, not
-        token-by-token streaming.
+        token-by-token streaming. SSE comments keep the connection active during generation;
+        backend failures after headers are sent become terminal SSE error events.
 
         Only a genuine boolean ``stream: true`` takes the streaming path; any other value
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
@@ -304,11 +305,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
-        completion = await self._invoke_chat_completions(request, params)
-        completion_json = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
-        return StreamingResponse(
-            synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
-            media_type="text/event-stream",
+        return BufferedChatStreamingResponse(
+            lambda: self._invoke_chat_completions(request, params), include_usage=include_usage
         )
 
     async def _invoke_chat_completions(
@@ -1373,6 +1371,7 @@ class _CaptureMiddleware:
         start = time.perf_counter()
         deferred_response_messages: list[dict[str, Any]] = []
         sse_event_buffer = bytearray()
+        first_data_buffer = bytearray()
         defer_response = False
 
         async def _send(message: dict[str, Any]) -> None:
@@ -1385,7 +1384,12 @@ class _CaptureMiddleware:
             elif message_type == "http.response.body":
                 chunk = message.get("body", b"") or b""
                 if chunk and state["ttft_ms"] is None:
-                    state["ttft_ms"] = (time.perf_counter() - start) * 1000.0
+                    first_data_buffer.extend(chunk)
+                    # SSE comments keep the transport alive but are not model data.
+                    # Retain partial lines so split comment/data frames work too.
+                    if not state["streaming"] or re.search(rb"(?:^|\n)data:[ \t]*[^ \t\r\n]", first_data_buffer):
+                        state["ttft_ms"] = (time.perf_counter() - start) * 1000.0
+                        first_data_buffer.clear()
                 state["body"].extend(chunk)  # buffered for both shapes; SSE is reassembled below
                 if state["streaming"] and chunk and not defer_response:
                     sse_event_buffer.extend(chunk)
