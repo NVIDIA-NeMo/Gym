@@ -10,6 +10,12 @@ terminal_bench_2_1_opencode_sandboxed_agent:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:
     opencode_sandboxed_agent:
+      # TB2.1 tasks expect an unrestricted shell: some instruct `git clone` (including over SSH) or
+      # need git history recovery. The agent's default bash denylist is SWE-bench anti-leak policy.
+      # Web tools stay denied (agent default).
+      opencode_config:
+        permission:
+          bash: allow
       resources_server:
         type: resources_servers
         name: terminal_bench_2_1_opencode_resources_server
