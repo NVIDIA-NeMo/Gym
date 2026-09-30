@@ -43,7 +43,9 @@ async def _serve(ledger, call_id, items, *, ordinary=False):
                 **{**candidate.model_dump(exclude={"request_replay", "candidate_replay"}), "mode": "token_in"}
             )
         handler.prepare_request({"model": "model", "messages": items})
-        context.external_commit_coords = _staged_coords(model_call_id=call_id, staging_key=f"rollout-1/{call_id}")
+        handler.prepare_response(
+            {"ng_commit_coords": _staged_coords(model_call_id=call_id, staging_key=f"rollout-1/{call_id}")}
+        )
         await handler.finalize_response(
             {
                 "id": f"response-{call_id}",
