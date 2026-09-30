@@ -34,8 +34,11 @@ from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_HEALTH_PORT,
     COLLECTOR_SERVICE_NAME,
     FINAL_SCRAPE_GRACE_SECONDS,
+    GYM_TELEMETRY_EXTRA,
     SHUTDOWN_WAIT_SECONDS,
     collector_config_path,
+    driver_telemetry_env,
+    gym_telemetry_active,
     otel_active,
 )
 from nemo_gym.orchestration.executors.script_templates import (
@@ -721,6 +724,24 @@ def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> di
     return run
 
 
+def _command_env(benchmark: BenchmarkRunConfig, remote_bench_dir: Path) -> dict[str, str]:
+    """Environment a `command` benchmark gets in place of `gym eval run` arguments.
+
+    Values are already literal here (driver.env prefixes were resolved at
+    validation time), so they are passed through as-is.
+    """
+    env = {"NEMO_GYM_BENCH_DIR": str(remote_bench_dir)}
+    for key, name in (
+        ("policy_base_url", "NEMO_GYM_POLICY_BASE_URL"),
+        ("policy_model_name", "NEMO_GYM_POLICY_MODEL_NAME"),
+        ("policy_api_key", "NEMO_GYM_POLICY_API_KEY"),
+    ):
+        value = benchmark.run.get(key)
+        if value is not None:
+            env[name] = str(value)
+    return env
+
+
 def _probe_host(node: int) -> str:
     """How the batch script, which runs on the allocation's first node, reaches `node`."""
     return "localhost" if node == 0 else f"${{gym_nodes[{node}]}}"
@@ -771,6 +792,7 @@ def build_sbatch_script(
     )
 
     observed = otel_active(config)
+    instrumented = gym_telemetry_active(config)
 
     driver_node = _driver_node(config, compute) if is_multi_node else None
     service_commands = "\n\n".join(
@@ -835,15 +857,34 @@ def build_sbatch_script(
     output_path = f"+output_jsonl_fpath={remote_bench_dir}/artifacts/rollouts.jsonl"
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
-    run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
-    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
+    driver_env = dict(config.driver.env)
+    if instrumented:
+        driver_env = {
+            **driver_telemetry_env(
+                remote_bench_dir.parent.name, config.otel.gym_span_groups, logs=config.otel.gym_logs
+            ),
+            **driver_env,
+        }
+    if benchmark.command is None:
+        run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
+        run_args.setdefault("require_complete", True)
+        gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
+    else:
+        # A command replaces `gym eval run`, so the run args it would have carried
+        # have nowhere to go. What the script still needs is where to write and how
+        # to reach the policy, which it gets as environment variables rather than
+        # as a calling convention it would have to parse.
+        gym_cmd = ""
+        driver_env |= _command_env(benchmark, remote_bench_dir)
     entrypoint = render_driver_entrypoint(
         repo=gi.repo if gi else None,
         ref=gi.ref if gi else None,
         prepare_cmd=prepare_cmd,
+        command=benchmark.command,
+        extras=(GYM_TELEMETRY_EXTRA,) if instrumented else (),
     )
     prepare_command = ""
-    driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
+    driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
     driver_node_flags = (
         f' --nodelist="${{gym_nodes[{driver_node}]}}" --nodes=1 --ntasks=1' if driver_node is not None else ""
     )
@@ -858,8 +899,7 @@ def build_sbatch_script(
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
-    driver_command = (
-        f"{gym_cmd}\n"
+    driver_command = (f"{gym_cmd}\n" if gym_cmd else "") + (
         f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
         f" --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver.log {entrypoint}"

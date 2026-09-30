@@ -230,6 +230,22 @@ class BenchmarkRunConfig(_StrictModel):
     # Hydra overrides forwarded to `gym eval run`. policy_model wiring is injected here at
     # validation time so all executors see it uniformly via flatten_run_args.
     run: dict[str, Any] = {}
+    # Shell script the driver runs INSTEAD of `gym eval run`, for a benchmark whose
+    # harness is not Gym's own runner -- one that provisions external machines and
+    # drives Gym from there, for instance. `prepare` still runs first, and the
+    # driver exports NEMO_GYM_BENCH_DIR plus the policy's base URL, model name and
+    # API key (when driver.policy_model is set) so the script can reach the served
+    # model without repeating its address.
+    command: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_command(self) -> "BenchmarkRunConfig":
+        if self.command is not None and self.run:
+            raise ValueError(
+                "A benchmark sets both `command` and `run`, but `run` only configures `gym eval run`, which "
+                "`command` replaces. Fold those settings into the command, or drop it."
+            )
+        return self
 
 
 class GymInstallConfig(_StrictModel):
@@ -296,6 +312,12 @@ class OtelConfig(_StrictModel):
     service_name: str | None = None
     # Display identity of the scraped metrics in the backend (`service.name.override`).
     component: str = "gym-vllm"
+    # Gym's own nemo-lens telemetry; needs `driver.gym_install`, which installs the `telemetry` extra.
+    gym_telemetry: bool = True
+    # Gym span groups to switch on: a preset or comma-separated names (`default`, `verify`, `sandbox`, ...).
+    gym_span_groups: str = "default,verify"
+    # Ship Gym's Python logging as OTel logs too (trace-correlated), through the same collector.
+    gym_logs: bool = True
     # Node-level exporters that clusters commonly run as system services on every compute node;
     # scraped on localhost when set, skipped when null. DCGM gives per-GPU activity/memory/power,
     # node_exporter gives CPU/memory/network/disk. A closed port only logs scrape errors.

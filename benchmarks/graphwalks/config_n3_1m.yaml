@@ -21,3 +21,10 @@ graphwalks_n3_1m_benchmark_simple_agent:
         prompt_config: null
         prepare_script: benchmarks/graphwalks/prepare_n3_1m.py
         num_repeats: 1
+
+graphwalks_n3_1m_benchmark_environment_server:
+  _inherit_from: graphwalks_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: graphwalks_n3_1m_benchmark_simple_agent

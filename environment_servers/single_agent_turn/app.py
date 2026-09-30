@@ -7,6 +7,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
+from fastapi import Body
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_environment_server import (
@@ -26,7 +27,13 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
-from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT, AgentServerRef, ResourcesServerRef
+from nemo_gym.config_types import (
+    TOKEN_CAPTURE_PATH_SEGMENT,
+    AgentServerRef,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ResourcesServerRef,
+)
 from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
@@ -35,10 +42,8 @@ from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypo
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnFailure,
     SingleAgentTurnRequest,
-    SingleAgentTurnResourcesVerifyRequest,
     SingleAgentTurnResponse,
     SingleAgentTurnResult,
-    SingleAgentTurnVerificationInput,
 )
 from nemo_gym.tool_access import (
     DirectHTTPToolAccess,
@@ -64,6 +69,16 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     config: SingleAgentTurnEnvironmentServerConfig
     request_model = SingleAgentTurnRequest
     response_model = SingleAgentTurnResponse
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Forward to the resources server, which owns verification in this protocol."""
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
 
     async def run(
         self,
@@ -244,14 +259,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=SingleAgentTurnResourcesVerifyRequest(
-                    episode_id=request.episode_id,
-                    task_id=request.task.task_id,
-                    verification_input=SingleAgentTurnVerificationInput(
-                        responses_create_params=task_input.responses_create_params,
-                        response=agent_response,
+                # The Resources Server's own flat verify body, as an Agent's /run sends it; the session
+                # cookie identifies the episode.
+                json=task_input.task_data
+                | {
+                    "responses_create_params": task_input.responses_create_params.model_dump(
+                        mode="json", exclude_unset=True
                     ),
-                ),
+                    "response": agent_response.model_dump(mode="json"),
+                },
                 cookies=resources_cookies,
             )
             await raise_for_status(verify_http_response)
