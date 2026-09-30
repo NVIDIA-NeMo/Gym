@@ -11,17 +11,20 @@ AGENT_ROLES = ("user", "assistant", "judge", "summary")
 
 def compute_task_metrics(task_input: Mapping[str, object]) -> dict[str, bool | str | None]:
     """Return deterministic, dependency-free metrics for one UserSim task input."""
-    sampling = task_input.get("sampling")
-    if not isinstance(sampling, Mapping):
-        raise ValueError("UserSim task_input.sampling must be a mapping")
+    scenario = task_input.get("scenario")
+    if not isinstance(scenario, Mapping):
+        raise ValueError("UserSim task_input.scenario must be a mapping")
+    context = task_input.get("usersim_context")
+    if not isinstance(context, Mapping):
+        raise ValueError("UserSim task_input.usersim_context must be a mapping")
 
     responses_create_params = task_input.get("responses_create_params", {})
     if not isinstance(responses_create_params, Mapping):
         raise ValueError("UserSim task_input.responses_create_params must be a mapping")
 
-    locale = sampling.get("locale")
-    probe_type = sampling.get("probe_type")
-    seed = sampling.get("seed")
+    locale = scenario.get("locale")
+    probe_type = scenario.get("probe_type")
+    seed = context.get("seed")
     return {
         "UserSim locales": locale if isinstance(locale, str) else None,
         "UserSim probe types": probe_type if isinstance(probe_type, str) else None,

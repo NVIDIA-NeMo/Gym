@@ -24,7 +24,7 @@ For every configured locale, server startup:
 
 1. Requires the panel and manifest prepared by the environment recipe.
 2. Validates the panel's version, size, row count, and SHA-256.
-3. Loads the panel into memory for episode sampling.
+3. Loads the panel into memory for prepared-row validation.
 
 Run `gym eval prepare --config environments/usersim/config.yaml` before starting the Resources
 Server. Preparation delegates population sampling to NeMo UserSim and treats
@@ -34,26 +34,33 @@ instruction when the panel is absent or does not match its manifest.
 ## Episode data contracts
 
 The episode uses separate contracts for each lifecycle. Static protocol and
-population settings live in YAML. An environment task row contains only task
-selectors and optional per-role Agent request parameters:
+population settings live in YAML. Preparation expands each tracked template
+into a fully resolved task row:
 
 ```json
 {
-  "sampling": {
+  "scenario": {
+    "locale": "en_US",
+    "persona": {"first_name": "Morgan"},
+    "probe_type": "general_open_ended",
+    "theme": {"type": "local food", "description": "Seek a practical recommendation."},
+    "goal": "Seek a practical recommendation.",
+    "probe_data": {}
+  },
+  "usersim_context": {
     "locale": "en_US",
     "seed": 1042,
-    "probe_type": "general_open_ended"
+    "personas_dataset_version": "0.0.2",
+    "personas_panel_sha256": "sha256-without-prefix",
+    "usersim_revision": "pinned-40-character-git-revision"
   },
   "responses_create_params": {}
 }
 ```
 
-`probe_type` is optional. When omitted, the resources server selects it from
-the configured `probe_mix`. The same locale and seed always resolve to the same
-persona, probe, and theme for an unchanged persona dataset and server config.
-
-The Environment Server sends only `sampling` to `/seed_session`. The server
-returns both the executable scenario and its immutable selection provenance:
+The Environment Server sends the prepared row to `/seed_session`. The server
+returns its executable scenario and immutable provenance after validating them
+against the loaded panel:
 
 ```json
 {
@@ -78,10 +85,9 @@ context does not duplicate the selected persona, probe, theme, or goal.
 
 At `/seed_session`, the server:
 
-1. Selects one persona from the prepared panel, plus one probe and theme,
-   deterministically.
+1. Validates the row's revision, panel version/checksum, locale, persona, and probe.
 2. Stores the resolved context in task-scoped session state.
-3. Records the persona dataset version and panel SHA-256 for replay.
+3. Uses the row's prepared persona, probe, theme, goal, and probe data unchanged.
 4. Returns a `UserSimScenario` to the Environment Server before its first participant
    invocation.
 
@@ -128,25 +134,21 @@ The YAML config owns static population and probe policy:
 - `personas_cache_dir`
 - `personas_dataset_version`
 - `personas_locales`
-- `probe_mix`
-- `probe_themes`
 - agent, model, and resources-server references
 - turn limits
 - typed `protocol_config` simulation behavior
 
-Each dataset row owns dynamic task identity:
-
-- `sampling.locale`
-- `sampling.seed`
-- optional `sampling.probe_type`
-- optional per-role `responses_create_params`
+Each prepared dataset row owns the complete scenario, selection provenance,
+and optional per-role `responses_create_params`. The tracked source templates
+live at `data/example_source.jsonl`; preparation writes the ignored runnable
+dataset at `environments/usersim/data/example.jsonl`.
 
 Changing the dataset version selects a different prepared-panel cache path.
 
 ## Supported probes
 
-`data/example.jsonl` contains one runnable row for every first-party NeMo
-UserSim probe:
+`data/example_source.jsonl` contains one tracked template for every first-party
+NeMo UserSim probe:
 
 - General: `general_open_ended`, `general_educational`, and `tool_calling`
 - Sovereign AI: `sov_ai_facts`, `sov_ai_dynamic`, and
@@ -163,8 +165,9 @@ The three probes that expose Assistant tools—`tool_calling`,
 runtime in the Resources Server. The remaining probes execute their native
 UserSim conversation shape through the Environment Server. Asset-backed probes
 derive their task from the selected persona and pinned UserSim assets; the
-dataset row only needs a stable locale, seed, and probe name. The
-`tool_calling` row additionally supplies its candidate tool schema.
+prepared row includes that resolved persona plus a stable locale, seed, probe,
+theme, goal, and probe data. The `tool_calling` row additionally supplies its
+candidate tool schema.
 
 During `/verify`, the Resources Server invokes UserSim's registered scorer for
 tool use, sovereign-AI, safety, financial-services, identity-disclosure, and guarded

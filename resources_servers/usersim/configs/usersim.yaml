@@ -45,23 +45,6 @@ usersim_resources:
         name: support_model
       personas_locales:
       - en_US
-      probe_mix:
-        general_open_ended: 0.5
-        general_educational: 0.5
-      probe_themes:
-        tool_calling:
-        - topic: weather and location lookup
-          goal: Ask for current weather information that requires the available tool.
-        general_open_ended:
-        - topic: local food and dining
-          goal: Seek a practical recommendation about local food and dining.
-        - topic: travel planning
-          goal: Ask for practical advice about planning a trip.
-        general_educational:
-        - topic: local ecology
-          goal: Learn about local ecology by asking focused follow-up questions.
-        - topic: personal finance fundamentals
-          goal: Learn the fundamentals of personal finance through clear explanations.
 
 usersim_user:
   responses_api_agents:
@@ -89,7 +72,7 @@ usersim_assistant:
       datasets:
         - name: example
           type: example
-          jsonl_fpath: resources_servers/usersim/data/example.jsonl
+          jsonl_fpath: environments/usersim/data/example.jsonl
           license: Apache 2.0
 
 usersim_environment:
