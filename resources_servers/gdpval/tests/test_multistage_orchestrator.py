@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import json
-from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -826,19 +825,22 @@ class TestResumeSeam:
             cfg, REF_ELOS, _distribution(task_ids), rows, counting_run, resume=resume
         )
 
-        # Stage 0 was not dispatched; only stage 1 ran.
-        assert len(dispatched) == 1
-        # Stage 0 ELO was re-fit from cached rows and threaded into stage 1's
-        # reference selection (same as the original full run).
-        assert summaries[0]["cached"] is True
-        if not incomplete:
+        if incomplete:
+            # A stage recorded complete but missing a planned row is stale: it is
+            # re-dispatched rather than reused, so the run still ends complete.
+            assert len(dispatched) == 2
+            assert not summaries[0].get("cached")
+        else:
+            # Stage 0 was not dispatched; only stage 1 ran. Its ELO was re-fit from
+            # the cached rows and threaded into stage 1's reference selection.
+            assert len(dispatched) == 1
+            assert summaries[0]["cached"] is True
             assert summaries[1]["reference_ids"] == base_summaries[1]["reference_ids"]
         assert summaries[0]["num_rollouts"] == 6
-        if incomplete:
-            results.append(results[0])  # A duplicate cannot replace the missing repeat.
         config = SharedRolloutCollectionConfig(output_jsonl_fpath="rollouts.jsonl", require_complete=True)
-        with pytest.raises(RuntimeError, match="15/16 samples completed") if incomplete else nullcontext():
-            config.check_completion(expected=sum(s["num_rollouts"] for s in summaries), results=results)
+        config.check_completion(expected=sum(s["num_rollouts"] for s in summaries), results=results)
+        with pytest.raises(RuntimeError, match="15/16 samples completed"):
+            config.check_completion(expected=sum(s["num_rollouts"] for s in summaries), results=results[:-1])
 
     async def test_interrupted_stage_redispatches_only_missing(self) -> None:
         task_ids = [f"t{i}" for i in range(10)]
@@ -3362,6 +3364,7 @@ class TestIntegrationWiring:
             dispatch_longest_first=True,
             resume_from_cache=False,
             route_failures_to_sidecar=True,
+            check_completion=lambda **kwargs: None,
         )
         global_config = {
             "multistage": {"enabled": True, "stages": ["1", "1"], "seed": 0},
