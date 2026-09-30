@@ -18,20 +18,19 @@ persona, probe, theme, toolset, locale, configuration, trajectory identity, and
 provenance selection; Gym does not maintain sampling templates or persona
 panels.
 
-While UserSim is private, the Environment Server installs the pinned source
-revision over Git+SSH from `github.com/NVIDIA-NeMo/UserSim`; the host therefore
-needs GitHub SSH access. This temporary source dependency should become a normal
-published-package dependency when UserSim is open-sourced.
+While UserSim is private, the preparation and runtime environments install
+revision `4fd4c800bbef8883329543df632f328860fc6429` over Git+SSH from
+`github.com/NVIDIA-NeMo/UserSim`; the host therefore needs GitHub SSH access.
 
-NeMo UserSim behavior is pinned once in the Resources Server's typed
-`protocol_config`; it is not repeated in task rows. The Resources Server also
-owns `max_turns`, fixes internal column names, and passes the complete protocol
-configuration into the canonical runtime. `context_compression` remains
-disabled and finance retrieval uses UserSim's `hybrid` default.
+Each task carries UserSim's resolved row unchanged. Resources constructs the
+runtime only with `ProbeEpisodeRuntime.from_resolved_row`, preserving the
+materialized configuration, trajectory identity, and provenance.
 
 `tool_calling`, `safety_agentic`, and `financial_services` expose
 probe-selected tool schemas to the Assistant Agent. The Agent owns model/tool
 iteration and invokes standard Resources Server `POST /{tool_name}` endpoints.
+Ordered parallel calls use `POST /runtime/tool_calls`; UserSim assigns semantic
+turn/call indices. Single tool responses remain opaque text.
 The Resources Server owns the episode-scoped tool implementation, mutable
 state, and native verification evidence. All other probes execute their native
 UserSim conversation shape without Assistant tools.
@@ -56,7 +55,7 @@ After preparation:
 ```bash
 gym eval run \
   --environment usersim \
-  --split example \
+  --split benchmark \
   --output results/usersim.jsonl \
   ++observability_enabled=true \
   ++model_call_capture_dir=/absolute/path/to/model-calls
