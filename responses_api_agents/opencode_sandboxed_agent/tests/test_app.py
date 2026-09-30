@@ -415,6 +415,41 @@ class TestOpenCodeSandboxedAgent:
         assert limits["output"] == 1024
         assert limits["context"] == server.config.opencode_max_context_window
 
+    async def test_task_mcp_and_skills_are_scoped_to_each_run(self, monkeypatch: MonkeyPatch) -> None:
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        server.config.opencode_config = {
+            "mcp": {"existing": {"type": "remote", "url": "http://configured/mcp"}},
+            "skills": {"paths": ["/configured/skills"]},
+            "tools": {"skill": False, "bash": True},
+        }
+        monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model-server")
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "base_url_for_run", lambda self, **kw: kw["base_url"])
+        request = MagicMock()
+        request.json = AsyncMock(return_value={"input": "solve"})
+        request.state._ng_sandbox_seed = {
+            "mcp_servers": [
+                {"name": "browser", "transport": "sse", "url": "http://browser:3080/sse"},
+                {"name": "local", "transport": "stdio", "command": "python3", "args": ["/task/mcp.py"]},
+            ],
+            "skills_dir": "/task/.agents/skills",
+        }
+        config = await server._create_opencode_config(request)
+        assert config["mcp"]["browser"] == {
+            "type": "remote",
+            "url": "http://browser:3080/sse",
+            "oauth": False,
+            "enabled": True,
+        }
+        assert config["mcp"]["local"]["command"] == ["python3", "/task/mcp.py"]
+        assert config["skills"]["paths"] == ["/configured/skills", "/task/.agents/skills"]
+        assert config["tools"] == {"skill": True, "bash": True}
+        request.state._ng_sandbox_seed = {}
+        following = await server._create_opencode_config(request)
+        assert following["mcp"] == server.config.opencode_config["mcp"]
+        assert set(following["mcp"]) == {"existing"}
+        assert following["skills"]["paths"] == ["/configured/skills"]
+        assert following["tools"]["skill"] is False
+
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,

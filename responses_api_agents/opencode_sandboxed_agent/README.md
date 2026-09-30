@@ -12,7 +12,9 @@ and execution outcome to `/verify`, after stopping its process group and
 releasing its connection. Resources owns sandbox destruction. Each seed attempt
 carries an `Idempotency-Key`; transport retries reuse it. The task prompt comes
 from the prepared input. Set `sandbox_model_base_url` if the configured Gym model
-address is not reachable from the sandbox.
+address is not reachable from the sandbox. Resource-supplied `mcp_servers` and
+`skills_dir` are applied to that run’s OpenCode configuration, including enabling
+the skill tool when a task provides skills.
 
 TB4's profile is `benchmarks/terminal_bench_4/opencode.yaml`. Prepare with
 `gym eval prepare --benchmark terminal_bench_4/opencode`, then use that same

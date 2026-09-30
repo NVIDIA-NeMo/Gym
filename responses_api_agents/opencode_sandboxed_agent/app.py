@@ -576,7 +576,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             )
             + "/v1"
         )
-        return {
+        config = {
             "model": "nemo_gym/dummy_model",
             "$schema": "https://opencode.ai/config.json",
             "provider": {
@@ -602,6 +602,27 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             },
             **self.config.opencode_config,
         }
+
+        seed = getattr(request.state, "_ng_sandbox_seed", {})
+        seed = seed if isinstance(seed, dict) else {}
+        if seed.get("mcp_servers"):
+            servers = dict(config.get("mcp", {}))
+            for server in seed["mcp_servers"]:
+                transport = server.get("transport", "sse")
+                if transport == "stdio":
+                    entry = {"type": "local", "command": [server["command"], *server.get("args", [])]}
+                elif transport in {"sse", "http", "streamable-http"}:
+                    entry = {"type": "remote", "url": server["url"], "oauth": False}
+                else:
+                    raise ValueError(f"Unsupported task MCP transport: {transport}")
+                servers[server["name"]] = entry | {"enabled": True}
+            config["mcp"] = servers
+        if skills_dir := seed.get("skills_dir"):
+            skills = dict(config.get("skills", {}))
+            skills["paths"] = list(dict.fromkeys([*skills.get("paths", []), skills_dir]))
+            config["skills"] = skills
+            config["tools"] = dict(config.get("tools", {})) | {"skill": True}
+        return config
 
     async def _stop_process_group(self, sandbox: AsyncSandbox, pidfile: str, exec_options: dict) -> bool:
         """Stop the borrowed sandbox's harness process group before verification."""
