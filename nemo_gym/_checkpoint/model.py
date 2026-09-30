@@ -16,6 +16,10 @@ With generation cuts enabled, prepare also asks each inference worker to stage t
 undelivered call has generated so far. Restore attaches that prefix to the re-issued call's admission,
 so the worker continues it instead of generating from scratch. A call the worker could not cut is
 simply regenerated.
+
+The data plane of one server process is a ``PolicyGate``. With one uvicorn worker, a
+``PolicyModelParticipant`` owns the gate directly. With several, each worker runs a gate and one
+coordinator in the main process owns the participant (``nemo_gym._checkpoint.model_workers``).
 """
 
 import asyncio
@@ -23,7 +27,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol, runtime_checkable
@@ -31,6 +35,7 @@ from typing import Any, Optional, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, JsonValue
 
 from nemo_gym._checkpoint.control import (
+    AttemptFence,
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
@@ -92,11 +97,71 @@ class CheckpointableLedger(Protocol):
     def import_rows(self, rollout_id: str, rows: list[dict]) -> None: ...
 
 
+class EpisodeCut(BaseModel):
+    """A durable cut of one undelivered call, keyed by the episode that will continue it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    capture_key: str
+    record: GenerationCutRecord
+
+
+class GateReport(BaseModel):
+    """What one process's gate contributes to readiness and to a commit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ready: bool
+    streaming: list[str]
+    inflight: int
+    held: int
+    # Undelivered model calls (model_call_id -> capture key): the commit leaves their ledger rows out.
+    undelivered: dict[str, str]
+    cuts: list[EpisodeCut]
+
+
+class RestoredCuts(Protocol):
+    """Where a gate finds the restored generation cut a re-issued call continues."""
+
+    async def prefetch(self, ticket: "_Ticket") -> None:
+        """Claim the ticket's restored cut before the call runs, if claiming needs I/O."""
+
+    def take(
+        self, ticket: Optional["_Ticket"], capture_key: str, request_digest: str
+    ) -> Optional[GenerationCutRecord]:
+        """Return and consume the restored cut for this request, if it has one."""
+
+    async def settle(self, ticket: "_Ticket") -> None:
+        """Give back a claimed cut the call did not use."""
+
+
+class LocalRestoredCuts:
+    """Restored cuts held in this process; claiming needs no I/O."""
+
+    def __init__(self) -> None:
+        self.records: dict[str, GenerationCutRecord] = {}
+
+    async def prefetch(self, ticket: "_Ticket") -> None:
+        return None
+
+    def take(
+        self, ticket: Optional["_Ticket"], capture_key: str, request_digest: str
+    ) -> Optional[GenerationCutRecord]:
+        record = self.records.get(capture_key)
+        if record is None or record.request_digest != request_digest:
+            return None
+        del self.records[capture_key]
+        return record
+
+    async def settle(self, ticket: "_Ticket") -> None:
+        return None
+
+
 @dataclass(eq=False)
 class _Ticket:
     """One admitted generation request."""
 
-    participant: "PolicyModelParticipant"
+    gate: "PolicyGate"
     capture_key: str
     task: Optional[asyncio.Task]
     ticket_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -105,6 +170,9 @@ class _Ticket:
     backend: Optional[str] = None
     capture: Optional[CaptureContext] = None
     cut: Optional[GenerationCutPrefixAck] = None
+    # A restored cut claimed from another process for this call, and whether the call used it.
+    claimed_cut: Optional[GenerationCutRecord] = None
+    claimed_cut_used: bool = False
 
     @property
     def undelivered_call_id(self) -> Optional[str]:
@@ -123,7 +191,7 @@ def attach_capture_context(context: CaptureContext) -> None:
     ticket = _CURRENT_TICKET.get()
     if ticket is not None:
         ticket.capture = context
-        context.admission_hook = ticket.participant.continue_restored_cut
+        context.admission_hook = ticket.gate.admission_hook(ticket)
 
 
 def note_generation_backend(base_url: Any) -> None:
@@ -133,28 +201,27 @@ def note_generation_backend(base_url: Any) -> None:
         ticket.backend = str(base_url)
 
 
-class PolicyModelParticipant(CheckpointParticipant):
-    kind = "model"
-    record_model = ModelRecord
+class PolicyGate:
+    """The policy data plane of one server process: admission, held responses, and generation cuts."""
 
     def __init__(
         self,
-        ledger: Optional[CheckpointableLedger] = None,
         *,
-        server_name: str = "policy",
-        cut_requester: Optional[CutRequester] = None,
+        server_name: str,
+        cut_requester: Optional[CutRequester],
+        attempts: AttemptFence,
+        restored_cuts: RestoredCuts,
+        on_change: Callable[[], Awaitable[None]],
     ) -> None:
-        super().__init__()
-        self.ledger = ledger
         self.server_name = server_name
         self.cut_requester = cut_requester
+        self.attempts = attempts
+        self.restored_cuts = restored_cuts
+        self.on_change = on_change
         self.accepting = True
         self._reopened = asyncio.Event()
         self._reopened.set()
-        self._tickets: set[_Ticket] = set()
-        self._restored_cuts: dict[str, GenerationCutRecord] = {}
-
-    # -- data plane -----------------------------------------------------------------------------
+        self.tickets: set[_Ticket] = set()
 
     def admit(self, capture_key: Optional[str]) -> None:
         if capture_key is not None:
@@ -163,32 +230,33 @@ class PolicyModelParticipant(CheckpointParticipant):
             raise AdmissionClosedError("policy model admission is closed for a checkpoint")
 
     def enter(self, capture_key: str) -> _Ticket:
-        ticket = _Ticket(participant=self, capture_key=capture_key, task=asyncio.current_task())
-        self._tickets.add(ticket)
+        ticket = _Ticket(gate=self, capture_key=capture_key, task=asyncio.current_task())
+        self.tickets.add(ticket)
         return ticket
 
     async def exit(self, ticket: _Ticket) -> None:
-        self._tickets.discard(ticket)
-        await self.notify()
+        self.tickets.discard(ticket)
+        await self.restored_cuts.settle(ticket)
+        await self.on_change()
 
     async def release_response(self, ticket: _Ticket) -> None:
         """Hold a response until resume unless it may be delivered now."""
         while not self.accepting:
-            await self.notify()
+            await self.on_change()
             await self._reopened.wait()
         ticket.response_started = True
 
-    def continue_restored_cut(self, context: CaptureContext, admission: CaptureAdmission) -> CaptureAdmission:
-        """Attach a restored generation cut to the re-issued call it belongs to."""
-        record = self._restored_cuts.get(context.rollout_id)
-        if record is None or conversation_digest(list(context.request_items or [])) != record.request_digest:
-            return admission
-        del self._restored_cuts[context.rollout_id]
-        return admission.model_copy(update={"generation_cut": record.continuation})
+    def admission_hook(self, ticket: _Ticket) -> Callable[[CaptureContext, CaptureAdmission], CaptureAdmission]:
+        def continue_restored_cut(context: CaptureContext, admission: CaptureAdmission) -> CaptureAdmission:
+            digest = conversation_digest(list(context.request_items or []))
+            record = self.restored_cuts.take(ticket, context.rollout_id, digest)
+            if record is None:
+                return admission
+            return admission.model_copy(update={"generation_cut": record.continuation})
 
-    # -- checkpoint -----------------------------------------------------------------------------
+        return continue_restored_cut
 
-    async def close_admission(self, request: CheckpointRequest) -> None:
+    async def close(self, request: CheckpointRequest) -> None:
         self.accepting = False
         self._reopened.clear()
         if self.cut_requester is not None:
@@ -196,15 +264,37 @@ class PolicyModelParticipant(CheckpointParticipant):
             # still held; without a cut it is simply regenerated after a restore.
             await self._cut_all(request)
 
-    async def open_admission(self) -> None:
+    def open(self) -> None:
         self.accepting = True
         self._reopened.set()
-        for ticket in self._tickets:
+        for ticket in self.tickets:
             ticket.cut = None
+
+    async def retire(self, episode_id: EpisodeId) -> None:
+        for ticket in list(self.tickets):
+            if covers(episode_id, ticket.capture_key) and ticket.task is not None:
+                ticket.task.cancel()
+
+    def report(self) -> GateReport:
+        # Held calls never block; only a response that started before admission closed must finish sending.
+        streaming = sorted({ticket.capture_key for ticket in self.tickets if ticket.response_started})
+        undelivered = [ticket for ticket in self.tickets if ticket.undelivered_call_id is not None]
+        return GateReport(
+            ready=not streaming,
+            streaming=streaming,
+            inflight=len(self.tickets),
+            held=sum(not ticket.response_started for ticket in self.tickets),
+            undelivered={ticket.undelivered_call_id: ticket.capture_key for ticket in undelivered},
+            cuts=[
+                EpisodeCut(capture_key=ticket.capture_key, record=_cut_record(ticket))
+                for ticket in undelivered
+                if ticket.cut is not None and ticket.cut.disposition == "durable_prefix"
+            ],
+        )
 
     async def _cut_all(self, request: CheckpointRequest) -> None:
         by_backend: dict[str, list[_Ticket]] = {}
-        for ticket in self._tickets:
+        for ticket in self.tickets:
             if ticket.backend is not None and ticket.undelivered_call_id is not None:
                 by_backend.setdefault(ticket.backend, []).append(ticket)
         await asyncio.gather(*(self._cut(request, backend, tickets) for backend, tickets in by_backend.items()))
@@ -235,75 +325,130 @@ class PolicyModelParticipant(CheckpointParticipant):
         for ticket in tickets:
             ticket.cut = acks[ticket.ticket_id]
 
-    def readiness(self) -> PrepareReport:
-        # Held calls never block; only a response that started before admission closed must finish sending.
-        streaming = sorted({ticket.capture_key for ticket in self._tickets if ticket.response_started})
-        durable_cuts = sum(
-            ticket.cut is not None and ticket.cut.disposition == "durable_prefix" for ticket in self._tickets
-        )
-        return PrepareReport(
-            ready=not streaming,
-            blockers=streaming,
-            counts={
-                "inflight": len(self._tickets),
-                "held": sum(not ticket.response_started for ticket in self._tickets),
-                "cut": durable_cuts,
-            },
+
+def merge_reports(reports: Iterable[GateReport]) -> PrepareReport:
+    reports = list(reports)
+    streaming = sorted({key for report in reports for key in report.streaming})
+    return PrepareReport(
+        ready=not streaming,
+        blockers=streaming,
+        counts={
+            "inflight": sum(report.inflight for report in reports),
+            "held": sum(report.held for report in reports),
+            "cut": sum(len(report.cuts) for report in reports),
+        },
+    )
+
+
+def export_model_records(
+    ledger: CheckpointableLedger,
+    episode_ids: Optional[list[EpisodeId]],
+    reports: Iterable[GateReport],
+    restored_cuts: Mapping[str, GenerationCutRecord],
+) -> list[ModelRecord]:
+    """The rows and cuts of each continued episode, leaving out every undelivered call of every process."""
+    if episode_ids is None:
+        raise ControlError("model commit needs the episode_ids the controller continues from this checkpoint")
+    reports = list(reports)
+    undelivered = {call_id for report in reports for call_id in report.undelivered}
+    cuts_by_key: dict[str, list[GenerationCutRecord]] = {}
+    for report in reports:
+        for cut in report.cuts:
+            cuts_by_key.setdefault(cut.capture_key, []).append(cut.record)
+    records = []
+    for episode_id in episode_ids:
+        key = episode_id.capture_key
+        rows = [row for row in ledger.export_rows(key) if row.get("model_call_id") not in undelivered]
+        cuts = list(cuts_by_key.get(key, []))
+        # A restored cut that no re-issued call has consumed yet is still this episode's prefix.
+        if key in restored_cuts:
+            cuts.append(restored_cuts[key])
+        if rows or cuts:
+            records.append(ModelRecord(episode_id=episode_id, rows=rows, generation_cuts=cuts))
+    return records
+
+
+def import_model_records(
+    ledger: Optional[CheckpointableLedger], records: list[ModelRecord]
+) -> dict[str, GenerationCutRecord]:
+    """Install every record's rows under its next attempt; return the restored cuts by capture key.
+
+    Everything is validated before anything is written.
+    """
+    if records and ledger is None:
+        raise ControlError("checkpoint holds capture-ledger rows but this model server has no capture ledger")
+    targets = [(record, next_attempt(record.episode_id).capture_key) for record in records]
+    for record, target in targets:
+        existing = ledger.export_rows(target)
+        if existing and existing != record.rows:
+            raise ControlError(f"capture ledger for {target} already holds rows from another execution")
+        if len(record.generation_cuts) > 1:
+            raise ControlError(f"episode {record.episode_id.capture_key} has more than one undelivered cut")
+    restored = {}
+    for record, target in targets:
+        ledger.import_rows(target, record.rows)
+        if record.generation_cuts:
+            restored[target] = record.generation_cuts[0]
+    return restored
+
+
+class PolicyModelParticipant(CheckpointParticipant):
+    """The participant of a policy model server that runs in one process."""
+
+    kind = "model"
+    record_model = ModelRecord
+
+    def __init__(
+        self,
+        ledger: Optional[CheckpointableLedger] = None,
+        *,
+        server_name: str = "policy",
+        cut_requester: Optional[CutRequester] = None,
+    ) -> None:
+        super().__init__()
+        self.ledger = ledger
+        self._local_cuts = LocalRestoredCuts()
+        self.gate = PolicyGate(
+            server_name=server_name,
+            cut_requester=cut_requester,
+            attempts=self.attempts,
+            restored_cuts=self._local_cuts,
+            on_change=self.notify,
         )
 
+    @property
+    def _restored_cuts(self) -> dict[str, GenerationCutRecord]:
+        return self._local_cuts.records
+
+    def continue_restored_cut(self, context: CaptureContext, admission: CaptureAdmission) -> CaptureAdmission:
+        """Attach a restored generation cut to the re-issued call it belongs to."""
+        digest = conversation_digest(list(context.request_items or []))
+        record = self._local_cuts.take(None, context.rollout_id, digest)
+        return admission if record is None else admission.model_copy(update={"generation_cut": record.continuation})
+
+    async def close_admission(self, request: CheckpointRequest) -> None:
+        await self.gate.close(request)
+
+    async def open_admission(self) -> None:
+        self.gate.open()
+
+    def readiness(self) -> PrepareReport:
+        return merge_reports([self.gate.report()])
+
     async def retire(self, episode_id: EpisodeId) -> None:
-        for ticket in list(self._tickets):
-            if _covers(episode_id, ticket.capture_key) and ticket.task is not None:
-                ticket.task.cancel()
-        for capture_key in [key for key in self._restored_cuts if _covers(episode_id, key)]:
+        await self.gate.retire(episode_id)
+        for capture_key in [key for key in self._restored_cuts if covers(episode_id, key)]:
             del self._restored_cuts[capture_key]
 
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         if self.ledger is None:
             return []
-        if episode_ids is None:
-            raise ControlError("model commit needs the episode_ids the controller continues from this checkpoint")
-        undelivered = {
-            ticket.undelivered_call_id: ticket for ticket in self._tickets if ticket.undelivered_call_id is not None
-        }
-        records = []
-        for episode_id in episode_ids:
-            rows = [
-                row
-                for row in self.ledger.export_rows(episode_id.capture_key)
-                if row.get("model_call_id") not in undelivered
-            ]
-            cuts = [
-                _cut_record(ticket)
-                for ticket in undelivered.values()
-                if ticket.capture_key == episode_id.capture_key
-                and ticket.cut is not None
-                and ticket.cut.disposition == "durable_prefix"
-            ]
-            # A restored cut that no re-issued call has consumed yet is still this episode's prefix.
-            restored_cut = self._restored_cuts.get(episode_id.capture_key)
-            if restored_cut is not None:
-                cuts.append(restored_cut)
-            if rows or cuts:
-                records.append(ModelRecord(episode_id=episode_id, rows=rows, generation_cuts=cuts))
-        return records
+        return export_model_records(self.ledger, episode_ids, [self.gate.report()], self._restored_cuts)
 
     def restore_records(self, records: list[CheckpointRecord]) -> None:
-        if self._tickets:
+        if self.gate.tickets:
             raise ControlError("model restore requires a process that is not serving generations")
-        if records and self.ledger is None:
-            raise ControlError("checkpoint holds capture-ledger rows but this model server has no capture ledger")
-        targets = [(record, next_attempt(record.episode_id).capture_key) for record in records]
-        for record, target in targets:
-            existing = self.ledger.export_rows(target)
-            if existing and existing != record.rows:
-                raise ControlError(f"capture ledger for {target} already holds rows from another execution")
-            if len(record.generation_cuts) > 1:
-                raise ControlError(f"episode {record.episode_id.capture_key} has more than one undelivered cut")
-        for record, target in targets:
-            self.ledger.import_rows(target, record.rows)
-            if record.generation_cuts:
-                self._restored_cuts[target] = record.generation_cuts[0]
+        self._restored_cuts.update(import_model_records(self.ledger, records))
 
     def status_extra(self) -> dict[str, Any]:
         return {"restored_generation_cuts": sorted(self._restored_cuts)}
@@ -327,7 +472,7 @@ def _cut_record(ticket: _Ticket) -> GenerationCutRecord:
     )
 
 
-def _covers(retired: EpisodeId, capture_key: str) -> bool:
+def covers(retired: EpisodeId, capture_key: str) -> bool:
     """Whether retiring ``retired`` discards the attempt named by ``capture_key``."""
     other = EpisodeId.from_capture_key(capture_key)
     return other.rollout_id == retired.rollout_id and other.attempt <= retired.attempt
@@ -336,9 +481,9 @@ def _covers(retired: EpisodeId, capture_key: str) -> bool:
 class PolicyAdmissionMiddleware:
     """Pure ASGI gate in front of generation routes."""
 
-    def __init__(self, app: Any, participant: PolicyModelParticipant) -> None:
+    def __init__(self, app: Any, gate: PolicyGate) -> None:
         self.app = app
-        self.participant = participant
+        self.gate = gate
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http" or not scope.get("path", "").endswith(GENERATION_ROUTES):
@@ -347,24 +492,25 @@ class PolicyAdmissionMiddleware:
         match = _ROLLOUT_PREFIX.match(scope["path"])
         capture_key = match.group("capture_key") if match else None
         try:
-            self.participant.admit(capture_key)
+            self.gate.admit(capture_key)
         except ControlError as error:
             await error.response()(scope, receive, send)
             return
 
-        ticket = self.participant.enter(capture_key or "")
+        ticket = self.gate.enter(capture_key or "")
 
         async def gated_send(message: dict[str, Any]) -> None:
             if message["type"] == "http.response.start":
-                await self.participant.release_response(ticket)
+                await self.gate.release_response(ticket)
             await send(message)
 
         token = _CURRENT_TICKET.set(ticket)
         try:
+            await self.gate.restored_cuts.prefetch(ticket)
             await self.app(scope, receive, gated_send)
         finally:
             _CURRENT_TICKET.reset(token)
-            await self.participant.exit(ticket)
+            await self.gate.exit(ticket)
 
 
 def generation_cut_requester(auth_token: str) -> CutRequester:

@@ -35,6 +35,7 @@ import os
 import re
 import time
 from abc import abstractmethod
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, ClassVar, Iterable, Literal, Mapping, Optional, TypedDict
@@ -45,15 +46,21 @@ import orjson
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
-from nemo_gym._checkpoint.control import install_participant
+from nemo_gym._checkpoint.control import install_control_routes, install_participant
 from nemo_gym._checkpoint.model import (
     CheckpointableLedger,
     PolicyAdmissionMiddleware,
     PolicyModelParticipant,
     attach_capture_context,
     generation_cut_requester,
+)
+from nemo_gym._checkpoint.model_workers import (
+    COORDINATOR_SOCKET_ENV,
+    PolicyCoordinator,
+    PolicyWorkerLink,
+    coordinator_socket_path,
 )
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
@@ -79,6 +86,7 @@ from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
     SimpleServer,
+    is_nemo_gym_fastapi_worker,
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -229,6 +237,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     # Subclasses can declare successful metadata or health routes here.
     # Unknown successful routes fail closed during training-token capture.
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
+    # Main process of a multi-worker policy server under checkpointing: coordinates the workers.
+    _policy_coordinator: Optional[PolicyCoordinator] = PrivateAttr(default=None)
 
     async def _finalize_served_response(self, response: Any) -> None:
         """Finalize capture after conversion to the response returned to the client."""
@@ -290,8 +300,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         settings = checkpoint_settings(global_config_dict)
         if settings is None or not self.config.checkpoint_policy:
             return
-        if (self.config.num_workers or 1) != 1:
-            raise ValueError("checkpoint_policy requires num_workers=1 until multi-worker admission is supported")
         capture_settings = token_id_capture_config(global_config_dict)
         if capture_settings is not None and capture_settings.enabled and capture_ledger is None:
             raise ValueError(
@@ -305,16 +313,55 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             if capture_ledger is None:
                 raise ValueError("checkpoint_generation_cuts requires token_id_capture with external_staging")
             cut_requester = generation_cut_requester(capture_settings.token_id_capture.resolve_control_auth_token())
-        participant = PolicyModelParticipant(capture_ledger, server_name=self.config.name, cut_requester=cut_requester)
-        install_participant(
-            app,
-            participant,
-            auth_token=settings.control_auth_token,
-            lease_grace_seconds=settings.lease_grace_seconds,
-            instance_name=self.config.name,
-        )
+        num_workers = self.config.num_workers or 1
+        if num_workers == 1:
+            participant = PolicyModelParticipant(
+                capture_ledger, server_name=self.config.name, cut_requester=cut_requester
+            )
+            install_participant(
+                app,
+                participant,
+                auth_token=settings.control_auth_token,
+                lease_grace_seconds=settings.lease_grace_seconds,
+                instance_name=self.config.name,
+            )
+            gate = participant.gate
+        elif not is_nemo_gym_fastapi_worker():
+            # The main process of a multi-worker server serves no requests. It coordinates the workers
+            # uvicorn is about to spawn; they inherit the socket path through the environment.
+            socket_path = coordinator_socket_path()
+            self._policy_coordinator = PolicyCoordinator(
+                capture_ledger,
+                expected_workers=num_workers,
+                instance_name=self.config.name,
+                lease_grace_seconds=settings.lease_grace_seconds,
+                socket_path=socket_path,
+            )
+            self._policy_coordinator.start_in_background()
+            os.environ[COORDINATOR_SOCKET_ENV] = socket_path
+            return
+        else:
+            link = PolicyWorkerLink(
+                socket_path=os.environ[COORDINATOR_SOCKET_ENV],
+                server_name=self.config.name,
+                cut_requester=cut_requester,
+            )
+            install_control_routes(app, link.dispatch, auth_token=settings.control_auth_token)
+            original_lifespan = app.router.lifespan_context
+
+            @asynccontextmanager
+            async def lifespan_with_coordinator(application: FastAPI) -> AsyncIterator[Any]:
+                await link.connect()
+                try:
+                    async with original_lifespan(application) as state:
+                        yield state
+                finally:
+                    await link.disconnect()
+
+            app.router.lifespan_context = lifespan_with_coordinator
+            gate = link.gate
         # Outermost of this app's middleware: a refused call must not register capture intent.
-        app.add_middleware(PolicyAdmissionMiddleware, participant=participant)
+        app.add_middleware(PolicyAdmissionMiddleware, gate=gate)
 
     @abstractmethod
     async def chat_completions(
