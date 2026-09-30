@@ -28,3 +28,11 @@ deepswe_opencode_sandboxed_agent:
           jsonl_fpath: benchmarks/deepswe/data/deepswe_benchmark.jsonl
           prepare_script: benchmarks/deepswe/prepare.py
           num_repeats: 10
+
+deepswe_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: deepswe_opencode_sandboxed_agent

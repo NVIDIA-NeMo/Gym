@@ -878,7 +878,12 @@ class TestCollectorRoundTrip:
                 server_client.post = AsyncMock(side_effect=_post)
                 # Pre-dispatch agent validation reads the running config off the client.
                 server_client.global_config_dict = OmegaConf.create(
-                    {"remote_agent": {"responses_api_agents": {"impl": {}}}}
+                    {
+                        "remote_agent": {"responses_api_agents": {"impl": {}}},
+                        "remote_environment_server": {
+                            "environment_servers": {"legacy_agent": {"agent_server": {"name": "remote_agent"}}}
+                        },
+                    }
                 )
                 return server_client
 

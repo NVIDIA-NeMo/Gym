@@ -1,0 +1,30 @@
+name: lmarena_v3
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: rlhf
+description: LMArena proxy v3 chat evaluation against baseline responses with pairwise
+  judge verdicts.
+modality: text
+licensing: unknown
+authors:
+- Julien Veron Vialard
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: arena
+agent_server: simple_agent
+datasets:
+- name: lmarena_v3
+  type: benchmark
+  jsonl_fpath: benchmarks/lmarena_v3/data/lmarena_v3_validation.jsonl
+  prepare_script: benchmarks/lmarena_v3/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

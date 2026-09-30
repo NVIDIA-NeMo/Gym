@@ -49,3 +49,11 @@ tavily_search_langchain_deepagents_agent_model_server:
       # not the larger nominal `context_length: 262144` — top_provider is what the routed provider actually
       # enforces). Update this if policy_model_name changes to point at a different model.
       max_input_tokens: 202800
+
+tavily_search_langchain_deepagents_agent_model_server_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: tavily_search_langchain_deepagents_agent_model_server

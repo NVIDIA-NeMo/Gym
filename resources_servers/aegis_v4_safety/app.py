@@ -244,7 +244,6 @@ class AegisV4SafetyResourcesServer(SimpleResourcesServer):
     """Stateless Aegis v4 verifier for text and single-image model responses."""
 
     ray_enabled = False
-
     config: AegisV4SafetyConfig
 
     def model_post_init(self, context: Any) -> None:

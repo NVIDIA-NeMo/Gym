@@ -47,7 +47,15 @@ def test_local_connection_writes_the_file(tmp_path):
     assert target.read_text() == '{"a": 1}\n'
 
 
-def _script_for(monkeypatch: MonkeyPatch, remote: Path, content: str) -> str:
+def test_local_connection_writes_a_private_file_owner_only(tmp_path):
+    target = tmp_path / "resolved-config.yaml"
+
+    LocalConnection().write_text(target, "secret: x\n", private=True)
+
+    assert oct(target.stat().st_mode & 0o777) == oct(0o600)
+
+
+def _script_for(monkeypatch: MonkeyPatch, remote: Path, content: str, **kwargs) -> str:
     """The bash `SSHConnection.write_text` would send, without opening a socket."""
     captured = {}
 
@@ -57,7 +65,7 @@ def _script_for(monkeypatch: MonkeyPatch, remote: Path, content: str) -> str:
         return ""
 
     monkeypatch.setattr(connection_module, "_checked", fake_checked)
-    SSHConnection("login-01").write_text(remote, content)
+    SSHConnection("login-01").write_text(remote, content, **kwargs)
 
     assert captured["cmd"][-2:] == ["bash", "-s"]
     return captured["input"]
@@ -115,3 +123,13 @@ def test_ssh_connection_quotes_the_heredoc_delimiter(monkeypatch: MonkeyPatch, t
     subprocess.run(["bash", "-s"], input=script, text=True, check=True)
 
     assert target.read_text() == content
+
+
+def test_ssh_connection_writes_a_private_file_owner_only(monkeypatch: MonkeyPatch, tmp_path):
+    target = tmp_path / "resolved-config.yaml"
+
+    script = _script_for(monkeypatch, target, "secret: x\n", private=True)
+    subprocess.run(["bash", "-s"], input=script, text=True, check=True)
+
+    assert oct(target.stat().st_mode & 0o777) == oct(0o600)
+    assert target.read_text() == "secret: x\n"

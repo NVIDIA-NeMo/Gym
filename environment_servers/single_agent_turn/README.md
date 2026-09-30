@@ -6,6 +6,8 @@ It seeds both participant sessions, grants configured task-scoped tool access an
 Use this server when one agent turn produces the response that Resources verifies.
 Other interaction patterns should define their own task input, episode result, and Environment Server implementation.
 
+`/verify` receives the Resources Server's own flat verify body, the same one an Agent's `/run` sends: the task's `task_data` fields, `responses_create_params`, and the agent's `response`. The request carries the Resources session cookie from seeding, which identifies the episode, so an existing Resources Server verifies these episodes without changes. The verify response becomes the episode result, with the agent's session observations added as `ng_agent_observations`.
+
 Resources tool access is opt-in. Set `resources_tool_transports` on the Environment Server deployment to any combination of `direct_http` and `mcp`. Leave it empty when the agent should receive no Resources tools:
 
 ```yaml
