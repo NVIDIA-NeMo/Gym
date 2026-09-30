@@ -438,6 +438,31 @@ def test_head_service_manifest_selects_completion_index_zero():
     assert ports == {8000, 13345}
 
 
+def test_head_service_manifest_is_headless_with_not_ready_addresses_published():
+    # A normal ClusterIP is a virtual address no pod's network interface actually owns, so vLLM's
+    # head process (which binds a ZMQ socket directly to this address, not just advertises it to
+    # workers) can't bind to it. Must be headless so DNS resolves straight to the pod's real,
+    # bindable IP, and must publish not-ready addresses since the head needs to resolve/bind its
+    # own address before it can ever become Ready.
+    from nemo_gym.orchestration.executors.kubernetes_script import build_head_service_manifest
+
+    compute = SubmitConfig.model_validate(
+        {
+            "services": _MULTI_NODE_SERVICES,
+            "compute": {"cluster": {"type": "kubernetes", "namespace": "eng-test", "nodes": 2, "gpus_per_node": 4}},
+            "driver": {"container": "gym:latest", "benchmarks": {"bench_a": {}}},
+            "job": {"output_path": "/tmp/jobs"},
+            "otel": {"enabled": False},
+        }
+    ).compute["cluster"]
+    labels = {"gym-job-id": "gym-job-test", "gym-benchmark": "bench-a"}
+
+    service = build_head_service_manifest(compute, "gym-test-bench-a", labels, vllm_port=8000)
+
+    assert service["spec"]["clusterIP"] == "None"
+    assert service["spec"]["publishNotReadyAddresses"] is True
+
+
 def test_build_manifests_includes_service_doc_only_when_multi_node(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     from datetime import datetime, timezone

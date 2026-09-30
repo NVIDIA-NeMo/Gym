@@ -16,17 +16,7 @@ compute:
     # which the kubelet kills first under node memory pressure -- often mid-startup, with no
     # error of its own to explain it. Default shown; raise it for a model that needs more.
     memory_per_gpu: "32Gi"
-    # PREREQUISITE (not managed by this repo): service_account below must be bound, by a cluster
-    # admin, to a Role in `namespace` granting:
-    #   - apiGroups: ["batch"], resources: ["jobs"],    verbs: ["delete"]
-    #   - apiGroups: [""],      resources: ["services"], verbs: ["delete"]
-    # The driver container (pod index 0) deletes this Job and its head Service itself once
-    # `gym eval run` finishes, success or failure -- the multi-node equivalent of a Slurm
-    # allocation being released when the sbatch script exits. Without this RBAC grant the Job
-    # and its Service are left running (and must be deleted by hand) even after the run itself
-    # completes.
-    service_account: gym-runner
-
+    
 services:
   vllm_model:
     container: vllm/vllm-openai:v0.9.0

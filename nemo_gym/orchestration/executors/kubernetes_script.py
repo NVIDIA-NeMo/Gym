@@ -384,10 +384,22 @@ def _wrap_driver_command_for_multi_node(driver_cmd: list[str], *, job_name: str,
 def build_head_service_manifest(
     compute: KubernetesComputeConfig, job_name: str, labels: dict[str, str], *, vllm_port: int
 ) -> dict[str, Any]:
-    """A ClusterIP Service selecting only pod index 0 of the given Indexed Job, so worker pods have
+    """A headless Service selecting only pod index 0 of the given Indexed Job, so worker pods have
     a stable DNS name for --data-parallel-address -- the k8s equivalent of Slurm's $HEAD_NODE_IP,
     resolved here at manifest-build time (as a plain string) since both the Service name and
     compute.namespace are known before `kubectl apply`, unlike Slurm's runtime scontrol lookup.
+
+    Must be headless (clusterIP: None): vLLM's head process doesn't just advertise this address to
+    workers, it `bind()`s a ZMQ socket on it directly (same flag, same value, for both roles -- see
+    _vllm_multi_node_command). A normal ClusterIP is a virtual, load-balanced address that no pod's
+    network interface actually owns, so the head can't bind to it ("Cannot assign requested
+    address", observed for real against a cluster). A headless Service's DNS name instead resolves
+    straight to the selected pod's real IP, which the head *can* bind (it's its own address) and
+    workers can still reach directly (flat pod network).
+
+    publishNotReadyAddresses is required too: a headless Service normally only publishes DNS
+    records for Ready pods, but the head needs to resolve/bind its own address before it can ever
+    start serving -- i.e. before it can become Ready -- so without this it deadlocks.
 
     Selects on `batch.kubernetes.io/job-completion-index`, a pod label Kubernetes' Job controller
     sets automatically for every pod of an Indexed Job -- consistent with this file's existing
@@ -398,6 +410,8 @@ def build_head_service_manifest(
         "kind": "Service",
         "metadata": {"name": _head_service_name(job_name), "namespace": compute.namespace, "labels": labels},
         "spec": {
+            "clusterIP": "None",
+            "publishNotReadyAddresses": True,
             "selector": {**labels, "batch.kubernetes.io/job-completion-index": "0"},
             "ports": [
                 {"name": "api", "port": vllm_port, "targetPort": vllm_port},
