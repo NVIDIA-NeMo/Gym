@@ -52,7 +52,7 @@ class HarborTask:
 
     @property
     def needs_compose(self) -> bool:
-        """The task's environment is a Compose group, which the harbor server cannot start yet."""
+        """The task's environment is a Compose group: ``main`` plus the sidecars its overlay declares."""
         return any(
             (self.path / "environment" / name).is_file()
             for name in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")

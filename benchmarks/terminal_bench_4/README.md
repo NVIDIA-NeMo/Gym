@@ -116,14 +116,13 @@ Both commands resolve the same reference through the package store. The first fe
 folders into `datasets/terminal-bench-4.0.0/` and every later fetch keeps each folder whose content hash
 still matches, so the model run reuses the validated tasks. `gym dataset validate` runs every reference
 solution through the separate verifier. `--agent terminus_2_sandboxed_agent` runs Terminus 2 instead.
-The 11 Compose tasks need `compose-images.json` (this benchmark's recorded image configurations) next to
-the task folders. Until the fetch generates it, copy it once after the first fetch:
-
-```sh
-cp benchmarks/terminal_bench_4/compose-images.json datasets/terminal-bench-4.0.0/
-```
-
-The 3 H100 tasks run on a GPU deployment when the harbor server's
+The 11 Compose tasks start sidecar images whose entrypoint, command, user and ports live in the image, not the
+task. Preparing the dataset records them from the registry into `compose-images.json` next to the task folders,
+pinning each image to the linux/amd64 digest it resolved to; entries already recorded are kept. The recording
+this benchmark's server uses, `benchmarks/terminal_bench_4/compose-images.json`, matches the freshly recorded
+one for 37 of the 38 images; `redis:7-alpine` is a floating tag whose startup configuration is identical but
+whose current build is newer. Place the benchmark's file in the dataset folder before the first prepare to pin
+the same redis build. The 3 H100 tasks run on a GPU deployment when the harbor server's
 `gpu_sandbox_provider` names its config block (for example `sandbox_gpu`); without one they run on the
 default provider and fail to schedule. `--exclude-tasks` and `--only-tasks` select subsets.
 
