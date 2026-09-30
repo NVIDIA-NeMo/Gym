@@ -581,6 +581,10 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 "status_code",
                 "response_status",
                 "finish_reason",
+                "upstream_attempted",
+                "response_source",
+                "upstream_status_code",
+                "local_response_reason",
                 "error_category",
                 "latency_ttft_ms",
             )

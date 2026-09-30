@@ -124,6 +124,22 @@ def test_scrape_targets_are_the_model_services():
     assert scrape_targets(config) == {"policy": 8000, "judge": 8100}
 
 
+def test_scrape_targets_include_both_tiers_of_a_pd_service():
+    pd = {
+        "type": "vllm_pd",
+        "container": "vllm:latest",
+        "model": "m",
+        "prefill": {"node_pool": "prefill"},
+        "decode": {"node_pool": "decode"},
+    }
+    pools = {"prefill": {"partition": "batch"}, "decode": {"partition": "batch"}}
+    config = _config(
+        services={"policy": pd},
+        compute={"cluster-a": {"type": "slurm", "account": "acct", "node_pools": pools}},
+    )
+    assert scrape_targets(config) == {"policy-prefill": 8001, "policy-decode": 8002, "policy": 8000}
+
+
 def test_active_without_a_model_service():
     """Gym's own servers produce telemetry with or without a local model, so the collector runs."""
     driver = {"container": "gym:latest", "benchmarks": {"scicode": {}}}
