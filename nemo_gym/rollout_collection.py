@@ -848,6 +848,36 @@ def _attach_ng_perf(
         result[NG_PERF_KEY] = ng_perf
 
 
+def _drop_truncated_tail(fpath: Path) -> None:
+    """Repair a jsonl whose last line a hard kill cut short, so resume can read and append to it."""
+    with fpath.open("r+b") as f:
+        size = f.seek(0, os.SEEK_END)
+        if size == 0:
+            return
+        f.seek(size - 1)
+        if f.read(1) == b"\n":
+            return
+        # Scan backwards in chunks: rollout files can be too large to read whole.
+        tail_start, chunk_end = 0, size
+        while chunk_end > 0:
+            chunk_start = max(0, chunk_end - (1 << 20))
+            f.seek(chunk_start)
+            newline_at = f.read(chunk_end - chunk_start).rfind(b"\n")
+            if newline_at >= 0:
+                tail_start = chunk_start + newline_at + 1
+                break
+            chunk_end = chunk_start
+        f.seek(tail_start)
+        tail = f.read()
+        try:
+            orjson.loads(tail)
+        except orjson.JSONDecodeError:
+            f.truncate(tail_start)
+            print(f"Dropped a truncated final line ({len(tail)} bytes) from {fpath} before resuming.")
+        else:
+            f.write(b"\n")
+
+
 def _get_max_rollout_attempts() -> int:
     """Read ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` (positive int) or default to 3."""
     raw = os.environ.get("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS")
@@ -1785,6 +1815,9 @@ class RolloutCollectionHelper(BaseModel):
 
         persisted_success_keys: set = set()
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
+            _drop_truncated_tail(output_fpath)
+            if failures_fpath.exists():
+                _drop_truncated_tail(failures_fpath)
             (
                 input_rows,
                 rows,
