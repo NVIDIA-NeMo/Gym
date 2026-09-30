@@ -36,6 +36,7 @@ from nemo_gym.sandbox.providers import (
     SandboxPtySpec,
     SandboxSpec,
     SandboxStatus,
+    SupportsSandboxBackgroundServices,
     SupportsSandboxEndpoint,
     SupportsSandboxPauseResume,
     SupportsSandboxPty,
@@ -490,9 +491,24 @@ class AsyncSandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        preserve_background_services: bool = False,
     ) -> SandboxExecResult:
+        """Run a command, optionally preserving services needed by later commands.
+
+        ``preserve_background_services`` selects a provider's service-preserving
+        execution when available; other providers use ordinary exec. Services
+        must redirect stdout and stderr. This mode does not accept per-command
+        ``env`` or ``user`` overrides on providers with a service-preserving path.
+        """
         if not is_span_group_enabled(GymSpanGroup.SANDBOX):
-            return await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+            return await self._exec_uninstrumented(
+                command,
+                cwd=cwd,
+                env=env,
+                timeout_s=timeout_s,
+                user=user,
+                preserve_background_services=preserve_background_services,
+            )
 
         # The command itself is deliberately not recorded. In a code-execution environment
         # it is model output or task content, which must not land in a trace backend
@@ -506,7 +522,14 @@ class AsyncSandbox:
             "gym.sandbox.exec",
             **{"nemo.gym.sandbox.provider": provider_name},
         ) as span:
-            result = await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+            result = await self._exec_uninstrumented(
+                command,
+                cwd=cwd,
+                env=env,
+                timeout_s=timeout_s,
+                user=user,
+                preserve_background_services=preserve_background_services,
+            )
             if span is not None:
                 safe_set_span_attributes(
                     span,
@@ -527,7 +550,17 @@ class AsyncSandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        preserve_background_services: bool = False,
     ) -> SandboxExecResult:
+        if preserve_background_services and isinstance(self._provider, SupportsSandboxBackgroundServices):
+            if env is not None or user is not None:
+                raise ValueError("Service-preserving execution does not support per-command env or user overrides")
+            return await self._provider.exec_with_background_services(
+                self._require_handle(),
+                command,
+                cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
+                timeout_s=timeout_s,
+            )
         return await self._provider.exec(
             self._require_handle(),
             command,
@@ -597,31 +630,27 @@ class AsyncSandbox:
     async def stop(self) -> None:
         if self._closed:
             return
-        try:
-            if self._handle is not None and not self._stopped:
-                # A failed close leaves the sandbox started so a later stop() retries it (the
-                # compose group relies on this); the count follows the same rule and drops only
-                # once the provider has actually released the sandbox.
-                if is_span_group_enabled(GymSpanGroup.SANDBOX):
-                    with managed_span(
-                        GymSpanGroup.SANDBOX,
-                        "gym.sandbox.stop",
-                        **{
-                            "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
-                            "nemo.gym.sandbox.id": _sandbox_id(self._handle),
-                        },
-                    ):
-                        await self._provider.close(self._handle)
-                else:
+        # A failed remote stop is retryable. Do not close its client or mark the
+        # wrapper closed until the provider confirms container teardown.
+        if self._handle is not None and not self._stopped:
+            if is_span_group_enabled(GymSpanGroup.SANDBOX):
+                with managed_span(
+                    GymSpanGroup.SANDBOX,
+                    "gym.sandbox.stop",
+                    **{
+                        "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
+                        "nemo.gym.sandbox.id": _sandbox_id(self._handle),
+                    },
+                ):
                     await self._provider.close(self._handle)
-                self._stopped = True
-                if self._counted_active:
-                    self._counted_active = False
-                    record_sandbox_active(-1, provider=self._telemetry_provider_name())
-        finally:
-            if self._owns_provider:
-                await self._provider.aclose()
-                self._closed = True
+            else:
+                await self._provider.close(self._handle)
+            self._stopped = True
+            if self._counted_active:
+                self._counted_active = False
+                record_sandbox_active(-1, provider=self._telemetry_provider_name())
+        if self._owns_provider:
+            await self._provider.aclose()
         self._closed = True
 
     async def disconnect(self) -> None:
@@ -809,6 +838,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        preserve_background_services: bool = False,
     ) -> SandboxExecResult:
         return self._runner.run(
             "exec",
@@ -818,6 +848,7 @@ class Sandbox:
                 env=env,
                 timeout_s=timeout_s,
                 user=user,
+                preserve_background_services=preserve_background_services,
             ),
         )
 

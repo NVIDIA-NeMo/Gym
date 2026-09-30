@@ -146,3 +146,19 @@ genrm_simple_agent_reasoning_off:
       - name: example
         type: example
         jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
+
+genrm_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: genrm_simple_agent
+
+genrm_simple_agent_reasoning_off_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: genrm_simple_agent_reasoning_off

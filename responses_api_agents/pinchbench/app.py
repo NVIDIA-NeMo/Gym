@@ -185,6 +185,7 @@ class PinchBenchVerifyResponse(BaseVerifyResponse):
 
 
 class PinchBenchAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: PinchBenchAgentConfig
 
     def model_post_init(self, context):

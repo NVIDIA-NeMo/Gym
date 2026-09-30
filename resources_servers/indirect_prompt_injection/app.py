@@ -108,6 +108,7 @@ class IPIVerifyResponse(BaseVerifyResponse):
 
 
 class IPIResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: IPIResourcesServerConfig
     session_id_to_env: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 

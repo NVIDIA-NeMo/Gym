@@ -5,8 +5,13 @@ position: 5
 ---
 
 Model-call capture records requests, responses, token usage, tool calls, reasoning, latency, and
-errors at a Gym model server. Capture is opt-in and does not modify model responses, agent responses,
+errors at a Gym model server. Capture does not modify model responses, agent responses,
 or rollout rewards.
+
+`gym eval submit` enables capture by default under each benchmark's job directory at `model-calls/`.
+Set `driver.benchmarks.<name>.run.observability_enabled: false` to opt out, or set
+`driver.benchmarks.<name>.run.model_call_capture_dir` to an absolute path to customize the directory.
+Other entry points, including local evaluations and training, remain opt-in.
 
 ## Run an evaluation with capture
 

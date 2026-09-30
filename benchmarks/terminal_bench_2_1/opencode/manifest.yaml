@@ -1,0 +1,31 @@
+name: terminal_bench_2_1/opencode
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: Terminal-Bench 2.1 tasks with prepared instruction messages, sandboxed
+  agent execution, and task-provided verification.
+modality: text
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../opencode.yaml
+resources_server: terminal_bench_2_1
+agent_server: opencode_sandboxed_agent
+datasets:
+- name: terminal_bench_2_1
+  type: benchmark
+  jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
+  prepare_script: benchmarks/terminal_bench_2_1/prepare.py
+  num_repeats: 8
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

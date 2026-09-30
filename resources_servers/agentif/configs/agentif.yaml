@@ -57,3 +57,11 @@ agentif_simple_agent:
 judge_base_url: null
 judge_api_key: null
 judge_model_name: null
+
+agentif_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: agentif_simple_agent
