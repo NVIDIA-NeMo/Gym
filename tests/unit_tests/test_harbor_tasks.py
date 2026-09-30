@@ -1138,6 +1138,28 @@ class TestDatasetConfig:
             load_task(folder / "hello")
 
 
+class TestDatasetInit:
+    """The scaffold is read back by the loader, so `gym dataset init` cannot drift from what runs."""
+
+    def test_scaffold_loads_validates_and_materializes(self, tmp_path):
+        from nemo_gym.tasks.harbor.dataset_config import read_dataset_config
+        from nemo_gym.tasks.harbor.scaffold import init_dataset
+
+        folder = init_dataset(tmp_path, "my-dataset", image="ubuntu:24.04")
+        assert folder == tmp_path / "my-dataset"
+        (task,) = discover_tasks(folder)
+        assert task.task_id == "hello" and task.image == "ubuntu:24.04" and task.has_solution
+        assert task.config.agent.timeout_sec == 600 and task.config.environment.cpus == 1
+        assert read_dataset_config(folder).is_empty  # defaults only, and the per-task example is a comment
+        rows = write_rows([task], folder.name, tmp_path / "out" / "tasks.jsonl")
+        assert rows[0]["task_id"] == {"taskset": "my-dataset", "task_id": "hello"}
+        for script in (folder / "hello" / "tests" / "test.sh", folder / "hello" / "solution" / "solve.sh"):
+            assert script.stat().st_mode & 0o111
+            assert subprocess.run(["bash", "-n", str(script)], capture_output=True).returncode == 0
+        with pytest.raises(FileExistsError):
+            init_dataset(tmp_path, "my-dataset")
+
+
 def test_harbor_task_data_schema_names_the_digest_key():
     """The schema module may import only pydantic, so the key is spelled out; keep it equal to DIGEST_KEY."""
     from resources_servers.harbor.task_data import TaskData

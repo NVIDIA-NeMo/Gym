@@ -40,3 +40,18 @@ datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). `harbor:<org>/
 fetches a package-store dataset instead (for example `harbor:terminal-bench/terminal-bench@4.0.0`): every task
 package is downloaded by content hash into `<name>-<tag>/`, checked against Gym's task digest and recorded in
 `manifest.toml`. A local task folder, or a folder of task folders, works the same way.
+
+## Where settings live
+
+Four homes, one owner each. A setting sits on this server's config only if every dataset on the same
+deployment wants the same value; a unit test pins that list.
+
+| Home | File | Owner | Holds |
+|---|---|---|---|
+| Task | `task.toml` | task author | image, resources, timeouts, env, verifier, agent user (read-only once fetched) |
+| Dataset | `dataset.toml`, `[gym]` table | dataset author | `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`; `[gym.tasks."<id>".environment]` overrides in Harbor's own fields (`env` merges) |
+| Deployment | the `sandbox:` provider block | operator | image rewrites and registry credentials (`images`), root setup commands (`setup`), networking, shared-memory labels |
+| Run | run config | the run | provider selection, GPU routing, repeats, output paths, `sandbox_resources_override` for parity runs |
+
+`gym dataset init <name>` writes a dataset in this shape, and `gym dataset validate <folder>` with no extra
+config is the test that a dataset is self-contained.
