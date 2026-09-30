@@ -201,8 +201,8 @@ rejected explicitly. E2B's ConnectRPC command streams keep their SDK-owned pyqwe
 
 ## AgentENV auto-pause and auto-resume
 
-The AgentENV profile at `benchmarks/osworld/configs/osworld_agentenv.yaml` enables
-`e2b.create.auto_resume: true`. At the sandbox timeout, AgentENV pauses the VM,
+Set `e2b.create.auto_resume: true` in your provider configuration to enable
+auto-pause and auto-resume on AgentENV. At the sandbox timeout, AgentENV pauses the VM,
 releasing CPU and memory while retaining its state. The next sandbox proxy request
 resumes the same VM, including its files and running processes.
 
