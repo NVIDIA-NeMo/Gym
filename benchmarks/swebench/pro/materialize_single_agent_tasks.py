@@ -8,45 +8,25 @@ data. Its taskset selects the EnvironmentServer configured in hermes.yaml.
 """
 
 import argparse
-import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
+from pydantic import JsonValue
 
-def _task_id(row: dict[str, Any]) -> str:
-    for key in ("task_id", "instance_id", "problem_id"):
-        value = row.get(key)
-        if value is not None:
-            return str(value)
-    canonical = json.dumps(row, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(canonical).hexdigest()
+from nemo_gym.single_agent_task import materialize_single_agent_task
 
 
 def materialize_row(
-    row: dict[str, Any],
+    row: Mapping[str, JsonValue],
     *,
     taskset: str,
-) -> dict[str, Any]:
+    task_index: int | None = None,
+) -> dict[str, JsonValue]:
     """Separate task identity and model input from the Resources Server's task data."""
-    responses_create_params = row.get("responses_create_params")
-    if not isinstance(responses_create_params, dict):
-        raise ValueError("SWE Pro rows require responses_create_params")
-    task_data = {
-        key: value
-        for key, value in row.items()
-        if key not in {"agent_ref", "responses_create_params", "task_source"} and not key.startswith("_ng_")
-    }
-    return {
-        "task_id": {
-            "taskset": taskset,
-            "task_id": _task_id(row),
-        },
-        "task_input": {
-            "responses_create_params": responses_create_params,
-            "task_data": task_data,
-        },
-    }
+    return materialize_single_agent_task(row, taskset=taskset, task_index=task_index).model_dump(
+        mode="json", exclude_unset=True
+    )
 
 
 def main() -> None:
@@ -62,13 +42,14 @@ def main() -> None:
     args = parser.parse_args()
 
     with args.input.open() as source, args.output.open("w") as target:
-        for line in source:
+        for task_index, line in enumerate(source):
             row = json.loads(line)
             target.write(
                 json.dumps(
                     materialize_row(
                         row,
                         taskset=args.taskset,
+                        task_index=task_index,
                     )
                 )
                 + "\n"
