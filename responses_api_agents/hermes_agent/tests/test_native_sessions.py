@@ -40,7 +40,7 @@ def agent(monkeypatch):
             max_tokens=500,
             temperature=0.7,
         ),
-        server_client=MagicMock(spec=ServerClient),
+        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
     )
 
     monkeypatch.setattr(
@@ -312,6 +312,9 @@ async def test_runner_exit_without_cleanup_receipt_blocks_close(agent, state, re
 @pytest.mark.parametrize("overrides", [{}, {"max_output_tokens": 32, "temperature": 0.0}])
 async def test_native_prompt_and_limits_reach_runner(agent, state, overrides, tmp_path):
     state.session_dir = str(tmp_path)
+    agent.server_client.global_config_dict = {
+        "model": {"responses_api_models": {"vllm_model": {"chat_template_kwargs": {"enable_thinking": False}}}}
+    }
     agent.config.system_prompt = "Configured instruction"
     agent._upload_json = AsyncMock()
     agent._download_json = AsyncMock(
@@ -336,6 +339,7 @@ async def test_native_prompt_and_limits_reach_runner(agent, state, overrides, tm
     assert int((tmp_path / "runner.pid").read_text()) == process.pid
     payload = agent._upload_json.await_args.args[2]
     assert payload["user_message"] == "Fix the bug"
+    assert payload["model_enable_thinking"] is False
     assert payload["history"] == []
     assert payload["system_message"] == "Configured instruction\n\nRequest instruction"
     assert payload["max_tokens"] == overrides.get("max_output_tokens", 500)
