@@ -99,66 +99,15 @@ class TestRowShape:
         rows = _read(prepare.prepare(source="hf", output=tmp_path / "out.jsonl"))
         assert len(rows) == 100 and {r["split"] for r in rows} == {"test"}
 
-    def test_both_settings_are_prepared_together_test_first(self, tmp_path, monkeypatch) -> None:
+    def test_the_with_solution_setting_is_selected_by_split(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(prepare, "load_hf_rows", lambda split: _hundred(split))
-        rows = _read(prepare.prepare(split="both", source="hf", output=tmp_path / "out.jsonl"))
-        assert [r["split"] for r in rows] == ["test"] * 100 + ["test_with_solution"] * 100
-
-    @pytest.mark.parametrize("split", ["test", "test_with_solution"])
-    def test_one_setting_can_be_prepared_alone(self, split, tmp_path, monkeypatch) -> None:
-        monkeypatch.setattr(prepare, "load_hf_rows", lambda name: _hundred(name))
-        rows = _read(prepare.prepare(split=split, source="hf", output=tmp_path / "out.jsonl"))
-        assert len(rows) == 100 and {r["split"] for r in rows} == {split}
-
-    def test_each_setting_is_fetched_as_its_own_split(self, tmp_path, monkeypatch) -> None:
-        requested = []
-
-        def load(split):
-            requested.append(split)
-            return _hundred(split)
-
-        monkeypatch.setattr(prepare, "load_hf_rows", load)
-        prepare.prepare(split="both", source="hf", output=tmp_path / "out.jsonl")
-        assert requested == ["test", "test_with_solution"]
-
-    def test_a_problem_may_appear_once_per_setting(self, tmp_path, monkeypatch) -> None:
-        """Duplicate detection is per split: the same theorem is in both by design."""
-        monkeypatch.setattr(prepare, "load_hf_rows", lambda split: _hundred(split))
-        rows = _read(prepare.prepare(split="both", source="hf", output=tmp_path / "out.jsonl"))
-        names = [r["theorem_name"] for r in rows]
-        assert len(names) == 200 and len(set(names)) == 100
-
-    def test_a_duplicate_inside_one_setting_is_still_rejected(self, tmp_path, monkeypatch) -> None:
-        def load(split):
-            rows = _hundred(split)
-            if split == "test_with_solution":
-                rows[1] = dict(rows[0])
-            return rows
-
-        monkeypatch.setattr(prepare, "load_hf_rows", load)
-        with pytest.raises(SystemExit, match="duplicated"):
-            prepare.prepare(split="both", source="hf", output=tmp_path / "out.jsonl")
-
-    def test_a_short_setting_fails_the_whole_preparation(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setattr(
-            prepare,
-            "load_hf_rows",
-            lambda split: _hundred(split)[:99] if split == "test_with_solution" else _hundred(split),
-        )
-        output = tmp_path / "out.jsonl"
-        with pytest.raises(SystemExit, match="test_with_solution.*loaded 99, expected 100"):
-            prepare.prepare(split="both", source="hf", output=output)
-        assert not output.exists()
-
-    def test_limit_applies_to_each_setting(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setattr(prepare, "load_hf_rows", lambda split: _hundred(split))
-        rows = _read(prepare.prepare(split="both", source="hf", limit=3, output=tmp_path / "out.jsonl"))
-        assert [r["split"] for r in rows] == ["test"] * 3 + ["test_with_solution"] * 3
+        rows = _read(prepare.prepare(split="test_with_solution", source="hf", output=tmp_path / "out.jsonl"))
+        assert len(rows) == 100 and {r["split"] for r in rows} == {"test_with_solution"}
 
     def test_default_output_is_the_same_whichever_split_was_prepared(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(prepare, "load_hf_rows", lambda split: _hundred(split))
         monkeypatch.setattr(prepare, "OUTPUT_FPATH", tmp_path / "data" / "combibench.jsonl")
-        for split in ("test", "test_with_solution", "both"):
+        for split in ("test", "test_with_solution"):
             assert prepare.prepare(source="hf", split=split) == tmp_path / "data" / "combibench.jsonl"
 
     def test_benchmark_config_reads_the_file_prepare_writes(self) -> None:
@@ -177,17 +126,12 @@ class TestRowShape:
         output = tmp_path / "out.jsonl"
         monkeypatch.setattr(sys, "argv", ["prepare", "--source", "hf", "--output", str(output)])
         prepare.main()
-        rows = _read(output)
-        assert len(rows) == 100 and {r["split"] for r in rows} == {"test"}
+        assert {r["split"] for r in _read(output)} == {"test"}
         monkeypatch.setattr(
             sys, "argv", ["prepare", "--source", "hf", "--split", "test_with_solution", "--output", str(output)]
         )
         prepare.main()
-        rows = _read(output)
-        assert len(rows) == 100 and {r["split"] for r in rows} == {"test_with_solution"}
-        monkeypatch.setattr(sys, "argv", ["prepare", "--source", "hf", "--split", "both", "--output", str(output)])
-        prepare.main()
-        assert len(_read(output)) == 200
+        assert {r["split"] for r in _read(output)} == {"test_with_solution"}
 
 
 class TestFailClosed:
@@ -248,10 +192,11 @@ class TestArguments:
         with pytest.raises(ValueError, match="positive"):
             prepare.prepare(limit=limit, output=tmp_path / "out.jsonl")
 
-    def test_unknown_split_is_rejected_before_fetching(self, tmp_path, monkeypatch) -> None:
+    @pytest.mark.parametrize("split", ["train", "both"])
+    def test_unknown_split_is_rejected_before_fetching(self, split, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(prepare, "load_hf_rows", _must_not_fetch)
         with pytest.raises(ValueError, match="split"):
-            prepare.prepare(split="train", output=tmp_path / "out.jsonl")
+            prepare.prepare(split=split, output=tmp_path / "out.jsonl")
 
     def test_cli_rejects_a_non_positive_limit_at_parse_time(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(prepare, "load_hf_rows", _must_not_fetch)
@@ -265,15 +210,7 @@ class TestArguments:
         monkeypatch.setattr(
             sys,
             "argv",
-            [
-                "prepare",
-                "--source-file",
-                str(FIXTURES / "synthetic_problems.json"),
-                "--split",
-                "test",
-                "--output",
-                str(output),
-            ],
+            ["prepare", "--source-file", str(FIXTURES / "synthetic_problems.json"), "--output", str(output)],
         )
         prepare.main()
         rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]

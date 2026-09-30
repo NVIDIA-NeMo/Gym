@@ -21,7 +21,7 @@ benchmark README explains why it is not the default.
 ## Scope
 
 One benchmark, [`benchmarks/combibench`](../../benchmarks/combibench/), uses this server. It
-prepares either or both of the paper's settings (default `test`), told apart by each row's
+prepares one of the paper's settings per file (default `test`), told apart by each row's
 `split`. They differ only in the 45 fill-in-the-blank problems: without solution the model
 supplies the `abbrev <name>_solution` answers and the proof, and the answer is checked; with
 solution the published answer is already in the statement and only the proof is checked. The
@@ -237,12 +237,6 @@ figures the tables below report — and adds `hackmath/`, `brualdi/`, `imo/` and
 `math_competitions/` pass rates keyed on `tag`. Upstream reports one pooled
 figure, so the pooled keys and the inherited `mean/reward` are the headline and
 the per-family keys are supplementary; they are not promoted to `key_metrics`.
-When the rows hold both settings (`split=both` at prepare time), pooling a
-problem's two settings would give a figure neither paper table contains, so every
-key is instead prefixed by its `split` (`test/pass@16/accuracy`,
-`test_with_solution/imo/pass@1/accuracy`) and `get_key_metrics` promotes each
-setting's `pass@1`, `pass@8` and `pass@16`. `mean/reward` still pools the two.
-A file of one setting keeps the unprefixed keys described above.
 `get_key_metrics` does promote the `coverage/` block alongside `mean/*`: because
 masking keeps a harness fault out of `mean/reward`, a Lean-server outage shrinks
 the corpus the score was computed from instead of lowering it, and a run that

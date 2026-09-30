@@ -8,9 +8,9 @@ combibench_resources_server:
     combibench:
       datasets:
       # Prepared with `split=test` by default: the paper's "without solution" setting.
-      # `gym eval prepare --benchmark combibench +prepare_script_args.split=<x>` picks
-      # `test_with_solution` (answers substituted, only the proof missing) or `both`,
-      # which holds the two settings side by side; rows are tagged by `split`.
+      # `gym eval prepare --benchmark combibench +prepare_script_args.split=test_with_solution`
+      # prepares the "with solution" setting (answers substituted, only the proof missing)
+      # into the same file; rows are tagged by `split`.
       - name: combibench
         type: benchmark
         jsonl_fpath: benchmarks/combibench/data/combibench.jsonl

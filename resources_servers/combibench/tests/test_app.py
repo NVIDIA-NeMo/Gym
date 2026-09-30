@@ -617,61 +617,6 @@ class TestMetrics:
         assert not any(k.startswith(("hackmath/", "imo/")) for k in aggregate.key_metrics)
 
 
-class TestMetricsAcrossBothSettings:
-    """A file holding both settings must be reported per setting, never pooled across them."""
-
-    def _responses(self) -> list[dict]:
-        server = _make_server()
-        rows = [
-            # (split, tag, solved): the same two problems in each setting.
-            ("test", "hackmath", True),
-            ("test", "imo", False),
-            ("test_with_solution", "hackmath", True),
-            ("test_with_solution", "imo", True),
-        ]
-        responses = []
-        for index, (split, tag, solved) in enumerate(rows):
-            text = _fenced(SOLUTION) if solved else "no code here"
-            response = asyncio.run(server.verify(_request(text, tag=tag, split=split)))
-            responses.append({**response.model_dump(), "_ng_task_index": index, "_ng_rollout_index": 0})
-        return responses
-
-    def _aggregate(self):
-        server = _make_server()
-        return compute_aggregate_metrics(
-            self._responses(), compute_metrics_fn=server.compute_metrics, get_key_metrics_fn=server.get_key_metrics
-        )
-
-    def test_each_setting_gets_its_own_pass_at_k(self) -> None:
-        agent_metrics = self._aggregate().agent_metrics
-        assert agent_metrics["test/pass@1/accuracy"] == pytest.approx(50.0)
-        assert agent_metrics["test_with_solution/pass@1/accuracy"] == pytest.approx(100.0)
-
-    def test_no_pooled_pass_at_k_is_emitted(self) -> None:
-        """A pooled figure would be 75%, which neither paper table contains."""
-        agent_metrics = self._aggregate().agent_metrics
-        assert "pass@1/accuracy" not in agent_metrics and "hackmath/pass@1/accuracy" not in agent_metrics
-
-    def test_families_are_reported_within_each_setting(self) -> None:
-        agent_metrics = self._aggregate().agent_metrics
-        assert agent_metrics["test/imo/pass@1/accuracy"] == 0.0
-        assert agent_metrics["test_with_solution/imo/pass@1/accuracy"] == 100.0
-
-    def test_headline_names_each_settings_pass_at_k(self) -> None:
-        key_metrics = self._aggregate().key_metrics
-        assert key_metrics["test/pass@1/accuracy"] == pytest.approx(50.0)
-        assert key_metrics["test_with_solution/pass@1/accuracy"] == pytest.approx(100.0)
-        assert "test/imo/pass@1/accuracy" not in key_metrics
-
-    def test_a_single_setting_keeps_the_unprefixed_keys(self) -> None:
-        """Runs of one setting publish exactly the keys they always did."""
-        server = _make_server()
-        response = asyncio.run(server.verify(_request(_fenced(SOLUTION), tag="hackmath", split="test")))
-        metrics = server.compute_metrics([[{**response.model_dump(), "_ng_task_index": 0, "_ng_rollout_index": 0}]])
-        assert metrics["pass@1/accuracy"] == pytest.approx(100.0)
-        assert not any(key.startswith("test/") for key in metrics)
-
-
 class TestConcurrencyIsSplitAcrossWorkers:
     """The cap is a per-process semaphore; ``num_workers`` runs several processes."""
 

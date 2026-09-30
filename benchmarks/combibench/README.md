@@ -25,7 +25,7 @@ evaluation protocol).
 ## Settings
 
 The paper evaluates the same 100 problems two ways. Each row carries its setting in
-a `split` field, and one benchmark serves both:
+a `split` field, and one benchmark serves both, one setting per prepared file:
 
 | `split` | Setting | What the model must produce |
 | --- | --- | --- |
@@ -51,10 +51,7 @@ theorem hackmath_1 ... : sols.card = ((1716) : ℕ ) := by sorry
   answer check. The statement-tamper check still applies.
 - The other 55 problems are proof-only and their statements are **identical** in
   both settings (verified: 55 of 100 statements equal, exactly the 45 that declare
-  an `abbrev` differ). Preparing `both` therefore asks those 55 prompts twice.
-
-Metrics are always reported per setting; nothing pools the two, because neither of
-the paper's tables does.
+  an `abbrev` differ). Report the two settings separately, as the paper does.
 
 ## Preparation
 
@@ -73,15 +70,12 @@ setting with `split`:
 gym eval prepare --benchmark combibench +prepare_script_args.split=test
 # with solution
 gym eval prepare --benchmark combibench +prepare_script_args.split=test_with_solution
-# both, 200 rows: `test` first, then `test_with_solution`
-gym eval prepare --benchmark combibench +prepare_script_args.split=both
 ```
 
 Every choice writes the same file, `data/combibench.jsonl`, which is the path
 `config.yaml` reads. Preparing again replaces it, so re-prepare to switch setting;
 `use_cached_prepared_benchmarks` skips preparation and keeps whichever setting is
-already on disk. `--limit` applies to each setting, so a subset of `both` still
-holds both.
+already on disk.
 
 Rows carry `theorem_name`, `formal_statement`, `answers` (list or null),
 `natural_language`, `tag`, `source`, `split`, `dataset_source`,
@@ -130,13 +124,9 @@ gym eval run --no-serve \
     --prompt-config benchmarks/combibench/prompt.yaml
 ```
 
-The run scores whichever setting was prepared. The server reports metrics under the
-row's `split`, so a file holding one setting still gets the plain `pass@16/accuracy`
-keys, while a `both` file (3,200 rollouts at 16 samples) gets
-`test/pass@16/accuracy` and `test_with_solution/pass@16/accuracy` (and
-`<split>/<family>/...` for the source families). The headline `mean/reward` of a
-`both` run pools the two settings and is not a figure the paper reports; read the
-per-setting keys.
+The run scores whichever setting was prepared, so `test` and `test_with_solution`
+are separate runs (1,600 rollouts each at 16 samples) and their `pass@k` keys are
+reported separately.
 
 The paper reports Pass@1/8/16 from 16 samples per problem; it does not state
 the temperature or token budget used, and upstream's shipped config defaults to

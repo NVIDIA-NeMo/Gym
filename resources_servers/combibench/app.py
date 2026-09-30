@@ -113,9 +113,6 @@ class CombibenchStatus(str, Enum):
 # ``coverage/measured_tasks``, ``coverage/fully_masked_tasks``. Kept as a literal
 # because that module exports no constant for it.
 COVERAGE_PREFIX = "coverage/"
-# The paper's reported ks, promoted per setting when a run holds both settings.
-_SPLITS = ("test", "test_with_solution")
-_HEADLINE_PASS_AT = ("pass@1", "pass@8", "pass@16")
 
 HARNESS_FAULTS = {
     CombibenchStatus.LEAN_SERVER_ERROR,
@@ -466,29 +463,12 @@ class CombibenchResourcesServer(SimpleResourcesServer):
         inherited ``mean/reward`` headline is kept. The ``hackmath/``,
         ``brualdi/``, ``imo/`` and ``math_competitions/`` keys are supplementary
         and are not promoted to ``key_metrics``.
-
-        A file holding both of the paper's settings (rows tagged ``split``) is
-        reported per setting instead, every key prefixed ``<split>/``: pooling a
-        problem's two settings would give a figure neither paper table contains.
         """
         if not tasks:
             return {}
-        splits = self._splits(tasks)
-        if len(splits) <= 1:
-            metrics = compute_pass_majority_metrics(tasks)[0]
-            metrics.update(compute_subset_metrics(tasks, "tag"))
-            return metrics
-        metrics = {}
-        for split in splits:
-            split_tasks = [rollouts for rollouts in tasks if rollouts and rollouts[0].get("split") == split]
-            split_metrics = compute_pass_majority_metrics(split_tasks)[0]
-            split_metrics.update(compute_subset_metrics(split_tasks, "tag"))
-            metrics.update({f"{split}/{key}": value for key, value in split_metrics.items()})
+        metrics = compute_pass_majority_metrics(tasks)[0]
+        metrics.update(compute_subset_metrics(tasks, "tag"))
         return metrics
-
-    @staticmethod
-    def _splits(tasks: list[list[dict]]) -> list[str]:
-        return sorted({rollouts[0]["split"] for rollouts in tasks if rollouts and rollouts[0].get("split")})
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
         """The default ``mean/*`` headline, plus how much of the run was measured at all.
@@ -501,15 +481,8 @@ class CombibenchResourcesServer(SimpleResourcesServer):
         in the headline rather than left to be found in the full metrics dump.
         It is empty unless something was masked, so a clean run publishes exactly
         the keys it published before.
-
-        A run holding both settings also names each setting's ``pass@1/8/16``
-        (``test/pass@16/accuracy``), since its ``mean/reward`` pools the two.
         """
         key_metrics = super().get_key_metrics(agent_metrics)
-        for key, value in agent_metrics.items():
-            parts = key.split("/")
-            if len(parts) == 3 and parts[0] in _SPLITS and parts[1] in _HEADLINE_PASS_AT and parts[2] == "accuracy":
-                key_metrics[key] = value
         key_metrics.update({k: v for k, v in agent_metrics.items() if k.startswith(COVERAGE_PREFIX)})
         return key_metrics
 
