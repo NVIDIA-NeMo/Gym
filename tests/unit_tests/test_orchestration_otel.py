@@ -357,7 +357,7 @@ def test_script_starts_the_collector_before_the_model_service():
 
 
 def _collector_line(script):
-    return next(line for line in script.splitlines() if "--output=logs/otel_collector.log" in line)
+    return next(line for line in script.splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line)
 
 
 def test_script_pins_the_collector_to_one_node_of_a_multi_node_job():
@@ -381,18 +381,22 @@ def test_script_pins_the_collector_to_one_node_of_a_multi_node_job():
 
 
 def test_script_runs_the_collector_on_the_node_by_default():
-    line = next(line for line in _script(_config()).splitlines() if "--output=logs/otel_collector.log" in line)
+    line = next(
+        line for line in _script(_config()).splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line
+    )
     assert "--container" not in line
     assert line.startswith("env ")
     assert (
-        f" srun --overlap --output=logs/otel_collector.log otelcol-contrib --config {collector_config_path(BENCH_DIR)} &"
+        f" srun --overlap --output=logs/otel_collector-$SLURM_JOB_ID.log otelcol-contrib --config {collector_config_path(BENCH_DIR)} &"
         in line
     )
 
 
 def test_script_runs_the_collector_in_a_container_with_the_job_dir_mounted_when_one_is_set():
     config = _config(otel={"container": "/shared/images/otelcol.sqsh", "binary": "/otelcol-contrib"})
-    line = next(line for line in _script(config).splitlines() if "--output=logs/otel_collector.log" in line)
+    line = next(
+        line for line in _script(config).splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line
+    )
     assert "--container-image=/shared/images/otelcol.sqsh" in line
     assert "--no-container-mount-home" in line
     assert f"--container-mounts={BENCH_DIR}:{BENCH_DIR}" in line
@@ -403,7 +407,9 @@ def test_script_runs_the_collector_in_a_container_with_the_job_dir_mounted_when_
 
 def test_script_forwards_the_token_from_the_job_environment_not_a_literal(monkeypatch):
     monkeypatch.setenv("OTEL_TOKEN", "secret-token")
-    line = next(line for line in _script(_config()).splitlines() if "--output=logs/otel_collector.log" in line)
+    line = next(
+        line for line in _script(_config()).splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line
+    )
     assert "OTEL_TOKEN=${OTEL_TOKEN}" in line
     assert "SLURM_JOB_ID=${SLURM_JOB_ID}" in line
     assert "secret-token" not in line
@@ -411,7 +417,9 @@ def test_script_forwards_the_token_from_the_job_environment_not_a_literal(monkey
 
 def test_script_honours_a_binary_path_on_shared_storage():
     config = _config(otel={"binary": "/shared/tools/otelcol-contrib"})
-    line = next(line for line in _script(config).splitlines() if "--output=logs/otel_collector.log" in line)
+    line = next(
+        line for line in _script(config).splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line
+    )
     assert " /shared/tools/otelcol-contrib --config " in line
     assert "--container" not in line
 
@@ -425,7 +433,7 @@ def test_script_health_checks_the_collector_before_the_model_service():
 
 def test_script_flushes_the_collector_after_the_driver_and_keeps_the_driver_exit_code():
     script = _script(_config())
-    tail = script[script.index("--output=logs/driver.log") :]
+    tail = script[script.index("--output=logs/driver-$SLURM_JOB_ID.log") :]
     assert "DRIVER_RC=$?" in tail
     # Anchored to the binary so the launching srun, whose command line also carries the path, is
     # not signalled: TERM to srun kills the step before the collector can flush.
@@ -438,7 +446,7 @@ def test_script_flushes_the_collector_after_the_driver_and_keeps_the_driver_exit
 
 
 def _driver_line(script):
-    return next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    return next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
 
 
 _DRIVER_WITH_INSTALL = {
@@ -544,7 +552,7 @@ def test_submit_fails_when_gym_telemetry_has_no_checkout_to_install_it_from(tmp_
 
 def test_gym_telemetry_off_keeps_the_collector_and_skips_lens():
     script = _script(_config(otel={"gym_telemetry": False}, driver=_DRIVER_WITH_INSTALL))
-    assert "--output=logs/otel_collector.log" in script
+    assert "--output=logs/otel_collector-$SLURM_JOB_ID.log" in script
     assert "NEMO_GYM_OTEL_ENABLED" not in script
     assert "[telemetry]" not in script
 

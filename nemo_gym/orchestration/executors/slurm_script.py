@@ -44,6 +44,7 @@ from nemo_gym.orchestration.executors.otel import (
     gym_telemetry_active,
     otel_active,
 )
+from nemo_gym.orchestration.executors.resume_script import render_resume_prologue
 from nemo_gym.orchestration.executors.script_templates import (
     ENSURE_RAY_INSTALLED,
     bash_var,
@@ -61,6 +62,8 @@ from nemo_gym.orchestration.executors.utils import flatten_run_args
 _SCRIPT_TEMPLATE = """\
 #!/bin/bash
 {directives}
+
+{resume_prologue}
 
 {ray_prelude}
 
@@ -198,6 +201,7 @@ def _render_service_command(
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
     # Without a container the command runs directly on the node: no image, mounts or workdir flags.
+    # $SLURM_JOB_ID suffixes the log so a resumed job (same job dir, new job id) keeps the previous log.
     container_flags = (
         f" --no-container-mount-home{mounts_flag}{workdir_flag} --container-image={shlex.quote(container)}"
         if container is not None
@@ -205,7 +209,7 @@ def _render_service_command(
     )
     return (
         f"# service: {name}\n"
-        f"{env_prefix}srun --overlap{node_flags}{container_flags} --output=logs/{name}.log {command} &\n"
+        f"{env_prefix}srun --overlap{node_flags}{container_flags} --output=logs/{name}-$SLURM_JOB_ID.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -859,6 +863,17 @@ def _service_pre_command(service: ServiceConfig) -> str:
     return f"{nixl}\n{service.pre_command}" if service.pre_command else nixl
 
 
+def _with_resume_flag(run: dict[str, Any], resumable: bool) -> dict[str, Any]:
+    """Auto-enable `gym eval run`'s own cache-based resume when the auto-resume chain is on.
+
+    A no-op on the chain's cold (first) run -- rollout_collection.py falls back to a fresh run
+    when the cache files don't exist yet -- and a no-op if the caller already set the key.
+    """
+    if resumable and "resume_from_cache" not in run:
+        return {**run, "resume_from_cache": True}
+    return run
+
+
 def build_sbatch_script(
     config: SubmitConfig,
     benchmark_name: str,
@@ -867,6 +882,9 @@ def build_sbatch_script(
     remote_bench_dir: Path,
 ) -> str:
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
+
+    resume = benchmark.resume_config
+    resume_prologue = render_resume_prologue(resume) if resume else ""
 
     total_nodes, total_ntasks = _node_totals(compute)
     is_multi_node = total_nodes > 1
@@ -969,6 +987,7 @@ def build_sbatch_script(
     if benchmark.command is None:
         run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
         run_args.setdefault("require_complete", True)
+        run_args = _with_resume_flag(run_args, resume is not None)
         gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
     else:
         # A command replaces `gym eval run`, so the run args it would have carried
@@ -1003,13 +1022,14 @@ def build_sbatch_script(
     driver_command = (f"{gym_cmd}\n" if gym_cmd else "") + (
         f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
         f" --container-image={shlex.quote(config.driver.container)} "
-        f"--output=logs/driver.log {entrypoint}"
+        f"--output=logs/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
     if observed:
         driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir)
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,
+        resume_prologue=resume_prologue,
         ray_prelude=ray_prelude,
         service_commands=service_commands,
         health_checks=health_checks,

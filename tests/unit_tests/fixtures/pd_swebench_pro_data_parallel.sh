@@ -7,6 +7,8 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 
+
+
 # Resolve the head node IP for multi-node vLLM services (spanning nodes via Ray).
 nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 nodes_array=($nodes)
@@ -20,11 +22,11 @@ export GYM_POOL_PREFILL_NODES="$(IFS=,; echo "${gym_nodes[*]:0:4}")"
 export GYM_POOL_DECODE_NODES="$(IFS=,; echo "${gym_nodes[*]:4:6}")"
 
 # service: otel_collector
-env OTEL_TOKEN=${OTEL_TOKEN} SLURM_JOB_ID=${SLURM_JOB_ID} srun --overlap --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --output=logs/otel_collector.log otelcol-contrib --config /jobs/swebench_pro/otel/collector.yaml &
+env OTEL_TOKEN=${OTEL_TOKEN} SLURM_JOB_ID=${SLURM_JOB_ID} srun --overlap --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --output=logs/otel_collector-$SLURM_JOB_ID.log otelcol-contrib --config /jobs/swebench_pro/otel/collector.yaml &
 OTEL_COLLECTOR_PID=$!
 
 # service: policy-prefill
-srun --overlap --nodelist="${GYM_POOL_PREFILL_NODES}" --nodes=4 --ntasks=4 --no-container-mount-home --container-image=vllm:img --output=logs/policy-prefill.log bash -c 'export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname)
+srun --overlap --nodelist="${GYM_POOL_PREFILL_NODES}" --nodes=4 --ntasks=4 --no-container-mount-home --container-image=vllm:img --output=logs/policy-prefill-$SLURM_JOB_ID.log bash -c 'export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname)
 export VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 exec bash -lc '"'"'
     if [ "$SLURM_NODEID" = "0" ]; then
@@ -36,7 +38,7 @@ exec bash -lc '"'"'
 POLICY_PREFILL_PID=$!
 
 # service: policy-decode
-env UCX_TLS=rc,cuda_copy srun --overlap --nodelist="${GYM_POOL_DECODE_NODES}" --nodes=6 --ntasks=6 --no-container-mount-home --container-image=vllm:img --output=logs/policy-decode.log bash -c 'export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname)
+env UCX_TLS=rc,cuda_copy srun --overlap --nodelist="${GYM_POOL_DECODE_NODES}" --nodes=6 --ntasks=6 --no-container-mount-home --container-image=vllm:img --output=logs/policy-decode-$SLURM_JOB_ID.log bash -c 'export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname)
 export VLLM_NIXL_SIDE_CHANNEL_PORT=5601
 export NCCL_DEBUG=WARN
 exec bash -lc '"'"'
@@ -49,7 +51,7 @@ exec bash -lc '"'"'
 POLICY_DECODE_PID=$!
 
 # service: policy
-srun --overlap --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --no-container-mount-home --container-image=vllm:img --output=logs/policy.log vllm-router --prefill-policy cache_aware --decode-policy cache_aware --vllm-pd-disaggregation --prefill "http://${gym_nodes[0]}:8001" --decode "http://${gym_nodes[4]}:8002" --host 0.0.0.0 --port 8000 --intra-node-data-parallel-size 1 --request-timeout-secs 86400 --log-level error &
+srun --overlap --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --no-container-mount-home --container-image=vllm:img --output=logs/policy-$SLURM_JOB_ID.log vllm-router --prefill-policy cache_aware --decode-policy cache_aware --vllm-pd-disaggregation --prefill "http://${gym_nodes[0]}:8001" --decode "http://${gym_nodes[4]}:8002" --host 0.0.0.0 --port 8000 --intra-node-data-parallel-size 1 --request-timeout-secs 86400 --log-level error &
 POLICY_PID=$!
 
 # Wait for otel_collector (try multiple health endpoints)
@@ -149,7 +151,7 @@ GYM_CMD=(
     +model_call_capture_dir=/jobs/swebench_pro/model-calls
     +require_complete=True
 )
-env NEMO_GYM_OTEL_ENABLED=1 NEMO_GYM_OTEL_RUN_ID=jobs NEMO_GYM_OTEL_SPAN_GROUPS=default,verify NEMO_GYM_OTEL_LOGS_ENABLED=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4317 srun --overlap --no-container-mount-home --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --container-mounts=/jobs/swebench_pro:/jobs/swebench_pro --container-image=img --output=logs/driver.log "${GYM_CMD[@]}"
+env NEMO_GYM_OTEL_ENABLED=1 NEMO_GYM_OTEL_RUN_ID=jobs NEMO_GYM_OTEL_SPAN_GROUPS=default,verify NEMO_GYM_OTEL_LOGS_ENABLED=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4317 srun --overlap --no-container-mount-home --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --container-mounts=/jobs/swebench_pro:/jobs/swebench_pro --container-image=img --output=logs/driver-$SLURM_JOB_ID.log "${GYM_CMD[@]}"
 DRIVER_RC=$?
 sleep 20
 pkill -TERM -u "$USER" -f -- '^otelcol\-contrib --config /jobs/swebench_pro/otel/collector\.yaml' || true
