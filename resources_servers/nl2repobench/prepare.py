@@ -99,7 +99,17 @@ def _write_jsonl(store: NL2RepoBenchTaskStore, output_path: Path) -> None:
                 "task_id": current_task_id,
                 "image": task_image(task),
                 "responses_create_params": {
-                    "input": [{"role": "user", "content": f"{FIXED_INSTRUCTION}\n\n{task.start_md}"}],
+                    # start.md is already present in the task's sandbox at
+                    # /workspace/start.md (part of the task image, matching
+                    # the upstream harness's own design — OpenHands gets an
+                    # empty workspace + start.md and reads it itself), so it
+                    # is NOT duplicated into the prompt here. Embedding the
+                    # full spec (15KB-375KB for some tasks) inline used to
+                    # blow past OpenSandbox's remote exec argument-size limit
+                    # for opencode's own process, failing every rollout with
+                    # "Argument list too long" before the agent ever got a
+                    # chance to read the file itself.
+                    "input": [{"role": "user", "content": FIXED_INSTRUCTION}],
                 },
                 "verifier_metadata": {
                     "task_id": current_task_id,

@@ -4,7 +4,7 @@
 import json
 from pathlib import Path
 
-from resources_servers.nl2repobench.prepare import _copy_task_assets, _write_jsonl
+from resources_servers.nl2repobench.prepare import FIXED_INSTRUCTION, _copy_task_assets, _write_jsonl
 from resources_servers.nl2repobench.task_store import REQUIRED_TASK_FILES, NL2RepoBenchTaskStore
 
 
@@ -40,7 +40,12 @@ def test_write_jsonl_produces_expected_row_shape(task_assets: Path, tmp_path: Pa
 
     content = row["responses_create_params"]["input"][0]["content"]
     assert "implement the entire project" in content.lower()
-    assert "example-task" in content
+    # start.md is intentionally NOT embedded here — it's already present in the
+    # task's sandbox at /workspace/start.md (matches the upstream harness's own
+    # design), and inlining the full spec (15KB-375KB for some real tasks) used
+    # to blow past OpenSandbox's remote exec argument-size limit.
+    assert content == FIXED_INSTRUCTION
+    assert "example-task" not in content
 
     verifier_metadata = row["verifier_metadata"]
     assert verifier_metadata["task_id"] == "example-task"

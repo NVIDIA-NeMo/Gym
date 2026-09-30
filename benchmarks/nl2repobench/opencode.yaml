@@ -21,10 +21,16 @@ nl2repobench_opencode_sandboxed_agent:
 
       # The agent sandbox denies all egress except the policy model host
       # (enforce_agent_no_network: true), so the default `curl
-      # https://opencode.ai/install` fallback fails. Reuse the same
-      # pre-staged, network-free OpenCode binary as the other opencode
-      # benchmarks (see benchmarks/nemotron_3.5_super/sandbox_utils.yaml for
-      # the equivalent per-benchmark entries).
+      # https://opencode.ai/install` fallback fails (confirmed via a live
+      # run: "curl: (6) Could not resolve host: opencode.ai" on 100% of
+      # rollouts). Reuse the same pre-staged, network-free OpenCode binary as
+      # the other opencode benchmarks. (A prior E2BIG failure on this same
+      # install path — "fork/exec /usr/bin/bash: argument list too long" —
+      # turned out to be caused by NL2RepoBench's much larger prompts
+      # (15KB-375KB vs a few KB for other benchmarks) being inlined into the
+      # exec command, not by this install method; fixed in
+      # responses_api_agents/opencode_sandboxed_agent/app.py by uploading the
+      # query to a file instead.)
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
 
@@ -37,3 +43,11 @@ nl2repobench_opencode_sandboxed_agent:
           jsonl_fpath: benchmarks/nl2repobench/data/nl2repobench_benchmark.jsonl
           prepare_script: benchmarks/nl2repobench/prepare.py
           num_repeats: 1
+
+nl2repobench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: nl2repobench_opencode_sandboxed_agent
