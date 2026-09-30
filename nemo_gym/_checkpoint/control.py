@@ -38,15 +38,12 @@ commit/restore) share one fencing discipline, implemented here by
 import asyncio
 import os
 import time
-from collections.abc import Mapping
 from enum import Enum
 from typing import Any, Awaitable, Callable, Literal, Optional
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
-
-from nemo_gym.token_id_capture.config import token_id_capture_config
 
 
 CONTROL_URL_PREFIX = "/ng-control/v1"
@@ -104,16 +101,10 @@ class StaleCheckpointError(ControlError):
 
 
 def checkpoint_control_auth_token(global_config: Any) -> Optional[str]:
-    """Resolve a checkpoint bearer independently of capture enablement."""
-    configured = os.environ.get(CHECKPOINT_CONTROL_TOKEN_ENV)
-    if configured:
-        return configured
-    if not isinstance(global_config, Mapping):
-        return None
-    settings = token_id_capture_config(global_config)
-    if settings is None or not settings.token_id_capture.external_staging:
-        return None
-    return settings.token_id_capture.resolve_control_auth_token()
+    """Resolve the dedicated checkpoint bearer independently of token capture."""
+    # Kept for API compatibility; checkpoint authentication no longer derives
+    # from token-capture configuration.
+    return os.environ.get(CHECKPOINT_CONTROL_TOKEN_ENV)
 
 
 class CheckpointConflictError(ControlError):
@@ -163,6 +154,25 @@ class MultiProcessCapability(BaseModel):
     num_workers: int = 1
 
 
+class GroupScoringCapability(BaseModel):
+    """Requirements for a resources server that scores a complete cohort."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_group_size: int = Field(ge=2)
+    verification_replayable: bool
+    collection_timeout_s: Optional[FiniteFloat] = Field(default=None, gt=0)
+
+
+class VerificationCapability(BaseModel):
+    """How an agent invokes and checkpoints its terminal verification call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resources_server: str
+    replayable: bool
+
+
 class ControlCapabilities(BaseModel):
     """The capability declaration served at ``GET /ng-control/v1/capabilities``."""
 
@@ -194,6 +204,14 @@ class ControlCapabilities(BaseModel):
     features: list[str] = Field(
         default_factory=list,
         description="Optional control-plane features implemented by this participant.",
+    )
+    group_scoring: Optional[GroupScoringCapability] = Field(
+        default=None,
+        description="Resources-server cohort requirements, when verification waits for a complete group.",
+    )
+    verification: Optional[VerificationCapability] = Field(
+        default=None,
+        description="Agent terminal-verification dependency and whether that wait can be replayed after restore.",
     )
 
 

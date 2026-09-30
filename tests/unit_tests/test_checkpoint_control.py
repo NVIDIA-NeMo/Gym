@@ -72,6 +72,47 @@ def test_checkpoint_auth_is_independent_of_capture(monkeypatch: pytest.MonkeyPat
     assert checkpoint_control_auth_token({"token_id_capture": {"enabled": False}}) == "checkpoint-secret"
 
 
+def test_token_capture_auth_does_not_install_agent_checkpoint_participant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(CHECKPOINT_CONTROL_TOKEN_ENV, raising=False)
+    monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "capture-secret")
+    global_config = OmegaConf.create(
+        {
+            "token_id_capture": {
+                "enabled": True,
+                "external_staging": True,
+                "rebuild_response": False,
+            }
+        }
+    )
+
+    class _Agent(SimpleResponsesAPIAgent):
+        async def responses(self, body):
+            raise NotImplementedError
+
+        async def run(self, body):
+            raise NotImplementedError
+
+    agent = _Agent(
+        config=BaseResponsesAPIAgentConfig(
+            host="agent.test",
+            port=80,
+            entrypoint="app.py",
+            name="agent",
+        ),
+        server_client=ServerClient(
+            head_server_config=BaseServerConfig(host="head.test", port=80),
+            global_config_dict=global_config,
+        ),
+    )
+
+    agent.setup_agent_checkpoint(FastAPI())
+
+    assert checkpoint_control_auth_token(global_config) is None
+    assert agent._checkpoint_participant is None
+
+
 def test_control_request_rejects_invalid_identity_and_deadline() -> None:
     with pytest.raises(ValidationError):
         CheckpointControlRequest(checkpoint_id="../bad", deadline_ts=1000.0)
@@ -490,7 +531,10 @@ def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["name"] == "agent"
     assert body["checkpoint_mode"] == "export_restore"
     assert body["concurrency_contract"] == "serialized_per_session"
-    assert body["features"] == ["completed_result_acknowledgement"]
+    assert body["features"] == [
+        "completed_result_acknowledgement",
+        "completion_receipt_in_run_response_v1",
+    ]
     assert agent._checkpoint_participant is not None
 
     class _WhiteboxAgent(_Agent):
@@ -507,6 +551,7 @@ def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     assert whitebox_body["concurrency_contract"] == "serialized_per_session"
     assert whitebox_body["features"] == [
         "completed_result_acknowledgement",
+        "completion_receipt_in_run_response_v1",
         "agent_continuation_index_v1",
         "discard_restored_continuation_v1",
         "agent_resource_dependency_index_v1",

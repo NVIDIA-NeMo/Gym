@@ -28,7 +28,9 @@ from nemo_gym._checkpoint import (
     RESOURCE_STATE_REVISION_HEADER,
     AgentBoundaryKind,
     AgentBoundaryRecord,
+    ControlCapabilities,
     PendingModelPayload,
+    VerificationCapability,
 )
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -119,6 +121,16 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
     checkpoint_continuation_supported = True
     checkpoint_resource_dependencies_supported = True
+
+    def control_capabilities(self) -> ControlCapabilities:
+        """Advertise the terminal verification dependency used by this agent."""
+        capabilities = super().control_capabilities()
+        if not self.config.skip_verification:
+            capabilities.verification = VerificationCapability(
+                resources_server=self.config.resources_server.name,
+                replayable=self.config.checkpoint_replayable_verify,
+            )
+        return capabilities
 
     async def _create_episode(
         self,

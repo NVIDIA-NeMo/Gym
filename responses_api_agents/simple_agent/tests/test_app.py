@@ -119,6 +119,26 @@ class TestApp:
         )
         SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
+    @pytest.mark.parametrize("replayable", [False, True])
+    def test_checkpoint_capability_reports_verification_dependency(
+        self,
+        replayable: bool,
+    ) -> None:
+        server, _ = _make_agent(observability_enabled=False)
+        server.config.checkpoint_replayable_verify = replayable
+
+        verification = server.control_capabilities().verification
+
+        assert verification is not None
+        assert verification.resources_server == "resources"
+        assert verification.replayable is replayable
+
+    def test_checkpoint_capability_omits_skipped_verification(self) -> None:
+        server, _ = _make_agent(observability_enabled=False)
+        server.config.skip_verification = True
+
+        assert server.control_capabilities().verification is None
+
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
