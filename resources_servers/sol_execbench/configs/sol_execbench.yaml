@@ -1,0 +1,34 @@
+sol_execbench:
+  resources_servers:
+    sol_execbench:
+      entrypoint: app.py
+      num_workers: 1
+      domain: coding
+      verified: false
+      description: SOL kernel verification through a pinned external evaluator, with complete-coverage aggregation
+      manifest_path: ???
+      manifest_sha256: ???
+      evaluator_command: ???
+      artifact_root: ???
+      gpu_uuid: ???
+      runner_timeout_s: 1800
+      timeout_zero_sensitivity: false
+
+sol_execbench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: sol_execbench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+sol_execbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: sol_execbench_simple_agent
