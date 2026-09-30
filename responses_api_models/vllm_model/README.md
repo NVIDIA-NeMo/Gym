@@ -87,6 +87,29 @@ When `return_token_id_information: true`, generation token IDs are read from
 the native `logprobs.tokens` (`"token_id:<int>"`) entries and prompt token IDs
 from `prompt_logprobs` — no separate `/tokenize` round-trip is needed.
 
+## Continuation likelihoods
+
+The same `vllm_model` server also exposes `POST /loglikelihood`; no separate
+model type is required. The request contains a context string and an ordered
+list of continuations. The response returns each continuation's summed
+conditional log probability and token-level audit data. Generation routes remain
+available on the same server.
+
+The adapter tokenizes each `context + continuation`, then calls vLLM's
+`/v1/completions` with `echo=true`, `logprobs=1`, and `max_tokens=1`. Context
+log probabilities and the one generated token are excluded. Leading whitespace
+belongs to the continuation, multi-token continuations are supported, and scores
+are not length-normalized. Missing or nonfinite log probabilities, ambiguous
+token boundaries, and prompts beyond `max_context_tokens` raise errors.
+
+Raw context strings are scored by default. With `render_chat_template=true`, the
+context is rendered as one user message with `add_generation_prompt=True` before
+scoring. `tokenizer` selects the Hugging Face tokenizer used for rendering;
+`likelihood_add_special_tokens` controls special tokens on vLLM `/tokenize`
+requests, and `likelihood_seed` controls the discarded one-token completion.
+These settings affect `/loglikelihood` only; generation sampling settings do not
+change likelihood scores.
+
 ## Example run config
 
 VLLMModel connects NeMo Gym to a vLLM server that you start and manage yourself. Spin up a vLLM server in a separate terminal (see the [vLLM docs](https://docs.vllm.ai/)), then point NeMo Gym at it.
