@@ -229,9 +229,15 @@ dependencies = [
     "orjson>=3.11.6",
 
     # urllib3: HTTP client library (transitive dependency, pinned for security)
-    # Updated: Mon May 19, 2026 with urllib3>=2.7.0
+    # Updated: Tue Sep 30, 2026 with urllib3>=2.8.0 (CVE mitigation)
     # License: MIT https://github.com/urllib3/urllib3/blob/main/LICENSE.txt
-    "urllib3>=2.7.0",
+    "urllib3>=2.8.0",
+
+    # PyJWT: transitive dependency of mcp (a core nemo-gym dep); pinned directly
+    # since mcp's own floor resolves to a version with a known CVE.
+    # Updated: Tue Sep 30, 2026 with PyJWT>=2.15.1 (CVE mitigation)
+    # License: MIT https://raw.githubusercontent.com/jpadilla/pyjwt/master/LICENSE
+    "PyJWT>=2.15.1",
 
     # sqlparse: SQL parsing library (transitive dependency of mlflow-skinny, pinned for security)
     # mlflow-skinny only requires sqlparse<1,>=0.4.0, so it won't pull the fixed version on its own.
