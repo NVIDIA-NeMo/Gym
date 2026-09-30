@@ -376,6 +376,184 @@ class TestRunHelperServerReadiness:
             assert response.status_code == 503
             assert response.json() == {"status": "starting"}
 
+    def test_server_spinup_timeout_names_waiting_servers(self, monkeypatch: MonkeyPatch) -> None:
+        runner = RunHelper()
+        runner._server_spinup_timeout_seconds = 1.0
+        runner._server_instance_display_configs = [SimpleNamespace(process_name="broken")]
+        runner.poll = MagicMock()
+        runner.check_http_server_statuses = MagicMock(return_value=[("broken", "connection_error")])
+        monotonic_mock = MagicMock(side_effect=[0.0, 2.0])
+        monkeypatch.setattr(nemo_gym.cli.env, "monotonic", monotonic_mock)
+
+        with raises(RuntimeError, match="Timed out after 1s.*broken") as excinfo:
+            runner.wait_for_spinup()
+
+        assert "`++server_spinup_timeout_seconds=<seconds>`" in str(excinfo.value)
+        assert "set it to 0" in str(excinfo.value)
+        runner.poll.assert_called_once_with()
+
+    def test_server_spinup_deadline_bounds_multiple_stalled_servers(self) -> None:
+        """Each probe used to wait its full 5s, so the deadline was checked only after every server had been tried."""
+        import socket
+
+        from nemo_gym.config_types import BaseServerConfig
+        from nemo_gym.server_utils import ServerClient
+
+        # A listening socket that never accepts completes the TCP handshake and then never answers.
+        stalled_sockets = []
+        servers = {}
+        for name in ["stalled_a", "stalled_b"]:
+            stalled_socket = socket.socket()
+            stalled_socket.bind(("127.0.0.1", 0))
+            stalled_socket.listen()
+            stalled_sockets.append(stalled_socket)
+            servers[name] = {
+                "resources_servers": {name: {"host": "127.0.0.1", "port": stalled_socket.getsockname()[1]}}
+            }
+
+        runner = RunHelper()
+        runner._server_spinup_timeout_seconds = 1.0
+        runner._server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="127.0.0.1", port=0),
+            global_config_dict=OmegaConf.create(servers),
+        )
+        runner._server_instance_display_configs = [
+            SimpleNamespace(process_name=name, config_path=name) for name in servers
+        ]
+        runner.poll = MagicMock()
+
+        started_at = nemo_gym.cli.env.monotonic()
+        try:
+            with raises(RuntimeError, match="stalled_a, stalled_b"):
+                runner.wait_for_spinup()
+        finally:
+            for stalled_socket in stalled_sockets:
+                stalled_socket.close()
+
+        assert nemo_gym.cli.env.monotonic() - started_at < 3.0
+
+    def test_zero_server_spinup_timeout_waits_without_a_deadline(self, monkeypatch: MonkeyPatch) -> None:
+        runner = RunHelper()
+        runner._server_spinup_timeout_seconds = 0.0
+        runner._server_instance_display_configs = [SimpleNamespace(process_name="slow")]
+        runner.poll = MagicMock()
+        runner.display_server_instance_info = MagicMock()
+        runner.check_http_server_statuses = MagicMock(
+            side_effect=[[("slow", "connection_error")]] * 3 + [[("slow", "success")]]
+        )
+        # A clock that has run far past the default budget must not end the wait.
+        monkeypatch.setattr(nemo_gym.cli.env, "monotonic", MagicMock(return_value=1e9))
+        sleep_mock = MagicMock()
+        monkeypatch.setattr(nemo_gym.cli.env, "sleep", sleep_mock)
+
+        runner.wait_for_spinup()
+
+        assert runner.check_http_server_statuses.call_count == 4
+        for call in runner.check_http_server_statuses.call_args_list:
+            assert call.kwargs == {"deadline": None}
+        assert [call.args for call in sleep_mock.call_args_list] == [(3,)] * 3
+
+
+class TestServerSpinupTimeoutFromConfig:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(1, 1.0), (2.5, 2.5), ("600", 600.0), (0, 0.0), (None, 600.0)],
+        ids=["int", "float", "numeric_string", "zero", "null"],
+    )
+    def test_normalizes_numeric_values(self, value: object, expected: float) -> None:
+        config = OmegaConf.create({nemo_gym.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: value})
+
+        assert nemo_gym.cli.env._server_spinup_timeout_seconds(config) == expected
+
+    def test_absent_key_uses_the_config_parser_default(self) -> None:
+        assert nemo_gym.cli.env._server_spinup_timeout_seconds(OmegaConf.create({})) == 600.0
+
+    def test_environment_interpolation_yields_a_number(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setenv("GYM_STARTUP_TIMEOUT", "900")
+        config = OmegaConf.create(
+            {nemo_gym.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: "${oc.env:GYM_STARTUP_TIMEOUT}"}
+        )
+
+        assert nemo_gym.cli.env._server_spinup_timeout_seconds(config) == 900.0
+
+    @pytest.mark.parametrize("value", ["ten minutes", [600]])
+    def test_malformed_value_is_a_config_error(self, value: object) -> None:
+        config = OmegaConf.create({nemo_gym.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: value})
+
+        with raises(ConfigError, match="server_spinup_timeout_seconds` must be a number of seconds"):
+            nemo_gym.cli.env._server_spinup_timeout_seconds(config)
+
+
+class TestRunHelperStartUnwind:
+    """Every caller calls start() outside its own try, so start() must release what it acquired."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            RuntimeError("Process `broken` finished unexpectedly!"),
+            ConfigError("model endpoint never answered"),
+            KeyboardInterrupt(),
+        ],
+        ids=["server_crash", "endpoint_timeout", "interrupt"],
+    )
+    def test_startup_failure_shuts_down_and_reraises(self, error: BaseException) -> None:
+        runner = RunHelper()
+        runner._start = MagicMock(side_effect=error)
+        runner.shutdown = MagicMock()
+
+        with raises(type(error)) as excinfo:
+            runner.start(None)
+
+        assert excinfo.value is error
+        runner.shutdown.assert_called_once_with()
+
+    def test_successful_start_leaves_servers_running(self) -> None:
+        runner = RunHelper()
+        runner._start = MagicMock()
+        runner.shutdown = MagicMock()
+
+        runner.start(None)
+
+        runner.shutdown.assert_not_called()
+
+    def test_invalid_timeout_fails_before_anything_starts(self, monkeypatch: MonkeyPatch) -> None:
+        """Runs the real start() and shutdown(), so cleanup state must already exist at the earliest failure."""
+        config = OmegaConf.create({nemo_gym.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: "ten minutes"})
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", MagicMock(return_value=config))
+        monkeypatch.setattr(nemo_gym.cli.env.GlobalConfigDictParser, "raise_on_no_server_instances", MagicMock())
+        initialize_ray = MagicMock()
+        monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", initialize_ray)
+        run_command = MagicMock()
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", run_command)
+
+        runner = RunHelper()
+        with raises(ConfigError, match="server_spinup_timeout_seconds"):
+            runner.start(None)
+
+        initialize_ray.assert_not_called()
+        run_command.assert_not_called()
+        assert runner._processes == {}
+        assert runner._head_server is None
+
+    def test_failure_after_spawning_stops_the_spawned_server_with_real_shutdown(self) -> None:
+        runner = RunHelper()
+        process = MagicMock()
+        process.wait.return_value = 0
+        error = RuntimeError("Process `broken` finished unexpectedly!")
+
+        def spawn_then_fail(_config: object) -> None:
+            runner._processes["healthy"] = process
+            raise error
+
+        runner._start = MagicMock(side_effect=spawn_then_fail)
+
+        with raises(RuntimeError) as excinfo:
+            runner.start(None)
+
+        assert excinfo.value is error
+        process.send_signal.assert_called_once()
+        assert runner._processes == {}
+
 
 class TestRunHelperShutdownReap:
     """RunHelper.shutdown must reap every server subprocess on every exit path."""
@@ -453,6 +631,28 @@ class TestRunHelperShutdownReap:
 
         profiler.stop.assert_called_once_with()
         assert runner._memory_profiler is None
+
+    def test_second_shutdown_does_not_repeat_teardown(self) -> None:
+        process = MagicMock()
+        process.wait.return_value = 0
+        runner = self._make_runner_with_processes({"server": process})
+        head_server_thread = runner._head_server_thread
+
+        runner.shutdown()
+        runner.shutdown()
+
+        process.send_signal.assert_called_once()
+        head_server_thread.join.assert_called_once_with()
+        assert runner._head_server is None
+
+    def test_shutdown_before_head_server_started(self) -> None:
+        runner = RunHelper()
+        runner._processes = {}
+        runner._head_server = None
+
+        runner.shutdown()
+
+        assert runner._processes == {}
 
 
 class TestExitCleanlyOnConfigError:

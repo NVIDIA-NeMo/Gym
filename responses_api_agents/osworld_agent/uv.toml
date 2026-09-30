@@ -20,6 +20,7 @@ override-dependencies = [
     "torchvision; sys_platform == 'never'",
     "torchaudio; sys_platform == 'never'",
     "pycountry; sys_platform == 'never'",
+    "wcwidth; sys_platform == 'never'",
 
     # Role-local repairs for legacy OSWorld dependency metadata.
     "grpcio-status==1.71.2",
@@ -40,7 +41,6 @@ exclude-dependencies = [
     "prettytable",
     "skops",
     "sqlalchemy",
-    "wcwidth",
     "werkzeug",
     "waitress",
     "diskcache",

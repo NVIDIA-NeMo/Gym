@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
-from nemo_gym.base_resources_server import BaseVerifyResponse, ResourcesVerifyRequest
+from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
@@ -54,16 +54,3 @@ class SingleAgentTurnResponse(BaseEpisodeResponse[SingleAgentTurnResult]):
     """Response for one resources-backed agent turn."""
 
     failure: SingleAgentTurnFailure | None = None
-
-
-class SingleAgentTurnVerificationInput(BaseModel):
-    """Carry one Responses API activation to a resources server."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    response: NeMoGymResponse
-
-
-class SingleAgentTurnResourcesVerifyRequest(ResourcesVerifyRequest[SingleAgentTurnVerificationInput]):
-    """Verify one completed single-agent turn."""

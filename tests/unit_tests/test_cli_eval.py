@@ -121,6 +121,7 @@ def test_aggregate_cli_exits_nonzero_after_saving_failed_agent_entry(tmp_path: P
         from unittest.mock import AsyncMock, patch
 
         from aiohttp import ClientResponseError
+        from omegaconf import OmegaConf
         from nemo_gym.cli.main import main
         from nemo_gym.rollout_collection import RolloutCollectionHelper
 
@@ -128,7 +129,13 @@ def test_aggregate_cli_exits_nonzero_after_saving_failed_agent_entry(tmp_path: P
             request_info=SimpleNamespace(real_url="http://agent/aggregate_metrics"),
             history=(), status=500, message="aggregation unavailable",
         )
-        client = SimpleNamespace(post=AsyncMock(side_effect=error))
+        client = SimpleNamespace(
+            post=AsyncMock(side_effect=error),
+            global_config_dict=OmegaConf.create({
+                "agent_a": {"responses_api_agents": {"impl": {}}},
+                "environment": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_a"}}}},
+            }),
+        )
         with patch.object(RolloutCollectionHelper, "setup_server_client", return_value=client):
             main()
         """)

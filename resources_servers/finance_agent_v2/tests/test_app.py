@@ -49,7 +49,7 @@ from resources_servers.finance_agent_v2.cached_tools import (
     CachedParseHtmlPage,
     CachedPriceHistory,
 )
-from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage
+from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage, LocalPriceHistory
 from resources_servers.sec_local_index import local_edgar_search
 from resources_servers.sec_local_index.tests.index_fixtures import build_index
 
@@ -433,6 +433,43 @@ class TestEdgarSearchMode:
 
         with pytest.raises(ValidationError, match="no metadata sidecar"):
             _make_server(edgar_search_mode="local", local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")))
+
+
+# ============================================================================
+# price_history_mode
+# ============================================================================
+
+
+class TestPriceHistoryMode:
+    def test_live_is_the_default(self) -> None:
+        server = _make_server()
+
+        assert not isinstance(server._tools["price_history"], LocalPriceHistory)
+
+    def test_local_does_not_need_a_key(self, tmp_path) -> None:
+        (tmp_path / "equity").mkdir()
+        server = _make_server(price_history_mode="local", local_pricing_dir=str(tmp_path), pricing_data_api_key=None)
+
+        assert isinstance(server._tools["price_history"], LocalPriceHistory)
+
+    def test_local_wins_over_the_cache(self, tmp_path) -> None:
+        (tmp_path / "prices" / "equity").mkdir(parents=True)
+        server = _make_server(
+            price_history_mode="local",
+            local_pricing_dir=str(tmp_path / "prices"),
+            use_cache=True,
+            cache_dir=str(tmp_path / "cache"),
+        )
+
+        assert isinstance(server._tools["price_history"], LocalPriceHistory)
+
+    def test_local_without_a_directory_fails_at_startup(self) -> None:
+        with pytest.raises(ValueError, match="local_pricing_dir is not set"):
+            _make_server(price_history_mode="local")
+
+    def test_local_with_a_missing_directory_fails_at_startup(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="does not exist"):
+            _make_server(price_history_mode="local", local_pricing_dir=str(tmp_path / "missing"))
 
 
 # ============================================================================
@@ -1162,6 +1199,14 @@ class TestAggregateMetrics:
         assert metrics["rubric/rollouts_without_submission"] == 1
         assert metrics["mean/rubric_partial_credit"] == 0.5
         assert metrics["mean/rubric_all_pass"] == 0.5
+
+    def test_repeat_metrics_include_legacy_give_up_as_zero(self) -> None:
+        give_up = {"reward": 0.0, "rubric_judgements": None, "judge_error": None}
+        metrics = _make_server().compute_repeat_metrics([[self._rollout()], [give_up]])
+
+        assert metrics["mean/rubric_fraction"] == 0.5
+        assert metrics["mean/rubric_partial_credit"] == 0.5
+        assert "rubric/rollouts" not in metrics
 
     def test_judge_errors_stay_out_of_the_means_that_give_ups_join(self) -> None:
         """A give-up is a model result and scores zero; a judge failure is not, and

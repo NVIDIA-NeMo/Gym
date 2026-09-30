@@ -261,7 +261,7 @@ def test_serving_workers_do_not_install_gym_dependencies(checkout) -> None:
     assert not (root / "prefetch-args").exists()
 
 
-@pytest.mark.parametrize("batch, expected_venvs", [("core", 14), ("swe", 3)])
+@pytest.mark.parametrize("batch, expected_venvs", [("core", 15), ("swe", 4)])
 @pytest.mark.parametrize("missing_file", [None, "bin/python", "bin/activate"])
 def test_prebuilt_check_uses_resolved_server_environments(
     checkout, monkeypatch, capsys, batch: str, expected_venvs: int, missing_file: str | None
@@ -510,7 +510,7 @@ def test_shared_container_config_with_core_suite_covers_both_batches(monkeypatch
             # Build-time interpolation must work without an endpoint or credentials.
             OmegaConf.to_container(config, resolve=True)
     assert components["core"] | components["swe"] <= components["container"]
-    assert len(components["core"] | components["swe"]) == 16
+    assert len(components["core"] | components["swe"]) == 17
 
 
 @pytest.mark.parametrize("extra_configs", [[], ["extra with spaces.yaml", "literal $(touch INJECTED).yaml"]])

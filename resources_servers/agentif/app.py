@@ -235,6 +235,7 @@ class AgentIFVerifyResponse(BaseVerifyResponse):
 
 
 class AgentIFResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: AgentIFResourcesServerConfig
 
     _semaphore: Any = PrivateAttr(default=None)
