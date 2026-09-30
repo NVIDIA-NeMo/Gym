@@ -28,7 +28,7 @@ from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
 from fastapi import Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
-from nemo_gym._checkpoint.model import note_generation_backend
+from nemo_gym._checkpoint.model import note_generation_backend, note_generation_request
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
@@ -578,6 +578,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict = self.config.extra_body | body_dict
         self._apply_sampling_overrides(body_dict)
 
+        note_generation_request(body_dict)
         client = self._resolve_client(request)
         execution = start_model_execution(request, upstream_attempted=True)
         try:
@@ -975,6 +976,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
+        note_generation_request(body_dict)
         client = self._resolve_client(request)
         # Rank-affine routing downstream: expose the Gym session (one per rollout)
         # as the backend's canonical conversation id so a disaggregated server can
@@ -1380,6 +1382,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         completion_body = self._build_completion_body_from_chat_body(body_dict, prompt)
         self._validate_single_choice_token_request(completion_body)
 
+        note_generation_request(body_dict)
         client = self._resolve_client(request)
 
         execution = start_model_execution(request, upstream_attempted=True)

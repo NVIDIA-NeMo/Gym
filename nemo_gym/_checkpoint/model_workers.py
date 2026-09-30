@@ -47,6 +47,7 @@ from nemo_gym._checkpoint.model import (
     CheckpointableLedger,
     CutRequester,
     GateReport,
+    GateSnapshot,
     GenerationCutRecord,
     ModelRecord,
     PolicyGate,
@@ -55,6 +56,7 @@ from nemo_gym._checkpoint.model import (
     export_model_records,
     import_model_records,
     merge_reports,
+    retained_staging_keys,
 )
 from nemo_gym.episode_types import EpisodeId
 
@@ -330,15 +332,32 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
         )
 
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+        raise NotImplementedError("the coordinated policy participant exports asynchronously; use export()")
+
+    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         if self.ledger is None:
             return []
-        reports = [worker.report for worker in self.workers.values() if worker.report is not None]
-        return export_model_records(self.ledger, episode_ids, reports, self.restored_cuts)
+        # Workers are closed, so what they hold is stable: fetch it once, then read the ledgers off the loop.
+        replies = await self._broadcast("snapshot", {}, timeout=_MESSAGE_TIMEOUT_SECONDS)
+        snapshots = [GateSnapshot.model_validate(reply) for reply in replies.values()]
+        return await asyncio.to_thread(
+            export_model_records, self.ledger, episode_ids, snapshots, dict(self.restored_cuts)
+        )
 
     def restore_records(self, records: list[CheckpointRecord]) -> None:
+        self._check_restorable()
+        self.restored_cuts.update(import_model_records(self.ledger, records))
+
+    async def install(self, records: list[CheckpointRecord]) -> None:
+        self._check_restorable()
+        self.restored_cuts.update(await asyncio.to_thread(import_model_records, self.ledger, records))
+
+    def _check_restorable(self) -> None:
         if any(worker.report is None or worker.report.inflight for worker in self.workers.values()):
             raise ControlError("model restore requires policy workers that are not serving generations")
-        self.restored_cuts.update(import_model_records(self.ledger, records))
+
+    def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
+        return {"staging_keys": retained_staging_keys(records)}
 
     def status_extra(self) -> dict[str, Any]:
         return {
@@ -567,6 +586,8 @@ class PolicyWorkerLink:
             self.restored_cuts.keys = set(body["restored_keys"])
             self.gate.open()
             return {}
+        if kind == "snapshot":
+            return self.gate.snapshot().model_dump(mode="json")
         if kind == "retire":
             episode_id = EpisodeId.model_validate(body["episode_id"])
             self.retiring.retire(episode_id)
