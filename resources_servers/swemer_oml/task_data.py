@@ -32,3 +32,17 @@ class TaskData(BaseModel):
     test_framework: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
     FAIL_TO_PASS: list[str] = Field(default_factory=list, json_schema_extra={"consumed_by": ["provenance"]})
     PASS_TO_PASS: list[str] = Field(default_factory=list, json_schema_extra={"consumed_by": ["provenance"]})
+    # Delivery metadata carried through from task.toml / config.json / the image manifest; none of
+    # it is read by verify().
+    nydus_ref: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    prompt_statement: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    f2p_synthetic: bool = Field(default=False, json_schema_extra={"consumed_by": ["provenance"]})
+    keywords: list[str] = Field(default_factory=list, json_schema_extra={"consumed_by": ["provenance"]})
+    difficulty: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    task_type: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    pass_at_k_glm_5_2: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    pass_at_k_opus_4_8: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    pass_at_k_gpt_5_5: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    agent_timeout_sec: float | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})
+    verifier_timeout_sec: float | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})
+    toml_workdir: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
