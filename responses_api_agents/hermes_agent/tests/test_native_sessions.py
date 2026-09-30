@@ -4,6 +4,7 @@
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import signal
 import sys
@@ -394,6 +395,7 @@ def local_runner(agent, state, monkeypatch, tmp_path):
     agent.config.session_close_timeout_seconds = 2
     monkeypatch.setattr(hermes_app, "_SANDBOX_PYTHON", sys.executable)
     monkeypatch.setattr(hermes_app, "_SANDBOX_RUNNER", str(Path(hermes_app.__file__).with_name("sandbox_runner.py")))
+    monkeypatch.setattr(hermes_app, "_SANDBOX_SUPERVISOR", hermes_app.process_supervisor.__file__)
     state.sandbox.upload.side_effect = shutil.copyfile
     state.sandbox.download.side_effect = shutil.copyfile
 
@@ -520,22 +522,21 @@ async def test_stop_during_interpreter_startup_closes_without_starting_a_worker(
     directory = Path(state.session_dir)
     ready = tmp_path / "before-handler"
     worker_started = tmp_path / "worker-started"
-    wrapper = tmp_path / "delayed_runner.py"
+    wrapper = tmp_path / "delayed_supervisor.py"
     wrapper.write_text(
         "import pathlib,runpy,sys,time\n"
-        f"sys.path.insert(0, {str(Path(hermes_app._SANDBOX_RUNNER).parent)!r})\n"
         f"pathlib.Path({str(ready)!r}).touch()\n"
         f"while not pathlib.Path({str(directory / 'runner.stop')!r}).exists(): time.sleep(0.01)\n"
         # Keep the interpreter in the pre-handler window while close sends TERM.
         "time.sleep(0.15)\n"
-        f"runner=runpy.run_path({hermes_app._SANDBOX_RUNNER!r})\n"
+        f"runner=runpy.run_path({hermes_app._SANDBOX_SUPERVISOR!r})\n"
         "def unexpected_worker(*args, **kwargs):\n"
         f"    pathlib.Path({str(worker_started)!r}).touch()\n"
         "    raise AssertionError('Worker must not start after the stop marker')\n"
         "runner['subprocess'].Popen=unexpected_worker\n"
         "raise SystemExit(runner['main']())\n"
     )
-    monkeypatch.setattr(hermes_app, "_SANDBOX_RUNNER", str(wrapper))
+    monkeypatch.setattr(hermes_app, "_SANDBOX_SUPERVISOR", str(wrapper))
     if stop_timing == "before-shell":
         (directory / "runner.stop").touch()
     state.task = asyncio.create_task(
@@ -556,6 +557,8 @@ async def test_stop_during_interpreter_startup_closes_without_starting_a_worker(
         assert json.loads((directory / "cleanup.json").read_text()) == {
             "cleanup_confirmed": True,
             "error": None,
+            "return_code": None,
+            "timed_out": False,
         }
         await agent._close_agent_session_state(state)
         state.sandbox.disconnect.assert_awaited_once()
@@ -601,6 +604,14 @@ async def test_native_prompt_and_limits_reach_runner(agent, state, overrides, tm
     )
     await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
     launch_command = state.sandbox.exec.await_args_list[0].args[0]
+    launch_args = shlex.split(launch_command)
+    assert any(arg.endswith("/process_supervisor.py") for arg in launch_args)
+    assert float(launch_args[launch_args.index("--timeout") + 1]) == agent.config.sandbox_runner_timeout_seconds
+    cleanup_timeout = float(launch_args[launch_args.index("--cleanup-timeout") + 1])
+    assert cleanup_timeout == agent.config.session_close_timeout_seconds / 3
+    assert state.sandbox.exec.await_args_list[0].kwargs["timeout_s"] > (
+        agent.config.sandbox_runner_timeout_seconds + 3 * cleanup_timeout
+    )
     # Execute the real launch prefix: cleanup must receive the shell's PID, not a literal "$".
     launch_prefix, separator, _ = launch_command.partition(" && exec ")
     assert separator

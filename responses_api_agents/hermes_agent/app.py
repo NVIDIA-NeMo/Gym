@@ -75,7 +75,7 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, process_supervisor
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
@@ -185,6 +185,7 @@ _SANDBOX_RUNTIME_DIR = f"/tmp/nemo-gym-hermes-runtime-{_HERMES_RUNTIME_KEY}"
 _SANDBOX_UV = f"{_SANDBOX_RUNTIME_DIR}/uv"
 _SANDBOX_PYTHON = f"{_SANDBOX_RUNTIME_DIR}/venv/bin/python"
 _SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
+_SANDBOX_SUPERVISOR = f"{_SANDBOX_RUNTIME_DIR}/process_supervisor.py"
 _SANDBOX_OBSERVER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_observer.py"
 _SANDBOX_MODEL_KWARGS = f"{_SANDBOX_RUNTIME_DIR}/model_kwargs.py"
 _AGENT_SESSION_ID_KEY = "agent_session_id"
@@ -634,6 +635,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
             await sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
             await sandbox.upload(Path(__file__).with_name("model_kwargs.py"), _SANDBOX_MODEL_KWARGS)
+            await sandbox.upload(Path(process_supervisor.__file__), _SANDBOX_SUPERVISOR)
         except BaseException:
             state.phase = SessionPhase.CLOSING
             try:
@@ -900,7 +902,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "agent_session_id": agent_session_id,
             "chat_template_kwargs_enabled": self.config.chat_template_kwargs_enabled,
             "config_yaml": self._build_config(mcp_accesses),
-            "cleanup_timeout": self.config.session_close_timeout_seconds / 3,
             "disabled_toolsets": self.config.disabled_toolsets,
             "enabled_toolsets": enabled_toolsets,
             "mcp_servers": [access.name for access in mcp_accesses],
@@ -923,13 +924,18 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "user_message": user_message,
         }
         await self._upload_json(state.sandbox, input_path, payload)
+        cleanup_timeout = self.config.session_close_timeout_seconds / 3
         # Only the claim winner can launch. Do not recreate the session directory: a delayed exec
         # must remain fenced even after close removes it. Ignore TERM across exec until the Python
         # supervisor installs its handler; it checks runner.stop before starting the worker.
         command = (
             f"trap '' TERM; ln -s launch {quote(claim_path)} 2>/dev/null || exit 0; "
             f"echo $$ > {quote(pid_path)} && "
-            f"exec {quote(_SANDBOX_PYTHON)} {quote(_SANDBOX_RUNNER)} {quote(input_path)} {quote(output_path)} "
+            f"exec {quote(_SANDBOX_PYTHON)} -I {quote(_SANDBOX_SUPERVISOR)} "
+            f"--timeout {self.config.sandbox_runner_timeout_seconds} --cleanup-timeout {cleanup_timeout} "
+            f"--stop-file {quote(state.session_dir + '/runner.stop')} "
+            f"--receipt {quote(state.session_dir + '/cleanup.json')} -- "
+            f"{quote(_SANDBOX_PYTHON)} {quote(_SANDBOX_RUNNER)} {quote(input_path)} {quote(output_path)} "
             f">{quote(stdout_path)} 2>{quote(stderr_path)}"
         )
         state.runner_cleanup = RunnerCleanup.UNCONFIRMED
@@ -937,7 +943,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             launched = await state.sandbox.exec(
                 command,
                 cwd=state.workdir,
-                timeout_s=self.config.sandbox_runner_timeout_seconds,
+                timeout_s=process_supervisor.exec_timeout(
+                    timeout=self.config.sandbox_runner_timeout_seconds, cleanup_timeout=cleanup_timeout
+                ),
             )
             if launched.error_type == "timeout":
                 raise TimeoutError(

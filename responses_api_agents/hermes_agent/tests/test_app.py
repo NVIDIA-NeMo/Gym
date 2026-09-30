@@ -166,6 +166,7 @@ class TestSanity:
             "sandbox_runner.py",
             "sandbox_observer.py",
             "model_kwargs.py",
+            "process_supervisor.py",
         }
 
     async def test_seed_installs_hermes_when_it_does_not_import(self, monkeypatch) -> None:
