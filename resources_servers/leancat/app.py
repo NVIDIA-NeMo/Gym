@@ -156,6 +156,7 @@ class LeanCatVerifyResponse(LeanCatVerifyRequest, BaseVerifyResponse):
 
 
 class LeanCatResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: LeanCatResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
