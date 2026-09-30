@@ -346,7 +346,8 @@ class TestOpenCodeSandboxedAgent:
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
         assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["command"]
 
-    def test_agent_sandbox_observation_classifies_timeout_errors(self) -> None:
+    @mark.parametrize("return_code,error_type", [(125, "TimeoutError"), (124, "timeout"), (124, None)])
+    def test_agent_sandbox_observation_classifies_timeout_errors(self, return_code, error_type) -> None:
         server = OpenCodeSandboxedAgent(
             config=self._create_config(),
             server_client=MagicMock(spec=ServerClient),
@@ -356,13 +357,13 @@ class TestOpenCodeSandboxedAgent:
 
         observation = server._agent_sandbox_observation(
             sandbox=sandbox,
-            return_code=125,
-            error_type="TimeoutError",
+            return_code=return_code,
+            error_type=error_type,
             finished=False,
         )
 
         assert observation.outcome == "timeout"
-        assert observation.exit_code is None
+        assert observation.exit_code == (None if error_type else return_code)
         assert observation.sandbox_id == "connected-sandbox"
         assert observation.provider == "opensandbox"
 

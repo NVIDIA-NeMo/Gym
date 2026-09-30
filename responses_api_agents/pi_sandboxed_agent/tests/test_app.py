@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.rollout_observability import ToolCallObservation
+from nemo_gym.rollout_observability import AgentInvocation, SandboxObservation, ToolCallObservation
 from nemo_gym.sandbox.agent_tools import restricted_network_policy
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.pi_agent.app import PiAgentRunRequest, PiMCPServerConfig
@@ -208,7 +208,7 @@ async def test_partial_event_tail_only_recovers_failed_execution(agent, failure,
     assert _RUN.get() is None
 
 
-@pytest.mark.parametrize("failure", ["exit", "timeout", "export", "cancel", "judge"])
+@pytest.mark.parametrize("failure", ["exit", "timeout", "timeout_result", "timeout_exit", "export", "cancel", "judge"])
 @pytest.mark.parametrize("cleanup_fails", [False, True])
 async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure, cleanup_fails):
     server, sandbox = agent
@@ -221,15 +221,24 @@ async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure
         ]
     elif failure == "timeout":
         sandbox.exec.side_effect = [SimpleNamespace(return_code=0, error_type=None), TimeoutError()]
+    elif failure in {"timeout_result", "timeout_exit"}:
+        sandbox.exec.side_effect = [
+            SimpleNamespace(return_code=0, error_type=None),
+            SimpleNamespace(return_code=124, error_type="timeout" if failure == "timeout_result" else None),
+        ]
     elif failure == "export":
         sandbox.download.side_effect = OSError("export unavailable")
     elif failure == "cancel":
         sandbox.exec.side_effect = asyncio.CancelledError()
     else:
         server.server_client.post.side_effect = [response({}), RuntimeError("judge unavailable")]
-    if failure in {"exit", "timeout"}:
+    if failure in {"exit", "timeout", "timeout_result", "timeout_exit"}:
         result = await server.run(SimpleNamespace(cookies={}), request_body())
         assert result.reward == 0 and result.pi_failed
+        observation = next(r for r in result.ng_agent_observations.records if isinstance(r, SandboxObservation))
+        invocation = next(r for r in result.ng_agent_observations.records if isinstance(r, AgentInvocation))
+        assert observation.outcome == ("failed" if failure == "exit" else "timeout")
+        assert invocation.status == ("failed" if failure == "exit" else "incomplete")
         assert server.server_client.post.await_count == 2
         assert server.server_client.post.await_args.kwargs["json"]["response"]["output"] == []
     else:

@@ -231,7 +231,8 @@ class PiSandboxedAgent(PiAgent):
                     {
                         "type": "_ng_process_exit",
                         "return_code": return_code or 1,
-                        "timed_out": "timeout" in (error_type or "").lower(),
+                        "timed_out": "timeout" in (error_type or "").lower()
+                        or (not error_type and return_code == 124),
                     },
                 )
             )
@@ -284,13 +285,16 @@ class PiSandboxedAgent(PiAgent):
                     for r in observations.records
                 )
                 execution["pi_failed"] = failed
+                timed_out = "timeout" in (execution["pi_error_type"] or "").lower() or (
+                    not execution["pi_error_type"] and execution["pi_exit_code"] == 124
+                )
                 handle = sandbox._handle
                 observations.records.append(
                     SandboxObservation(
                         role="agent",
                         sandbox_id=handle.sandbox_id,
                         provider=handle.provider_name,
-                        outcome="failed" if failed else "completed",
+                        outcome="timeout" if timed_out else "failed" if failed else "completed",
                         exit_code=execution["pi_exit_code"],
                         error_type=execution["pi_error_type"],
                     )

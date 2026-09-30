@@ -565,7 +565,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         handle_provider = getattr(handle, "provider_name", None)
         handle_sandbox_id = getattr(handle, "sandbox_id", None)
         normalized_error = error_type.lower() if isinstance(error_type, str) else ""
-        if "timeout" in normalized_error:
+        if "timeout" in normalized_error or (not normalized_error and return_code == 124):
             outcome = "timeout"
         elif normalized_error:
             outcome = "sandbox_error"
