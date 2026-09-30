@@ -62,16 +62,15 @@ ENV PATH=/opt/lean/bin:$PATH
 RUN ln -sf /opt/lean/bin/lake /usr/local/bin/lake && \
     ln -sf /opt/lean/bin/lean /usr/local/bin/lean
 
-# Compiles run as this user (see LeanSandbox.compile). The toolchain stays root-owned, so a
-# submission's `#eval` can neither rewrite it nor write outside /tmp.
+# Compiles run as this user (see LeanSandbox.compile), so where the provider can drop privileges a
+# submission's `#eval` can neither rewrite the root-owned toolchain nor write outside /tmp. The
+# build cannot assert that: its namespace has one uid, so `su` here keeps uid 0 (as under enroot).
 RUN useradd --system --create-home --shell /bin/sh lean
 
 # Compile as the verifier will: `lake env lean` in the project, as `lean`, under `env -i` with
-# no PATH. Setting PATH here would hide the failure this exists to catch. The second command
-# fails the build if the toolchain is writable to that user.
+# no PATH. Setting PATH here would hide the failure this exists to catch.
 RUN printf 'import Mathlib\n#eval Lean.versionString\n' > /tmp/smoke.lean && \
     su -s /bin/sh lean -c 'cd /opt/mathlib && env -i sh -c "lake env lean /tmp/smoke.lean"' && \
-    ! su -s /bin/sh lean -c 'touch /opt/lean/probe || touch /opt/mathlib/probe' && \
     rm /tmp/smoke.lean
 
 WORKDIR /opt/mathlib

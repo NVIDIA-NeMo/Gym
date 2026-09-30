@@ -59,8 +59,9 @@ DEFAULT_LEAN_PROJECT_DIR = "/opt/mathlib"
 
 # Compiles run as this unprivileged user, which lean_image/ creates. `#eval` executes during
 # elaboration, so a submission can run arbitrary IO; as root it could rewrite the toolchain that
-# every later rollout is scored against. Set `sandbox_config.compile_user: null` for an image
-# without the user.
+# every later rollout is scored against. Only effective where the provider can switch uid (k8s /
+# OpenSandbox, docker); under enroot's single-uid namespace `su` keeps uid 0. Set
+# `sandbox_config.compile_user: null` for an image without the user.
 DEFAULT_COMPILE_USER = "lean"
 
 # OpenSandbox requires an entry process when creating from an image; the image's own CMD is
