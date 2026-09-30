@@ -159,15 +159,16 @@ def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per
 
 
 class VllmPDTierConfig(VllmServiceConfig):
-    """The prefill or decode tier of a `vllm_pd` service; the P/D service sets its KV role."""
+    """One tier of a `vllm_pd` service as deployed. Built by the service, never written by a user."""
 
-    type: Literal["vllm"] = "vllm"
-    # NIXL's side-channel port. Unset on decode, it takes prefill's plus one.
-    nixl_side_channel_port: int = 5600
-    # Run an independent server on every node of the pool instead of one data-parallel
-    # engine across them. The router then lists each node as its own endpoint.
-    server_per_node: bool = False
-    _kv_transfer_config: dict[str, str] = PrivateAttr(default_factory=dict)
+    nixl_side_channel_port: int
+    server_per_node: bool
+    kv_transfer_config: dict[str, str]
+
+
+# Set on the vllm_pd service, never on a tier: the service derives each tier's value.
+_PD_SERVICE_ONLY_FIELDS = ("server_per_node", "nixl_side_channel_port")
+_DECODE_NIXL_PORT_OFFSET = 1
 
 
 class VllmPDServiceConfig(BaseModelServiceConfig):
@@ -178,8 +179,13 @@ class VllmPDServiceConfig(BaseModelServiceConfig):
     """
 
     type: Literal["vllm_pd"]
-    prefill: VllmPDTierConfig
-    decode: VllmPDTierConfig
+    prefill: VllmServiceConfig
+    decode: VllmServiceConfig
+    # Run an independent server on every node of each tier's pool instead of one data-parallel
+    # engine across them. The router then lists each node as its own endpoint.
+    server_per_node: bool = False
+    # Prefill's NIXL side-channel port; decode uses this plus 1.
+    nixl_side_channel_port: int = 5600
     prefill_policy: str = "cache_aware"
     decode_policy: str = "cache_aware"
     intra_node_data_parallel_size: int = 1
@@ -189,6 +195,7 @@ class VllmPDServiceConfig(BaseModelServiceConfig):
     kv_connector: str = "NixlConnector"
     # "fail" surfaces a broken KV transfer instead of silently recomputing the prefill.
     kv_load_failure_policy: str = "fail"
+    _tiers: dict[str, VllmPDTierConfig] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
@@ -197,22 +204,42 @@ class VllmPDServiceConfig(BaseModelServiceConfig):
         # the router's and prefill's, unless it sets its own.
         if not isinstance(data, dict) or not all(isinstance(data.get(t), dict) for t in ("prefill", "decode")):
             return data
-        inherited = {k: data[k] for k in ("container", "model", "served_model_name") if k in data}
+        for tier in ("prefill", "decode"):
+            misplaced = [f for f in _PD_SERVICE_ONLY_FIELDS if f in data[tier]]
+            if misplaced:
+                raise ValueError(
+                    f"{', '.join(misplaced)} is set on the {tier} tier. Set it on the vllm_pd service itself; "
+                    "it applies to both tiers."
+                )
+        inherited = {"type": "vllm", **{k: data[k] for k in ("container", "model", "served_model_name") if k in data}}
         port = data.get("port", cls.model_fields["port"].default)
         prefill = {**inherited, "port": port + 1, **data["prefill"]}
         decode = {**inherited, "port": port + 2, **data["decode"]}
-        for field in ("nixl_side_channel_port", "data_parallel_rpc_port"):
-            decode.setdefault(field, prefill.get(field, VllmPDTierConfig.model_fields[field].default) + 1)
+        rpc_port = prefill.get(
+            "data_parallel_rpc_port", VllmServiceConfig.model_fields["data_parallel_rpc_port"].default
+        )
+        decode.setdefault("data_parallel_rpc_port", rpc_port + 1)
         return {**data, "prefill": prefill, "decode": decode}
 
     @model_validator(mode="after")
-    def _set_roles(self) -> "VllmPDServiceConfig":
-        for tier, role in ((self.prefill, "kv_producer"), (self.decode, "kv_consumer")):
-            tier._kv_transfer_config = {
-                "kv_connector": self.kv_connector,
-                "kv_role": role,
-                "kv_load_failure_policy": self.kv_load_failure_policy,
-            }
+    def _build_tiers(self) -> "VllmPDServiceConfig":
+        # Built once and kept private: the deploy-only values stay out of the saved config.
+        for name, tier, role, nixl_port in (
+            ("prefill", self.prefill, "kv_producer", self.nixl_side_channel_port),
+            ("decode", self.decode, "kv_consumer", self.nixl_side_channel_port + _DECODE_NIXL_PORT_OFFSET),
+        ):
+            # model_construct: the tier is already validated, and env prefixes must not resolve twice.
+            self._tiers[name] = VllmPDTierConfig.model_construct(
+                _fields_set=tier.model_fields_set,
+                **dict(tier),
+                nixl_side_channel_port=nixl_port,
+                server_per_node=self.server_per_node,
+                kv_transfer_config={
+                    "kv_connector": self.kv_connector,
+                    "kv_role": role,
+                    "kv_load_failure_policy": self.kv_load_failure_policy,
+                },
+            )
         if self.health_check is None:
             self.health_check = HealthCheckConfig(port=self.port)
         elif self.health_check.port is None:
@@ -220,7 +247,7 @@ class VllmPDServiceConfig(BaseModelServiceConfig):
         return self
 
     def tiers(self, name: str) -> dict[str, VllmPDTierConfig]:
-        return {f"{name}-prefill": self.prefill, f"{name}-decode": self.decode}
+        return {f"{name}-prefill": self._tiers["prefill"], f"{name}-decode": self._tiers["decode"]}
 
 
 class RayServiceConfig(BaseServiceConfig):
@@ -527,8 +554,8 @@ class SubmitConfig(_StrictModel):
             if isinstance(service, VllmPDTierConfig) and service.server_per_node:
                 if service.number_of_instances != 1:
                     raise ValueError(
-                        f"Service '{service_name}' sets server_per_node, so each node is one instance; "
-                        f"number_of_instances must be 1, got {service.number_of_instances}."
+                        f"Service '{service_name}' runs one server per node (server_per_node), so each node is one "
+                        f"instance; number_of_instances must be 1, got {service.number_of_instances}."
                     )
                 # Each node serves on its own, so size it as a single-node deployment.
                 service_nodes = 1
@@ -586,13 +613,12 @@ class SubmitConfig(_StrictModel):
                 continue
 
             prefill_name, decode_name = pd.tiers(name)
-            for field in ("nixl_side_channel_port", "data_parallel_rpc_port"):
-                if getattr(pd.prefill, field) == getattr(pd.decode, field):
-                    raise ValueError(
-                        f"Services '{prefill_name}' and '{decode_name}' share {field} "
-                        f"{getattr(pd.prefill, field)}. Each tier binds the port on its own hosts, so the two "
-                        "tiers need different ones."
-                    )
+            if pd.prefill.data_parallel_rpc_port == pd.decode.data_parallel_rpc_port:
+                raise ValueError(
+                    f"Services '{prefill_name}' and '{decode_name}' share data_parallel_rpc_port "
+                    f"{pd.prefill.data_parallel_rpc_port}. Each tier binds the port on its own hosts, so the two "
+                    "tiers need different ones."
+                )
 
             # The driver reaches the router over localhost from the allocation's first node.
             if pd.node_pool is not None and pools and pd.node_pool != pools[0]:

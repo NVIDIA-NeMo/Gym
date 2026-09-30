@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig
+from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
 from nemo_gym.orchestration.executors.script_templates import (
     render_driver_entrypoint,
     render_gym_cmd,
@@ -34,6 +34,7 @@ from nemo_gym.orchestration.executors.slurm_script import (
     _build_vllm_multi_instance_multi_node_command,
     _build_vllm_ray_command,
     _build_vllm_ray_serve_command,
+    _kv_transfer_flag,
     _node_totals,
     _render_directives,
     _render_pool_directives,
@@ -2064,9 +2065,10 @@ def test_the_node_list_is_resolved_for_the_router(tmp_path):
 def test_a_pd_service_renders_the_three_service_form_it_replaced(per_node):
     # The fixtures are the job scripts the earlier form (two tier services wired by hand to a
     # `type: router` service) rendered for SWE-bench Pro's 4 prefill + 6 decode layout.
-    shape = (lambda n: {"server_per_node": True}) if per_node else (lambda n: {"number_of_instances": n})
+    shape = (lambda n: {}) if per_node else (lambda n: {"number_of_instances": n})
     pd = _pd_service(
         container="vllm:img",
+        server_per_node=per_node,
         prefill={
             "node_pool": "prefill",
             "tensor_parallel_size": 4,
@@ -2126,13 +2128,18 @@ def test_the_tiers_inherit_the_model_and_take_the_next_ports(tmp_path):
     assert (prefill.health_check.port, decode.health_check.port) == (9001, 9100)
 
 
-def test_decode_ports_follow_prefills_unless_set(tmp_path):
-    services = _pd_services()
-    services["policy"]["prefill"] |= {"nixl_side_channel_port": 7000, "data_parallel_rpc_port": 14000}
-    services["policy"]["decode"] |= {"data_parallel_rpc_port": 15000}
-    deployed = _pd_config(tmp_path, services=services).deployed_services
+def test_decode_takes_the_nixl_port_one_above_prefills(tmp_path):
+    deployed = _pd_config(tmp_path, services=_pd_services(nixl_side_channel_port=7000)).deployed_services
+    assert deployed["policy-prefill"].nixl_side_channel_port == 7000
     assert deployed["policy-decode"].nixl_side_channel_port == 7001
-    assert deployed["policy-decode"].data_parallel_rpc_port == 15000
+
+
+def test_decode_data_parallel_rpc_port_follows_prefills_unless_set(tmp_path):
+    services = _pd_services()
+    services["policy"]["prefill"]["data_parallel_rpc_port"] = 14000
+    assert _pd_config(tmp_path, services=services).deployed_services["policy-decode"].data_parallel_rpc_port == 14001
+    services["policy"]["decode"]["data_parallel_rpc_port"] = 15000
+    assert _pd_config(tmp_path, services=services).deployed_services["policy-decode"].data_parallel_rpc_port == 15000
 
 
 def test_the_policy_model_is_the_router(tmp_path):
@@ -2150,7 +2157,25 @@ def test_a_pd_service_is_recorded_as_written(tmp_path):
         benchmark["run"] = {}
     reloaded = SubmitConfig.model_validate(dumped)
     assert list(reloaded.deployed_services) == ["policy-prefill", "policy-decode", "policy"]
-    assert reloaded.deployed_services["policy-decode"]._kv_transfer_config["kv_role"] == "kv_consumer"
+    assert reloaded.deployed_services["policy-decode"].kv_transfer_config["kv_role"] == "kv_consumer"
+
+
+def test_a_reloaded_pd_config_keeps_the_derived_tier_values_out(tmp_path):
+    # Written back in, a derived value would be refused on reload or fixed at its old value.
+    services = _pd_services(server_per_node=True, nixl_side_channel_port=7000)
+    for tier in ("prefill", "decode"):
+        services["policy"][tier]["number_of_instances"] = 1
+    dumped = _pd_config(tmp_path, services=services).model_dump(mode="json")
+    for tier in ("prefill", "decode"):
+        derived = {"server_per_node", "nixl_side_channel_port", "kv_transfer_config"} & set(
+            dumped["services"]["policy"][tier]
+        )
+        assert not derived
+    for benchmark in dumped["driver"]["benchmarks"].values():
+        benchmark["run"] = {}
+    dumped["services"]["policy"]["nixl_side_channel_port"] = 8000
+    decode = SubmitConfig.model_validate(dumped).deployed_services["policy-decode"]
+    assert (decode.nixl_side_channel_port, decode.server_per_node) == (8001, True)
 
 
 def test_a_tiers_missing_mount_is_named_by_its_path_in_the_config(tmp_path):
@@ -2160,10 +2185,12 @@ def test_a_tiers_missing_mount_is_named_by_its_path_in_the_config(tmp_path):
         _validate_mounts(_pd_config(tmp_path, services=services), LocalConnection())
 
 
-def test_tiers_sharing_a_side_channel_port_are_refused(tmp_path):
+@pytest.mark.parametrize("tier", ["prefill", "decode"])
+@pytest.mark.parametrize("field", ["nixl_side_channel_port", "server_per_node"])
+def test_service_wide_settings_are_refused_on_a_tier(tmp_path, tier, field):
     services = _pd_services()
-    services["policy"]["decode"]["nixl_side_channel_port"] = 5600
-    with pytest.raises(ValueError, match="'policy-prefill' and 'policy-decode' share nixl_side_channel_port 5600"):
+    services["policy"][tier][field] = 1
+    with pytest.raises(ValueError, match=f"{field} is set on the {tier} tier. Set it on the vllm_pd service itself"):
         _pd_config(tmp_path, services=services)
 
 
@@ -2223,6 +2250,19 @@ def test_a_router_away_from_the_driver_is_refused(tmp_path):
     # the allocation's first node.
     with pytest.raises(ValueError, match="reaches it over localhost"):
         _pd_config(tmp_path, services=_pd_services(node_pool="decode"))
+
+
+def test_an_empty_kv_config_renders_no_kv_transfer_flag():
+    # `--kv-transfer-config '{}'` would start a tier with no KV role at all.
+    tier = VllmPDTierConfig(
+        type="vllm",
+        container="img",
+        model="/ckpt",
+        nixl_side_channel_port=5600,
+        server_per_node=False,
+        kv_transfer_config={},
+    )
+    assert _kv_transfer_flag(tier) == ""
 
 
 def test_a_plain_vllm_service_gets_no_kv_transfer_config(tmp_path):
@@ -2355,10 +2395,9 @@ def test_the_driver_goes_to_the_policys_node_when_services_are_pinned(tmp_path):
 
 
 def _per_node_services():
-    services = _pd_services()
+    services = _pd_services(server_per_node=True)
     for tier in ("prefill", "decode"):
         services["policy"][tier]["number_of_instances"] = 1
-        services["policy"][tier]["server_per_node"] = True
     return services
 
 

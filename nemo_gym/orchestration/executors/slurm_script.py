@@ -236,9 +236,9 @@ def _kv_transfer_flag(service: VllmServiceConfig) -> str:
     single-quoted `bash -c` block as everything else, and the escaping helper
     handles it there.
     """
-    if not isinstance(service, VllmPDTierConfig):
+    if not isinstance(service, VllmPDTierConfig) or not service.kv_transfer_config:
         return ""
-    config = json.dumps(service._kv_transfer_config, separators=(",", ":"))
+    config = json.dumps(service.kv_transfer_config, separators=(",", ":"))
     return f" --kv-transfer-config {shlex.quote(config)}"
 
 
@@ -417,7 +417,7 @@ def _build_router_command(router: VllmPDServiceConfig, offsets: dict[str, tuple[
     for flag, tier in (("--prefill", router.prefill), ("--decode", router.decode)):
         start, count = offsets[tier.node_pool]
         # A per-node tier is one server per node; otherwise the tier's API rank is its head.
-        for i in range(count if tier.server_per_node else 1):
+        for i in range(count if router.server_per_node else 1):
             endpoints += f' {flag} "http://{_pool_head(start + i)}:{tier.port}"'
     return (
         "vllm-router"
