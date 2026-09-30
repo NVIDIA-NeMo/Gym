@@ -209,6 +209,7 @@ class HermesAgentSessionState(AgentSessionState):
     session_dir: str
     owns_sandbox: bool = False
     observations: AgentObservationBundle | None = None
+    activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     phase: SessionPhase = SessionPhase.READY
     runner_cleanup: RunnerCleanup = RunnerCleanup.IDLE
@@ -826,7 +827,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             body=body,
             result=result,
             model_name=self._model_name(),
-            fail_on_error=False,
             n_input=len(history) + 1,
         )
         # Verifiers see Gym's MCP naming; the model's own names stay in the captured model calls.
@@ -896,12 +896,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         result: dict[str, Any],
         model_name: str,
-        fail_on_error: bool,
         interrupted_by_dispatch: bool = False,
         n_input: int = 0,
     ) -> NeMoGymResponse:
-        if fail_on_error and result.get("error"):
-            raise RuntimeError(f"Hermes agent failed: {result['error']}")
+        # The pinned Hermes marks provider/API failures with `failed`, but model-limit and
+        # invalid-tool outcomes with `partial`. Keep those partial patches gradable. Its one
+        # model-caused `failed` outcome is first-response truncation (run_agent.py).
+        if result.get("failed") and result.get("error") != "First response truncated due to output length limit":
+            raise RuntimeError(f"Hermes agent failed: {result.get('error') or 'unknown provider/API failure'}")
 
         messages = result.get("messages") or []
         output_items = _trajectory_to_output_items(messages, n_input)
@@ -1083,7 +1085,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             body=body,
             result=result,
             model_name=model_name,
-            fail_on_error=False,
             interrupted_by_dispatch=interrupted_by_dispatch,
             n_input=len(history) + 1,
         )
@@ -1102,28 +1103,29 @@ class HermesAgent(SimpleResponsesAPIAgent):
             state = self._require_agent_session(agent_session_id)
             if state.request.episode_id.capture_key != rollout_id:
                 raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
-            if state.phase is not SessionPhase.READY:
-                raise HTTPException(409, "Hermes sandbox sessions support one activation")
             body = self._validate_sandbox_request(body)
-            state.phase = SessionPhase.ACTIVATED
+            if state.phase is SessionPhase.READY:
+                # No await until the task and its immutable request binding are installed.
+                state.activation_request = body.model_copy(deep=True)
+                state.phase = SessionPhase.ACTIVATED
 
-            async def activate() -> NeMoGymResponse:
-                async with self.sem:
-                    episode = await self._run_sandbox_episode(
-                        body=body,
-                        agent_session_id=agent_session_id,
-                        state=state,
-                    )
-                    state.observations = episode.observations
-                    return episode.response
+                async def activate() -> NeMoGymResponse:
+                    async with self.sem:
+                        episode = await self._run_sandbox_episode(
+                            body=body,
+                            agent_session_id=agent_session_id,
+                            state=state,
+                        )
+                        state.observations = episode.observations
+                        return episode.response
 
-            state.task = asyncio.create_task(activate())
-            try:
-                return await asyncio.shield(state.task)
-            except asyncio.CancelledError:
-                if not state.task.done() and not state.task.cancelling():
-                    state.task.cancel()
-                raise
+                state.task = asyncio.create_task(activate())
+            elif state.phase is not SessionPhase.ACTIVATED or body != state.activation_request:
+                raise HTTPException(409, "Hermes sandbox sessions support one activation; retry the same request")
+            assert state.task is not None
+            # A disconnected HTTP waiter must not cancel the shared activation. Session close
+            # owns cancellation; identical retries join this task or replay its result/error.
+            return (await asyncio.shield(state.task)).model_copy(deep=True)
         if not isinstance(rollout_id, str):
             return await self._create_response(body)
         episode = await self._create_episode(body, rollout_id=rollout_id)

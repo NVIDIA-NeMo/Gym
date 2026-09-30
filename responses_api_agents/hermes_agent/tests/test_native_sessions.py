@@ -94,7 +94,6 @@ def episode(agent):
             body=body,
             result={"completed": True, "messages": [{"role": "assistant", "content": "done"}]},
             model_name="model",
-            fail_on_error=False,
         ),
         observations=AgentObservationBundle(source="hermes"),
     )
@@ -112,11 +111,15 @@ def test_http_close_retry_and_stale_activation_never_fall_back(agent, state):
         assert state.runner_cleanup is RunnerCleanup.IDLE
         assert client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json")).status_code == 200
         path = f"/ng-rollout/{state.request.episode_id.capture_key}/v1/responses"
-        assert client.post(path, json={"input": "task"}).status_code == 200
+        activation = client.post(path, json={"input": "task"})
+        assert activation.status_code == 200
         assert state.task is not None
         assert state.task.done()
         assert state.phase is SessionPhase.ACTIVATED
-        assert client.post(path, json={"input": "task"}).status_code == 409
+        replay = client.post(path, json={"input": "task"})
+        assert replay.status_code == 200
+        assert replay.json() == activation.json()
+        assert client.post(path, json={"input": "different task"}).status_code == 409
         close = {
             "agent_session_id": seed.json()["agent_session_id"],
             "episode_id": state.request.episode_id.model_dump(),
@@ -229,7 +232,7 @@ def test_close_retry_window_must_be_positive_and_finite(agent, window):
         HermesAgentConfig.model_validate(config)
 
 
-async def test_close_cancels_activation_and_rejects_duplicate(agent, state):
+async def test_close_cancels_activation_and_its_replay(agent, state):
     started = asyncio.Event()
     stopped = asyncio.Event()
 
@@ -247,8 +250,10 @@ async def test_close_cancels_activation_and_rejects_duplicate(agent, state):
     await asyncio.wait_for(started.wait(), 5)
     assert state.phase is SessionPhase.ACTIVATED
     with pytest.raises(HTTPException) as error:
-        await agent.responses(request(state), body)
+        await agent.responses(request(state), body.model_copy(update={"temperature": 0.2}))
     assert error.value.status_code == 409
+    replay = asyncio.create_task(agent.responses(request(state), body))
+    await asyncio.sleep(0)
     close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
     first, second = await asyncio.gather(
         agent.close_agent_session(request(state), close), agent.close_agent_session(request(state), close)
@@ -258,6 +263,78 @@ async def test_close_cancels_activation_and_rejects_duplicate(agent, state):
     assert state.phase is SessionPhase.CLOSING
     with pytest.raises(asyncio.CancelledError):
         await running
+    with pytest.raises(asyncio.CancelledError):
+        await replay
+    agent._run_sandbox_episode.assert_awaited_once()
+    state.sandbox.disconnect.assert_awaited_once()
+
+
+async def test_activation_replay_survives_disconnected_waiter(agent, state):
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    expected = episode(agent)
+
+    async def activate(**kwargs):
+        started.set()
+        await finish.wait()
+        return expected
+
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+    agent._run_sandbox_episode = AsyncMock(side_effect=activate)
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task")
+    original = asyncio.create_task(agent.responses(request(state), body))
+    await asyncio.wait_for(started.wait(), 5)
+    replay = asyncio.create_task(agent.responses(request(state), body.model_copy(deep=True)))
+    await asyncio.sleep(0)
+    try:
+        assert not replay.done()
+        original.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await original
+        assert not state.task.done()
+        assert not state.task.cancelling()
+        # The request retained for comparison must not alias the caller's mutable model.
+        body.input = "changed after dispatch"
+        with pytest.raises(HTTPException) as error:
+            await agent.responses(request(state), body)
+        assert error.value.status_code == 409
+        finish.set()
+        assert await asyncio.wait_for(replay, 5) == expected.response
+        assert await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task")) == (
+            expected.response
+        )
+        agent._run_sandbox_episode.assert_awaited_once()
+        assert state.observations == expected.observations
+    finally:
+        finish.set()
+        await asyncio.gather(original, replay, return_exceptions=True)
+        await agent.close_agent_session(
+            request(state), AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
+        )
+
+
+def test_provider_failure_is_http_500_and_replays_without_rerunning(agent, state):
+    agent._initialize_agent_session_state = AsyncMock(return_value=state)
+    agent._upload_json = AsyncMock()
+    agent._download_json = AsyncMock(
+        side_effect=[
+            {"cleanup_confirmed": True},
+            {"result": {"failed": True, "error": "HTTP 429 Too Many Requests", "messages": []}, "runtime": {}},
+        ]
+    )
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json")).status_code == 200
+        path = f"/ng-rollout/{state.request.episode_id.capture_key}/v1/responses"
+        for _ in range(2):
+            response = client.post(path, json={"input": "task"})
+            assert response.status_code == 500
+        agent._upload_json.assert_awaited_once()
+        assert state.runner_cleanup is RunnerCleanup.CONFIRMED
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": "session", "episode_id": state.request.episode_id.model_dump()},
+        )
+        assert close.status_code == 200
     state.sandbox.disconnect.assert_awaited_once()
 
 
