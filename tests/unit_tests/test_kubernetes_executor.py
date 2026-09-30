@@ -25,7 +25,7 @@ from nemo_gym.orchestration.executors.kubernetes_script import _dns_label, _scal
 from nemo_gym.orchestration.jobs import SubmissionRecord
 
 
-def _submit_config(tmp_path, benchmarks, services=None):
+def _submit_config(tmp_path, benchmarks, services=None, compute_overrides=None):
     return SubmitConfig.model_validate(
         {
             "services": services or {},
@@ -34,6 +34,7 @@ def _submit_config(tmp_path, benchmarks, services=None):
                     "type": "kubernetes",
                     "namespace": "eng-test",
                     "pvc_name": "workspace",
+                    **(compute_overrides or {}),
                 }
             },
             "driver": {"container": "gym:latest", "benchmarks": {name: {} for name in benchmarks}},
@@ -118,6 +119,41 @@ def test_gpu_sidecar_gets_a_memory_request_scaled_by_gpu_count(tmp_path):
     assert sidecar["resources"]["requests"]["memory"] == "64Gi"
     driver = job["spec"]["template"]["spec"]["containers"][0]
     assert driver["resources"]["requests"]["memory"]
+
+
+def test_gpu_sidecar_has_a_startup_probe_that_gates_the_driver(tmp_path):
+    # readinessProbe alone does not delay when kubelet starts the next (driver) container for a
+    # native sidecar -- only startupProbe does. Missing this means the driver runs before vLLM is
+    # actually serving.
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    services = {
+        "vllm_model": {
+            "type": "vllm",
+            "container": "vllm/vllm-openai:latest",
+            "model": "org/model",
+        }
+    }
+    config = _submit_config(tmp_path, ["bench_a"], services=services)
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    sidecar = job["spec"]["template"]["spec"]["initContainers"][0]
+    assert "startupProbe" in sidecar
+    assert sidecar["startupProbe"]["httpGet"]["path"] == "/health"
+    assert "readinessProbe" in sidecar
 
 
 def test_gpu_sidecar_mounts_a_larger_dev_shm(tmp_path):
@@ -225,7 +261,7 @@ def test_otel_enabled_by_default_is_rejected(tmp_path):
     config = SubmitConfig.model_validate(
         {
             "services": services,
-            "compute": {"cluster": {"type": "kubernetes", "namespace": "eng-test"}},
+            "compute": {"cluster": {"type": "kubernetes", "namespace": "eng-test", "pvc_name": "workspace"}},
             "driver": {"container": "gym:latest", "benchmarks": {"bench_a": {}}},
             "job": {"output_path": str(tmp_path / "jobs")},
         }
@@ -316,3 +352,68 @@ def test_multi_instance_sidecar_requests_gpus_for_all_replicas(tmp_path):
 
     sidecar = job["spec"]["template"]["spec"]["initContainers"][0]
     assert sidecar["resources"]["limits"]["nvidia.com/gpu"] == 8
+
+
+def test_job_has_ttl_seconds_after_finished_by_default(tmp_path):
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    config = _submit_config(tmp_path, ["bench_a"])
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    assert job["spec"]["ttlSecondsAfterFinished"] == 60 * 60 * 24
+    assert "activeDeadlineSeconds" not in job["spec"]
+
+
+def test_job_uses_configured_active_deadline_seconds(tmp_path):
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    config = _submit_config(
+        tmp_path, ["bench_a"], compute_overrides={"active_deadline_seconds": 3600, "ttl_seconds_after_finished": 60}
+    )
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    assert job["spec"]["activeDeadlineSeconds"] == 3600
+    assert job["spec"]["ttlSecondsAfterFinished"] == 60
+
+
+class _TimingOutKubectl:
+    def __call__(self, compute, *args, input=None):
+        raise subprocess.TimeoutExpired(cmd=["kubectl", *args], timeout=kubernetes_module._KUBECTL_TIMEOUT_SECONDS)
+
+
+def test_kubectl_timeout_is_recorded_as_that_benchmarks_error(tmp_path, monkeypatch):
+    _install(monkeypatch, _TimingOutKubectl())
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = KubernetesExecutor().run(_submit_config(tmp_path, ["bench_a"]))
+
+    assert record is not None
+    benchmark = record.benchmarks[0]
+    assert benchmark.job_id is None
+    assert "timed out" in benchmark.error

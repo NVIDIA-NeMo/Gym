@@ -226,8 +226,11 @@ class KubernetesComputeConfig(BaseComputeConfig):
     gpus_per_node: int | None = None
     node_selector: dict[str, str] = {}
     service_account: str | None = None
-    # A pre-existing PVC, mounted at job.output_path in every container.
-    pvc_name: str | None = None
+    # A pre-existing PVC, mounted at job.output_path in every container. Required: the driver
+    # container's own volumeMounts always references this volume (build_job_manifest), so an
+    # unset pvc_name would leave that reference dangling and the pod rejected outright by the API
+    # server ("volumeMounts[0].name: Not found") -- fail clearly at config-validation time instead.
+    pvc_name: str
     # Memory *request* (Kubernetes quantity string, e.g. "32Gi") per requested GPU on a service
     # container. Without a memory request a pod gets QoS class BestEffort, which the kubelet
     # kills first under node memory pressure -- observed in practice as a GPU sidecar getting
@@ -236,6 +239,16 @@ class KubernetesComputeConfig(BaseComputeConfig):
     # leaving every GPU pod first-in-line for eviction by default.
     memory_per_gpu: str = "32Gi"
     extra_args: dict[str, str] = {}  # Forwarded verbatim as pod labels/annotations.
+    # Seconds after a Job finishes (Complete or Failed) before Kubernetes garbage-collects it and
+    # its pods -- without this, finished Jobs stick around forever and need manual cleanup. 24h by
+    # default: long enough to inspect logs/results after a run, short enough not to accumulate.
+    ttl_seconds_after_finished: int = 60 * 60 * 24
+    # Kills a still-Running Job (and frees its GPUs) once it's been running this long, regardless
+    # of state -- e.g. a hung vLLM that never becomes healthy, or a benchmark that never
+    # terminates. None (default) sets no deadline, since benchmark runtimes vary too widely for
+    # one default to be safe for every workload; set this explicitly once you know a reasonable
+    # upper bound for a given benchmark/model.
+    active_deadline_seconds: int | None = None
 
 
 ComputeConfig = Annotated[

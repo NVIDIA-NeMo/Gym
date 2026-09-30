@@ -385,7 +385,7 @@ def test_gpu_footprint_no_node_pools_skips_validation():
 # KubernetesComputeConfig
 # ---------------------------------------------------------------------------
 
-COMPUTE_K8S = {"cluster": {"type": "kubernetes", "namespace": "eng-test", "gpus_per_node": 8}}
+COMPUTE_K8S = {"cluster": {"type": "kubernetes", "namespace": "eng-test", "gpus_per_node": 8, "pvc_name": "workspace"}}
 
 
 def test_kubernetes_compute_accepted():
@@ -422,3 +422,12 @@ def test_kubernetes_compute_discriminated_from_slurm():
 def test_kubernetes_unknown_type_rejected():
     with pytest.raises(ValidationError):
         SubmitConfig.model_validate(_config(compute={"cluster": {"type": "not-a-real-backend"}}))
+
+
+def test_kubernetes_pvc_name_is_required():
+    # The driver container's own volumeMounts always references the output volume
+    # (kubernetes_script.py's build_job_manifest); without a pvc_name that volume is never
+    # declared, and the pod is rejected outright by the API server. Fail at config-validation
+    # time with a clear message instead.
+    with pytest.raises(ValidationError, match="pvc_name"):
+        SubmitConfig.model_validate(_config(compute={"cluster": {"type": "kubernetes", "namespace": "eng-test"}}))

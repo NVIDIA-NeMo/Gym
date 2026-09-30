@@ -150,13 +150,18 @@ def _vllm_command(service: VllmServiceConfig, port: int) -> list[str]:
     return cmd
 
 
-def _probe(path: str, port: int, timeout_seconds: int) -> dict[str, Any]:
-    period = 5
+def _probe(path: str, port: int, *, period: int, failure_threshold: int) -> dict[str, Any]:
     return {
         "httpGet": {"path": path, "port": port},
         "periodSeconds": period,
-        "failureThreshold": max(1, timeout_seconds // period),
+        "failureThreshold": failure_threshold,
     }
+
+
+# Ongoing readinessProbe cadence, once startup has already succeeded once: quick to notice a real
+# problem without needing `health_check.timeout_seconds`' full startup allowance every time.
+_READINESS_PERIOD_SECONDS = 5
+_READINESS_FAILURE_THRESHOLD = 3
 
 
 def _sidecar_containers(config: SubmitConfig, compute: KubernetesComputeConfig) -> list[dict[str, Any]]:
@@ -173,8 +178,11 @@ def _sidecar_containers(config: SubmitConfig, compute: KubernetesComputeConfig) 
         container: dict[str, Any] = {
             "name": _dns_label(name),
             "image": service.container,
-            "restartPolicy": "Always",  # Native sidecar (k8s >= 1.29): starts before, and is torn
-            # down after, the pod's regular (driver) container -- kubelet handles the ordering.
+            "restartPolicy": "Always",  # Native sidecar (k8s >= 1.29): torn down after the pod's
+            # regular (driver) container finishes. A `startupProbe` (added below when a
+            # health_check is set) is what actually makes the driver WAIT for this one to be
+            # healthy first -- without it, kubelet starts the driver the instant this container's
+            # process launches, readinessProbe or not; readinessProbe alone never gates that.
             "command": _vllm_command(service, service.port),
             "ports": [{"containerPort": service.port}],
             "resources": _gpu_resources(gpu_count, compute.memory_per_gpu),
@@ -184,10 +192,17 @@ def _sidecar_containers(config: SubmitConfig, compute: KubernetesComputeConfig) 
         if service.env:
             container["env"] = _env_list(service.env)
         if service.health_check:
+            port = service.health_check.port or service.port
+            period = 5
+            failure_threshold = max(1, service.health_check.timeout_seconds // period)
+            container["startupProbe"] = _probe(
+                service.health_check.path, port, period=period, failure_threshold=failure_threshold
+            )
             container["readinessProbe"] = _probe(
                 service.health_check.path,
-                service.health_check.port or service.port,
-                service.health_check.timeout_seconds,
+                port,
+                period=_READINESS_PERIOD_SECONDS,
+                failure_threshold=_READINESS_FAILURE_THRESHOLD,
             )
         containers.append(container)
     return containers
@@ -252,9 +267,10 @@ def build_job_manifest(
     manifest_writes = _manifest_write_commands(resolved_config, manifest, run_dir_str)
     _reject_unsupported_mounts(config.driver.mounts)
 
-    volumes = [{"name": SHM_VOLUME_NAME, "emptyDir": {"medium": "Memory", "sizeLimit": SHM_SIZE}}]
-    if compute.pvc_name:
-        volumes.append({"name": OUTPUT_VOLUME_NAME, "persistentVolumeClaim": {"claimName": compute.pvc_name}})
+    volumes = [
+        {"name": SHM_VOLUME_NAME, "emptyDir": {"medium": "Memory", "sizeLimit": SHM_SIZE}},
+        {"name": OUTPUT_VOLUME_NAME, "persistentVolumeClaim": {"claimName": compute.pvc_name}},
+    ]
 
     driver_container: dict[str, Any] = {
         "name": "driver",
@@ -286,12 +302,17 @@ def build_job_manifest(
         "gym-benchmark": _dns_label(benchmark_name),
     }
 
+    job_spec: dict[str, Any] = {
+        "backoffLimit": 0,
+        "ttlSecondsAfterFinished": compute.ttl_seconds_after_finished,
+        "template": {"metadata": {"labels": labels}, "spec": pod_spec},
+    }
+    if compute.active_deadline_seconds is not None:
+        job_spec["activeDeadlineSeconds"] = compute.active_deadline_seconds
+
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
         "metadata": {"name": name, "namespace": compute.namespace, "labels": labels},
-        "spec": {
-            "backoffLimit": 0,
-            "template": {"metadata": {"labels": labels}, "spec": pod_spec},
-        },
+        "spec": job_spec,
     }

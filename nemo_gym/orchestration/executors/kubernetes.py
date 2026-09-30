@@ -58,11 +58,17 @@ def _validate_benchmark_names(benchmarks: list[str]) -> None:
         )
 
 
+# kubectl can hang indefinitely -- e.g. an expired `tsh` session attempting an interactive
+# relogin that can never complete non-interactively in this subprocess -- which would otherwise
+# block the whole submit across every benchmark, not just the one affected.
+_KUBECTL_TIMEOUT_SECONDS = 60
+
+
 def _kubectl(compute: KubernetesComputeConfig, *args: str, input: str | None = None) -> subprocess.CompletedProcess:
     cmd = ["kubectl", *args, "-n", compute.namespace]
     if compute.context:
         cmd += ["--context", compute.context]
-    return subprocess.run(cmd, input=input, text=True, capture_output=True)
+    return subprocess.run(cmd, input=input, text=True, capture_output=True, timeout=_KUBECTL_TIMEOUT_SECONDS)
 
 
 class KubernetesExecutor(BaseExecutor):
@@ -96,7 +102,17 @@ class KubernetesExecutor(BaseExecutor):
         benchmarks = []
         for name, job in manifests:
             rendered = yaml.safe_dump(job, sort_keys=False)
-            result = _kubectl(compute, "apply", "-f", "-", input=rendered)
+            try:
+                result = _kubectl(compute, "apply", "-f", "-", input=rendered)
+            except subprocess.TimeoutExpired:
+                error = (
+                    f"kubectl apply timed out after {_KUBECTL_TIMEOUT_SECONDS}s -- check that the kubeconfig "
+                    "context is reachable and `tsh kube login <cluster>` (or equivalent) hasn't expired."
+                )
+                benchmarks.append(
+                    BenchmarkJob(benchmark=name, job_dir=str(base_run_dir / name), job_id=None, error=error)
+                )
+                continue
             if result.returncode == 0:
                 benchmarks.append(
                     BenchmarkJob(benchmark=name, job_dir=str(base_run_dir / name), job_id=job["metadata"]["name"])
