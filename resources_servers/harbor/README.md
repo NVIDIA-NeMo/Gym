@@ -20,7 +20,7 @@ Supported today: single-step tasks with a prebuilt `docker_image` or a base-imag
 `[verifier.environment]` names a prebuilt image (the agent's `/logs/artifacts` and `artifacts` entries are
 copied into the verifier sandbox first, sidecar hooks and artifacts included). Compose environments start as
 a sandbox group when a `compose-images.json` with the sidecar images' recorded OCI configuration sits next to
-the task folders (or `compose_image_configs` points at one); on OpenSandbox the provider block also needs
+the task folders, written by `gym dataset fetch`; on OpenSandbox the provider block also needs
 `networking.enabled: true` (with `loopback_forwarding`) and `runtime_requirements.shm_size_metadata_key`, as
 `benchmarks/terminal_bench_4/resources.yaml` shows. `[environment.healthcheck]` is polled at seed.
 Tasks that declare GPUs run on the `gpu_sandbox_provider` block when one is set. The task's
