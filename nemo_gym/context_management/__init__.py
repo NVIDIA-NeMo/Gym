@@ -5,13 +5,10 @@
 
 from nemo_gym.context_management.client import ContextGuardRejected, ContextManagedResponsesClient
 from nemo_gym.context_management.config import ContextHistoryConfig
-from nemo_gym.context_management.result import LogicalCCResult, SelectedAction
 
 
 __all__ = [
     "ContextGuardRejected",
     "ContextHistoryConfig",
     "ContextManagedResponsesClient",
-    "LogicalCCResult",
-    "SelectedAction",
 ]

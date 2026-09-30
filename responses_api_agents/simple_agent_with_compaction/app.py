@@ -18,7 +18,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.context_management import ContextHistoryConfig, ContextManagedResponsesClient, LogicalCCResult
+from nemo_gym.context_management import ContextHistoryConfig, ContextManagedResponsesClient
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -85,7 +85,7 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
         logical_rollout_id: str,
         resources_server_cookies: Any = None,
         seed_observations: list | None = None,
-    ) -> tuple[NeMoGymResponse, LogicalCCResult, dict]:
+    ) -> tuple[NeMoGymResponse, dict]:
         client = ContextManagedResponsesClient(
             server_client=self.server_client,
             model_server=self.config.model_server,
@@ -96,26 +96,17 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
         )
         cookies = dict(resources_server_cookies or {})
         usage = None
-        outcome = "max_steps"
         for _ in range(self.config.max_steps):
             model_response = await client.create()
             usage = accumulate_response_usage(usage, model_response.usage)
             if model_response.error is not None or model_response.status == "failed":
-                outcome = "execution_failure"
                 break
             if model_response.incomplete_details:
-                outcome = (
-                    "max_output_tokens"
-                    if model_response.incomplete_details.reason == "max_output_tokens"
-                    else "execution_failure"
-                )
                 break
             calls = [item for item in model_response.output if item.type == "function_call"]
             if not calls:
-                outcome = "completed"
                 if not any(item.type == "message" and item.role == "assistant" for item in model_response.output):
                     mark_missing_assistant_output(model_response)
-                    outcome = "incomplete_output"
                 break
             for call in calls:
                 try:
@@ -147,12 +138,12 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
                 client.append_observation(observations)
         # ID still identifies the last selected action while output accumulates the
         # ordinary semantic conversation for verification.
-        result = client.finish(model_response, outcome=outcome)
+        client.finish(model_response)
         response = NeMoGymResponse.model_validate(
             model_response.model_dump() | {"output": client.output_items, "usage": usage}
         )
         cookies.update(client.cookies)
-        return response, result, cookies
+        return response, cookies
 
     def _require_capture(self, logical_rollout_id: str | None) -> str:
         if not self._token_id_capture_enabled() or not logical_rollout_id or "/" in logical_rollout_id:
@@ -166,7 +157,7 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
         owner = self._require_capture(request.path_params.get("rollout_id"))
-        model_response, result, cookies = await self._create_episode(
+        model_response, cookies = await self._create_episode(
             body, logical_rollout_id=owner, resources_server_cookies=request.cookies
         )
         for key, value in cookies.items():
@@ -188,7 +179,7 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
         await raise_for_status(seed_response)
         cookies.update(seed_response.cookies)
         seed_observations = await self._seed_session_response_messages(seed_response)
-        model_response, result, cookies = await self._create_episode(
+        model_response, cookies = await self._create_episode(
             body.responses_create_params,
             logical_rollout_id=owner,
             resources_server_cookies=cookies,
@@ -215,7 +206,7 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
         # Project only after verification: the framework already captures processed media,
         # while the verifier above still sees every observation occurrence.
         # Preserve verifier annotations, just as simple_agent does. Only the media
-        # transport projection is ours; capture evidence remains in result.
+        # transport projection is ours; capture evidence remains in shared capture.
         transport_response = dict(verified["response"])
         transport_response["output"] = _without_raw_images(transport_response["output"])
         input_echo = dict(verified["responses_create_params"])

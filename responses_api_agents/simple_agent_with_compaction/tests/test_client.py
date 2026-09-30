@@ -115,7 +115,11 @@ async def test_identity_and_full_history_adapter_share_selected_parent_state():
         )
     )
     second_full = await full.create(full_body)
-    assert explicit.finish(second) == full.finish(second_full)
+    explicit.finish(second)
+    full.finish(second_full)
+    assert NeMoGymResponse.model_validate(second.model_dump() | {"output": explicit.output_items}).output == (
+        NeMoGymResponse.model_validate(second_full.model_dump() | {"output": full.output_items}).output
+    )
     assert [call["json"].model_dump() for call in explicit_calls] == [call["json"].model_dump() for call in full_calls]
     assert [json.loads(call["headers"][CAPTURE_PARENT_HEADER]) for call in full_calls] == [None, first.id]
     assert all(call["_retry"] is False for call in full_calls)
@@ -140,7 +144,12 @@ async def test_full_history_adapter_accepts_original_source_after_policy_compact
     third = await client.create(
         NeMoGymResponseCreateParamsNonStreaming.model_validate(initial.model_dump() | {"input": full_history})
     )
-    assert len(client.finish(third).selected_actions) == 3
+    client.finish(third)
+    assert [item["id"] for item in client.output_items if item.get("role") == "assistant"] == [
+        first.output[0].id,
+        second.output[0].id,
+        third.output[0].id,
+    ]
     assert "seed.png" not in calls[-1]["json"].model_dump_json()
     assert "newest.png" in calls[-1]["json"].model_dump_json()
 
@@ -154,16 +163,20 @@ async def test_empty_initial_message_does_not_drop_final_output():
     assert client.output_items[0]["id"] == "message-1"
 
 
-async def test_retained_image_uses_original_source_and_result_has_no_segments():
+async def test_retained_image_uses_original_source_and_history_survives_finish():
     client, _, calls, _ = make_client(seed=[observation("A")])
     first = await client.create()
     client.append_observation([observation("B")])
     second = await client.create()
     assert "A.png" in calls[1]["json"].model_dump_json()
     assert "B.png" in calls[1]["json"].model_dump_json()
-    result = client.finish(second).model_dump()
-    assert set(result) == {"logical_rollout_id", "selected_actions", "outcome"}
-    assert [item["response_id"] for item in result["selected_actions"]] == [first.id, second.id]
+    history = client.output_items
+    assert client.finish(second) is None
+    assert client.output_items == history
+    assert [item["id"] for item in history if item.get("role") == "assistant"] == [
+        first.output[0].id,
+        second.output[0].id,
+    ]
 
 
 async def test_only_definite_responses_are_resampled_from_the_accepted_parent():
@@ -171,15 +184,55 @@ async def test_only_definite_responses_are_resampled_from_the_accepted_parent():
     first = await client.create(select_response=lambda response: response.id != "response-1")
     client.append_observation([{"role": "user", "content": "next"}])
     final = await client.create(select_response=lambda response: response.id != "response-3")
-    result = client.finish(final)
+    client.finish(final)
     assert first.id == "response-2"
     assert [json.loads(call["headers"][CAPTURE_PARENT_HEADER]) for call in calls] == [None, None, first.id, first.id]
-    assert [item.response_id for item in result.selected_actions] == ["response-2", "response-4"]
+    assert [item["id"] for item in client.output_items if item.get("role") == "assistant"] == [
+        "message-2",
+        "message-4",
+    ]
     assert "answer 1" not in json.dumps(client.output_items)
     assert "answer 3" not in json.dumps(client.output_items)
     assert calls[0]["json"] == calls[1]["json"]
     assert calls[2]["json"] == calls[3]["json"]
     assert all(call["_retry"] is False for call in calls)
+
+
+@pytest.mark.parametrize("accepted_calls", [0, 2])
+async def test_finish_rejects_missing_or_nonterminal_accepted_response(accepted_calls):
+    client, _, _, _ = make_client()
+    for _ in range(accepted_calls):
+        await client.create()
+    with pytest.raises(ValueError, match="last selected model action"):
+        client.finish(answer(1))
+
+
+async def test_finish_closes_client_and_finalizes_partial_policy_chunk():
+    client, _, _, _ = make_client(
+        config=ContextHistoryConfig.model_validate(
+            {"schedule": {"type": "turn_chunked_recency", "actions_per_chunk": 10}}
+        )
+    )
+    response = await client.create()
+    client.finish(response)
+    assert client.controller.chunk_records[0].eligible_action_ids == (response.id,)
+    assert client.controller.chunk_records[0].early_close_reason == "terminal"
+    with pytest.raises(RuntimeError, match="closed"):
+        await client.create()
+    with pytest.raises(RuntimeError, match="closed"):
+        client.append_observation([{"role": "user", "content": "late"}])
+    with pytest.raises(RuntimeError, match="closed"):
+        client.finish(response)
+
+
+async def test_reused_accepted_response_id_is_rejected():
+    client, _, _, _ = make_client(responses=[answer(1), answer(1)])
+    await client.create()
+    with pytest.raises(ValueError, match="reused"):
+        await client.create()
+    assert len(client.output_items) == 1
+    with pytest.raises(RuntimeError, match="closed"):
+        client.finish(answer(1))
 
 
 @pytest.mark.parametrize("failure", ["transport", "read"])

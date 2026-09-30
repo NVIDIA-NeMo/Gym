@@ -24,10 +24,8 @@ from nemo_gym.context_management.history import (
     SemanticHistory,
     _view_digest,
     normalize_semantic_items,
-    strip_completion_evidence,
 )
 from nemo_gym.context_management.policies import build_history_policy
-from nemo_gym.context_management.result import LogicalCCResult, SelectedAction
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -100,7 +98,7 @@ class ContextManagedResponsesClient:
             else HistoryController(self.history, policy)
         )
         self.cookies = dict(cookies or {})
-        self._selected_actions: list[SelectedAction] = []
+        self._last_accepted_response_id: str | None = None
         self._selected_ids: set[str] = set()
         self._step = 1
         self._model_calls = 0
@@ -147,8 +145,7 @@ class ContextManagedResponsesClient:
     def _candidate_headers(self) -> dict[str, str]:
         # Keep the last accepted response even across a semantic rewrite. RL
         # compares the actual request and owns root versus continuation choice.
-        parent = self._selected_actions[-1].response_id if self._selected_actions else None
-        return {CAPTURE_PARENT_HEADER: orjson.dumps(parent).decode()}
+        return {CAPTURE_PARENT_HEADER: orjson.dumps(self._last_accepted_response_id).decode()}
 
     async def _measure(self, prepared: PreparedHistoryView) -> ContextMeasurements:
         guards = self.config.guards
@@ -255,27 +252,15 @@ class ContextManagedResponsesClient:
             self.controller.acknowledge_action(acknowledged, action_id=response.id, completion_id=response.id)
         else:
             self.controller.acknowledge(acknowledged)
-        reason = response.incomplete_details.reason if response.incomplete_details else None
-        self._selected_actions.append(
-            SelectedAction(
-                response_id=response.id,
-                finish_reason="length" if reason == "max_output_tokens" else (reason or "stop"),
-                last_output_item=strip_completion_evidence(response.output[-1]) if response.output else None,
-            )
-        )
+        self._last_accepted_response_id = response.id
         self._selected_ids.add(response.id)
         self._step += 1
 
-    def finish(self, response: NeMoGymResponse, *, outcome: str = "completed") -> LogicalCCResult:
+    def finish(self, response: NeMoGymResponse) -> None:
+        """Validate the final accepted response and close the policy lifecycle."""
         self._check_open()
-        if not self._selected_actions or response.id != self._selected_actions[-1].response_id:
+        if self._last_accepted_response_id is None or response.id != self._last_accepted_response_id:
             raise ValueError("Final logical response must identify the last selected model action")
         if isinstance(self.controller, TurnChunkedHistoryController):
             self.controller.finalize_terminal()
-        result = LogicalCCResult(
-            logical_rollout_id=self.logical_rollout_id,
-            selected_actions=self._selected_actions,
-            outcome=outcome,
-        )
         self._closed = True
-        return result.model_copy(deep=True)
