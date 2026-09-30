@@ -182,7 +182,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             resources_cookies=dict(direct_access.cookies) if direct_access is not None else {},
         )
 
-    def export_agent_session(self, session_key: str) -> dict[str, JsonValue]:
+    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+        return {session_key: self._export_agent_session(session_key) for session_key in session_keys}
+
+    def _export_agent_session(self, session_key: str) -> dict[str, JsonValue]:
         if session_key.startswith(_LEGACY_SESSION_PREFIX):
             # A legacy /run keeps everything it needs in the loop boundary.
             return {}
@@ -193,7 +196,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             "observations": state.observations.model_dump(mode="json") if state.observations is not None else None,
         }
 
-    def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
+    async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
         restored: dict[str, SimpleAgentSessionState] = {}
         for session in sessions:
             if session.session_key.startswith(_LEGACY_SESSION_PREFIX):
@@ -208,7 +211,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             restored[session.session_key] = state
         self._agent_sessions.update(restored)
 
-    def retire_agent_session(self, session_key: str) -> None:
+    async def retire_agent_session(self, session_key: str) -> None:
         self._agent_sessions.pop(session_key, None)
 
     async def close_agent_session(

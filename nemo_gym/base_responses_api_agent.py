@@ -187,13 +187,16 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             instance_name=self.config.name,
         )
 
-    def export_agent_session(self, session_key: str) -> dict[str, JsonValue]:
+    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+        """Return the state of every session in ``session_keys`` for a checkpoint."""
         raise NotImplementedError
 
-    def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
+    async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
+        """Validate every session, then install all of them; never install a partial set."""
         raise NotImplementedError
 
-    def retire_agent_session(self, session_key: str) -> None:
+    async def retire_agent_session(self, session_key: str) -> None:
+        """Discard a session whose attempt was retired."""
         raise NotImplementedError
 
     def effective_tool_accesses(self, request: AgentSeedSessionRequest) -> list[ToolAccess]:
