@@ -230,12 +230,8 @@ class KubernetesComputeConfig(BaseComputeConfig):
     # container always mounts this volume, so an unset pvc_name would leave that reference
     # dangling and the pod rejected outright ("volumeMounts[0].name: Not found").
     pvc_name: str
-    # Memory *request* (Kubernetes quantity string, e.g. "32Gi") per requested GPU on a service
-    # container. Without a memory request a pod gets QoS class BestEffort, which the kubelet
-    # kills first under node memory pressure -- observed in practice as a GPU sidecar getting
-    # SIGKILLed (exit 137) mid-startup on a busy shared node, with no error of its own to explain
-    # it. Scaling by GPU count is a coarse proxy for what a service actually needs, but it beats
-    # leaving every GPU pod first-in-line for eviction by default.
+    # Memory *request* per requested GPU on a service container (e.g. "32Gi"). Without it a pod
+    # is QoS class BestEffort, which the kubelet kills first under node memory pressure.
     memory_per_gpu: str = "32Gi"
     extra_args: dict[str, str] = {}  # Forwarded verbatim as pod labels/annotations.
     # Seconds after a Job finishes before k8s garbage-collects it and its pods. 24h by default so

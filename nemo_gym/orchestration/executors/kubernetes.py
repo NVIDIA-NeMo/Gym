@@ -135,10 +135,8 @@ class KubernetesExecutor(BaseExecutor):
             benchmarks=benchmarks,
             executor_metadata={"namespace": compute.namespace, "context": compute.context or ""},
         )
-        # The manifest/resolved-config write already happened as part of each Job's own apply
-        # (baked into its driver container's preamble -- see kubernetes_script.py), so this
-        # `write_manifest` only needs to satisfy `persist()`'s contract, not perform any I/O of
-        # its own; the local index write is the part that still matters here.
+        # The manifest/config write already happened in each Job's own apply (kubernetes_script.py),
+        # so write_manifest is a no-op here; only persist()'s local index write matters.
         self.persist(record, config, lambda _path, _content: None)
         return record
 

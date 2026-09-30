@@ -117,9 +117,8 @@ def _gpu_resources(gpu_count: int, memory_per_gpu: str) -> dict[str, Any]:
     memory = _scale_quantity(memory_per_gpu, gpu_count)
     return {
         "limits": {GPU_RESOURCE_KEY: gpu_count},
-        # A memory *request* (not just a GPU limit) so the pod isn't QoS class BestEffort --
-        # BestEffort pods are the kubelet's first choice to kill under node memory pressure, which
-        # otherwise silently SIGKILLs a GPU sidecar mid-startup on a busy shared node.
+        # A memory *request* (not just a GPU limit) so the pod isn't QoS class BestEffort, which
+        # the kubelet kills first under node memory pressure.
         "requests": {"memory": memory},
     }
 
