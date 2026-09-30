@@ -36,7 +36,7 @@ usersim_resources:
       description: Deterministic NeMo UserSim persona, probe runtime, and verification.
       personas_cache_dir: ~/.cache/nemo-gym/usersim/personas
       personas_dataset_version: 0.0.2
-      usersim_revision: 44c39daf481a23a87742c3c456852aca910653ce  # pragma: allowlist secret
+      usersim_revision: 2d9ec0d7c32ac800f2171b5943382a7b1eb96cbc  # pragma: allowlist secret
       tool_simulation_model:
         type: responses_api_models
         name: support_model
@@ -45,6 +45,11 @@ usersim_resources:
         name: support_model
       personas_locales:
       - en_US
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/usersim/data/example.jsonl
+          license: Apache 2.0
 
 usersim_user:
   responses_api_agents:
@@ -69,11 +74,6 @@ usersim_assistant:
         type: resources_servers
         name: usersim_resources
       max_steps: 10
-      datasets:
-        - name: example
-          type: example
-          jsonl_fpath: environments/usersim/data/example.jsonl
-          license: Apache 2.0
 
 usersim_environment:
   environment_servers:
