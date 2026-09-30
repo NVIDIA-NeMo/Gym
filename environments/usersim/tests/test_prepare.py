@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 from environments.usersim import prepare as prepare_module
 from nemo_gym.benchmarks import BenchmarkConfig
@@ -31,8 +32,16 @@ REGISTERED_PROBES = (
 
 def test_environment_config_resolves_one_resources_owned_benchmark() -> None:
     config_path = Path("environments/usersim/config.yaml")
+    config = OmegaConf.merge(
+        OmegaConf.load(config_path),
+        {
+            "support_model_base_url": "http://support.invalid/v1",
+            "support_model_api_key": "test-key",
+            "support_model_name": "test-support-model",
+        },
+    )
 
-    benchmark = BenchmarkConfig.from_config_path(config_path, strict=False)
+    benchmark = BenchmarkConfig.from_initial_config_dict(config_path, config, strict=False)
 
     assert benchmark is not None
     assert benchmark.name == "example"
