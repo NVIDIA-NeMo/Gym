@@ -113,7 +113,7 @@ class TestApp:
         )
         assert verification.reward == 1.0
 
-        close = await server.close_session(
+        close = await server.close_resources_session(
             ResourcesCloseSessionRequest(
                 resources_session_id=seed.resources_session_id,
                 episode_id=episode_id,
@@ -121,7 +121,7 @@ class TestApp:
         )
         assert close.resources_session_id == seed.resources_session_id
 
-        repeated_close = await server.close_session(
+        repeated_close = await server.close_resources_session(
             ResourcesCloseSessionRequest(
                 resources_session_id=seed.resources_session_id,
                 episode_id=episode_id,
@@ -139,7 +139,8 @@ class TestApp:
             )
 
     def test_native_session_routes_bind_the_native_contract(self) -> None:
-        client = TestClient(self._server().setup_webserver())
+        server = self._server()
+        client = TestClient(server.setup_webserver())
         episode_id = EpisodeId(rollout_id="rollout", attempt=0)
         seed = client.post(
             "/seed_session",
@@ -161,3 +162,6 @@ class TestApp:
             ).model_dump(mode="json"),
         )
         assert close.status_code == 200
+        # The route reached this server's close, not the base default, so the session was released.
+        assert resources_session_id not in server._native_sessions
+        assert resources_session_id in server._closed_native_session_ids
