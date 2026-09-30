@@ -840,6 +840,24 @@ class TestSeparateVerifierFields:
         assert config.verifier.collect[0].service == "kafka" and config.verifier.collect[0].timeout_sec == 10
         assert not config.is_shared_verifier
 
+    def test_verifier_environment_block_alone_keeps_shared_mode(self):
+        """Sizing the verifier must not switch to separate mode, which grades a fresh container."""
+        config = HarborTaskConfig.model_validate({"verifier": {"environment": {"docker_image": "org/verifier:1"}}})
+        assert config.is_shared_verifier
+        config = HarborTaskConfig.model_validate(
+            {"verifier": {"environment_mode": "separate"}, "artifacts": ["/app/out"]}
+        )
+        assert not config.is_shared_verifier
+
+    def test_separate_mode_without_artifacts_is_rejected_at_load(self, tmp_path):
+        separate = HELLO_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        with pytest.raises(HarborTaskError, match="declares no artifacts"):
+            load_task(write_task(tmp_path / "t", toml=separate))
+        with_artifacts = separate.replace(
+            'schema_version = "1.4"\n', 'schema_version = "1.4"\nartifacts = ["/logs/artifacts"]\n'
+        )
+        assert not load_task(write_task(tmp_path / "t", toml=with_artifacts)).config.is_shared_verifier
+
     def test_artifact_paths_stay_contained(self):
         with pytest.raises(ValueError, match="inside"):
             HarborTaskConfig.model_validate({"artifacts": ["/app/../etc/passwd"]})
