@@ -64,6 +64,7 @@ async def main(args):
         for path in [
             "nemo_gym/sandbox/api.py",
             "responses_api_agents/opencode_sandboxed_agent/app.py",
+            "responses_api_agents/opencode_sandboxed_agent/install_opencode.py",
             "benchmarks/terminal_bench_4/prepare.py",
             "resources_servers/terminal_bench_4/models.py",
             "nemo_gym/sandbox/adapters/docker_compose.py",

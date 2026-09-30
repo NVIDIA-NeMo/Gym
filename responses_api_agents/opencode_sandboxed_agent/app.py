@@ -602,20 +602,46 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
     async def _stop_process_group(self, sandbox: AsyncSandbox, pidfile: str, exec_options: dict) -> bool:
         """Stop the borrowed sandbox's harness process group before verification."""
-        command = (
-            f"if [ -f {quote(pidfile)} ]; then p=$(cat {quote(pidfile)}); "
-            "case $p in ''|*[!0-9]*) exit 1;; esac; [ \"$p\" -gt 1 ] || exit 1; "
-            'echo started; kill -TERM -- -"$p" 2>/dev/null || true; '
-            'sleep 0.2; kill -KILL -- -"$p" 2>/dev/null || true; '
-            "for n in 1 2 3 4 5 6 7 8 9 10; do "
-            "processes=$(ps -eo pgid=,stat=) || exit 1; "
-            'if printf \'%s\\n\' "$processes" | awk -v group="$p" '
-            "'$1 == group && $2 !~ /^Z/ {exit 1}'; then "
-            f"rm -f {quote(pidfile)}; exit 0; fi; sleep 0.1; done; exit 1; fi"
-        )
-        result = await sandbox.exec(command, timeout_s=20, **exec_options)
+        # Minimal task images may not include procps/ps. Python is already
+        # required for sandbox networking and OpenCode artifact collection.
+        script = r"""
+import os, signal, sys, time
+from pathlib import Path
+pidfile = Path(sys.argv[1])
+if not pidfile.exists():
+    sys.exit(0)
+group = int(pidfile.read_text().strip())
+if group <= 1 or group == os.getpgrp():
+    raise RuntimeError("Invalid OpenCode process group")
+print("started", flush=True)
+for sig in (signal.SIGTERM, signal.SIGKILL):
+    try:
+        os.killpg(group, sig)
+    except ProcessLookupError:
+        pass
+    time.sleep(0.2)
+deadline = time.monotonic() + 5
+while True:
+    live = False
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+            if stat[0] != 'Z' and int(stat[2]) == group:
+                live = True
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+    if not live:
+        pidfile.unlink()
+        break
+    if time.monotonic() >= deadline:
+        raise RuntimeError("OpenCode processes did not exit")
+    time.sleep(0.1)
+"""
+        result = await sandbox.exec(f"python3 -c {quote(script)} {quote(pidfile)}", timeout_s=20, **exec_options)
         if result.return_code or result.error_type:
-            raise RuntimeError("OpenCode process cleanup was not acknowledged")
+            raise RuntimeError(f"OpenCode process cleanup was not acknowledged: {result.stderr}")
         return "started" in (result.stdout or "")
 
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
