@@ -46,7 +46,6 @@ class TerminalBench4RunRequest(BaseRunRequest):
     task_name: str
     task_ref: str
     dataset_ref: str
-    rollout_id: str = Field(min_length=1, max_length=256)
     client_session_id: str | None = Field(default=None, min_length=1, max_length=256)
     artifact_directory: str | None = Field(default=None, min_length=1)
 
@@ -57,7 +56,6 @@ class SeedSessionResponse(SessionRequest):
     workdir: str | None = None
     sandbox_descriptor: dict[str, Any] | None = None
     sandbox_provider: dict[str, Any] = Field(default_factory=dict)
-    instruction: str = ""
     user: str | int | None = None
     agent_timeout_sec: float = Field(default=28800, gt=0)
     mcp_servers: list[dict[str, Any]] = Field(default_factory=list)

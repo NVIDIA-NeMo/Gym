@@ -37,7 +37,7 @@ async def fixture(tmp_path, monkeypatch):
     request = Request(
         {"type": "http", "session": {SESSION_ID_KEY: "owner"}, "headers": [(b"cookie", b"session=incoming")]}
     )
-    body = MiniSWERunRequest(responses_create_params={"input": []}, problem={"id": 42}, rollout_id="rollout")
+    body = MiniSWERunRequest(responses_create_params={"input": [{"role": "user", "content": "Prepared instruction"}]}, problem={"id": 42}, rollout_id="rollout")
     seed = dict(
         session_id="resource-session",
         task_id="problem-42",
@@ -113,7 +113,7 @@ async def test_run_with_unrelated_resource_schema(fixture):
     assert response.model_dump()["problem_score"] == {"passed": 1, "total": 4}
     assert "evaluation_completed" not in response.model_dump()
     context = f.harnesses[0].context
-    assert context.task_id == "problem-42" and context.instruction == f.seed["instruction"]
+    assert context.task_id == "problem-42" and context.instruction == "Prepared instruction"
     assert context.workdir == "/workspace"
     assert f.verification["session_id"] == "resource-session"
     assert f.verification["termination"]["reason"] == "completed"
@@ -121,7 +121,7 @@ async def test_run_with_unrelated_resource_schema(fixture):
     assert f.verification["harness_metadata"] == {"harness_version": "test"}
     assert f.harnesses[0].model_base_url == "http://gym-model:8000/v1"
     f.provider.aclose.assert_awaited_once()
-    assert f.body.responses_create_params.input == []
+    assert f.body.responses_create_params.input[0].content == "Prepared instruction"
 
 
 async def test_run_passes_rollout_prefixed_gym_model_url(fixture):
@@ -180,8 +180,8 @@ async def test_responses_sets_up_borrowed_session_without_resource_calls(fixture
     module.AsyncSandbox.connect.assert_not_awaited()
     f.harnesses[0].setup.assert_awaited_once()
     assert f.harnesses[0].context.task_id is None
-    assert f.harnesses[0].params.input[0].content == f.seed["instruction"]
-    assert f.body.responses_create_params.input == []
+    assert f.harnesses[0].params.input[0].content == "Prepared instruction"
+    assert f.body.responses_create_params.input[0].content == "Prepared instruction"
     f.provider.aclose.assert_not_awaited()
 
 
@@ -234,7 +234,7 @@ async def test_run_invokes_responses_with_session_state_and_releases_it(fixture,
         assert state.sandbox is f.sandbox
         assert not f.harnesses
         module.AsyncSandbox.connect.assert_awaited_once()
-        assert body.input == []
+        assert body.input[0].content == "Prepared instruction"
         calls.append(key)
         return await original(self, request, body)
 
@@ -243,7 +243,7 @@ async def test_run_invokes_responses_with_session_state_and_releases_it(fixture,
     assert first == replay
     assert calls == [("owner", "rollout")]
     assert not f.agent._sessions
-    assert f.body.responses_create_params.input == []
+    assert f.body.responses_create_params.input[0].content == "Prepared instruction"
 
 
 async def test_responses_requires_matching_session_and_replays_one_execution(fixture, monkeypatch):

@@ -35,7 +35,6 @@ class SeedSessionResponse(BaseModel):
     workdir: str | None = None
     sandbox_descriptor: dict[str, JsonValue] | None = None
     sandbox_provider: dict[str, JsonValue] = Field(default_factory=dict)
-    instruction: str = ""
     user: str | int | None = None
     agent_timeout_sec: float = Field(default=28800, gt=0)
     mcp_servers: list[dict[str, JsonValue]] = Field(default_factory=list)

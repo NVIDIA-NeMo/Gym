@@ -44,8 +44,10 @@ benchmark supplies 30 seconds. Task-specific overall deadlines remain separate.
 The dataset is `terminal-bench/terminal-bench@4.0.0`, pinned to
 `sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732`.
 `manifest.json` retains all 52 CPU, 11 CPU Compose, and 3 H100 tasks and their
-individual package digests. Preparation writes identities only; the resources
-server validates the dataset and task digests before allocation.
+individual package digests. Preparation downloads and verifies the pinned task packages and writes their
+identities and normalized instructions. The resources server validates the dataset
+and task digests again before allocation. Re-run `gym eval prepare` for rows
+created by older versions that contained empty input.
 
 Set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` for one deployment. For the
 established split deployment, set `OPENSANDBOX_DOMAIN_CPU`,

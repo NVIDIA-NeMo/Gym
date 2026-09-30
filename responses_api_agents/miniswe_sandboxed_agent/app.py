@@ -13,7 +13,7 @@ from pathlib import Path
 from time import monotonic, time
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import Field, field_validator
@@ -21,7 +21,7 @@ from pydantic import Field, field_validator
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
 from nemo_gym.sandbox import AsyncSandbox, SandboxProvider, create_provider, resolve_provider_config
 from nemo_gym.server_utils import (
@@ -47,6 +47,26 @@ from responses_api_agents.miniswe_sandboxed_agent.models import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def task_instruction(params: NeMoGymResponseCreateParamsNonStreaming) -> str:
+    """Read the task text from the prepared input without replacing its messages."""
+    parts = []
+    for message in params.input:
+        if getattr(message, "role", None) != "user":
+            continue
+        if isinstance(message.content, str):
+            parts.append(message.content)
+        else:
+            for item in message.content:
+                if isinstance(item, dict) and item.get("type") == "input_text":
+                    parts.append(item["text"])
+                elif getattr(item, "type", None) == "input_text":
+                    parts.append(item.text)
+    instruction = "\n\n".join(parts)
+    if not instruction.strip():
+        raise ValueError("Prepared rows must contain a user task instruction; run gym eval prepare again")
+    return instruction
 
 
 @dataclass
@@ -214,14 +234,13 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                                 session_id=seed.session_id,
                                 task_id=seed.task_id,
                                 rollout_id=rollout_id,
-                                instruction=seed.instruction,
+                                instruction=task_instruction(params),
                                 user=seed.user,
                                 workdir=workdir,
                                 setup_timeout_sec=self.config.setup_timeout_sec,
                                 mcp_servers=seed.mcp_servers,
                                 skills_dir=seed.skills_dir,
                             )
-                            params.input = [NeMoGymEasyInputMessage(role="user", content=context.instruction)]
 
                             global_config = getattr(self.server_client, "global_config_dict", None)
                             harness = MiniSWEHarness(
@@ -378,6 +397,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/seed_session",
+                headers={"Idempotency-Key": uuid5(NAMESPACE_URL, f"{payload['client_session_id']}:{payload['rollout_id']}").hex},
                 json=payload,
                 cookies=cookies,
             )

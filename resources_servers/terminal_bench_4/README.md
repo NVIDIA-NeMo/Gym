@@ -3,15 +3,16 @@
 ## Contract
 
 `/seed_session` provisions the pinned task and returns its sandbox descriptor,
-connection configuration, explicit working directory, instruction, `task_id`, execution user, MCP/skills metadata,
+connection configuration, explicit working directory, `task_id`, execution user, MCP/skills metadata,
 and official agent timeout. An agent server connects to that sandbox and owns
 harness setup, model calls, and the rollout loop. `/verify` collects artifacts,
 runs the separate official verifier, and cleans up the task's resources.
 
-Seed requests include `task_name`, `task_ref`, `dataset_ref`, and `rollout_id`.
-The task must match the configured manifest. The agent supplies a stable
-`client_session_id`, so identical seed retries share provisioning before the first
-cookie response. Verification retries share one finalizer and replay its result;
+Seed requests include `task_name`, `task_ref`, and `dataset_ref`. Prepared rows carry the task instruction in `responses_create_params.input`.
+The task must match the configured manifest. The agent supplies a stable `Idempotency-Key` header per seed attempt, so identical
+transport retries share provisioning before the first cookie response. A new key
+starts a new attempt; requests without a key always start a new attempt. Rollout
+capture IDs are independent of this HTTP retry contract. Verification retries share one finalizer and replay its result;
 conflicting requests fail. Run one resources worker per artifact directory.
 
 A seeded session has a resource-owned 10-hour deadline covering agent setup and

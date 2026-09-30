@@ -21,7 +21,7 @@ from shlex import quote
 from time import time
 from traceback import format_exc
 from typing import Any, Dict, List, Optional
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
@@ -930,6 +930,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         seed_session_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/seed_session",
+            headers={"Idempotency-Key": uuid5(NAMESPACE_URL, f"{session_key}:{rollout_id}").hex if rollout_id else uuid4().hex},
             json=body.model_dump(),
             cookies=cookies,
         )

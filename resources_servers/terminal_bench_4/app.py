@@ -157,10 +157,14 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         task = self._tasks.get(body.task_name)
         if task is None or body.task_ref != task["ref"] or body.dataset_ref != self._manifest["ref"]:
             raise HTTPException(422, "Task identity does not match the configured dataset pin")
-        if body.client_session_id:
-            request.session["tb4_client_session_id"] = body.client_session_id
+        request_id = request.headers.get("Idempotency-Key")
+        if request_id is not None and (not request_id.strip() or len(request_id) > 256):
+            raise HTTPException(422, "Idempotency-Key must contain 1 to 256 characters")
+        if body.client_session_id or request_id:
+            # A seed retry may arrive before the caller receives our first session cookie.
+            request.session["tb4_client_session_id"] = body.client_session_id or request_id
         owner = self._owner(request)
-        identity = hashlib.sha256(f"{owner}:{body.rollout_id}".encode()).hexdigest()
+        identity = hashlib.sha256(f"{owner}:{request_id or uuid4().hex}".encode()).hexdigest()
         session_id = self._by_identity.get(identity)
         if session_id is None:
             if self._state_path(identity).exists():
@@ -207,7 +211,6 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     workdir=workdir,
                     sandbox_descriptor=descriptor,
                     sandbox_provider=session.environment.provider_config,
-                    instruction=session.task.instruction,
                     user=session.task.config.agent.user,
                     agent_timeout_sec=session.task.config.agent.timeout_sec,
                     mcp_servers=[s.model_dump() for s in session.task.config.environment.mcp_servers],

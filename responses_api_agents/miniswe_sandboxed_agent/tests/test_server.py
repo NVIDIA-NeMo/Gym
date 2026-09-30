@@ -59,9 +59,9 @@ async def fixture(tmp_path, monkeypatch):
         task_ref=pin["ref"],
         dataset_ref=server._manifest["ref"],
         rollout_id="rollout",
-        responses_create_params={"input": []},
+        responses_create_params={"input": [{"role": "user", "content": "Solve task"}]},
     )
-    request = SimpleNamespace(session={SESSION_ID_KEY: "owner"}, cookies={"session": "incoming"})
+    request = SimpleNamespace(session={SESSION_ID_KEY: "owner"}, cookies={"session": "incoming"}, headers={"Idempotency-Key": "seed-request"})
     task = SimpleNamespace(
         config=TaskSettings.model_validate(
             {
@@ -139,6 +139,7 @@ async def fixture(tmp_path, monkeypatch):
                 "tb4_client_session_id": json.get("client_session_id", cookies.get("owner", "owner")),
             },
             cookies=cookies,
+            headers=kwargs.get("headers", {}),
         )
         if url_path == "/seed_session":
             value = await server.seed_session(resource_request, TerminalBench4RunRequest.model_validate(json))
@@ -190,7 +191,7 @@ async def test_agent_owns_loop_and_replays_exact_result(fixture):
     assert f.harnesses[0].sandbox is f.envs[0].main
     assert f.harnesses[0].context.workdir == "/task"
     assert f.harnesses[0].context.user == "task-user"
-    assert f.body.responses_create_params.input == []
+    assert f.body.responses_create_params.input[0].content == "Solve task"
     assert f.events == [
         "agent_start",
         "setup",
@@ -619,7 +620,7 @@ async def test_seed_and_verify_retries_share_resource_work(fixture):
         f.server.seed_session(f.request, f.body), f.server.seed_session(f.request, f.body)
     )
     assert first == retry
-    assert first.instruction == "Solve task"
+    assert "instruction" not in first.model_dump()
     assert first.user == "task-user"
     assert first.agent_timeout_sec == 28800
     assert first.sandbox_descriptor == {"sandbox_id": first.session_id}
@@ -868,3 +869,27 @@ async def test_tb4_seed_serializes_shared_sandbox_access(fixture, monkeypatch):
     f.envs[0].agent_workdir.assert_awaited_once()
     f.envs[0].main.exec.assert_not_awaited()
     assert f.events.index("close") < f.events.index("grade")
+
+
+async def test_seed_idempotency_key_is_independent_of_rollout_fields(fixture):
+    f = fixture
+    body = TerminalBench4RunRequest.model_validate({
+        "task_name": f.body.task_name,
+        "task_ref": f.body.task_ref,
+        "dataset_ref": f.body.dataset_ref,
+        "responses_create_params": f.body.responses_create_params.model_dump(),
+    })
+    first_request = SimpleNamespace(session={SESSION_ID_KEY: "first-cookie"}, headers={"Idempotency-Key": "attempt-1"})
+    retry_request = SimpleNamespace(session={SESSION_ID_KEY: "lost-cookie"}, headers={"Idempotency-Key": "attempt-1"})
+    first, retry = await asyncio.gather(
+        f.server.seed_session(first_request, body), f.server.seed_session(retry_request, body)
+    )
+    assert first.session_id == retry.session_id
+    assert len(f.envs) == 2  # Agent and separate verifier descriptors, one provisioning.
+    changed = body.model_copy(update={"artifact_directory": "different"})
+    with pytest.raises(HTTPException) as exc:
+        await f.server.seed_session(retry_request, changed)
+    assert exc.value.status_code == 409
+    next_request = SimpleNamespace(session={SESSION_ID_KEY: "first-cookie"}, headers={"Idempotency-Key": "attempt-2"})
+    second = await f.server.seed_session(next_request, body)
+    assert second.session_id != first.session_id
