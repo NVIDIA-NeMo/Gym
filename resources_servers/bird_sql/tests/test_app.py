@@ -304,6 +304,40 @@ async def test_execute_and_compare_gold_error(monkeypatch):
     assert match is False and err == "gold_sql_error" and gold is None and pred is None
 
 
+@pytest.mark.asyncio
+async def test_execute_and_compare_pred_timeout(monkeypatch):
+    import time
+
+    def slow_execute(db_path, sql):
+        if "SLOW" in sql:
+            time.sleep(10)
+        return [(1,)]
+
+    monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_sqlite", slow_execute)
+    sem = asyncio.Semaphore(4)
+    match, gold, pred, err = await execute_and_compare(
+        Path("/x.sqlite"), gold_sql="SELECT 1", pred_sql="SELECT SLOW", semaphore=sem, timeout_s=0.05
+    )
+    assert match is False and err == "pred_sql_timeout" and gold == [(1,)] and pred is None
+
+
+@pytest.mark.asyncio
+async def test_execute_and_compare_gold_timeout(monkeypatch):
+    import time
+
+    def slow_execute(db_path, sql):
+        if "SLOW" in sql:
+            time.sleep(10)
+        return [(1,)]
+
+    monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_sqlite", slow_execute)
+    sem = asyncio.Semaphore(4)
+    match, gold, pred, err = await execute_and_compare(
+        Path("/x.sqlite"), gold_sql="SELECT SLOW", pred_sql="SELECT 1", semaphore=sem, timeout_s=0.05
+    )
+    assert match is False and err == "gold_sql_timeout" and gold is None and pred is None
+
+
 # ---------------------------------------------------------------------------
 # BirdSqlResourcesServer.verify end-to-end (mock execute_and_compare)
 # ---------------------------------------------------------------------------
@@ -370,7 +404,7 @@ async def test_verify_mismatch_with_codeblock(server_with_mocked_dbs, monkeypatc
     assert resp.reward == 0.0
     assert resp.execution_match is False
     assert resp.had_codeblock is True
-    assert resp.failure_reason == FailureCode.EXECUTION_ERROR
+    assert resp.failure_reason == FailureCode.RESULT_MISMATCH
 
 
 @pytest.mark.asyncio
@@ -387,6 +421,19 @@ async def test_verify_pred_sql_error_with_codeblock(server_with_mocked_dbs, monk
 
 
 @pytest.mark.asyncio
+async def test_verify_pred_sql_timeout_with_codeblock(server_with_mocked_dbs, monkeypatch):
+    async def fake(**_kw):
+        return False, [(1,)], None, "pred_sql_timeout"
+
+    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+
+    body = _make_verify_request("```sql\nSLOW SQL\n```")
+    resp = await server_with_mocked_dbs.verify(body)
+    assert resp.reward == 0.0
+    assert resp.failure_reason == FailureCode.EXECUTION_TIMEOUT
+
+
+@pytest.mark.asyncio
 async def test_verify_gold_sql_error(server_with_mocked_dbs, monkeypatch):
     async def fake(**_kw):
         return False, None, None, "gold_sql_error"
@@ -397,6 +444,19 @@ async def test_verify_gold_sql_error(server_with_mocked_dbs, monkeypatch):
     resp = await server_with_mocked_dbs.verify(body)
     assert resp.reward == 0.0
     assert resp.failure_reason == FailureCode.GOLD_EXECUTION_ERROR
+
+
+@pytest.mark.asyncio
+async def test_verify_gold_sql_timeout(server_with_mocked_dbs, monkeypatch):
+    async def fake(**_kw):
+        return False, None, None, "gold_sql_timeout"
+
+    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+
+    body = _make_verify_request("```sql\nSELECT 1\n```")
+    resp = await server_with_mocked_dbs.verify(body)
+    assert resp.reward == 0.0
+    assert resp.failure_reason == FailureCode.GOLD_EXECUTION_TIMEOUT
 
 
 @pytest.mark.asyncio

@@ -609,15 +609,24 @@ class AsyncSandboxCompose:
                 await sandbox.stop()
             except Exception as error:
                 errors.append(error)
+        if self._volume_helper:
+            try:
+                result = await self._volume_helper.exec(f"rm -rf /tmp/compose-volumes/{self.project}", user="root")
+                if result.return_code:
+                    raise RuntimeError(f"Shared volume cleanup failed: {result.stderr}")
+            except Exception as error:
+                errors.append(error)
+            try:
+                await self._volume_helper.stop()
+                self._volume_helper = None
+            except Exception as error:
+                errors.append(error)
+        try:
+            await self.provider.aclose()
+        except Exception as error:
+            errors.append(error)
         if errors:
             raise ExceptionGroup("Compose cleanup failed", errors)
-        if self._volume_helper:
-            result = await self._volume_helper.exec(f"rm -rf /tmp/compose-volumes/{self.project}", user="root")
-            if result.return_code:
-                raise RuntimeError(f"Shared volume cleanup failed: {result.stderr}")
-            await self._volume_helper.stop()
-            self._volume_helper = None
-        await self.provider.aclose()
         self._closed = True
 
     async def __aenter__(self):

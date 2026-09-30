@@ -126,7 +126,12 @@ class AgentServerRef(BaseModel):
     name: str
 
 
-ServerRef = Union[ModelServerRef, ResourcesServerRef, AgentServerRef]
+class EnvironmentServerRef(BaseModel):
+    type: Literal["environment_servers"]
+    name: str
+
+
+ServerRef = ModelServerRef | ResourcesServerRef | AgentServerRef | EnvironmentServerRef
 ServerRefTypeAdapter = TypeAdapter(ServerRef)
 
 
@@ -178,6 +183,14 @@ class InheritPathNotFoundError(ConfigError, ValueError):
 class AlmostServerError(ConfigError, ValueError):
     """One or more server blocks are almost-servers (right shape, failed validation) and
     `error_on_almost_servers` is set, so the run is aborted."""
+
+
+class AgentWithoutEnvironmentServerError(ConfigError, ValueError):
+    """An agent instance has no environment server."""
+
+
+class AmbiguousEnvironmentServerError(ConfigError, ValueError):
+    """Rows route by an agent that more than one environment server fronts."""
 
 
 class AgentCompositionError(ConfigError, ValueError):
@@ -625,6 +638,7 @@ class BaseServerTypeConfig(BaseModel):
             Literal["responses_api_models"],
             Literal["resources_servers"],
             Literal["responses_api_agents"],
+            Literal["environment_servers"],
         ]
     ]
 
@@ -653,10 +667,19 @@ class ResponsesAPIAgentServerTypeConfig(BaseServerTypeConfig):
     responses_api_agents: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
 
 
+class EnvironmentServerTypeConfig(BaseServerTypeConfig):
+    SERVER_TYPE: ClassVar[Literal["environment_servers"]] = "environment_servers"
+
+    model_config = ConfigDict(extra="allow")
+
+    environment_servers: dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
+
+
 ServerTypeConfig = Union[
     ResponsesAPIModelServerTypeConfig,
     ResourcesServerTypeConfig,
     ResponsesAPIAgentServerTypeConfig,
+    EnvironmentServerTypeConfig,
 ]
 
 
@@ -704,10 +727,15 @@ class ResponsesAPIAgentServerInstanceConfig(ResponsesAPIAgentServerTypeConfig, B
     pass
 
 
+class EnvironmentServerInstanceConfig(EnvironmentServerTypeConfig, BaseServerInstanceConfig):
+    pass
+
+
 ServerInstanceConfig = Union[
     ResponsesAPIModelServerInstanceConfig,
     ResourcesServerInstanceConfig,
     ResponsesAPIAgentServerInstanceConfig,
+    EnvironmentServerInstanceConfig,
 ]
 ServerInstanceConfigTypeAdapter = TypeAdapter(ServerInstanceConfig)
 
@@ -739,7 +767,12 @@ def is_almost_server(server_type_config_dict: Any) -> bool:
         return False
 
     # Check for server type.
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    server_type_keys = [
+        "responses_api_models",
+        "resources_servers",
+        "responses_api_agents",
+        "environment_servers",
+    ]
     has_server_type = any(key in server_type_config_dict for key in server_type_keys)
 
     if not has_server_type:

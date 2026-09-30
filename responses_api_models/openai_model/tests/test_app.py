@@ -63,7 +63,7 @@ def _response_data() -> dict:
 
 
 class TestApp:
-    def _setup_server(self, max_concurrent_requests=None, drop_input_reasoning_items=False):
+    def _setup_server(self, max_concurrent_requests=None, drop_input_reasoning_items=False, **kwargs):
         config = SimpleModelServerConfig(
             host="0.0.0.0",
             port=8081,
@@ -74,11 +74,18 @@ class TestApp:
             name="test_model_server",
             max_concurrent_requests=max_concurrent_requests,
             drop_input_reasoning_items=drop_input_reasoning_items,
+            **kwargs,
         )
         return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     async def test_sanity(self) -> None:
         self._setup_server()
+
+    async def test_retry_configuration_is_scoped_to_model_server(self):
+        judge = self._setup_server(max_http_attempts=5)
+        policy = self._setup_server()
+        assert judge._client.max_http_attempts == 5
+        assert policy._client.max_http_attempts == 3
 
     async def test_chat_completions(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = self._setup_server()
@@ -154,6 +161,45 @@ class TestApp:
 
         calls = read_model_call_records(CaptureStore(tmp_path), "chat-test")
         assert len(calls) == 1 and calls[0].dialect == "chat"
+
+    async def test_chat_completions_forwards_provider_reasoning_extensions(self, monkeypatch: MonkeyPatch) -> None:
+        """Claude judges send adaptive thinking + effort as body fields.
+
+        The strict ingress schema must forward these documented gateway
+        extensions exactly while still rejecting arbitrary extra keys.
+        """
+        server = self._setup_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+        called_args_chat = {}
+
+        async def mock_create_chat(**kwargs):
+            nonlocal called_args_chat
+            called_args_chat = kwargs
+            return {
+                "id": "chatcmpl-x",
+                "choices": [{"finish_reason": "stop", "index": 0, "message": {"content": "ok", "role": "assistant"}}],
+                "created": 1753983922,
+                "model": "dummy_model",
+                "object": "chat.completion",
+            }
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        extensions = {"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}}
+        forwarded = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], **extensions},
+        )
+        assert forwarded.status_code == 200
+        assert {field: called_args_chat[field] for field in extensions} == extensions
+
+        rejected = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "thinkng": {"type": "adaptive"}},
+        )
+        assert rejected.status_code == 422
 
     async def test_responses(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = self._setup_server()

@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+
 import pytest
 from pytest import approx
 
@@ -133,6 +135,14 @@ class TestParseGenRMOutput:
         assert score_1 == approx(3.0)
         assert score_2 == approx(3.0)
         assert ranking == approx(3.5)
+
+    @pytest.mark.parametrize("key", ["score_1", "score_2", "ranking"])
+    @pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity", 1e309])
+    def test_nonfinite_scores_are_parse_failures(self, key, value):
+        output = json.dumps({"score_1": 4, "score_2": 2, "ranking": 1} | {key: value})
+        with pytest.raises(GenRMOutputParseError):
+            parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True)
+        assert parse_genrm_output(output, 3.0, 3.5) == (3.0, 3.0, 3.5)
 
     def test_raise_on_fail_raises_exception(self) -> None:
         """raise_on_fail=True raises GenRMOutputParseError."""

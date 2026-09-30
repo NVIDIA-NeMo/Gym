@@ -206,6 +206,17 @@ def test_all_supported_agents_have_dependency_scripts() -> None:
         assert app.resolve_agent_setup_script(module).is_file()
 
 
+def test_native_dependency_recipe_installs_model_retry_dependency() -> None:
+    module = "responses_api_agents.legal_agent_bench_native_agent.app"
+    script = app.resolve_agent_setup_script(module).read_text()
+    requirements = (
+        app.PARENT_DIR / "responses_api_agents" / "legal_agent_bench_native_agent" / "requirements.txt"
+    ).read_text()
+
+    assert 'pip install "tenacity>=9.1.4"' in script
+    assert "tenacity>=9.1.4" in requirements
+
+
 @pytest.mark.asyncio
 async def test_dependency_runtime_cache_is_harness_and_recipe_specific(monkeypatch, tmp_path) -> None:
     package_dir, script = _runtime_sources(monkeypatch, tmp_path, "hermes_agent", "hermes-v1")
@@ -752,6 +763,9 @@ def test_runner_config_preserves_dynamic_agent_configuration(tmp_path) -> None:
     assert "client._build_server_base_url = lambda _cfg: model_url_root" in runner_source
     assert 'object.__setattr__(agent, "_resolve_base_url", lambda *args, **kwargs: model_url_root)' in runner_source
     assert "runner_status.json" in (tmp_path / "agent_runner.py").read_text()
+    assert 'return "agent_timed_out"' in runner_source
+    assert 'return "model_connection_failed"' in runner_source
+    assert "failure_class=exception_failure_class(exc)" in runner_source
     assert '"responses_api_models"' in (tmp_path / "agent_runner.py").read_text()
     assert '"global_aiohttp_trust_env": runner.get("http_proxy_from_environment", False)' in runner_source
     assert "if not is_global_aiohttp_client_setup():" in runner_source
@@ -1074,7 +1088,7 @@ def test_context_limit_error_is_scoreable_only_for_lab_hermes() -> None:
     assert app.agent_response_failure(response, "responses_api_agents.codex_agent.app") is not None
 
 
-def test_native_timeout_failure_metadata_propagates_timeout_flag() -> None:
+def test_timeout_failure_metadata_propagates_for_each_harness() -> None:
     response = app.NeMoGymResponse.model_validate(
         {
             **_successful_response().model_dump(mode="json"),
@@ -1084,11 +1098,16 @@ def test_native_timeout_failure_metadata_propagates_timeout_flag() -> None:
         }
     )
 
-    assert app.agent_response_failure_flags(response, app.NATIVE_AGENT_MODULE) == (False, True)
-    assert app.agent_response_failure_flags(response, "responses_api_agents.codex_agent.app") == (False, False)
+    for module in (
+        app.NATIVE_AGENT_MODULE,
+        "responses_api_agents.hermes_agent.app",
+        "responses_api_agents.claude_code_agent.app",
+        "responses_api_agents.codex_agent.app",
+    ):
+        assert app.agent_response_failure_flags(response, module) == (False, True)
 
 
-def test_native_model_connection_failure_metadata_propagates_connection_flag() -> None:
+def test_model_connection_failure_metadata_propagates_for_each_harness() -> None:
     response = app.NeMoGymResponse.model_validate(
         {
             **_successful_response().model_dump(mode="json"),
@@ -1098,8 +1117,59 @@ def test_native_model_connection_failure_metadata_propagates_connection_flag() -
         }
     )
 
-    assert app.agent_response_failure_flags(response, app.NATIVE_AGENT_MODULE) == (True, False)
+    for module in (
+        app.NATIVE_AGENT_MODULE,
+        "responses_api_agents.hermes_agent.app",
+        "responses_api_agents.claude_code_agent.app",
+        "responses_api_agents.codex_agent.app",
+    ):
+        assert app.agent_response_failure_flags(response, module) == (True, False)
+
+
+@pytest.mark.parametrize(
+    ("module", "message"),
+    [
+        ("responses_api_agents.claude_code_agent.app", "Claude Code failed: timeout"),
+        ("responses_api_agents.codex_agent.app", "Codex failed: timeout: partial stderr"),
+    ],
+)
+def test_cli_adapter_timeout_error_propagates_timeout_flag(module: str, message: str) -> None:
+    response = app.NeMoGymResponse.model_validate(
+        {
+            **_successful_response().model_dump(mode="json"),
+            "status": "failed",
+            "error": {"code": "server_error", "message": message},
+        }
+    )
+
+    assert app.agent_response_failure_flags(response, module) == (False, True)
+
+
+def test_non_timeout_cli_adapter_error_does_not_set_timeout_flag() -> None:
+    response = app.NeMoGymResponse.model_validate(
+        {
+            **_successful_response().model_dump(mode="json"),
+            "status": "failed",
+            "error": {"code": "server_error", "message": "Codex failed: process_exit_1"},
+        }
+    )
+
     assert app.agent_response_failure_flags(response, "responses_api_agents.codex_agent.app") == (False, False)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ({"phase": "model_connectivity"}, (True, False)),
+        ({"phase": "agent_execution", "failure_class": "model_connection_failed"}, (True, False)),
+        ({"phase": "agent_execution", "failure_class": "agent_timed_out"}, (False, True)),
+        ({"phase": "agent_execution", "failure_class": None}, (False, False)),
+    ],
+)
+def test_runner_status_propagates_only_operational_agent_failures(
+    status: dict[str, object], expected: tuple[bool, bool]
+) -> None:
+    assert app.runner_status_failure_flags(status) == expected
 
 
 def test_response_masks_harness_and_verifier_failures() -> None:

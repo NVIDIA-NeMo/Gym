@@ -68,6 +68,10 @@ INITIAL_USER_PROMPT = "Please begin working on the task described in the system 
 NATIVE_AGENT_MODULE = "responses_api_agents.legal_agent_bench_native_agent.app"
 AGENT_FAILURE_CLASS_METADATA_KEY = "nemo_gym_failure_class"
 PROPAGATED_AGENT_FAILURE_CLASSES = frozenset({"agent_timed_out", "model_connection_failed"})
+ADAPTER_TIMEOUT_ERROR_PREFIXES = {
+    "claude_code_agent": "Claude Code failed: timeout",
+    "codex_agent": "Codex failed: timeout",
+}
 LAB_SYSTEM_PROMPT = (
     PARENT_DIR / "resources_servers" / "legal_agent_bench" / "vendor" / "harvey_labs" / "harness" / "system-prompt.md"
 ).read_text(encoding="utf-8")
@@ -207,8 +211,25 @@ model_url_v1 = model_url if model_url.endswith("/v1") else model_url + "/v1"
 status_path = Path(f"{RUNTIME}/runner_status.json")
 
 
-def write_status(*, ok, phase, error=None):
-    status_path.write_text(json.dumps({"ok": ok, "phase": phase, "error": error}, indent=2))
+def write_status(*, ok, phase, error=None, failure_class=None):
+    status_path.write_text(
+        json.dumps({"ok": ok, "phase": phase, "error": error, "failure_class": failure_class}, indent=2)
+    )
+
+
+def exception_failure_class(error):
+    current = error
+    while current is not None:
+        name = type(current).__name__.lower()
+        if isinstance(current, (TimeoutError, asyncio.TimeoutError)) or "timeout" in name:
+            return "agent_timed_out"
+        if name.endswith(("connectionerror", "connecterror")) or name in {
+            "clientpayloaderror",
+            "serverdisconnectederror",
+        }:
+            return "model_connection_failed"
+        current = current.__cause__ or current.__context__
+    return None
 
 
 try:
@@ -370,7 +391,12 @@ try:
     response = asyncio.run(invoke_agent())
     Path(f"{RUNTIME}/response.json").write_text(response.model_dump_json())
 except Exception as exc:
-    write_status(ok=False, phase="agent_execution", error=f"{type(exc).__name__}: {exc}")
+    write_status(
+        ok=False,
+        phase="agent_execution",
+        error=f"{type(exc).__name__}: {exc}",
+        failure_class=exception_failure_class(exc),
+    )
     raise
 else:
     write_status(ok=True, phase="complete")
@@ -801,14 +827,29 @@ def agent_response_failure(response: NeMoGymResponse, agent_server_module: str) 
 
 
 def agent_response_failure_flags(response: NeMoGymResponse, agent_server_module: str) -> tuple[bool, bool]:
-    """Return structured model-connection and timeout flags from a failed native response."""
-    if agent_server_module != NATIVE_AGENT_MODULE or response.error is None:
+    """Return model-connection and timeout flags preserved by the selected agent adapter."""
+    if response.error is None:
         return False, False
     metadata = response.metadata or {}
     failure_class = metadata.get(AGENT_FAILURE_CLASS_METADATA_KEY)
-    if failure_class not in PROPAGATED_AGENT_FAILURE_CLASSES:
-        return False, False
-    return failure_class == "model_connection_failed", failure_class == "agent_timed_out"
+    if failure_class in PROPAGATED_AGENT_FAILURE_CLASSES:
+        return failure_class == "model_connection_failed", failure_class == "agent_timed_out"
+
+    timeout_prefix = ADAPTER_TIMEOUT_ERROR_PREFIXES.get(agent_key(agent_server_module))
+    timeout_error = bool(
+        timeout_prefix
+        and (response.error.message == timeout_prefix or response.error.message.startswith(f"{timeout_prefix}:"))
+    )
+    return False, timeout_error
+
+
+def runner_status_failure_flags(status: dict[str, Any]) -> tuple[bool, bool]:
+    """Return model-connection and timeout flags recorded by the inner runner."""
+    failure_class = status.get("failure_class")
+    return (
+        status.get("phase") == "model_connectivity" or failure_class == "model_connection_failed",
+        failure_class == "agent_timed_out",
+    )
 
 
 def _task_name(instance_id: str) -> str:
@@ -1854,7 +1895,9 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
                 runner_status = self._runner_status(paths)
                 if runner_status.get("ok") is False:
                     agent_failed = True
-                    model_connection_failed = runner_status.get("phase") == "model_connectivity"
+                    runner_model_connection_failed, runner_agent_timed_out = runner_status_failure_flags(runner_status)
+                    model_connection_failed = model_connection_failed or runner_model_connection_failed
+                    agent_timed_out = agent_timed_out or runner_agent_timed_out
                     failure_reason = str(runner_status.get("error") or "Agent runner failed")[-2000:]
                 if agent_result.return_code != 0:
                     agent_failed = True

@@ -590,7 +590,7 @@ class TestApp:
         assert response.context_length_exceeded_error == 1
         assert response.agent_timeout_error == 0
         assert response.response.output
-        assert "mask_sample" not in response.model_dump()
+        assert response.mask_sample is False
         assert "_ng_failure_class" not in response.model_dump()
         assert "_ng_failure_terminal" not in response.model_dump()
 

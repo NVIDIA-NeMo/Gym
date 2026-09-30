@@ -19,3 +19,10 @@ putnam_bench_math_formal_lean_simple_agent:
         prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
         prepare_script: benchmarks/putnam_bench/prepare.py
         num_repeats: 32
+
+putnam_bench_math_formal_lean_environment_server:
+  _inherit_from: math_formal_lean_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: putnam_bench_math_formal_lean_simple_agent
