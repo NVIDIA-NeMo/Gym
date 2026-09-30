@@ -182,17 +182,18 @@ class MCPServerMetadata(BaseModel):
 
 
 class ResourcesSeedSessionRequest(BaseModel):
-    """Initialize resources-server state for one episode."""
+    """Idempotently initialize resources state under a caller-assigned identifier."""
 
     model_config = ConfigDict(extra="forbid")
 
+    resources_session_id: str = Field(min_length=1)
     episode_id: EpisodeId
     task_id: TaskId
     task_data: dict[str, JsonValue]
 
 
 class ResourcesSeedSessionResponse(BaseModel):
-    """Return resources state and optional agent access."""
+    """Confirm resources state and return optional agent access."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -212,12 +213,6 @@ class ResourcesVerifyRequest(BaseModel, Generic[VerificationInputT]):
     episode_id: EpisodeId
     task_id: TaskId
     verification_input: VerificationInputT
-
-
-class ResourcesVerifyResponse(BaseVerifyResponse):
-    """Preserve environment-specific verification fields across the server boundary."""
-
-    model_config = ConfigDict(extra="allow")
 
 
 class ResourcesCloseSessionRequest(BaseModel):
@@ -288,13 +283,14 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Compute aggregate metrics from verify responses.
 
-        RewardProfiler provides baseline stats. Override compute_metrics() and/or
-        get_key_metrics() for benchmark-specific customization.
+        RewardProfiler provides baseline stats. Override compute_metrics(),
+        compute_repeat_metrics(), and/or get_key_metrics() for benchmark-specific customization.
         """
         return compute_aggregate_metrics(
             body.verify_responses,
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
+            compute_repeat_metrics_fn=self.compute_repeat_metrics,
         )
 
     async def get_reverify_mode(self) -> ReverifyMode:

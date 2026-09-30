@@ -31,3 +31,11 @@ swemer_v2_opencode_sandboxed_agent:
           jsonl_fpath: resources_servers/swemer_v2/data/swemer_v2_training.jsonl
           num_repeats: 1
           license: NVIDIA Internal Use Only, Do Not Distribute
+
+swemer_v2_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swemer_v2_opencode_sandboxed_agent

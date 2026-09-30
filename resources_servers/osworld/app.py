@@ -38,6 +38,8 @@ from resources_servers.osworld.session_manager import (
 class OSWorldResourcesServer(SimpleResourcesServer):
     """Own stateful OSWorld environments using Gym's signed session cookie."""
 
+    ray_enabled = False
+
     config: OSWorldResourcesServerConfig
     _manager: OSWorldSessionManager = PrivateAttr()
 

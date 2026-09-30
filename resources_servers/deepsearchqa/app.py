@@ -78,6 +78,7 @@ def parse_judge(text: str) -> dict[str, Any]:
 
 
 class DeepSearchQAServer(SimpleResourcesServer):
+    ray_enabled = False
     config: DeepSearchQAConfig
 
     def model_post_init(self, context: Any) -> None:

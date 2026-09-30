@@ -3005,6 +3005,7 @@ class RunOpenHandsAgent(BaseModel):
 
 
 class SWEBenchWrapper(SimpleResponsesAPIAgent):
+    ray_enabled = True
     config: SWEBenchWrapperConfig
 
     _sem: Optional[Semaphore] = None

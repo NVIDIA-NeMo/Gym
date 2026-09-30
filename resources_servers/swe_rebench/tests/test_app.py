@@ -25,9 +25,11 @@ import pytest
 from resources_servers.swe_rebench.verification import (
     TEST_OUTPUT_BEGIN,
     TEST_OUTPUT_END,
+    TEST_PATCH_FAILED,
     VerificationInputs,
     as_command_list,
     build_eval_script,
+    drop_test_patch_files,
     grade,
     normalize_test_name,
     repo_directory,
@@ -152,6 +154,10 @@ class TestBuildEvalScript:
         test_at = script.index("npm run test:unit")
         assert patch_at < test_at and test_patch_at < test_at
 
+    def test_flags_a_test_patch_that_fails_to_apply(self) -> None:
+        script = build_eval_script(_inputs())
+        assert f"grep -q '^error: ' /tmp/nemo_gym_test_patch.log && echo {TEST_PATCH_FAILED}" in script
+
     def test_omits_the_patch_step_when_there_is_no_patch(self) -> None:
         """An empty model patch must not produce a `git apply` of a nonexistent file."""
         script = build_eval_script(_inputs(patch=""))
@@ -173,6 +179,32 @@ class TestVerificationFiles:
         assert "/tmp/nemo_gym_eval.sh" in files
         assert "/tmp/nemo_gym_patch.diff" not in files
         assert "/tmp/nemo_gym_test_patch.diff" in files
+
+
+class TestDropTestPatchFiles:
+    def test_drops_the_model_sections_for_files_the_test_patch_touches(self) -> None:
+        patch = (
+            "diff --git a/src/calc.py b/src/calc.py\n--- a/src/calc.py\n+++ b/src/calc.py\n@@ -1 +1 @@\n-a\n+b\n"
+            "diff --git a/tests/test_calc.py b/tests/test_calc.py\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n"
+            "@@ -1 +1 @@\n-x\n+mine\n"
+            "diff --git a/tests/test_new.py b/tests/test_new.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_new.py\n"
+            "@@ -0,0 +1 @@\n+mine\n"
+            "diff --git a/tests/test_mine.py b/tests/test_mine.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_mine.py\n"
+            "@@ -0,0 +1 @@\n+mine\n"
+        )
+        test_patch = (
+            "diff --git a/tests/test_calc.py b/tests/test_calc.py\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n"
+            "@@ -1 +1 @@\n-x\n+hidden\n"
+            "diff --git a/tests/test_new.py b/tests/test_new.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_new.py\n"
+            "@@ -0,0 +1 @@\n+hidden\n"
+        )
+        kept = drop_test_patch_files(patch, test_patch)
+        assert "a/src/calc.py" in kept and "b/tests/test_mine.py" in kept
+        assert "tests/test_calc.py" not in kept and "tests/test_new.py" not in kept
+
+    def test_keeps_the_patch_when_there_is_no_test_patch(self) -> None:
+        patch = "diff --git a/tests/test_calc.py b/tests/test_calc.py\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n"
+        assert drop_test_patch_files(patch, "") == patch
 
 
 class _FakeSandbox:
@@ -197,6 +229,17 @@ class TestRunVerification:
         )
         assert result.completed and result.resolved
         assert sandbox.commands == ["bash /tmp/nemo_gym_eval.sh"]
+
+    @pytest.mark.asyncio
+    async def test_a_test_patch_that_does_not_apply_is_incomplete(self) -> None:
+        result = await run_verification(
+            sandbox=_FakeSandbox(f"{TEST_PATCH_FAILED}\n" + f"{TEST_OUTPUT_BEGIN}\nirrelevant\n{TEST_OUTPUT_END}"),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=lambda _log: {"a": "PASSED"},
+        )
+        assert result.completed is False
+        assert result.resolved is False
+        assert result.test_patch_failed is True
 
     @pytest.mark.asyncio
     async def test_missing_repo_directory_is_incomplete_not_a_zero(self) -> None:
