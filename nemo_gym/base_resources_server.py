@@ -182,13 +182,7 @@ class MCPServerMetadata(BaseModel):
 
 
 class ResourcesSeedSessionRequest(BaseModel):
-    """Idempotently initialize resources state under a caller-assigned identifier.
-
-    Repeating the same identifier and episode must return the existing session.
-    Closing an unknown identifier must prevent a racing seed from creating it later.
-    External resources should use provider TTLs when available. Current process-local
-    session records may remain until the server shuts down.
-    """
+    """Idempotently initialize resources state under a caller-assigned identifier."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -248,6 +242,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.add_middleware(RolloutContextMiddleware)
 
         app.post("/seed_session")(self.seed_session)
+        app.post("/close_session")(self.close_resources_session)
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
             traced_verify_endpoint(
@@ -275,12 +270,32 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> Optional[list[str]]:
         """Per-session tool restriction: return the tool names allowed for this rollout's MCP token,
         or ``None`` (the default) for unrestricted. ``seed_body`` is the JSON body POSTed to
-        ``/seed_session``.
+        ``/seed_session``, or its ``task_data`` when an Environment Server seeds the session.
         """
         return None
 
-    async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+    async def seed_session(
+        self,
+        body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """Seed per-rollout state; the default keeps none.
+
+        An Environment Server seeds with a ``ResourcesSeedSessionRequest`` and gets its caller-assigned
+        ``resources_session_id`` back. An Agent's ``/run`` seeds with its legacy body and gets an empty
+        response. Servers that keep per-rollout state override this method.
+        """
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
         return BaseSeedSessionResponse()
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Close state an Environment Server seeded; the default keeps none.
+
+        Served at ``/close_session``. Servers that keep per-rollout state override this method, and may accept
+        other close bodies by overriding it with a different signature. The name differs from the
+        ``close_session`` helpers some servers already define for their own state.
+        """
+        return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
     @abstractmethod
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
@@ -289,13 +304,14 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Compute aggregate metrics from verify responses.
 
-        RewardProfiler provides baseline stats. Override compute_metrics() and/or
-        get_key_metrics() for benchmark-specific customization.
+        RewardProfiler provides baseline stats. Override compute_metrics(),
+        compute_repeat_metrics(), and/or get_key_metrics() for benchmark-specific customization.
         """
         return compute_aggregate_metrics(
             body.verify_responses,
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
+            compute_repeat_metrics_fn=self.compute_repeat_metrics,
         )
 
     async def get_reverify_mode(self) -> ReverifyMode:

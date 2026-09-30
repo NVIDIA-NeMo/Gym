@@ -853,7 +853,11 @@ async def test_native_recipe_collects_through_environment_run(setup, monkeypatch
             if url_path == "/verify":
                 assert not agent._sandbox_sessions
                 assert sandbox.disconnect.await_count == 1
-                return Response({**body.verification_input.model_dump(mode="json"), "reward": 1.0})
+                assert body["instance_id"] == "instance"
+                assert body["responses_create_params"]["input"] == "Fix it"
+                assert body["response"]["usage"]["total_tokens"] == 22
+                assert "verification_input" not in body
+                return Response({**body, "reward": 1.0})
             assert url_path == "/close_session"
             return Response({"resources_session_id": body["resources_session_id"]})
         assert server_name == agent_name

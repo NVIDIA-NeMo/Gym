@@ -551,6 +551,15 @@ def _standalone_resources_server_config(module_name: str) -> str:
               model_server:
                 type: responses_api_models
                 name: policy_model
+
+        # Expose the agent through an environment server for rollout collection.
+        {module_name}_environment_server:
+          environment_servers:
+            legacy_agent:
+              entrypoint: app.py
+              agent_server:
+                type: responses_api_agents
+                name: {module_name}_simple_agent
         """
     )
 
@@ -619,6 +628,8 @@ def _resources_server_app(module_name: str) -> str:
 
 
         class {class_name}ResourcesServer({class_name}Verifier, SimpleResourcesServer):
+            ray_enabled = False
+
             config: {class_name}ResourcesServerConfig
 
 
@@ -725,6 +736,8 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
 
 
         class {class_name}Agent(SimpleAgent):
+            ray_enabled = False
+
             async def responses(
                 self,
                 request: Request,
@@ -748,6 +761,8 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
 
 
         class {class_name}Agent(SimpleAgent):
+            ray_enabled = False
+
             async def responses(
                 self,
                 request: Request,

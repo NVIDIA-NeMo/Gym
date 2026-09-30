@@ -82,6 +82,7 @@ class TestGlobalConfig:
             "python_version": "test python version",
             "skip_venv_if_present": False,
             "dry_run": False,
+            "server_spinup_timeout_seconds": 600,
             "model_endpoint_readiness_timeout_seconds": 600,
             "allow_openai_version_skew": False,
             "uv_cache_dir": str(CACHE_DIR.expanduser().resolve() / "uv"),
@@ -2055,6 +2056,39 @@ class TestConfigLoadErrors:
             }
         }
         parser._raise_on_agent_without_environment_server(config)
+
+    @mark.parametrize("resources_server", ["reasoning_gym", "tavily_search"])
+    def test_langchain_deepagents_configs_have_environment_servers(self, resources_server: str) -> None:
+        agent_name = f"{resources_server}_langchain_deepagents_agent_model_server"
+        config_path = (
+            Path(__file__).resolve().parents[2]
+            / "resources_servers"
+            / resources_server
+            / "configs"
+            / f"{agent_name}.yaml"
+        )
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                    OmegaConf.load(config_path),
+                    {
+                        "tavily_api_key": "test-key",
+                        "exclude_domains_file_path": None,
+                        "search_judge_model_base_url": "http://example.invalid/v1",
+                        "search_judge_model_api_key": "test-key",
+                        "search_judge_model_name": "test-model",
+                    },
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        environment = resolved[f"{agent_name}_environment_server"]["environment_servers"]["legacy_agent"]
+        assert environment["entrypoint"] == "app.py"
+        assert environment["agent_server"] == {"type": "responses_api_agents", "name": agent_name}
 
     def test_all_repo_configs_load_without_duplicate_keys(self) -> None:
         # OmegaConf.load (the loader `gym env start` actually uses) rejects duplicate YAML keys,

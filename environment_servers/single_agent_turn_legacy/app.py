@@ -74,8 +74,10 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             )
         task_id = next(
             (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
-            str(row[TASK_INDEX_KEY_NAME]),
+            None,
         )
+        if task_id is None:
+            task_id = str(row[TASK_INDEX_KEY_NAME])
         attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
         if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
             raise ValueError(f"Invalid episode attempt: {attempt!r}")

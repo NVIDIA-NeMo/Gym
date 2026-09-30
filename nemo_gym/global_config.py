@@ -92,6 +92,7 @@ PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
 UVICORN_TIMEOUT_WORKER_HEALTHCHECK = "uvicorn_timeout_worker_healthcheck"
+SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME = "server_spinup_timeout_seconds"
 MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
 ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
@@ -140,6 +141,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PORT_RANGE_LOW_KEY_NAME,
     PORT_RANGE_HIGH_KEY_NAME,
     DRY_RUN_KEY_NAME,
+    SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     ALLOW_OPENAI_VERSION_SKEW_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
@@ -209,50 +211,6 @@ ENVIRONMENT_SERVER_STAMP_KEY_NAME = "_ng_environment_server"
 TASK_SOURCE_KEY_NAME = "task_source"
 SKILLS_REF_KEY_NAME = "skills_ref"
 REWARD_KEY_NAME = "reward"
-
-# Metric key names. `RewardProfiler` builds its metric names from these prefixes and suffixes, and
-# consumers of `*_aggregate_metrics.json` (e.g. `gym eval compare`) parse them back out -- so they
-# live here, where both sides can import them without pulling in pandas/scipy/wandb.
-MEAN_STAT_NAME = "mean"
-MAX_STAT_NAME = "max"
-MIN_STAT_NAME = "min"
-MEDIAN_STAT_NAME = "median"
-STD_STAT_NAME = "std"
-SEM_STAT_NAME = "sem"
-P25_STAT_NAME = "p25"
-P75_STAT_NAME = "p75"
-CI_LOW_95_STAT_NAME = "ci_low_95"
-CI_HIGH_95_STAT_NAME = "ci_high_95"
-HISTOGRAM_STAT_NAME = "histogram"
-
-# `<stat>/<field>`, e.g. `mean/reward`.
-STAT_SEPARATOR = "/"
-MEAN_PREFIX = f"{MEAN_STAT_NAME}{STAT_SEPARATOR}"
-MAX_PREFIX = f"{MAX_STAT_NAME}{STAT_SEPARATOR}"
-MIN_PREFIX = f"{MIN_STAT_NAME}{STAT_SEPARATOR}"
-MEDIAN_PREFIX = f"{MEDIAN_STAT_NAME}{STAT_SEPARATOR}"
-STD_PREFIX = f"{STD_STAT_NAME}{STAT_SEPARATOR}"
-SEM_PREFIX = f"{SEM_STAT_NAME}{STAT_SEPARATOR}"
-P25_PREFIX = f"{P25_STAT_NAME}{STAT_SEPARATOR}"
-P75_PREFIX = f"{P75_STAT_NAME}{STAT_SEPARATOR}"
-CI_LOW_95_PREFIX = f"{CI_LOW_95_STAT_NAME}{STAT_SEPARATOR}"
-CI_HIGH_95_PREFIX = f"{CI_HIGH_95_STAT_NAME}{STAT_SEPARATOR}"
-
-# `<stat>_across_repeats/mean/<field>`: one repeat's estimate aggregated over the run's repeats.
-ACROSS_REPEATS_MARKER = f"_across_repeats{STAT_SEPARATOR}"
-MEAN_ACROSS_REPEATS_PREFIX = f"{MEAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-MEDIAN_ACROSS_REPEATS_PREFIX = f"{MEDIAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-STD_ACROSS_REPEATS_PREFIX = f"{STD_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-MIN_ACROSS_REPEATS_PREFIX = f"{MIN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-MAX_ACROSS_REPEATS_PREFIX = f"{MAX_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-SE_ACROSS_REPEATS_PREFIX = f"se{ACROSS_REPEATS_MARKER}"
-CI_LOW_95_ACROSS_REPEATS_PREFIX = f"{CI_LOW_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-CI_HIGH_95_ACROSS_REPEATS_PREFIX = f"{CI_HIGH_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-
-# Suffixes `compute_pass_majority_metrics` appends to a pass@k metric name.
-STD_DEV_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_dev_across_runs"
-STD_ERR_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_err_across_runs"
-AVG_SAMPLE_STD_DEV_SUFFIX = f"{STAT_SEPARATOR}avg_sample_std_dev"
 
 # Per-task keys in `group_level_metrics`.
 ROLLOUT_INFOS_KEY_NAME = "rollout_infos"
@@ -1493,6 +1451,10 @@ Found global config dict yaml:
 
             global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
 
+            # Bound server startup independently of model-endpoint readiness. Multi-worker
+            # supervisors can otherwise replace a deterministically failing worker forever.
+            global_config_dict.setdefault(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME, 600)
+
             # How long `gym env start` waits for the model endpoints named in the config to accept
             # a connection. Generous because vLLM can take minutes to load weights; 0 skips it.
             global_config_dict.setdefault(MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME, 600)
@@ -1639,6 +1601,24 @@ def _apply_verbosity(global_config_dict: DictConfig) -> None:
         logging.getLogger().setLevel(logging.DEBUG)
 
 
+def translate_interpolation_error(e: InterpolationResolutionError) -> ConfigInterpolationError:
+    """Same class of user error as an unset '???' (see raise_on_missing_values), reported the same way
+    instead of letting omegaconf's traceback reach the top level. Covers both a missing `${key}`
+    (InterpolationKeyError) and a failing resolver such as `${oc.env:VAR}`, which carries its own
+    message and so is passed through as-is."""
+    match = re.search(r"Interpolation key '([^']+)' not found", str(e))
+    if not match:
+        return ConfigInterpolationError(str(e))
+    key = match.group(1)
+    return ConfigInterpolationError(
+        f"""Config value '{e.full_key}' references '{key}', which is not set after merging.
+
+Provide it via a CLI override, in env.yaml, or in a config you pass via config_paths.
+For example, on the command line:
+  ++{key}=<value>"""
+    )
+
+
 def set_global_config_dict(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
@@ -1647,21 +1627,7 @@ def set_global_config_dict(
     try:
         global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
     except InterpolationResolutionError as e:
-        # Same class of user error as an unset '???' (see raise_on_missing_values), so report it the same
-        # way instead of letting omegaconf's traceback reach the top level. Covers both a missing `${key}`
-        # (InterpolationKeyError) and a failing resolver such as `${oc.env:VAR}`, which carries its own
-        # message and so is passed through as-is.
-        match = re.search(r"Interpolation key '([^']+)' not found", str(e))
-        if not match:
-            raise ConfigInterpolationError(str(e)) from e
-        key = match.group(1)
-        raise ConfigInterpolationError(
-            f"""Config value '{e.full_key}' references '{key}', which is not set after merging.
-
-Provide it via a CLI override, in env.yaml, or in a config you pass via config_paths.
-For example, on the command line:
-  ++{key}=<value>"""
-        ) from e
+        raise translate_interpolation_error(e) from e
 
     _GLOBAL_CONFIG_DICT = global_config_dict
 

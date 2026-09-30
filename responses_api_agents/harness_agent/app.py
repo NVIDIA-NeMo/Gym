@@ -157,6 +157,7 @@ class HarnessAgentVerifyResponse(BaseVerifyResponse):
 
 
 class HarnessAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: HarnessAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)

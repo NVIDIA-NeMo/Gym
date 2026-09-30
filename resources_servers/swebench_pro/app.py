@@ -51,7 +51,6 @@ from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ConnectableProvider
 from nemo_gym.server_utils import SESSION_ID_KEY
-from nemo_gym.single_agent_turn_types import SingleAgentTurnResourcesVerifyRequest
 from resources_servers.swebench_pro.image_cache import digest_hex, verify_local_image
 from resources_servers.swebench_pro.verification import (
     DEFAULT_ENVIRONMENT_REPAIRS,
@@ -203,6 +202,7 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
 
 
 class SWEBenchProResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: SWEBenchProResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -213,7 +213,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         # Untracked files the image ships, per session. Leading underscore: pydantic needs it.
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         # Typed sessions, which an Environment Server seeds and closes by resources_session_id.
-        self._session_id_to_task: dict[str, SWEBenchProInstanceRequest] = {}
         self._session_id_to_identity: dict[str, tuple[EpisodeId, TaskId]] = {}
         self._native_session_locks: dict[str, asyncio.Lock] = {}
         self._closed_native_sessions: dict[str, EpisodeId] = {}
@@ -231,10 +230,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 await self.shutdown()
 
         app.router.lifespan_context = lifespan
-        app.post("/close_session")(self.close_session)
         return app
 
-    async def close_session(
+    async def close_resources_session(
         self,
         request: Request,
         body: Annotated[dict[str, Any] | None, Body()] = None,
@@ -264,7 +262,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             if identity is not None and typed.episode_id != identity[0]:
                 raise ValueError("episode_id does not match the seeded resources session")
             await self._stop_session_sandbox(session_id)
-            self._session_id_to_task.pop(session_id, None)
             self._session_id_to_identity.pop(session_id, None)
             self._closed_native_sessions[session_id] = typed.episode_id
             request.session.pop(SESSION_ID_KEY, None)
@@ -279,7 +276,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked.pop(session_id, None)
 
     async def shutdown(self) -> None:
-        self._session_id_to_task.clear()
         self._session_id_to_identity.clear()
         self._native_session_locks.clear()
         self._closed_native_sessions.clear()
@@ -384,7 +380,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 # The agent cannot reach a sandbox it was never handed, so stop it here.
                 await self._stop_session_sandbox(session_id)
                 raise
-            self._session_id_to_task[session_id] = task
             self._session_id_to_identity[session_id] = (body.episode_id, body.task_id)
             return response
 
@@ -499,25 +494,17 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
     async def verify(
         self,
         request: Request,
-        body: SWEBenchProVerifyRequest | SingleAgentTurnResourcesVerifyRequest,
+        body: SWEBenchProVerifyRequest,
     ) -> SWEBenchProVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        if isinstance(body, SingleAgentTurnResourcesVerifyRequest):
-            task = self._session_id_to_task.get(session_id)
-            identity = self._session_id_to_identity.get(session_id)
-            if task is None or identity is None:
-                raise ValueError("Unknown SWE-bench Pro resources session")
-            if identity != (body.episode_id, body.task_id):
-                raise ValueError("Verification identity does not match the seeded resources session")
-            if not self.config.is_verifying_golden_patch and session_id not in self._session_id_to_sandbox:
-                raise ValueError("SWE-bench Pro task sandbox is no longer available")
-            body = SWEBenchProVerifyRequest.model_validate(
-                task.model_dump()
-                | {
-                    "responses_create_params": body.verification_input.responses_create_params,
-                    "response": body.verification_input.response,
-                }
-            )
+        # A typed session's sandbox is consumed by its first verify. Grading again would score an empty
+        # patch with a normal-looking reward, so a repeated verify fails instead.
+        if (
+            not self.config.is_verifying_golden_patch
+            and session_id in self._session_id_to_identity
+            and session_id not in self._session_id_to_sandbox
+        ):
+            raise ValueError("SWE-bench Pro task sandbox is no longer available")
         extraction_error = None
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch

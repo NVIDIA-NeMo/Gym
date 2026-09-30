@@ -227,7 +227,7 @@ async def test_token_capture_keeps_prefixed_twin_route() -> None:
     environment, client = _environment(token_capture=True)
     result = await environment.run_request(_request())
     assert client.calls[2][1] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
-    verified_response = client.calls[4][2]["json"].verification_input.response
+    verified_response = NeMoGymResponse.model_validate(client.calls[4][2]["json"]["response"])
     assert verified_response == _agent_response()
     assert result.result.response == verified_response
 
@@ -255,7 +255,7 @@ async def test_failed_agent_response_still_reaches_verification(reward: float, m
         "/verify",
         "/close_session",
     ]
-    forwarded = client.calls[4][2]["json"].verification_input.response
+    forwarded = NeMoGymResponse.model_validate(client.calls[4][2]["json"]["response"])
     assert forwarded == NeMoGymResponse.model_validate(failed_response)
     assert client.calls[4][2]["cookies"] == {"session": "resources-updated"}
     assert result.result.response == forwarded
