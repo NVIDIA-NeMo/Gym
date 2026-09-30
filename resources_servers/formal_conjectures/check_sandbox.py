@@ -24,7 +24,7 @@ Two failure modes it separates, which is the whole point:
 
 * the sandbox's Mathlib is not v4.33.1, so statements fail for reasons unrelated to the task;
 * upstream's "proof" is not one -- it transitively depends on a `sorry` elsewhere in the file.
-  Only `#print axioms` catches that, and it is why `verified_tasks.json` is smaller than the
+  Only `#print axioms` catches that, and it is why `data/verified_task_ids.txt` is smaller than the
   set `extract.py` can produce.
 
 No model or GPU needed.
@@ -39,7 +39,6 @@ Usage:
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 
@@ -125,7 +124,7 @@ async def compile_in(lean: LeanSandbox, code: str, timeout: float) -> dict:
 def load_candidates(check_all: bool, limit: int | None) -> list:
     """Extract candidate tasks from the pinned upstream revision.
 
-    Without ``--all`` this is narrowed to the ids already in ``verified_tasks.json``, which is
+    Without ``--all`` this is narrowed to the ids already in ``data/verified_task_ids.txt``, which is
     the gate: it re-checks the committed benchmark rather than rediscovering it.
     """
     sources = fetch_sources()
@@ -144,7 +143,7 @@ def load_candidates(check_all: bool, limit: int | None) -> list:
         seen[task.task_id] = task
 
     if not check_all:
-        wanted = set(json.loads(VERIFIED_TASKS_FPATH.read_text(encoding="utf-8")))
+        wanted = set(VERIFIED_TASKS_FPATH.read_text(encoding="utf-8").split("\n")) - {""}
         tasks = [t for t in tasks if t.task_id in wanted]
         missing = wanted - {t.task_id for t in tasks}
         if missing:
@@ -275,7 +274,7 @@ async def main() -> int:
     print(f"\n{len(passed)}/{len(tasks)} reference files compiled with their target proved.")
 
     if args.write_verified:
-        VERIFIED_TASKS_FPATH.write_text(json.dumps(sorted(passed), indent=2) + "\n", encoding="utf-8")
+        VERIFIED_TASKS_FPATH.write_text("\n".join(sorted(passed)) + "\n", encoding="utf-8")
         print(f"Wrote {len(passed)} task ids to {VERIFIED_TASKS_FPATH}")
         return 0
 

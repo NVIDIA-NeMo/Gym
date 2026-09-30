@@ -126,7 +126,7 @@ because the guard rejects everything is visible without opening rollouts.
 
 ## Data
 
-`verified_tasks.json` **is** the benchmark definition: the 1,526 task ids whose reference version was *observed to
+`data/verified_task_ids.txt` **is** the benchmark definition: the 1,526 task ids whose reference version was *observed to
 compile clean with the target free of `sorryAx`* inside a Mathlib v4.33.1 sandbox. Candidacy is not answerability —
 a statement can reference a definition that does not survive the rewrite to plain Mathlib, and some upstream
 "proofs" transitively depend on a `sorry` elsewhere in the file. Neither is detectable by reading the text.

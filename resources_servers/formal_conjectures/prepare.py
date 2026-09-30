@@ -22,7 +22,7 @@ repository.
 as answerability: a statement can reference a definition that does not survive the rewrite to
 plain Mathlib, and some upstream "proofs" transitively depend on a ``sorry`` elsewhere in the
 file. Neither is detectable by reading the text. So the benchmark is defined by
-``verified_tasks.json`` -- the task ids whose **reference version was observed to compile
+``data/verified_task_ids.txt`` -- the task ids whose **reference version was observed to compile
 clean, with the target free of ``sorryAx``**, inside a Mathlib v4.33.1 sandbox.
 
 That list is the benchmark's definition and is committed. Regenerating it means re-running the
@@ -55,7 +55,7 @@ TARBALL_URL = f"https://codeload.github.com/google-deepmind/formal-conjectures/t
 LEAN_TOOLCHAIN = "leanprover/lean4:v4.33.1"
 MATHLIB_VERSION = "v4.33.1"
 
-VERIFIED_TASKS_FPATH = HERE / "verified_tasks.json"
+VERIFIED_TASKS_FPATH = HERE / "data" / "verified_task_ids.txt"
 NUM_EXAMPLE_ROWS = 5
 
 
@@ -85,7 +85,7 @@ def fetch_sources() -> Dict[str, str]:
 def build_rows() -> List[Dict[str, Any]]:
     """Re-derive the verified tasks as Gym rows."""
     sources = fetch_sources()
-    wanted = set(json.loads(VERIFIED_TASKS_FPATH.read_text(encoding="utf-8")))
+    wanted = set(VERIFIED_TASKS_FPATH.read_text(encoding="utf-8").split("\n")) - {""}
 
     by_id = {}
     for path, text in sources.items():
@@ -95,7 +95,7 @@ def build_rows() -> List[Dict[str, Any]]:
         # validation sweep by skipping statements unlikely to compile against a stock Mathlib;
         # it needs Mathlib's name list to be accurate, which is not available from the tarball,
         # and an over-broad version silently drops verified tasks. Membership is already
-        # decided by `verified_tasks.json`, so re-screening here is redundant and harmful.
+        # decided by `data/verified_task_ids.txt`, so re-screening here is redundant and harmful.
         for task in extract_file(path, text, fc_only_names=set()):
             # Ids are namespace-qualified and therefore unique. Before they were, this
             # assignment silently kept whichever of several same-named declarations came
