@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -257,7 +258,7 @@ async def test_undelivered_call_is_cut_and_continued_by_the_reissued_call(tmp_pa
         rollout_id="r-a1", model_call_id="c3", token_sink=None, request_items=[USER_1, ASSISTANT_1, USER_2]
     )
 
-    assert prepared["report"]["counts"] == {"inflight": 1, "held": 1, "cut": 1}
+    assert prepared["report"]["counts"] == {"inflight": 1, "held": 1, "cut": 1, "cut_failed": 0, "cut_skipped": 0}
     assert [inventory.active_prefixes[0].model_call_id for _, inventory in requests] == ["c2"]
     assert [row["model_call_id"] for row in restored_ledger.export_rows("r-a1")] == ["c1"]
     assert restored.continue_restored_cut(other_request, admission).generation_cut is None
@@ -401,3 +402,162 @@ async def test_a_restored_cut_not_yet_reused_survives_the_next_checkpoint(tmp_pa
     await again_controller.restore(_restore_request("r2", tmp_path / "ckpt", [{"rollout_id": "r", "attempt": 1}]))
 
     assert again._restored_cuts == {"r-a2": cut}
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        ({}, None),
+        ({"tool_choice": "auto", "tools": [{"type": "function"}]}, None),
+        ({"tool_choice": "none", "tools": [{"type": "function"}]}, None),
+        ({"tool_choice": "required"}, "tool_choice:required"),
+        ({"tool_choice": {"type": "function", "function": {"name": "f"}}}, "tool_choice:constrained"),
+        ({"response_format": {"type": "text"}}, None),
+        ({"response_format": {"type": "json_schema"}}, "response_format:json_schema"),
+        ({"guided_json": {}}, "guided_json"),
+        ({"structured_outputs": {}}, "structured_outputs"),
+    ],
+)
+def test_constrained_decoding_must_restart_instead_of_continuing_a_cut(body: dict, reason: str | None) -> None:
+    from nemo_gym._checkpoint.model import generation_cut_restart_reason
+
+    assert generation_cut_restart_reason(body) == reason
+
+
+async def test_a_constrained_call_is_not_cut_and_never_continues_a_restored_cut(tmp_path: Path) -> None:
+    request_cut, requests = _cutting_worker()
+    participant = PolicyModelParticipant(FileLineageStore(tmp_path / "ledger"), cut_requester=request_cut)
+    _held_call(participant, "r", "c1", [USER_1])
+    constrained = participant.gate.enter("s")
+    constrained.backend = "http://worker-0/v1"
+    constrained.capture = CaptureContext(rollout_id="s", model_call_id="c2", token_sink=None, request_items=[USER_1])
+    constrained.cut_restart_reason = "tool_choice:required"
+    await participant.close_admission(CheckpointRequest(**control()))
+    report = participant.readiness()
+
+    participant._restored_cuts["s"] = restored = participant.gate.snapshot().cuts[0].record.model_copy()
+    admission = CaptureAdmission(rollout_id="s", model_call_id="c9", mode="text")
+    context = CaptureContext(rollout_id="s", model_call_id="c9", token_sink=None, request_items=[USER_1])
+    attached = participant.gate.admission_hook(constrained)(context, admission).generation_cut
+
+    [(_, inventory)] = requests
+    assert [prefix.model_call_id for prefix in inventory.active_prefixes] == ["c1"]
+    assert (report.counts["cut"], report.counts["cut_skipped"]) == (1, 1)
+    assert attached is None
+    assert participant._restored_cuts == {"s": restored}
+
+
+async def test_calls_the_worker_could_not_cut_are_counted(tmp_path: Path) -> None:
+    request_cut, _ = _cutting_worker(cut=False)
+    participant = PolicyModelParticipant(FileLineageStore(tmp_path / "ledger"), cut_requester=request_cut)
+    _held_call(participant, "r", "c1", [USER_1])
+    await participant.close_admission(CheckpointRequest(**control()))
+
+    assert participant.readiness().counts["cut_failed"] == 1
+
+
+async def test_commit_reply_lists_the_staged_keys_the_checkpoint_keeps(tmp_path: Path) -> None:
+    ledger, _, controller = await _ledger_participant(tmp_path / "ledger")
+    await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r", staging_chain=("r/c1",)))
+    await controller.prepare(CheckpointRequest(**control()))
+    reply = await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
+    [row] = ledger.export_rows("r")
+
+    assert reply["staging_keys"] == [row["staging_key"]]
+
+
+async def test_ledger_export_and_import_run_off_the_event_loop(tmp_path: Path) -> None:
+    import threading
+
+    class RecordingLedger:
+        def __init__(self) -> None:
+            self.threads: list[int] = []
+            self.rows: dict[str, list[dict]] = {}
+
+        def export_rows(self, rollout_id: str) -> list[dict]:
+            self.threads.append(threading.get_ident())
+            return self.rows.get(rollout_id, [{"model_call_id": "c1", "staging_key": "r/c1"}])
+
+        def import_rows(self, rollout_id: str, rows: list[dict]) -> None:
+            self.threads.append(threading.get_ident())
+            self.rows[rollout_id] = rows
+
+    source = RecordingLedger()
+    participant = PolicyModelParticipant(source)
+    controller = ParticipantControlPlane(participant, instance_name="policy", lease_grace_seconds=60)
+    await controller.prepare(CheckpointRequest(**control()))
+    await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
+    target = RecordingLedger()
+    restored = PolicyModelParticipant(target)
+    await ParticipantControlPlane(restored, instance_name="policy", lease_grace_seconds=60).restore(
+        _restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}])
+    )
+
+    loop_thread = threading.get_ident()
+    assert source.threads and loop_thread not in source.threads
+    assert target.threads and loop_thread not in target.threads
+    assert target.rows["r-a1"] == [{"model_call_id": "c1", "staging_key": "r/c1"}]
+
+
+def test_a_batched_ledger_import_syncs_the_directory_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import nemo_gym.token_id_capture.lineage as lineage
+
+    ledger = FileLineageStore(tmp_path / "ledger")
+    directory_opens = []
+    real_open = lineage.os.open
+
+    def counting_open(path, flags, *args):
+        if flags == os.O_RDONLY:
+            directory_opens.append(path)
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(lineage.os, "open", counting_open)
+    rows = {f"r{index}-a1": [{"model_call_id": f"c{index}"}] for index in range(20)}
+    ledger.import_rows_many(rows)
+    ledger.import_rows_many(rows)
+
+    assert len(directory_opens) == 1
+    assert ledger.export_rows("r7-a1") == [{"model_call_id": "c7"}]
+    with pytest.raises(ValueError, match="different rows"):
+        ledger.import_rows_many({"r7-a1": [{"model_call_id": "other"}]})
+
+
+async def test_readiness_stays_cheap_while_many_cut_calls_are_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import nemo_gym._checkpoint.model as model
+
+    request_cut, _ = _cutting_worker()
+    participant = PolicyModelParticipant(FileLineageStore(tmp_path / "ledger"), cut_requester=request_cut)
+    for index in range(50):
+        _held_call(participant, f"r{index}", f"c{index}", [USER_1])
+    await participant.close_admission(CheckpointRequest(**control()))
+    digests = []
+    real_digest = model.conversation_digest
+    monkeypatch.setattr(model, "conversation_digest", lambda items: digests.append(1) or real_digest(items))
+    for _ in range(20):
+        report = participant.readiness()
+
+    # Each cut record is built once, when the cut is acknowledged; readiness only counts.
+    assert digests == []
+    assert report.counts["cut"] == 50
+
+
+async def test_an_episode_with_a_retried_call_keeps_only_the_latest_cut(tmp_path: Path) -> None:
+    request_cut, _ = _cutting_worker()
+    ledger = FileLineageStore(tmp_path / "ledger")
+    participant = PolicyModelParticipant(ledger, cut_requester=request_cut)
+    controller = ParticipantControlPlane(participant, instance_name="policy", lease_grace_seconds=60)
+    # The client gave up on c1 and retried it as c2; the server is still running both.
+    _held_call(participant, "r", "c1", [USER_1])
+    _held_call(participant, "r", "c2", [USER_1])
+    [first, second] = sorted(participant.gate.tickets, key=lambda ticket: ticket.capture.model_call_id)
+    first.admitted_at, second.admitted_at = 1.0, 2.0
+    await controller.prepare(CheckpointRequest(**control()))
+    await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
+    restored = PolicyModelParticipant(FileLineageStore(tmp_path / "restored"))
+    await ParticipantControlPlane(restored, instance_name="policy", lease_grace_seconds=60).restore(
+        _restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}])
+    )
+
+    assert restored._restored_cuts["r-a1"].model_call_id == "c2"
