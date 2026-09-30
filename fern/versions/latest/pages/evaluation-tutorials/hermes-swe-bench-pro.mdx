@@ -18,11 +18,14 @@ Run the commands below from the Gym repository root with Gym and the SWE-bench P
 preparation dependencies installed. Create a `model-provider.yaml` configuration that supplies:
 
 - `policy_model`: the Gym Model Server deployment used by Hermes.
+- `policy_model_name`: the served model ID, also used by Hermes by default.
 - `sandbox`: the sandbox provider and its connection credentials.
-- `swebench_pro_hermes_agent.responses_api_agents.hermes_agent.model`: the served model ID.
+
+To use a different model ID for Hermes, override
+`swebench_pro_hermes_agent.responses_api_agents.hermes_agent.model`.
 
 The task sandbox must be able to reach the Gym Model Server. Use a Linux sandbox with exec
-support and one Hermes agent-server worker; the recipe sets `num_workers: 1` and enables
+support and one Hermes agent-server worker (the default); the recipe enables
 the terminal toolset. Installing the pinned Hermes runtime also requires outbound access
 to GitHub and the Python package index unless that runtime is already present in the image.
 

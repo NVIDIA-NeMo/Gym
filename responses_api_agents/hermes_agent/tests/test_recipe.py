@@ -3,18 +3,23 @@
 
 from pathlib import Path
 
+import pytest
 from omegaconf import OmegaConf
 
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
 from nemo_gym.global_config import GlobalConfigDictParser
+from responses_api_agents.hermes_agent.app import HermesAgentConfig
 
 
-def test_hermes_recipe_resolves_to_session_environment() -> None:
+@pytest.mark.parametrize("model_override", [None, "other-served-model"])
+def test_hermes_recipe_resolves_to_session_environment(model_override: str | None) -> None:
     recipe = Path(__file__).parents[3] / "benchmarks/swebench/pro/hermes.yaml"
     parser = GlobalConfigDictParser()
     _, configs = parser.load_extra_config_paths([str(recipe)])
-    config = OmegaConf.merge(*configs)
+    config = OmegaConf.merge(*configs, {"policy_model_name": "served-policy-model"})
     parser._recursively_swap_keys(config)
+    if model_override is not None:
+        config.swebench_pro_hermes_agent.responses_api_agents.hermes_agent.model = model_override
     assert config.environment_routing_mode == "taskset"
     environment_name = config.environment_server_routes["swebench_pro"]
     assert environment_name == "swebench_pro_hermes"
@@ -24,8 +29,17 @@ def test_hermes_recipe_resolves_to_session_environment() -> None:
         port=8000,
         **OmegaConf.to_container(config[environment_name].environment_servers.single_agent_turn, resolve=True),
     )
-    agent = config[environment.agent_server.name].responses_api_agents.hermes_agent
-    assert agent.num_workers == 1
+    agent = HermesAgentConfig(
+        name=environment.agent_server.name,
+        host="localhost",
+        port=8001,
+        **OmegaConf.to_container(
+            config[environment.agent_server.name].responses_api_agents.hermes_agent, resolve=True
+        ),
+    )
+    assert agent.model == (model_override or "served-policy-model")
+    assert agent.num_workers is None
+    assert agent.session_lifetime_seconds == 21600
     assert agent.resources_server.name == environment.resources_server.name
     assert agent.model_server.name == "policy_model"
     resources = config[environment.resources_server.name].resources_servers.swebench_pro
