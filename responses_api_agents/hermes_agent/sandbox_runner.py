@@ -20,8 +20,10 @@ from uuid import uuid4
 
 
 try:
+    from .model_kwargs import _model_api_kwargs
     from .sandbox_observer import SandboxHermesObserver
 except ImportError:
+    from model_kwargs import _model_api_kwargs
     from sandbox_observer import SandboxHermesObserver
 
 
@@ -103,18 +105,11 @@ def _run(payload: dict[str, Any], session_dir: Path) -> dict[str, Any]:
     original_build_api_kwargs = agent._build_api_kwargs
 
     def build_api_kwargs(api_messages: list[dict[str, Any]]) -> dict[str, Any]:
-        kwargs = original_build_api_kwargs(api_messages)
-        if not payload["chat_template_kwargs_enabled"]:
-            return kwargs
-        chat_template_kwargs = kwargs.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})
-        chat_template_kwargs.setdefault("enable_thinking", True)
-        chat_template_kwargs["truncate_history_thinking"] = False
-        # Gym accepts template overrides through metadata, not an extra top-level field.
-        kwargs["extra_body"].pop("chat_template_kwargs")
-        metadata = kwargs.setdefault("metadata", {})
-        previous = json.loads(metadata.get("chat_template_kwargs") or "{}")
-        metadata["chat_template_kwargs"] = json.dumps(previous | chat_template_kwargs)
-        return kwargs
+        return _model_api_kwargs(
+            original_build_api_kwargs(api_messages),
+            preserve_reasoning_history=payload["chat_template_kwargs_enabled"],
+            model_enable_thinking=payload.get("model_enable_thinking"),
+        )
 
     agent._build_api_kwargs = build_api_kwargs
     result = None

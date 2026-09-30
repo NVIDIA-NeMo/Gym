@@ -50,7 +50,7 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.global_config import get_first_server_config_dict, get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -81,6 +81,7 @@ from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess
+from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
 
 
@@ -185,6 +186,7 @@ _SANDBOX_UV = f"{_SANDBOX_RUNTIME_DIR}/uv"
 _SANDBOX_PYTHON = f"{_SANDBOX_RUNTIME_DIR}/venv/bin/python"
 _SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
 _SANDBOX_OBSERVER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_observer.py"
+_SANDBOX_MODEL_KWARGS = f"{_SANDBOX_RUNTIME_DIR}/model_kwargs.py"
 _AGENT_SESSION_ID_KEY = "agent_session_id"
 
 
@@ -631,6 +633,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 await self._install_sandbox_hermes(sandbox, workdir)
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
             await sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
+            await sandbox.upload(Path(__file__).with_name("model_kwargs.py"), _SANDBOX_MODEL_KWARGS)
         except BaseException:
             state.phase = SessionPhase.CLOSING
             try:
@@ -744,6 +747,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     def _model_name(self) -> str:
         return self.config.model or str(self.config.model_server.name)
+
+    def _model_enable_thinking(self) -> bool | None:
+        """Read the resolved model config only to diagnose conflicting Hermes overrides."""
+        global_config = self.server_client.global_config_dict
+        if self.config.model_server.name not in global_config:
+            return None
+        model_config = get_first_server_config_dict(global_config, self.config.model_server.name)
+        value = (model_config.get("chat_template_kwargs") or {}).get("enable_thinking")
+        return value if isinstance(value, bool) else None
 
     @staticmethod
     async def _upload_json(sandbox: AsyncSandbox, remote_path: str, payload: dict[str, Any]) -> None:
@@ -880,6 +892,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "max_tokens": body.max_output_tokens if body.max_output_tokens is not None else self.config.max_tokens,
             "max_turns": self.config.max_turns,
             "model": self._model_name(),
+            "model_enable_thinking": self._model_enable_thinking(),
             # The sandbox reaches the Model Server directly; the rollout prefix keeps its calls correlated.
             "model_base_url": self.resolve_model_base_url(
                 self.config.model_server.name, state.request.episode_id.capture_key
@@ -1128,15 +1141,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
             save_trajectories=False,
         )
         _original_build_api_kwargs = agent._build_api_kwargs
+        model_enable_thinking = self._model_enable_thinking()
 
-        def _patched_build_api_kwargs(api_messages):
-            kw = _original_build_api_kwargs(api_messages)
-            if not self.config.chat_template_kwargs_enabled:
-                return kw
-            ctk = kw.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})
-            ctk.setdefault("enable_thinking", True)
-            ctk["truncate_history_thinking"] = False
-            return kw
+        def _patched_build_api_kwargs(api_messages: list[dict[str, Any]]) -> dict[str, Any]:
+            return _model_api_kwargs(
+                _original_build_api_kwargs(api_messages),
+                preserve_reasoning_history=self.config.chat_template_kwargs_enabled,
+                model_enable_thinking=model_enable_thinking,
+            )
 
         agent._build_api_kwargs = _patched_build_api_kwargs
         observer = None
