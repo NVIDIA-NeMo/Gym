@@ -345,7 +345,6 @@ class UserSimResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
-        app.post("/close_session")(self.close_session)
         app.post("/{tool_name}")(self.invoke_probe_tool)
         return app
 
@@ -707,7 +706,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
             },
         )
 
-    async def close_session(
+    async def close_resources_session(
         self,
         request: Request,
         body: ResourcesCloseSessionRequest,
