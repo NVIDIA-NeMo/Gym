@@ -42,7 +42,6 @@ from aiohttp import (
     ClientTimeout,
     DummyCookieJar,
     ServerDisconnectedError,
-    TCPConnector,
 )
 from aiohttp.client import _RequestOptions
 from anyio import create_task_group
@@ -81,7 +80,8 @@ from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
-    build_connection_pool_trace_configs,
+    QueueTimedTCPConnector,
+    build_connection_pool_connector,
     connection_pool_capacity,
     report_connection_pool_capacity,
     reset_server_name,
@@ -331,21 +331,20 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     capacity = connection_pool_capacity(cfg, num_workers)
     if not is_nemo_gym_fastapi_worker():
         report_connection_pool_capacity(cfg, capacity)
-    trace_configs = build_connection_pool_trace_configs()
-    client_session = ClientSession(
-        connector=TCPConnector(
-            limit=capacity.total,
-            limit_per_host=capacity.per_host,
-            keepalive_timeout=15.0,
-            socket_factory=_make_keepalive_socket_factory(
-                idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
-                interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
-                probes=cfg.global_aiohttp_tcp_keepalive_probes,
-            ),
+    connector = build_connection_pool_connector(
+        limit=capacity.total,
+        limit_per_host=capacity.per_host,
+        keepalive_timeout=15.0,
+        socket_factory=_make_keepalive_socket_factory(
+            idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+            interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+            probes=cfg.global_aiohttp_tcp_keepalive_probes,
         ),
+    )
+    client_session = ClientSession(
+        connector=connector,
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
-        trace_configs=trace_configs,
     )
 
     global _GLOBAL_AIOHTTP_CLIENT
@@ -355,7 +354,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
 
     global _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
-    _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = bool(trace_configs)
+    _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = isinstance(connector, QueueTimedTCPConnector)
 
     return _GLOBAL_AIOHTTP_CLIENT
 

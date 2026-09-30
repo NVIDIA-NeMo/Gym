@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import inspect
 from contextlib import asynccontextmanager
-from types import SimpleNamespace
 
 import pytest
-from aiohttp import ClientSession, ClientTimeout, TCPConnector, TraceConfig, web
+from aiohttp import ClientSession, ClientTimeout, TCPConnector, web
 
 from nemo_gym import server_utils
 from nemo_gym.telemetry import connection_pool, gym_metrics
@@ -16,6 +16,7 @@ from nemo_gym.telemetry import setup as telemetry_setup
 pytest.importorskip("opentelemetry.sdk.metrics")
 
 QUEUE_DURATION = gym_metrics.HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT
+CONNECT_TOTAL = gym_metrics.HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT
 CONSTRAINT = gym_metrics.HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE
 OUTCOME = gym_metrics.HTTP_CONNECTION_POOL_ATTEMPT_OUTCOME_ATTRIBUTE
 SERVER = gym_metrics.HTTP_SERVER_NAME_ATTRIBUTE
@@ -37,6 +38,7 @@ def collected_metrics(monkeypatch):
     monkeypatch.setattr(connection_pool, "is_metrics_exporting", lambda: True)
     monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
     gym_metrics._reset_for_testing()
+    connection_pool._CONNECT_COUNTS.clear()
 
     def collect():
         data = reader.get_metrics_data()
@@ -75,8 +77,7 @@ async def _serve(handler):
 @asynccontextmanager
 async def _client(monkeypatch, *, limit: int, limit_per_host: int):
     session = ClientSession(
-        connector=TCPConnector(limit=limit, limit_per_host=limit_per_host),
-        trace_configs=connection_pool.build_connection_pool_trace_configs(),
+        connector=connection_pool.QueueTimedTCPConnector(limit=limit, limit_per_host=limit_per_host),
     )
     monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
     try:
@@ -99,17 +100,31 @@ def _expanded_attribute(points, name):
     return sorted(value for point in points for value in [point.attributes[name]] * point.count)
 
 
-async def test_no_queue_records_zero_duration_with_bounded_attributes(collected_metrics, monkeypatch):
+async def test_no_queue_records_no_histogram_sample(collected_metrics, monkeypatch):
     async def immediate(_request):
         return web.json_response({"ok": True})
 
     async with _serve(immediate) as url, _client(monkeypatch, limit=2, limit_per_host=2):
         await _get(url)
 
-    (point,) = _points(collected_metrics)
-    assert point.count == 1 and point.sum == 0
-    assert list(point.explicit_bounds) == list(gym_metrics.HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS)
-    assert point.attributes == {CONSTRAINT: "none", OUTCOME: "ok", SERVER: "model"}
+    assert _points(collected_metrics) == []
+    (connect_point,) = collected_metrics()[CONNECT_TOTAL]
+    assert connect_point.value == 1
+    assert connect_point.attributes == {SERVER: "model"}
+
+
+async def test_connect_counter_survives_connector_replacement(collected_metrics, monkeypatch):
+    async def immediate(_request):
+        return web.json_response({"ok": True})
+
+    async with _serve(immediate) as url:
+        async with _client(monkeypatch, limit=2, limit_per_host=2):
+            await _get(url)
+        async with _client(monkeypatch, limit=2, limit_per_host=2):
+            await _get(url)
+
+    (connect_point,) = collected_metrics()[CONNECT_TOTAL]
+    assert connect_point.value == 2
 
 
 async def test_per_host_limit_records_queue_wait(collected_metrics, monkeypatch):
@@ -121,10 +136,14 @@ async def test_per_host_limit_records_queue_wait(collected_metrics, monkeypatch)
         await asyncio.gather(*(_get(url) for _ in range(3)))
 
     points = _points(collected_metrics)
-    assert _expanded_attribute(points, CONSTRAINT) == ["none", "per_host", "per_host"]
+    assert _expanded_attribute(points, CONSTRAINT) == ["per_host", "per_host"]
     queued = [point for point in points if point.attributes[CONSTRAINT] == "per_host"]
     assert sum(point.count for point in queued) == 2
     assert sum(point.sum for point in queued) > 0
+    assert all(
+        list(point.explicit_bounds) == list(gym_metrics.HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS)
+        for point in points
+    )
 
 
 async def test_multi_destination_waits_are_attributed_to_the_binding_limit(collected_metrics, monkeypatch):
@@ -161,7 +180,7 @@ async def test_multi_destination_waits_are_attributed_to_the_binding_limit(colle
         release.set()
         await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
 
-    assert _expanded_attribute(_points(collected_metrics), CONSTRAINT) == ["none", "none", "per_host", "total"]
+    assert _expanded_attribute(_points(collected_metrics), CONSTRAINT) == ["per_host", "total"]
 
 
 async def test_queued_timeout_and_retry_record_separate_attempts(collected_metrics, monkeypatch):
@@ -194,8 +213,8 @@ async def test_queued_timeout_and_retry_record_separate_attempts(collected_metri
         await occupying
 
     points = _points(collected_metrics)
-    assert _expanded_attribute(points, OUTCOME) == ["ok", "ok", "timeout"]
-    timeout_point = next(point for point in points if point.attributes[OUTCOME] == "timeout")
+    assert _expanded_attribute(points, OUTCOME) == ["abandoned", "ok"]
+    timeout_point = next(point for point in points if point.attributes[OUTCOME] == "abandoned")
     assert 50 <= timeout_point.sum <= 250
     assert timeout_point.attributes[CONSTRAINT] == "total"
     retried_point = next(
@@ -232,12 +251,13 @@ async def test_cancelled_queue_wait_is_recorded(collected_metrics, monkeypatch):
         release.set()
         await occupying
 
-    cancelled = next(point for point in _points(collected_metrics) if point.attributes[OUTCOME] == "cancelled")
+    cancelled = next(point for point in _points(collected_metrics) if point.attributes[OUTCOME] == "abandoned")
     assert cancelled.sum > 0
 
 
 async def test_metric_failure_does_not_change_response(collected_metrics, monkeypatch):
-    async def immediate(_request):
+    async def delayed(_request):
+        await asyncio.sleep(0.03)
         return web.json_response({"ok": True})
 
     monkeypatch.setattr(
@@ -245,82 +265,23 @@ async def test_metric_failure_does_not_change_response(collected_metrics, monkey
         "record_http_connection_pool_queue_duration",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("metrics failed")),
     )
-    async with _serve(immediate) as url, _client(monkeypatch, limit=1, limit_per_host=1):
-        await _get(url)
+    async with _serve(delayed) as url, _client(monkeypatch, limit=1, limit_per_host=1):
+        await asyncio.gather(_get(url), _get(url))
 
 
-@pytest.mark.parametrize(
-    ("constraints", "expected"),
-    [([], "none"), (["unknown"], "unknown"), (["total", "per_host"], "mixed"), (["unknown", "total"], "total")],
-)
-def test_queue_constraint_summary(constraints, expected, monkeypatch):
-    monkeypatch.setattr(connection_pool.time, "perf_counter", lambda: 1.0)
-    context = connection_pool.ConnectionQueueContext("model")
-    for constraint in constraints:
-        context.queued(constraint)
-    assert context.queue_constraint() == expected
-
-
-def test_repeated_wait_intervals_are_accumulated_without_counting_time_between_them(monkeypatch):
-    monkeypatch.setattr(connection_pool.time, "perf_counter", iter([1.0, 2.0, 10.0, 11.0]).__next__)
-    context = connection_pool.ConnectionQueueContext("model")
-    context.queued("per_host")
-    context.released()
-    context.queued("per_host")
-    context.released()
-    assert context.duration_ms == 2_000
-
-
-@pytest.mark.parametrize("caller_context", [{"caller": "value"}, object()])
-async def test_caller_trace_request_context_is_preserved(collected_metrics, monkeypatch, caller_context):
-    received = []
-
-    def caller_trace_context_factory(*, trace_request_ctx=None):
-        received.append(trace_request_ctx)
-        return SimpleNamespace()
-
-    async def immediate(_request):
-        return web.json_response({"ok": True})
-
-    session = ClientSession(
-        connector=TCPConnector(limit=1),
-        trace_configs=[
-            connection_pool.build_connection_pool_trace_configs()[0],
-            TraceConfig(trace_config_ctx_factory=caller_trace_context_factory),
-        ],
-    )
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
-    try:
-        async with _serve(immediate) as url:
-            response = await server_utils.request("GET", url, trace_request_ctx=caller_context)
-            await response.read()
-    finally:
-        await session.close()
-
-    assert received == [caller_context]
-
-
-@pytest.mark.parametrize("outcome", ["ok", "timeout", "cancelled", "error"])
-@pytest.mark.parametrize(
-    ("constraints", "expected_constraint"),
-    [([], "none"), (["unknown"], "unknown"), (["total", "per_host"], "mixed")],
-)
-def test_record_exports_bounded_outcome_and_constraint_attributes(
-    collected_metrics, outcome, constraints, expected_constraint
-):
-    context = connection_pool.ConnectionQueueContext("resources")
-    context.queue_constraints.update(constraints)
-
-    context.record(outcome)
-
-    (point,) = _points(collected_metrics)
-    assert point.count == 1
-    assert point.attributes == {CONSTRAINT: expected_constraint, OUTCOME: outcome, SERVER: "resources"}
+def test_queue_wait_override_matches_aiohttp_signature():
+    base = inspect.signature(TCPConnector._wait_for_available_connection)
+    override = inspect.signature(connection_pool.QueueTimedTCPConnector._wait_for_available_connection)
+    assert [(name, parameter.kind, parameter.default) for name, parameter in base.parameters.items()] == [
+        (name, parameter.kind, parameter.default) for name, parameter in override.parameters.items()
+    ]
 
 
 def test_unlimited_total_can_only_queue_on_per_host_limit():
-    session = SimpleNamespace(connector=SimpleNamespace(limit=0, _acquired=set()))
-    assert connection_pool._connector_queue_constraint(session) == "per_host"
+    connector = object.__new__(TCPConnector)
+    connector._limit = 0
+    connector._acquired = set()
+    assert connection_pool._connector_queue_constraint(connector) == "per_host"
 
 
 def test_connector_introspection_failure_is_unknown():
@@ -328,5 +289,7 @@ def test_connector_introspection_failure_is_unknown():
         def __len__(self):
             raise RuntimeError("aiohttp internals changed")
 
-    session = SimpleNamespace(connector=SimpleNamespace(limit=1, _acquired=_BrokenAcquired()))
-    assert connection_pool._connector_queue_constraint(session) == "unknown"
+    connector = object.__new__(TCPConnector)
+    connector._limit = 1
+    connector._acquired = _BrokenAcquired()
+    assert connection_pool._connector_queue_constraint(connector) == "unknown"

@@ -20,7 +20,7 @@ from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
 import uvicorn
-from aiohttp import ClientOSError, ClientResponseError, RequestInfo
+from aiohttp import ClientOSError, ClientResponseError, RequestInfo, TCPConnector
 from fastapi import Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -689,6 +689,7 @@ class TestServerUtils:
 
         client = nemo_gym.server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
         try:
+            assert type(client.connector) is TCPConnector
             assert client.trace_configs == []
             report.assert_not_called()
         finally:
@@ -704,12 +705,8 @@ class TestServerUtils:
 
         client = nemo_gym.server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
         try:
-            assert len(client.trace_configs) == 1
-            trace_config = client.trace_configs[0]
-            assert len(trace_config.on_connection_queued_start) == 1
-            assert len(trace_config.on_connection_queued_end) == 1
-            assert len(trace_config.on_request_end) == 1
-            assert len(trace_config.on_request_exception) == 1
+            assert isinstance(client.connector, connection_pool.QueueTimedTCPConnector)
+            assert client.trace_configs == []
         finally:
             await client.close()
             monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)

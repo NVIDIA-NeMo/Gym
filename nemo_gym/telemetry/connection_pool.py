@@ -3,19 +3,24 @@
 
 """aiohttp connection-pool capacity diagnostics and queue-wait metrics."""
 
-import asyncio
 import logging
 import resource
 import time
-from asyncio.exceptions import CancelledError
 from contextvars import ContextVar, Token
 from math import ceil
 from pathlib import Path
+from threading import Lock
 from typing import Any, NamedTuple, Optional, Protocol
 
-from aiohttp import TraceConfig
+from aiohttp import ClientTimeout, TCPConnector
+from aiohttp.client_reqrep import ClientRequest, ConnectionKey
+from aiohttp.connector import Connection
+from aiohttp.tracing import Trace
 
-from nemo_gym.telemetry.gym_metrics import record_http_connection_pool_queue_duration
+from nemo_gym.telemetry.gym_metrics import (
+    record_http_connection_pool_queue_duration,
+    register_http_connection_pool_connect_counter,
+)
 from nemo_gym.telemetry.setup import is_metrics_exporting
 
 
@@ -39,6 +44,13 @@ class ConnectionPoolCapacity(NamedTuple):
 
 _REPORTED_CAPACITIES: set[tuple[object, ...]] = set()
 _SERVER_NAME: ContextVar[str] = ContextVar("nemo_gym_http_server_name", default="external")
+_CONNECT_COUNTS: dict[str, int] = {}
+_CONNECT_COUNTS_LOCK = Lock()
+
+
+def _connect_count_snapshot() -> dict[str, int]:
+    with _CONNECT_COUNTS_LOCK:
+        return _CONNECT_COUNTS.copy()
 
 
 def set_server_name(server_name: str) -> Token[str]:
@@ -174,50 +186,8 @@ def report_connection_pool_capacity(
         )
 
 
-class ConnectionQueueContext:
-    """Queue state for one aiohttp request attempt."""
-
-    def __init__(self, server_name: str) -> None:
-        self.server_name = server_name
-        self.started_at: Optional[float] = None
-        self.duration_ms = 0.0
-        self.queue_constraints: set[str] = set()
-        self.recorded = False
-
-    def queued(self, queue_constraint: str) -> None:
-        self.queue_constraints.add(queue_constraint)
-        if self.started_at is None:
-            self.started_at = time.perf_counter()
-
-    def released(self) -> None:
-        if self.started_at is not None:
-            self.duration_ms += (time.perf_counter() - self.started_at) * 1000.0
-            self.started_at = None
-
-    def queue_constraint(self) -> str:
-        if not self.queue_constraints:
-            return "none"
-        known = self.queue_constraints - {"unknown"}
-        if len(known) > 1:
-            return "mixed"
-        return next(iter(known)) if known else "unknown"
-
-    def record(self, attempt_outcome: str) -> None:
-        if self.recorded:
-            return
-        self.recorded = True
-        self.released()
-        record_http_connection_pool_queue_duration(
-            self.duration_ms,
-            queue_constraint=self.queue_constraint(),
-            attempt_outcome=attempt_outcome,
-            server_name=self.server_name,
-        )
-
-
-def _connector_queue_constraint(session: Any) -> str:
+def _connector_queue_constraint(connector: Any) -> str:
     """Classify the binding connector limit when aiohttp reports a queue wait."""
-    connector = getattr(session, "connector", None)
     limit = getattr(connector, "limit", None)
     acquired = getattr(connector, "_acquired", None)
     if limit is None or acquired is None:
@@ -230,51 +200,40 @@ def _connector_queue_constraint(session: Any) -> str:
         return "unknown"
 
 
-async def _on_connection_queued_start(session: Any, context: ConnectionQueueContext, _params: Any) -> None:
-    try:
-        context.queued(_connector_queue_constraint(session))
-    except Exception:
-        logger.debug("Failed to start aiohttp connection-queue telemetry", exc_info=True)
+class QueueTimedTCPConnector(TCPConnector):
+    """Record waits without imposing aiohttp TraceConfig overhead on every request."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        register_http_connection_pool_connect_counter(_connect_count_snapshot)
+
+    async def connect(self, req: ClientRequest, traces: list[Trace], timeout: ClientTimeout) -> Connection:
+        server_name = _SERVER_NAME.get()
+        with _CONNECT_COUNTS_LOCK:
+            _CONNECT_COUNTS[server_name] = _CONNECT_COUNTS.get(server_name, 0) + 1
+        return await super().connect(req, traces, timeout)
+
+    async def _wait_for_available_connection(self, key: ConnectionKey, traces: list[Trace]) -> None:
+        queue_constraint = _connector_queue_constraint(self)
+        started_at = time.perf_counter()
+        outcome = "abandoned"
+        try:
+            await super()._wait_for_available_connection(key, traces)
+            outcome = "ok"
+        finally:
+            try:
+                record_http_connection_pool_queue_duration(
+                    (time.perf_counter() - started_at) * 1000.0,
+                    queue_constraint=queue_constraint,
+                    attempt_outcome=outcome,
+                    server_name=_SERVER_NAME.get(),
+                )
+            except Exception:
+                # Diagnostics must never alter request, timeout, or cancellation behavior.
+                logger.debug("Failed to record aiohttp connection-queue telemetry", exc_info=True)
 
 
-async def _on_connection_queued_end(_session: Any, context: ConnectionQueueContext, _params: Any) -> None:
-    try:
-        context.released()
-    except Exception:
-        logger.debug("Failed to finish aiohttp connection-queue telemetry", exc_info=True)
-
-
-async def _on_request_end(_session: Any, context: ConnectionQueueContext, _params: Any) -> None:
-    try:
-        context.record("ok")
-    except Exception:
-        logger.debug("Failed to record aiohttp connection-queue telemetry", exc_info=True)
-
-
-async def _on_request_exception(_session: Any, context: ConnectionQueueContext, params: Any) -> None:
-    try:
-        if isinstance(params.exception, CancelledError):
-            outcome = "cancelled"
-        elif isinstance(params.exception, asyncio.TimeoutError):
-            outcome = "timeout"
-        else:
-            outcome = "error"
-        context.record(outcome)
-    except Exception:
-        logger.debug("Failed to record aiohttp connection-queue telemetry", exc_info=True)
-
-
-def _trace_context_factory(*, trace_request_ctx: Any = None) -> ConnectionQueueContext:
-    return ConnectionQueueContext(server_name=_SERVER_NAME.get())
-
-
-def build_connection_pool_trace_configs() -> list[TraceConfig]:
-    """Build queue instrumentation only when this process exports metrics."""
-    if not is_metrics_exporting():
-        return []
-    trace_config = TraceConfig(trace_config_ctx_factory=_trace_context_factory)
-    trace_config.on_connection_queued_start.append(_on_connection_queued_start)
-    trace_config.on_connection_queued_end.append(_on_connection_queued_end)
-    trace_config.on_request_end.append(_on_request_end)
-    trace_config.on_request_exception.append(_on_request_exception)
-    return [trace_config]
+def build_connection_pool_connector(**kwargs: Any) -> TCPConnector:
+    """Build the timed connector only while this process exports metrics."""
+    connector_cls = QueueTimedTCPConnector if is_metrics_exporting() else TCPConnector
+    return connector_cls(**kwargs)

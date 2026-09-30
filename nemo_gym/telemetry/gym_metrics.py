@@ -40,8 +40,11 @@ All four carry ``nemo.gym.sandbox.provider``.
 HTTP connection pool
 --------------------
 ``gym.http.connection_pool.queue_duration_ms`` (histogram): connection-acquisition wait
-for one outbound request attempt, including zero for attempts that did not queue. Bounded
-attributes identify the binding connector limit, attempt outcome, and configured server.
+for one queued connect. Connects that acquire a slot immediately do not record a sample.
+Bounded attributes identify the binding connector limit, queue outcome, and configured server.
+
+``gym.http.connection_pool.connect_total`` (observable counter): all connection acquisitions.
+Compare its value with the queue-duration histogram count to calculate the queued fraction.
 """
 
 import logging
@@ -58,6 +61,7 @@ SANDBOX_STARTUP_INSTRUMENT = "gym.sandbox.startup_duration_ms"
 SANDBOX_EXEC_INSTRUMENT = "gym.sandbox.exec_duration_ms"
 SANDBOX_CREATE_RETRY_INSTRUMENT = "gym.sandbox.create_retry_total"
 HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT = "gym.http.connection_pool.queue_duration_ms"
+HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT = "gym.http.connection_pool.connect_total"
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_ATTEMPT_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.attempt_outcome"
 HTTP_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.server.name"
@@ -224,7 +228,7 @@ def record_http_connection_pool_queue_duration(
     attempt_outcome: str,
     server_name: str,
 ) -> None:
-    """Record connection-pool wait for one outbound request attempt."""
+    """Record one queued connection acquisition."""
     _record_histogram(
         HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT,
         "ms",
@@ -237,6 +241,34 @@ def record_http_connection_pool_queue_duration(
         },
         boundaries=HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS,
     )
+
+
+def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[str, int]]) -> None:
+    """Export cumulative connection-acquisition counts without an OTel call on each connect."""
+    meter = _meter()
+    if meter is None:
+        return
+
+    def observe(_options: Any) -> list[Any]:
+        from opentelemetry.metrics import Observation
+
+        return [
+            Observation(count, {HTTP_SERVER_NAME_ATTRIBUTE: server_name}) for server_name, count in snapshot().items()
+        ]
+
+    try:
+        _get_or_create(
+            meter,
+            HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT,
+            lambda: meter.create_observable_counter(
+                HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT,
+                callbacks=[observe],
+                unit="{connection}",
+                description="Outbound aiohttp connection acquisitions.",
+            ),
+        )
+    except Exception:
+        logger.debug("nemo-lens: failed to register %s", HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT, exc_info=True)
 
 
 def _reset_for_testing() -> None:

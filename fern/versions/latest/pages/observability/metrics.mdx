@@ -28,7 +28,8 @@ would disagree the first time one dropped a sample.
 | `gym.verify.duration_ms` | Histogram | ms | Wall-clock duration of one verification. |
 | `gym.verify.success_rate` | Gauge | fraction | Cumulative fraction of verifications that completed. See below. |
 | `gym.servers.active` | Gauge | count | Number of servers the orchestrator started. |
-| `gym.http.connection_pool.queue_duration_ms` | Histogram | ms | Time one outbound HTTP attempt waited for an aiohttp connection, including zero-wait attempts. |
+| `gym.http.connection_pool.queue_duration_ms` | Histogram | ms | Time one queued connection acquisition waited for an aiohttp pool slot. |
+| `gym.http.connection_pool.connect_total` | Observable counter | count | All outbound aiohttp connection acquisitions. |
 | `gym.server.memory.usage` | Gauge | bytes | Current RSS or PSS for one managed server and its descendants. |
 | `gym.server.memory.sampled_peak` | Gauge | bytes | Largest value observed by the sampler for one managed server and its descendants. |
 | `gym.server.processes` | Gauge | count | Processes currently attributed to one managed server. |
@@ -87,10 +88,12 @@ Use these for request latency. They are dimensioned, so you can compare `/verify
 
 The Gym-specific `gym.http.connection_pool.queue_duration_ms` histogram measures client-side
 connection acquisition separately from request latency. Its bounded attributes identify the
-destination server, attempt outcome (`ok`, `timeout`, `cancelled`, or `error`), and which pool
-constraint caused the wait (`total`, `per_host`, `mixed`, `unknown`, or `none`). It records one
-sample for every request attempt, so retries are separate samples and attempts that do not queue
-record zero.
+destination server, queue outcome (`ok` or `abandoned`), and which pool constraint caused the
+wait (`total`, `per_host`, or `unknown`). It records one sample for each queued connect, including
+queued redirect hops. Connections that immediately acquire a slot do not record a sample.
+`abandoned` means the wait ended before a slot became available, including timeout and cancellation.
+Divide the histogram count by `gym.http.connection_pool.connect_total` over the same interval and
+destination to calculate the fraction of connects that queued.
 
 ### A Note on `gym.server.request_duration_ms`
 
