@@ -62,10 +62,18 @@ ENV PATH=/opt/lean/bin:$PATH
 RUN ln -sf /opt/lean/bin/lake /usr/local/bin/lake && \
     ln -sf /opt/lean/bin/lean /usr/local/bin/lean
 
-# Compiles run as this user (see LeanSandbox.compile), so where the provider can drop privileges a
-# submission's `#eval` can neither rewrite the root-owned toolchain nor write outside /tmp. The
-# build cannot assert that: its namespace has one uid, so `su` here keeps uid 0 (as under enroot).
-RUN useradd --system --create-home --shell /bin/sh lean
+# Compiles run as this user (see LeanSandbox.compile), so where the provider can switch uid a
+# submission's `#eval` can neither rewrite the toolchain nor write outside /tmp. The build cannot
+# test that by running as `lean`: its namespace has one uid, so `su` here keeps uid 0 (as under
+# enroot). It asserts the permissions that make it true instead.
+RUN useradd --system --create-home --shell /bin/sh lean && \
+    test -z "$(find /opt/lean /opt/mathlib ! -type l -perm /022)" && \
+    test -z "$(find /opt/lean /opt/mathlib ! -user root)"
+
+# `lake env` asks git about each package. Git refuses root-owned repos for another user ("dubious
+# ownership"), so lake concludes the package URL changed and tries to delete and re-clone it -- which
+# the read-only toolchain rightly refuses, failing every compile. The repos are ours: trust them.
+RUN git config --system --add safe.directory '*'
 
 # Compile as the verifier will: `lake env lean` in the project, as `lean`, under `env -i` with
 # no PATH. Setting PATH here would hide the failure this exists to catch.

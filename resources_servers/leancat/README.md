@@ -70,6 +70,12 @@ cd ../lean_proof/lean_image && ./build.sh v4.19.0
 Verification runs through `nemo_gym.sandbox`, so any provider works — OpenSandbox, enroot,
 docker — and nothing has to be started out of band.
 
+**Isolation depends on the provider.** Submitted Lean can execute code while it compiles (`#eval`), so compiles run as
+the unprivileged `lean` user the image creates, with a root-owned toolchain. That is enforced on OpenSandbox and docker.
+Enroot maps a single uid, so there `su` keeps uid 0 and the toolchain is writable; the server logs a warning. Use enroot
+for trusted-model runs such as reproducing the paper, and OpenSandbox (with `provider_options.network_policy` for
+network isolation) for untrusted models or training.
+
 **The Mathlib version must be exactly v4.19.0.** LeanCat's statements are written against that release's
 `CategoryTheory` API, and a different Mathlib fails tasks for reasons that have nothing to do with the model: on
 v4.12.0, 36 of the 100 reference statements fail to compile **with their `sorry` still intact**, so they score 0

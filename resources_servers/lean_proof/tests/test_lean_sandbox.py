@@ -95,3 +95,19 @@ async def test_named_provider_without_a_global_config_is_a_clear_error():
     lean = LeanSandbox(sandbox_provider="sandbox", sandbox_config={"image": "gym-lean:test"})
     with pytest.raises(RuntimeError, match="no Gym global config"):
         await lean.start()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider,warns", [({"enroot": {}}, True), ({"opensandbox": {}}, False)])
+async def test_start_warns_when_the_provider_does_not_isolate(provider, warns, monkeypatch, caplog):
+    """Enroot runs submitted code as the host user; the operator should be told."""
+    monkeypatch.setattr(
+        "resources_servers.lean_proof.lean_sandbox.AsyncSandbox",
+        lambda _provider: type("S", (), {"start": AsyncMock()})(),
+    )
+    lean = LeanSandbox(sandbox_provider=provider, sandbox_config={"image": "gym-lean:test"})
+
+    with caplog.at_level("WARNING"):
+        await lean.start()
+
+    assert ("no uid switch" in caplog.text) is warns

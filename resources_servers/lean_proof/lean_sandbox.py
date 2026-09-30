@@ -111,6 +111,12 @@ class LeanSandbox:
                     "loaded. Pass an inline {provider: {...}} mapping when running outside a Gym run."
                 )
             provider = resolve_provider_config(self._provider, global_config)
+            if "enroot" in provider:
+                logger.warning(
+                    "Sandbox provider 'enroot' runs submitted Lean as your own user, with no uid switch, "
+                    "read-only toolchain or network isolation. Use it for trusted-model runs such as "
+                    "reproducing published numbers; use OpenSandbox for untrusted models or training."
+                )
             # Accepts a mapping too, so an inline block's default_metadata is not dropped.
             default_metadata = resolve_provider_metadata(self._provider, global_config)
 
