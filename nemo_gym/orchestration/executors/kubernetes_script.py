@@ -48,6 +48,15 @@ OUTPUT_VOLUME_NAME = "gym-output"
 # Flat memory request for the driver container, which does no GPU work of its own: enough that it
 # isn't QoS class BestEffort either (see `_gpu_resources`), without needing its own config knob.
 DRIVER_MEMORY_REQUEST = "2Gi"
+# Kubernetes defaults a container's /dev/shm to 64Mi, which is enough for most workloads but not
+# vLLM's multiprocess engine: with tensor_parallel_size > 1 or number_of_instances > 1 it talks to
+# its GPU worker processes over a /dev/shm-backed ring buffer, and starting one on the default
+# allocation fails outright ("Insufficient space in /dev/shm ... Increase /dev/shm (e.g. --shm-size
+# or --ipc=host)") -- observed in practice at TP=2 and again at TP2 x 4 instances. A well-known
+# vLLM-on-Kubernetes gotcha; 4Gi comfortably covers ordinary single-node sizes without eating
+# meaningfully into `memory_per_gpu`.
+SHM_VOLUME_NAME = "dshm"
+SHM_SIZE = "4Gi"
 
 _QUANTITY_RE = re.compile(r"^(\d+)([A-Za-z]*)$")
 
@@ -170,6 +179,8 @@ def _sidecar_containers(config: SubmitConfig, compute: KubernetesComputeConfig) 
             "ports": [{"containerPort": service.port}],
             "resources": _gpu_resources(gpu_count, compute.memory_per_gpu),
         }
+        if gpu_count > 0:
+            container["volumeMounts"] = [{"name": SHM_VOLUME_NAME, "mountPath": "/dev/shm"}]
         if service.env:
             container["env"] = _env_list(service.env)
         if service.health_check:
@@ -241,7 +252,7 @@ def build_job_manifest(
     manifest_writes = _manifest_write_commands(resolved_config, manifest, run_dir_str)
     _reject_unsupported_mounts(config.driver.mounts)
 
-    volumes = []
+    volumes = [{"name": SHM_VOLUME_NAME, "emptyDir": {"medium": "Memory", "sizeLimit": SHM_SIZE}}]
     if compute.pvc_name:
         volumes.append({"name": OUTPUT_VOLUME_NAME, "persistentVolumeClaim": {"claimName": compute.pvc_name}})
 

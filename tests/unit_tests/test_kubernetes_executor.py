@@ -120,6 +120,42 @@ def test_gpu_sidecar_gets_a_memory_request_scaled_by_gpu_count(tmp_path):
     assert driver["resources"]["requests"]["memory"]
 
 
+def test_gpu_sidecar_mounts_a_larger_dev_shm(tmp_path):
+    # Kubernetes' default 64Mi /dev/shm is too small for vLLM's multiprocess engine at TP>1 or
+    # number_of_instances>1 ("Insufficient space in /dev/shm ..."), observed for real against a
+    # cluster.
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    services = {
+        "vllm_model": {
+            "type": "vllm",
+            "container": "vllm/vllm-openai:latest",
+            "model": "org/model",
+            "tensor_parallel_size": 2,
+        }
+    }
+    config = _submit_config(tmp_path, ["bench_a"], services=services)
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    sidecar = job["spec"]["template"]["spec"]["initContainers"][0]
+    assert sidecar["volumeMounts"] == [{"name": "dshm", "mountPath": "/dev/shm"}]
+    volumes = {v["name"]: v for v in job["spec"]["template"]["spec"]["volumes"]}
+    assert volumes["dshm"]["emptyDir"]["sizeLimit"] == "4Gi"
+
+
 def test_run_returns_a_record_naming_every_benchmark(tmp_path, monkeypatch):
     fake = _FakeKubectl([(0, "job.batch/x created", ""), (0, "job.batch/y created", "")])
     _install(monkeypatch, fake)
