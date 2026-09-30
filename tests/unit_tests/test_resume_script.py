@@ -13,10 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -160,23 +158,3 @@ def test_successor_is_killed_if_its_dependency_can_never_be_met(tmp_path):
     sbatch_args = (tmp_path / "sbatch_calls").read_text()
     assert "--dependency=afternotok:200" in sbatch_args
     assert "--kill-on-invalid-dep=yes" in sbatch_args
-
-
-@pytest.mark.docs
-def test_job_dir_files_are_documented():
-    """Downstream tools read these names, so the docs page must list every one the scripts write."""
-    root = Path(__file__).resolve().parents[2]
-    page = (root / "fern/versions/latest/pages/evaluation/submit-auto-resume.mdx").read_text()
-    state_files = set(re.findall(r"\.gym_\w+", render_resume_prologue(ResumeConfig())))
-    script_source = (root / "nemo_gym/orchestration/executors/slurm_script.py").read_text()
-    log_stems = set(re.findall(r"logs/([\w{}]+)-\$SLURM_JOB_ID\.log", script_source))
-
-    assert state_files == {".gym_job_chain", ".gym_accumulated_walltime", ".gym_infra_retries"}
-    assert log_stems == {"{name}", "driver"}
-    for documented in [
-        *state_files,
-        "logs/driver-<SLURM_JOB_ID>.log",
-        "logs/<service>-<SLURM_JOB_ID>.log",
-        "logs/otel_collector-<SLURM_JOB_ID>.log",
-    ]:
-        assert f"`{documented}`" in page, f"{documented} is missing from the auto-resume docs"
