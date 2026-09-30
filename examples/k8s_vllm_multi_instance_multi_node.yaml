@@ -47,6 +47,9 @@ driver:
     HF_TOKEN: host:HF_TOKEN
   benchmarks:
     gpqa:
+      prepare:
+        config_paths:
+          - benchmarks/gpqa/config.yaml
       run:
         split: benchmark
         config_paths:
