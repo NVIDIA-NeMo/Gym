@@ -379,3 +379,46 @@ def test_gpu_footprint_no_node_pools_skips_validation():
     # Default COMPUTE fixture has no node_pools, so nothing to validate against.
     config = SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}))
     assert config.services["svc"].number_of_instances == 4
+
+
+# ---------------------------------------------------------------------------
+# KubernetesComputeConfig
+# ---------------------------------------------------------------------------
+
+COMPUTE_K8S = {"cluster": {"type": "kubernetes", "namespace": "eng-test", "gpus_per_node": 8}}
+
+
+def test_kubernetes_compute_accepted():
+    config = SubmitConfig.model_validate(_config(compute=COMPUTE_K8S))
+    assert config.services["svc"].placement == "cluster"
+
+
+def test_kubernetes_gpu_footprint_exact_fit_accepted():
+    service = {**SERVICE, "tensor_parallel_size": 2, "number_of_instances": 4}
+    config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_K8S))
+    assert config.services["svc"].number_of_instances == 4
+
+
+def test_kubernetes_gpu_footprint_exceeds_node_raises():
+    service = {**SERVICE, "tensor_parallel_size": 2, "number_of_instances": 8}
+    with pytest.raises(ValidationError, match="exceeds the node pool's gpus_per_node"):
+        SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_K8S))
+
+
+def test_kubernetes_node_pool_on_service_raises():
+    # Kubernetes v1 has no named pools; a service pinned to one has nothing to match.
+    service = {**SERVICE, "node_pool": "compute"}
+    with pytest.raises(ValidationError, match="does not match any node pool"):
+        SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_K8S))
+
+
+def test_kubernetes_compute_discriminated_from_slurm():
+    k8s_config = SubmitConfig.model_validate(_config(compute=COMPUTE_K8S))
+    slurm_config = SubmitConfig.model_validate(_config())
+    assert type(next(iter(k8s_config.compute.values()))).__name__ == "KubernetesComputeConfig"
+    assert type(next(iter(slurm_config.compute.values()))).__name__ == "SlurmComputeConfig"
+
+
+def test_kubernetes_unknown_type_rejected():
+    with pytest.raises(ValidationError):
+        SubmitConfig.model_validate(_config(compute={"cluster": {"type": "not-a-real-backend"}}))
