@@ -3252,7 +3252,14 @@ class TestDispatchBudget:
         mock_server_client.post = AsyncMock(side_effect=post)
         # Pre-dispatch validation reads the running config; the fake agent must
         # exist there as an agent instance or run_examples refuses the rows.
-        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {}}})
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "my_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}
+                },
+            }
+        )
 
         class MockHelper(RolloutCollectionHelper):
             def setup_server_client(self, *args, **kwargs):
@@ -3551,7 +3558,14 @@ class TestDispatchOrderReachesTheServer:
 
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(side_effect=post)
-        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {}}})
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "my_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}
+                },
+            }
+        )
 
         class MockHelper(RolloutCollectionHelper):
             def setup_server_client(self, *args, **kwargs):
