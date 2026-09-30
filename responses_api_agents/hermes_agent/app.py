@@ -723,9 +723,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
         self,
         state: HermesAgentSessionState,
     ) -> AgentObservationBundle:
+        if state.task is not None and not state.task.done() and not state.task.cancelling():
+            state.task.cancel()
+        if state.owns_sandbox:
+            # Container teardown is the cleanup boundary for an owned sandbox. Do not let a
+            # missing runner receipt or a stuck activation prevent stopping all its processes.
+            await state.sandbox.stop()
+            state.runner_cleanup = RunnerCleanup.CONFIRMED
         if state.task is not None:
-            if not state.task.done() and not state.task.cancelling():
-                state.task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(state.task), timeout=self.config.session_close_timeout_seconds)
             except asyncio.CancelledError:
@@ -734,23 +739,21 @@ class HermesAgent(SimpleResponsesAPIAgent):
             except Exception:
                 if not state.task.done():
                     raise
-                # An activation error is not proof of cleanup; confirm it below.
-        await self._terminate_sandbox_runner(state)
-        # Retire the path atomically before deleting its launch fence. Otherwise a delayed
-        # exec could claim the directory between rm unlinking launch.claim and removing the directory.
-        retired_dir = f"{state.session_dir}.closed"
-        removed = await state.sandbox.exec(
-            f"if [ -d {quote(state.session_dir)} ]; then "
-            f"mv {quote(state.session_dir)} {quote(retired_dir)} || exit 1; fi; "
-            f"rm -rf {quote(retired_dir)}",
-            cwd=state.workdir,
-            timeout_s=self.config.session_close_timeout_seconds,
-        )
-        if removed.return_code != 0:
-            raise RuntimeError("Could not remove Hermes session files")
-        if state.owns_sandbox:
-            await state.sandbox.stop()
-        else:
+                # A borrowed sandbox still needs proof of cleanup after an activation error.
+        if not state.owns_sandbox:
+            await self._terminate_sandbox_runner(state)
+            # Retire the path atomically before deleting its launch fence. Otherwise a delayed
+            # exec could claim the directory between rm unlinking launch.claim and removing the directory.
+            retired_dir = f"{state.session_dir}.closed"
+            removed = await state.sandbox.exec(
+                f"if [ -d {quote(state.session_dir)} ]; then "
+                f"mv {quote(state.session_dir)} {quote(retired_dir)} || exit 1; fi; "
+                f"rm -rf {quote(retired_dir)}",
+                cwd=state.workdir,
+                timeout_s=self.config.session_close_timeout_seconds,
+            )
+            if removed.return_code != 0:
+                raise RuntimeError("Could not remove Hermes session files")
             await state.sandbox.disconnect()
         observations = state.observations
         if observations is None:

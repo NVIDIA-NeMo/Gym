@@ -284,6 +284,87 @@ async def test_close_failure_keeps_session_for_retry(
         agent._download_json.assert_awaited_once()
 
 
+@pytest.mark.parametrize("receipt", [None, {"cleanup_confirmed": False, "error": "cleanup failed"}])
+@pytest.mark.parametrize("runner_cleanup", list(RunnerCleanup))
+async def test_owned_close_stops_without_receipt_or_filesystem_cleanup(agent, state, receipt, runner_cleanup):
+    state.owns_sandbox = True
+    state.runner_cleanup = runner_cleanup
+    state.observations = AgentObservationBundle(source="hermes")
+    agent._agent_sessions["session"] = state
+    agent._download_json = AsyncMock(return_value=receipt)
+    if receipt is None:
+        agent._download_json.side_effect = FileNotFoundError("missing cleanup receipt")
+    state.sandbox.exec.side_effect = AssertionError("Owned close must not depend on sandbox exec")
+    close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
+
+    response = await agent.close_agent_session(request(state), close)
+    assert response.agent_observations == state.observations
+    assert state.runner_cleanup is RunnerCleanup.CONFIRMED
+    assert "session" not in agent._agent_sessions
+    assert await agent.close_agent_session(request(state), close) == response
+    state.sandbox.stop.assert_awaited_once()
+    state.sandbox.disconnect.assert_not_awaited()
+    state.sandbox.exec.assert_not_awaited()
+    agent._download_json.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, TimeoutError, asyncio.CancelledError])
+async def test_owned_stop_failure_keeps_close_retryable(agent, state, failure):
+    state.owns_sandbox = True
+    state.runner_cleanup = RunnerCleanup.UNCONFIRMED
+    agent._agent_sessions["session"] = state
+    state.sandbox.stop.side_effect = [failure("stop failed"), None]
+    agent._download_json = AsyncMock(side_effect=FileNotFoundError("missing cleanup receipt"))
+    close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
+
+    with pytest.raises(failure, match="stop failed"):
+        await agent.close_agent_session(request(state), close)
+    assert agent._agent_sessions["session"] is state
+    assert state.phase is SessionPhase.CLOSING
+    assert state.runner_cleanup is RunnerCleanup.UNCONFIRMED
+    assert "session" not in agent._closed_agent_sessions
+    response = await agent.close_agent_session(request(state), close)
+    assert await agent.close_agent_session(request(state), close) == response
+    assert state.sandbox.stop.await_count == 2
+    assert state.runner_cleanup is RunnerCleanup.CONFIRMED
+    state.sandbox.disconnect.assert_not_awaited()
+    state.sandbox.exec.assert_not_awaited()
+    agent._download_json.assert_not_awaited()
+
+
+async def test_owned_stop_precedes_waiting_for_cancelled_activation(agent, state):
+    state.owns_sandbox = True
+    state.runner_cleanup = RunnerCleanup.UNCONFIRMED
+    agent.config.session_close_timeout_seconds = 0.1
+    started, stopped = asyncio.Event(), asyncio.Event()
+
+    async def activation():
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            # Model an activation whose cleanup cannot finish until the container stops.
+            await stopped.wait()
+            raise
+
+    state.sandbox.stop.side_effect = stopped.set
+    agent._download_json = AsyncMock(side_effect=FileNotFoundError("missing cleanup receipt"))
+    state.task = asyncio.create_task(activation())
+    await started.wait()
+    try:
+        await agent._close_agent_session_state(state)
+        assert state.task.cancelled()
+        assert state.runner_cleanup is RunnerCleanup.CONFIRMED
+        state.sandbox.stop.assert_awaited_once()
+        state.sandbox.exec.assert_not_awaited()
+        agent._download_json.assert_not_awaited()
+    finally:
+        stopped.set()
+        if not state.task.done():
+            state.task.cancel()
+        await asyncio.gather(state.task, return_exceptions=True)
+
+
 @pytest.mark.parametrize("failure", [TimeoutError, asyncio.CancelledError])
 async def test_unavailable_remote_fence_still_blocks_close(agent, state, failure):
     # Losing contact with the sandbox is not proof that its pending launch is fenced.
