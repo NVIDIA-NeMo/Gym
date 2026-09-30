@@ -63,6 +63,18 @@ LOGGER = logging.getLogger(__name__)
 GENERATION_ROUTES = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
 _ROLLOUT_PREFIX = re.compile(rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<capture_key>[^/]+)")
 
+# Request fields that compile into a structured decoder. A cut prefix cannot restore that decoder's state,
+# so such a call restarts after a restore instead of continuing its prefix.
+_STRUCTURED_GENERATION_FIELDS = (
+    "guided_choice",
+    "guided_grammar",
+    "guided_json",
+    "guided_regex",
+    "guided_whitespace_pattern",
+    "structural_tag",
+    "structured_outputs",
+)
+
 # Sends one inventory to the worker at ``backend`` and returns its receipt.
 CutRequester = Callable[[str, GenerationCutInventory], Awaitable[GenerationCutReceipt]]
 
@@ -104,10 +116,13 @@ class EpisodeCut(BaseModel):
 
     capture_key: str
     record: GenerationCutRecord
+    # When the cut call was admitted: an episode can hold several undelivered calls when its client
+    # retried a call the server was still running, and only the latest is still awaited.
+    admitted_at: float = 0.0
 
 
 class GateReport(BaseModel):
-    """What one process's gate contributes to readiness and to a commit."""
+    """One process's readiness: cheap enough to recompute on every change while a checkpoint is open."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -115,6 +130,18 @@ class GateReport(BaseModel):
     streaming: list[str]
     inflight: int
     held: int
+    cut: int = 0
+    # Undelivered calls the worker could not cut, and calls not cut because their decoding is constrained.
+    # Both regenerate after a restore; a worker that cuts nothing shows up here instead of silently.
+    cut_failed: int = 0
+    cut_skipped: int = 0
+
+
+class GateSnapshot(BaseModel):
+    """What one process contributes to a commit; taken once, while admission is closed."""
+
+    model_config = ConfigDict(extra="forbid")
+
     # Undelivered model calls (model_call_id -> capture key): the commit leaves their ledger rows out.
     undelivered: dict[str, str]
     cuts: list[EpisodeCut]
@@ -170,6 +197,10 @@ class _Ticket:
     backend: Optional[str] = None
     capture: Optional[CaptureContext] = None
     cut: Optional[GenerationCutPrefixAck] = None
+    # The durable cut as a record, built once when the worker acknowledges it.
+    cut_record: Optional[GenerationCutRecord] = None
+    # Why this call must restart rather than continue a cut prefix (constrained decoding), if it must.
+    cut_restart_reason: Optional[str] = None
     # A restored cut claimed from another process for this call, and whether the call used it.
     claimed_cut: Optional[GenerationCutRecord] = None
     claimed_cut_used: bool = False
@@ -192,6 +223,34 @@ def attach_capture_context(context: CaptureContext) -> None:
     if ticket is not None:
         ticket.capture = context
         context.admission_hook = ticket.gate.admission_hook(ticket)
+
+
+def generation_cut_restart_reason(body: Mapping[str, Any]) -> Optional[str]:
+    """Why a generation request cannot continue a cut prefix: its decoding is constrained."""
+    tool_choice = body.get("tool_choice")
+    if isinstance(tool_choice, str):
+        if tool_choice not in {"auto", "none"}:
+            return f"tool_choice:{tool_choice}"
+    elif tool_choice is not None:
+        # Named function and allowed-tool choices compile into a structured decoder.
+        return "tool_choice:constrained"
+    response_format = body.get("response_format")
+    if response_format is not None and (
+        not isinstance(response_format, Mapping) or response_format.get("type") != "text"
+    ):
+        format_type = response_format.get("type", "unknown") if isinstance(response_format, Mapping) else "unknown"
+        return f"response_format:{format_type}"
+    for name in _STRUCTURED_GENERATION_FIELDS:
+        if body.get(name) is not None:
+            return name
+    return None
+
+
+def note_generation_request(body: Mapping[str, Any]) -> None:
+    """Record the request the current policy call sends, so a checkpoint knows whether it may cut it."""
+    ticket = _CURRENT_TICKET.get()
+    if ticket is not None:
+        ticket.cut_restart_reason = generation_cut_restart_reason(body)
 
 
 def note_generation_backend(base_url: Any) -> None:
@@ -248,6 +307,8 @@ class PolicyGate:
 
     def admission_hook(self, ticket: _Ticket) -> Callable[[CaptureContext, CaptureAdmission], CaptureAdmission]:
         def continue_restored_cut(context: CaptureContext, admission: CaptureAdmission) -> CaptureAdmission:
+            if ticket.cut_restart_reason is not None:
+                return admission
             digest = conversation_digest(list(context.request_items or []))
             record = self.restored_cuts.take(ticket, context.rollout_id, digest)
             if record is None:
@@ -269,6 +330,7 @@ class PolicyGate:
         self._reopened.set()
         for ticket in self.tickets:
             ticket.cut = None
+            ticket.cut_record = None
 
     async def retire(self, episode_id: EpisodeId) -> None:
         for ticket in list(self.tickets):
@@ -283,19 +345,31 @@ class PolicyGate:
             ready=not streaming,
             streaming=streaming,
             inflight=len(self.tickets),
-            held=sum(not ticket.response_started for ticket in self.tickets),
+            held=len(self.tickets) - sum(ticket.response_started for ticket in self.tickets),
+            cut=sum(ticket.cut_record is not None for ticket in undelivered),
+            cut_failed=sum(ticket.cut is not None and ticket.cut_record is None for ticket in undelivered),
+            cut_skipped=sum(ticket.cut_restart_reason is not None for ticket in undelivered),
+        )
+
+    def snapshot(self) -> GateSnapshot:
+        undelivered = [ticket for ticket in self.tickets if ticket.undelivered_call_id is not None]
+        return GateSnapshot(
             undelivered={ticket.undelivered_call_id: ticket.capture_key for ticket in undelivered},
             cuts=[
-                EpisodeCut(capture_key=ticket.capture_key, record=_cut_record(ticket))
+                EpisodeCut(capture_key=ticket.capture_key, record=ticket.cut_record, admitted_at=ticket.admitted_at)
                 for ticket in undelivered
-                if ticket.cut is not None and ticket.cut.disposition == "durable_prefix"
+                if ticket.cut_record is not None
             ],
         )
 
     async def _cut_all(self, request: CheckpointRequest) -> None:
         by_backend: dict[str, list[_Ticket]] = {}
         for ticket in self.tickets:
-            if ticket.backend is not None and ticket.undelivered_call_id is not None:
+            if (
+                ticket.backend is not None
+                and ticket.undelivered_call_id is not None
+                and ticket.cut_restart_reason is None
+            ):
                 by_backend.setdefault(ticket.backend, []).append(ticket)
         await asyncio.gather(*(self._cut(request, backend, tickets) for backend, tickets in by_backend.items()))
 
@@ -322,8 +396,14 @@ class PolicyGate:
             # A missing cut only costs regeneration after restore; never block the checkpoint on it.
             LOGGER.warning("generation cut failed on %s; those calls regenerate after restore", backend, exc_info=True)
             acks = {ticket_id: GenerationCutPrefixAck.failure(prefix) for ticket_id, prefix in prefixes.items()}
+        failed = sum(ack.disposition != "durable_prefix" for ack in acks.values())
+        if failed:
+            LOGGER.warning(
+                "worker %s could not cut %d of %d calls; they regenerate after restore", backend, failed, len(acks)
+            )
         for ticket in tickets:
             ticket.cut = acks[ticket.ticket_id]
+            ticket.cut_record = _cut_record(ticket) if ticket.cut.disposition == "durable_prefix" else None
 
 
 def merge_reports(reports: Iterable[GateReport]) -> PrepareReport:
@@ -335,7 +415,9 @@ def merge_reports(reports: Iterable[GateReport]) -> PrepareReport:
         counts={
             "inflight": sum(report.inflight for report in reports),
             "held": sum(report.held for report in reports),
-            "cut": sum(len(report.cuts) for report in reports),
+            "cut": sum(report.cut for report in reports),
+            "cut_failed": sum(report.cut_failed for report in reports),
+            "cut_skipped": sum(report.cut_skipped for report in reports),
         },
     )
 
@@ -343,29 +425,47 @@ def merge_reports(reports: Iterable[GateReport]) -> PrepareReport:
 def export_model_records(
     ledger: CheckpointableLedger,
     episode_ids: Optional[list[EpisodeId]],
-    reports: Iterable[GateReport],
+    snapshots: Iterable[GateSnapshot],
     restored_cuts: Mapping[str, GenerationCutRecord],
 ) -> list[ModelRecord]:
     """The rows and cuts of each continued episode, leaving out every undelivered call of every process."""
     if episode_ids is None:
         raise ControlError("model commit needs the episode_ids the controller continues from this checkpoint")
-    reports = list(reports)
-    undelivered = {call_id for report in reports for call_id in report.undelivered}
-    cuts_by_key: dict[str, list[GenerationCutRecord]] = {}
-    for report in reports:
-        for cut in report.cuts:
-            cuts_by_key.setdefault(cut.capture_key, []).append(cut.record)
+    snapshots = list(snapshots)
+    undelivered = {call_id for snapshot in snapshots for call_id in snapshot.undelivered}
+    # One cut per episode: when a client retried a call the server was still running, both calls are
+    # undelivered and cut, but only the latest is still awaited and will be re-issued after a restore.
+    latest: dict[str, EpisodeCut] = {}
+    for snapshot in snapshots:
+        for cut in snapshot.cuts:
+            if cut.capture_key not in latest or cut.admitted_at > latest[cut.capture_key].admitted_at:
+                latest[cut.capture_key] = cut
+    cuts_by_key = {key: [cut.record] for key, cut in latest.items()}
     records = []
     for episode_id in episode_ids:
         key = episode_id.capture_key
         rows = [row for row in ledger.export_rows(key) if row.get("model_call_id") not in undelivered]
         cuts = list(cuts_by_key.get(key, []))
-        # A restored cut that no re-issued call has consumed yet is still this episode's prefix.
-        if key in restored_cuts:
+        # A restored cut that no re-issued call has consumed yet is still this episode's prefix, unless a
+        # newer call of the episode was cut since.
+        if key in restored_cuts and not cuts:
             cuts.append(restored_cuts[key])
         if rows or cuts:
             records.append(ModelRecord(episode_id=episode_id, rows=rows, generation_cuts=cuts))
     return records
+
+
+def retained_staging_keys(records: Iterable[CheckpointRecord]) -> list[str]:
+    """Every staged token-store key the checkpointed episodes still refer to.
+
+    The training framework must keep these rows in its token store and may clear the rest.
+    """
+    keys: set[str] = set()
+    for record in records:
+        keys.update(row["staging_key"] for row in record.rows if row.get("staging_key"))
+        for cut in record.generation_cuts:
+            keys.update(cut.continuation.staging_keys)
+    return sorted(keys)
 
 
 def import_model_records(
@@ -384,12 +484,13 @@ def import_model_records(
             raise ControlError(f"capture ledger for {target} already holds rows from another execution")
         if len(record.generation_cuts) > 1:
             raise ControlError(f"episode {record.episode_id.capture_key} has more than one undelivered cut")
-    restored = {}
-    for record, target in targets:
-        ledger.import_rows(target, record.rows)
-        if record.generation_cuts:
-            restored[target] = record.generation_cuts[0]
-    return restored
+    import_many = getattr(ledger, "import_rows_many", None)
+    if import_many is not None:
+        import_many({target: record.rows for record, target in targets})
+    else:
+        for record, target in targets:
+            ledger.import_rows(target, record.rows)
+    return {target: record.generation_cuts[0] for record, target in targets if record.generation_cuts}
 
 
 class PolicyModelParticipant(CheckpointParticipant):
@@ -443,12 +544,27 @@ class PolicyModelParticipant(CheckpointParticipant):
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         if self.ledger is None:
             return []
-        return export_model_records(self.ledger, episode_ids, [self.gate.report()], self._restored_cuts)
+        return export_model_records(self.ledger, episode_ids, [self.gate.snapshot()], self._restored_cuts)
+
+    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+        if self.ledger is None:
+            return []
+        # Snapshot on the event loop, then read every episode's ledger off it.
+        snapshots, restored = [self.gate.snapshot()], dict(self._restored_cuts)
+        return await asyncio.to_thread(export_model_records, self.ledger, episode_ids, snapshots, restored)
 
     def restore_records(self, records: list[CheckpointRecord]) -> None:
         if self.gate.tickets:
             raise ControlError("model restore requires a process that is not serving generations")
         self._restored_cuts.update(import_model_records(self.ledger, records))
+
+    async def install(self, records: list[CheckpointRecord]) -> None:
+        if self.gate.tickets:
+            raise ControlError("model restore requires a process that is not serving generations")
+        self._restored_cuts.update(await asyncio.to_thread(import_model_records, self.ledger, records))
+
+    def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
+        return {"staging_keys": retained_staging_keys(records)}
 
     def status_extra(self) -> dict[str, Any]:
         return {"restored_generation_cuts": sorted(self._restored_cuts)}
@@ -529,6 +645,8 @@ def generation_cut_requester(auth_token: str) -> CutRequester:
             json=inventory.model_dump(mode="json"),
             headers={"authorization": f"Bearer {auth_token}"},
             _internal=True,
+            # The worker's data connections are busy with the very generations being cut.
+            _control=True,
         )
         await raise_for_status(response)
         return GenerationCutReceipt.model_validate(await get_response_json(response))
