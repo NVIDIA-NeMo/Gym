@@ -132,8 +132,8 @@ aiohttp connection acquisition. This metric is independent of the `http_client` 
 | `nemo.gym.http.connection_pool.attempt_outcome` | Queue outcome: `ok`, or `abandoned` when the wait ends before a slot is available, including timeout and cancellation |
 | `nemo.gym.http.server.name` | Configured destination server name, or `external` for direct external calls |
 
-The timed connector subclass is installed only when metrics export is active. Otherwise Gym uses
-aiohttp's `TCPConnector` directly, so immediate connects do not pay tracing-hook overhead.
+When metrics export is active, Gym uses `QueueTimedTCPConnector` to count connection attempts and
+measure queue waits. Otherwise, Gym uses aiohttp’s `TCPConnector` directly without collecting these metrics.
 
 ### Reverse Proxy Headers
 

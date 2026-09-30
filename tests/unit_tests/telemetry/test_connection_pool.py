@@ -86,6 +86,29 @@ async def _client(monkeypatch, *, limit: int, limit_per_host: int):
         await session.close()
 
 
+@asynccontextmanager
+async def _lazy_client(monkeypatch, *, metrics_enabled: bool = True, workers: int = 1, aggregate_limit: int = 4):
+    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
+    monkeypatch.setattr(connection_pool, "is_metrics_exporting", lambda: metrics_enabled)
+    monkeypatch.setattr(server_utils, "get_nemo_gym_fastapi_num_workers", lambda: workers)
+    monkeypatch.setattr(server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
+    monkeypatch.setattr(
+        server_utils,
+        "get_global_config_dict",
+        lambda **_kwargs: {
+            "global_aiohttp_connector_limit": aggregate_limit,
+            "global_aiohttp_connector_limit_per_host": aggregate_limit,
+        },
+    )
+    try:
+        yield
+    finally:
+        if server_utils._GLOBAL_AIOHTTP_CLIENT is not None:
+            await server_utils._GLOBAL_AIOHTTP_CLIENT.close()
+            monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+
+
 async def _get(url: str, **kwargs) -> None:
     response = await server_utils.request("GET", url, _server_name="model", **kwargs)
     assert response.status == 200
@@ -111,6 +134,80 @@ async def test_no_queue_records_no_histogram_sample(collected_metrics, monkeypat
     (connect_point,) = collected_metrics()[CONNECT_TOTAL]
     assert connect_point.value == 1
     assert connect_point.attributes == {SERVER: "model"}
+
+
+@pytest.mark.parametrize("metrics_enabled", [False, True])
+@pytest.mark.parametrize("server_name", ["policy_model", "remote_agent_service", None])
+@pytest.mark.parametrize("workers", [1, 4])
+async def test_lazy_client_labels_first_and_subsequent_attempts(
+    collected_metrics, monkeypatch, metrics_enabled: bool, server_name: str | None, workers: int
+):
+    async def immediate(_request):
+        return web.json_response({"ok": True})
+
+    async with (
+        _lazy_client(monkeypatch, metrics_enabled=metrics_enabled, workers=workers),
+        _serve(immediate) as url,
+    ):
+        for count in (1, 2):
+            response = await server_utils.request("GET", url, _server_name=server_name)
+            assert response.status == 200
+            await response.read()
+            points = collected_metrics().get(CONNECT_TOTAL, [])
+            if metrics_enabled:
+                (point,) = points
+                assert point.value == count
+                assert point.attributes == {SERVER: server_name or "external"}
+            else:
+                assert points == []
+                assert type(server_utils._GLOBAL_AIOHTTP_CLIENT.connector) is TCPConnector
+            assert _points(collected_metrics) == []
+            assert connection_pool._SERVER_NAME.get() == "external"
+
+
+async def test_lazy_client_preserves_concurrent_destination_labels(collected_metrics, monkeypatch):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    queued = asyncio.Event()
+    original = connection_pool._connector_queue_constraint
+
+    def recording(connector):
+        queued.set()
+        return original(connector)
+
+    monkeypatch.setattr(connection_pool, "_connector_queue_constraint", recording)
+
+    async def blocked(_request):
+        entered.set()
+        await release.wait()
+        return web.json_response({"ok": True})
+
+    async def get_named(url: str, server_name: str) -> None:
+        response = await server_utils.request("GET", url, _server_name=server_name)
+        assert response.status == 200
+        await response.read()
+        assert connection_pool._SERVER_NAME.get() == "external"
+
+    async with _lazy_client(monkeypatch, aggregate_limit=1), _serve(blocked) as url:
+        tasks = []
+        try:
+            tasks.append(asyncio.create_task(get_named(url, "policy_model")))
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            tasks.append(asyncio.create_task(get_named(url, "resources")))
+            await asyncio.wait_for(queued.wait(), timeout=1)
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
+        finally:
+            release.set()
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    points = collected_metrics()[CONNECT_TOTAL]
+    assert {point.attributes[SERVER]: point.value for point in points} == {"policy_model": 1, "resources": 1}
+    (queue_point,) = _points(collected_metrics)
+    assert queue_point.attributes[SERVER] == "resources"
+    assert queue_point.count == 1
 
 
 async def test_connect_counter_survives_connector_replacement(collected_metrics, monkeypatch):

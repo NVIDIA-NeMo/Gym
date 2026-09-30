@@ -416,6 +416,9 @@ async def request(
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
 
+    # Lazy client creation sets the metrics flag; read it only after initialization so
+    # the first outbound attempt receives the caller's destination label too.
+    get_global_aiohttp_client()
     if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY:
         token = set_server_name(_server_name or "external")
         try:
