@@ -422,3 +422,66 @@ def test_kubernetes_compute_discriminated_from_slurm():
 def test_kubernetes_unknown_type_rejected():
     with pytest.raises(ValidationError):
         SubmitConfig.model_validate(_config(compute={"cluster": {"type": "not-a-real-backend"}}))
+
+
+# ---------------------------------------------------------------------------
+# KubernetesComputeConfig - multi-node data-parallel deployment
+# ---------------------------------------------------------------------------
+
+COMPUTE_K8S_MULTI_NODE = {"cluster": {"type": "kubernetes", "namespace": "eng-test", "gpus_per_node": 4, "nodes": 2}}
+
+
+def test_kubernetes_nodes_defaults_to_one_and_is_unaffected():
+    config = SubmitConfig.model_validate(_config(compute=COMPUTE_K8S))
+    assert next(iter(config.compute.values())).nodes == 1
+
+
+def test_kubernetes_nodes_below_one_rejected():
+    with pytest.raises(ValidationError, match="nodes must be >= 1"):
+        SubmitConfig.model_validate(_config(compute={"cluster": {**COMPUTE_K8S["cluster"], "nodes": 0}}))
+
+
+def test_kubernetes_multi_node_dp_evenly_divisible_accepted():
+    service = {**SERVICE, "tensor_parallel_size": 2, "number_of_instances": 4}
+    config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_K8S_MULTI_NODE))
+    assert config.services["svc"].number_of_instances == 4
+
+
+def test_kubernetes_multi_node_dp_uneven_split_raises():
+    service = {**SERVICE, "number_of_instances": 3}
+    with pytest.raises(ValidationError, match="evenly divisible"):
+        SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_K8S_MULTI_NODE))
+
+
+def test_kubernetes_multi_node_dp_per_node_footprint_exceeds_raises():
+    # 4 instances / 2 nodes = 2 local replicas/node; TP3 x 2 local replicas = 6 GPUs > gpus_per_node (4).
+    service = {**SERVICE, "tensor_parallel_size": 3, "number_of_instances": 4}
+    with pytest.raises(ValidationError, match="exceeds a single node's gpus_per_node"):
+        SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_K8S_MULTI_NODE))
+
+
+def test_kubernetes_multi_node_single_instance_raises():
+    with pytest.raises(ValidationError, match="only supports multi-node deployment as data-parallel replicas"):
+        SubmitConfig.model_validate(_config(compute=COMPUTE_K8S_MULTI_NODE))
+
+
+def test_kubernetes_multi_node_footprint_requiring_ray_serve_raises():
+    # TP5 exceeds a single node's gpus_per_node (4), which would need the Ray Serve gateway - not
+    # supported on kubernetes.
+    service = {**SERVICE, "tensor_parallel_size": 5, "number_of_instances": 2}
+    with pytest.raises(ValidationError, match="would require the Ray Serve gateway"):
+        SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_K8S_MULTI_NODE))
+
+
+def test_kubernetes_multi_node_explicit_ray_serve_raises():
+    service = {**SERVICE, "number_of_instances": 4, "use_ray_serve": True}
+    with pytest.raises(ValidationError, match="would require the Ray Serve gateway"):
+        SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_K8S_MULTI_NODE))
+
+
+def test_kubernetes_multi_node_multiple_vllm_services_raises():
+    service = {**SERVICE, "number_of_instances": 4}
+    with pytest.raises(ValidationError, match="only one vllm service per multi-node compute resource"):
+        SubmitConfig.model_validate(
+            _config(services={"svc_a": service, "svc_b": service}, compute=COMPUTE_K8S_MULTI_NODE)
+        )
