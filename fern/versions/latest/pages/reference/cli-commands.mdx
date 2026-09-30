@@ -1082,6 +1082,8 @@ The most common Hydra overrides now have dedicated flags:
 | `+create_pr=true` | `--create-pr` |
 | `+outdated=true` | `--outdated` |
 
+For standalone rollout collection, `num_samples_in_parallel` limits active requests, while `max_resident_rollout_tasks` limits how many rollout tasks the driver creates at once. When both are set, active requests cannot exceed the lower limit. Both settings are optional; leaving the task window unset preserves the previous admission behavior. Set `retain_results_in_memory=false` for artifact-oriented runs: results are appended and flushed as they complete, and `run_from_config()` returns `[]` instead of the ordered full result list. Aggregation and upload may still load the persisted results into memory. These settings are available through the collection config or Hydra overrides such as `+max_resident_rollout_tasks=64` and `+retain_results_in_memory=false`.
+
 ### Common workflows, before and after
 
 ```bash
