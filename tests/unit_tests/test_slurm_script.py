@@ -2003,6 +2003,70 @@ def test_each_tier_exports_its_own_nixl_side_channel(tmp_path):
     assert "export VLLM_NIXL_SIDE_CHANNEL_PORT=5700" in script
 
 
+@pytest.mark.parametrize("per_node", [False, True], ids=["data_parallel", "server_per_node"])
+def test_swebench_pro_pd_layout_renders_the_pinned_script(per_node):
+    # Pins the job script for SWE-bench Pro's 4 prefill + 6 decode layout, so a
+    # rework of the P/D config shape can be checked against it byte for byte.
+    shape = (lambda n: {"server_per_node": True}) if per_node else (lambda n: {"number_of_instances": n})
+
+    def tier(port, pool, role, nixl, rpc, **kw):
+        return {
+            "type": "vllm",
+            "container": "vllm:img",
+            "model": "/ckpt",
+            "served_model_name": "super35",
+            "port": port,
+            "node_pool": pool,
+            "kv_role": role,
+            "nixl_side_channel_port": nixl,
+            "data_parallel_rpc_port": rpc,
+            "tensor_parallel_size": 4,
+            **kw,
+        }
+
+    services = {
+        "policy-prefill": tier(
+            8001, "prefill", "producer", 5600, 13345, extra_args="--max-model-len 131072", **shape(4)
+        ),
+        "policy-decode": tier(
+            8002,
+            "decode",
+            "consumer",
+            5601,
+            13346,
+            env={"UCX_TLS": "lit:rc,cuda_copy"},
+            pre_command="export NCCL_DEBUG=WARN",
+            **shape(6),
+        ),
+        "policy": {
+            "type": "router",
+            "container": "vllm:img",
+            "model": "/ckpt",
+            "served_model_name": "super35",
+            "port": 8000,
+            "prefill": "policy-prefill",
+            "decode": "policy-decode",
+        },
+    }
+    config = SubmitConfig.model_validate(
+        {
+            "services": services,
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _PD_POOLS}},
+            "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"swebench_pro": {"run": {}}}},
+            "job": {"output_path": "/jobs"},
+        }
+    )
+    script = build_sbatch_script(
+        config,
+        "swebench_pro",
+        config.driver.benchmarks["swebench_pro"],
+        config.compute["hsg"],
+        Path("/jobs/swebench_pro"),
+    )
+    fixture = "pd_swebench_pro_server_per_node.sh" if per_node else "pd_swebench_pro_data_parallel.sh"
+    assert script == (Path(__file__).parent / "fixtures" / fixture).read_text()
+
+
 def test_the_node_list_is_resolved_for_the_router(tmp_path):
     assert 'gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))' in _pd_script(tmp_path)
 
