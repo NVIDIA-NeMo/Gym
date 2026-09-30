@@ -141,6 +141,7 @@ class SwemerOmlVerifyResponse(BaseVerifyResponse):
 
 class SwemerOmlResourcesServer(SimpleResourcesServer):
     config: SwemerOmlResourcesServerConfig
+    ray_enabled = False
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
