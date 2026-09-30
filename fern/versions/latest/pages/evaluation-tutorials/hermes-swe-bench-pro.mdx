@@ -1,6 +1,6 @@
 ---
 title: "Evaluate SWE-bench Pro with Hermes"
-description: "Prepare SWE-bench Pro tasks and run Hermes through the EnvironmentServer."
+description: "Prepare SWE-bench Pro tasks and run Hermes through the Environment Server."
 position: 4
 ---
 
@@ -8,9 +8,9 @@ position: 4
 
 Use [hermes.yaml](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/swebench/pro/hermes.yaml)
 to connect Hermes to the SWE-bench Pro Resources Server through the `single_agent_turn`
-EnvironmentServer. The EnvironmentServer owns session setup, agent execution, verification,
+Environment Server. The Environment Server owns session setup, agent execution, verification,
 and cleanup. Hermes performs its multi-turn model/tool loop inside the task sandbox that
-Resources created. Resources extracts the resulting patch and grades it in a clean sandbox.
+the Resources Server created. The Resources Server extracts the resulting patch and grades it in a clean sandbox.
 
 ## Configure the model and sandbox
 
@@ -35,7 +35,7 @@ Skip this step if you already have the prepared JSONL:
 python benchmarks/swebench/pro/prepare.py
 ```
 
-Then convert the prepared rows into the task format consumed by the EnvironmentServer:
+Then convert the prepared rows into the task format consumed by the Environment Server:
 
 ```bash
 python benchmarks/swebench/pro/materialize_single_agent_tasks.py \
@@ -69,19 +69,9 @@ gym eval run --no-serve \
   -i benchmarks/swebench/data/swebench_pro_tasks.jsonl -o rollouts.jsonl
 ```
 
-## Session behavior and limits
+## Session limits
 
-Each session accepts one agent activation, which may contain multiple model/tool turns.
-Agent process cleanup must be confirmed before verification. EnvironmentServer assigns
-session IDs before seeding, so cleanup can be requested even when a seed response is lost.
-Identical retries reuse a session; mismatched requests and closed IDs are rejected.
-
-Abandoned agent sessions expire after `session_lifetime_seconds` (default 21600).
-Failed cleanup retains its handle for retry. Close receipts are process-local and expire
-separately from closed-ID tombstones; set `session_close_retry_window_seconds` to cover
-request timeouts and retry backoff. Expired sessions return 409, without falling back to host execution.
-
-Requests support text input and instructions; output limits apply per model call.
-Unsupported settings return 422. Final response usage counters remain zero pending
-aggregation support. This sandbox integration is for evaluation: the model can modify
-its runner's result file, so it is not yet suitable for producing RL training data.
+- Each session accepts one activation, which may contain multiple model/tool turns.
+- Use `num_workers: 1`.
+- Use a Linux sandbox that can reach the Gym Model Server.
+- This integration is evaluation-only, not suitable for producing RL training data.
