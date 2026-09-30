@@ -66,6 +66,9 @@ class TrajectoryModelCall(ObservationModel):
     response: Optional[Any] = None
     response_metadata: TrajectoryResponseMetadata = Field(default_factory=TrajectoryResponseMetadata)
     token_stats: TrajectoryTokenStats = Field(default_factory=TrajectoryTokenStats)
+    invocation_kind: Optional[Literal["main", "compaction"]] = None
+    attempts_total: Optional[int] = Field(default=None, ge=1)
+    time_lost_to_retries_ms: Optional[float] = Field(default=None, ge=0)
 
 
 class TrajectoryTurn(ObservationModel):

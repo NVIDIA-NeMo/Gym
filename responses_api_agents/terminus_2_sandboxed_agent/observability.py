@@ -14,7 +14,10 @@ from nemo_gym.rollout_observability import (
     ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,
+    TrajectoryModelCall,
     TrajectoryRecord,
+    TrajectoryResponseMetadata,
+    TrajectoryTokenStats,
     TrajectoryTurn,
 )
 
@@ -25,6 +28,7 @@ class ObservedResponse:
     response: NeMoGymResponse
     timestamp: float
     harbor_response: LLMResponse | None = None
+    model_call_id: str | None = None
 
 
 class TerminusObservations:
@@ -51,17 +55,68 @@ class TerminusObservations:
             self.trajectory.gaps.append(scope_gap)
 
     def record_response(
-        self, question: list[dict[str, Any]], response: NeMoGymResponse, timestamp: float
+        self,
+        question: list[dict[str, Any]],
+        response: NeMoGymResponse,
+        timestamp: float,
+        *,
+        model_call_id: str | None = None,
+        started_at: float | None = None,
+        invocation_kind: str | None = None,
+        attempts_total: int | None = None,
+        time_lost_to_retries_ms: float | None = None,
     ) -> ObservedResponse:
-        observed = ObservedResponse(question=question, response=response, timestamp=timestamp)
+        observed = ObservedResponse(
+            question=question, response=response, timestamp=timestamp, model_call_id=model_call_id
+        )
         same_id = self.responses.setdefault(response.id, [])
         same_id.append(observed)
         if len(same_id) > 1:
             self.gap("model_response_id_reused", response.id)
         if not response.id:
             self.gap("model_response_id_unavailable")
-        if self.compaction is not None and response.id:
-            self.compaction.model_calls.append(ModelCallRef(model_ref=self.model_ref, response_id=response.id))
+        ref = (
+            ModelCallRef(model_call_id=model_call_id, model_ref=self.model_ref, response_id=response.id)
+            if model_call_id
+            else ModelCallRef(model_ref=self.model_ref, response_id=response.id)
+        ) if response.id else None
+        if self.compaction is not None and ref is not None:
+            self.compaction.model_calls.append(ref)
+        if model_call_id is not None and started_at is not None:
+            usage = response.usage
+            token_stats = TrajectoryTokenStats()
+            if usage is not None:
+                token_stats = TrajectoryTokenStats(
+                    prompt_tokens=usage.input_tokens,
+                    completion_tokens=usage.output_tokens,
+                    reasoning_tokens=(
+                        usage.output_tokens_details.reasoning_tokens
+                        if usage.output_tokens_details is not None
+                        else None
+                    ),
+                    total_tokens=usage.total_tokens,
+                    cached_tokens=(
+                        usage.input_tokens_details.cached_tokens
+                        if usage.input_tokens_details is not None
+                        else None
+                    ),
+                )
+            self.trajectory.model_calls.append(
+                TrajectoryModelCall(
+                    model_call_id=model_call_id,
+                    started_at=started_at,
+                    completed_at=timestamp,
+                    duration_ms=(timestamp - started_at) * 1000,
+                    response_metadata=TrajectoryResponseMetadata(
+                        response_id=response.id,
+                        model_ref=self.model_ref,
+                    ),
+                    token_stats=token_stats,
+                    invocation_kind=invocation_kind,
+                    attempts_total=attempts_total,
+                    time_lost_to_retries_ms=time_lost_to_retries_ms,
+                )
+            )
         return observed
 
     def begin_decision(self) -> None:
@@ -78,6 +133,15 @@ class TerminusObservations:
             return
         observed = candidates[0]
         self.selected_response_ids.add(observed.response.id)
+        ref = (
+            ModelCallRef(
+                model_call_id=observed.model_call_id,
+                model_ref=self.model_ref,
+                response_id=observed.response.id,
+            )
+            if observed.model_call_id
+            else ModelCallRef(model_ref=self.model_ref, response_id=observed.response.id)
+        )
         self.trajectory.turns.append(
             TrajectoryTurn(
                 invocation_id=self.invocation_id,
@@ -91,7 +155,7 @@ class TerminusObservations:
                 # Completed nonempty terminal-command batch attempts before this decision.
                 # A returned timeout counts as a batch attempt, not as all commands having run.
                 step_count=step_count,
-                model_calls=[ModelCallRef(model_ref=self.model_ref, response_id=observed.response.id)],
+                model_calls=[ref],
             )
         )
 

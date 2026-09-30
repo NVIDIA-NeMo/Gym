@@ -44,6 +44,7 @@ from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ContextCompactionObservation,
     TrajectoryRecord,
+    TrajectoryToolCall,
 )
 from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config
@@ -121,6 +122,8 @@ class NeMoGymSandboxEnvironment:
         self.default_user = None
         self.trial_paths = SimpleNamespace(agent_dir=logs_dir)
         self.session_id = session_id
+        self._invocation_id: str | None = None
+        self._tool_records: list[TrajectoryToolCall] = []
 
     async def exec(
         self,
@@ -131,7 +134,23 @@ class NeMoGymSandboxEnvironment:
         env: dict[str, str] | None = None,
         **_: Any,
     ) -> Any:
+        started_at = time()
         result = await self._sandbox.exec(command, timeout_s=timeout_sec, cwd=cwd, user=user, env=env)
+        completed_at = time()
+
+        if self._invocation_id is not None:
+            self._tool_records.append(
+                TrajectoryToolCall(
+                    invocation_id=self._invocation_id,
+                    tool_call_id=f"cmd_{uuid4().hex[:12]}",
+                    tool_name="terminal",
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    duration_ms=(completed_at - started_at) * 1000,
+                    timing_source="harness",
+                    status="completed" if result.return_code == 0 else "failed",
+                )
+            )
 
         return SimpleNamespace(
             stdout=result.stdout or "",
@@ -222,9 +241,13 @@ class NeMoGymLLM(BaseLLM):
         request_input = [item.model_dump(mode="json", exclude_none=True) for item in input_items]
         observed_input = deepcopy(request_input) if self.observations is not None else None
         response = None
-        start_time = perf_counter()
+        started_at = time()
+        start_perf = perf_counter()
         max_attempts = 10  # Harbor does 3 by default and Litellm does 3 by default. Hardcode 10 attempts for now.
+        attempts_total = 0
+        time_lost_to_retries_ms = 0.0
         for _ in range(max_attempts):
+            attempt_perf = perf_counter()
             try:
                 async with asyncio.timeout(delay=self._llm_request_timeout):
                     response = NeMoGymResponse.model_validate(
@@ -233,22 +256,38 @@ class NeMoGymLLM(BaseLLM):
                             input=request_input,
                         )
                     )
+                    attempts_total += 1
                     break
             except TimeoutError:
+                attempts_total += 1
+                time_lost_to_retries_ms += (perf_counter() - attempt_perf) * 1000
                 self._model_calls_gt_10min += 1
                 if self.observations is not None:
                     self.observations.gap("model_attempt_without_response", "TimeoutError")
             except BaseException as exc:
+                attempts_total += 1
                 if self.observations is not None:
                     self.observations.gap("model_attempt_without_response", type(exc).__name__)
                 raise
 
-        self._times_spent.append(perf_counter() - start_time)
+        self._times_spent.append(perf_counter() - start_perf)
         if not response:
             raise TimeoutError(f"Failed to query model endpoint due to timeouts after {max_attempts} attempts!")
 
+        completed_at = time()
+        model_call_id = uuid4().hex
+        invocation_kind: str = "compaction" if self._is_compacting else "main"
         observed = (
-            self.observations.record_response(observed_input, response, time())
+            self.observations.record_response(
+                observed_input,
+                response,
+                completed_at,
+                model_call_id=model_call_id,
+                started_at=started_at,
+                invocation_kind=invocation_kind,
+                attempts_total=attempts_total,
+                time_lost_to_retries_ms=time_lost_to_retries_ms if time_lost_to_retries_ms > 0 else None,
+            )
             if self.observations is not None
             else None
         )
@@ -478,6 +517,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                     file=sys.stderr,
                 )
             await agent.setup(environment)
+            # Enable per-command timing after setup so setup execs are not attributed to agent tool calls.
+            environment._invocation_id = invocation_id
 
             try:
                 async with asyncio.timeout(self.config.sandbox_timeout):
@@ -503,7 +544,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 error_type = type(exc).__name__
                 print(f"Hit exception while running Terminus2: {format_exc()}", file=sys.stderr)
             finally:
-                pass
+                if observations is not None and environment._tool_records:
+                    observations.trajectory.tool_calls.extend(environment._tool_records)
 
         usage = NeMoGymResponseUsage(
             input_tokens=context.n_input_tokens or 0,
