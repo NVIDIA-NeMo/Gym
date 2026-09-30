@@ -742,6 +742,9 @@ class OpenSandboxSetupConfig:
 
     commands: list[str] = field(default_factory=list)
     timeout_s: float = 600.0
+    # Environment set in every sandbox this provider creates, under the spec's own variables. For
+    # platform knobs such as the exec daemon's grace period, never for task or dataset settings.
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1550,7 +1553,7 @@ class OpenSandboxProvider:
         options = OpenSandboxProviderOptions.from_mapping(spec.provider_options)
 
         kwargs: dict[str, Any] = {
-            "env": spec.env,
+            "env": {**self._setup.env, **(spec.env or {})} or None,
             "metadata": spec.metadata,
             "resource": _resource_map(spec.resources),
             "extensions": self._resolve_extensions(options.extensions),
