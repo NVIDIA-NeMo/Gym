@@ -23,7 +23,7 @@ PREPARE_REQUIREMENTS_FPATH = ENVIRONMENT_DIR / "requirements.txt"
 DEFAULT_PERSONAS_DATASET_VERSION = "0.0.2"
 DEFAULT_PERSONAS_LOCALES = ("en_US",)
 DEFAULT_PERSONAS_PANEL_SIZE = 1_000
-USERSIM_REVISION = "3a928ef8b4f5f8e7740bde213606443ccf04e6b1"  # pragma: allowlist secret
+USERSIM_REVISION = "2d9ec0d7c32ac800f2171b5943382a7b1eb96cbc"  # pragma: allowlist secret
 
 
 def _panel_path(cache_dir: Path, version: str, locale: str) -> Path:

@@ -8,7 +8,7 @@ usersim_resources:
       personas_cache_dir: environments/usersim/data/personas
       datasets:
         - name: example
-          type: example
+          type: benchmark
           jsonl_fpath: environments/usersim/data/example.jsonl
           prepare_script: environments/usersim/prepare.py
           prompt_config: null

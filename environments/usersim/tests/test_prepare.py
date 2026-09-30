@@ -10,11 +10,23 @@ import pyarrow.parquet as pq
 import pytest
 
 from environments.usersim import prepare as prepare_module
+from nemo_gym.benchmarks import BenchmarkConfig
 
 
 def _write_parquet(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist([{"first_name": "Morgan", "age": 42}]), path)
+
+
+def test_environment_config_resolves_one_resources_owned_benchmark() -> None:
+    config_path = Path("environments/usersim/config.yaml")
+
+    benchmark = BenchmarkConfig.from_config_path(config_path, strict=False)
+
+    assert benchmark is not None
+    assert benchmark.name == "example"
+    assert benchmark.agent_name == "usersim_assistant"
+    assert benchmark.dataset.prepare_script == Path("environments/usersim/prepare.py")
 
 
 def test_prepare_invokes_usersim_panel_and_records_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
