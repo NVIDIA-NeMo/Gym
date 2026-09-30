@@ -608,6 +608,29 @@ class TestCli:
         assert "opensandbox/configs/opensandbox.yaml" in config_paths
         assert f"+output_jsonl_fpath={tmp_path / 'out' / 'rollouts.jsonl'}" in tokens
 
+    def test_build_run_merges_caller_overlays_after_component_defaults(self, tmp_path):
+        """A later config_paths entry wins and replaces lists, so a run overlay must come after the
+        component and provider defaults or `setup.commands: []` in opensandbox.yaml would erase it."""
+        from nemo_gym.cli.main import _merge_config_paths
+
+        folder = tmp_path / "ds"
+        tasks = [load_task(write_task(folder / "a"))]
+        prepared = PreparedTaskset("ds", folder, tasks, tmp_path / "out" / "tasks.jsonl", tmp_path / "out")
+        prepared.output_dir.mkdir(parents=True)
+        agent = AgentSelection(tmp_path / "agent.yaml", "hermes_agent", "hermes_agent")
+        overlay = tmp_path / "overlay.yaml"
+
+        _, tokens = build_run(
+            prepared, agent, sandbox="opensandbox", overrides=[f"+config_paths=[{overlay}]", "+split=train"]
+        )
+
+        merged = [token for token in _merge_config_paths(tokens) if token.startswith("+config_paths=[")]
+        assert len(merged) == 1
+        paths = merged[0][len("+config_paths=[") : -1].split(",")
+        assert paths[-1] == str(overlay)
+        assert any(path.endswith("opensandbox.yaml") for path in paths[:-1])
+        assert any(path.endswith("harbor.yaml") for path in paths[:-1])
+
 
 class TestValidationSummary:
     def test_summarizes_rollouts(self, tmp_path):
