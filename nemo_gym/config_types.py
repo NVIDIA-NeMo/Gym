@@ -897,6 +897,13 @@ class AggregateMetricsRequest(BaseModel):
     """
 
     verify_responses: List[Dict[str, Any]]
+    imputed_reward_options: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Options that replace a failed rollout's missing reward with zero. "
+            "Use an empty verify_responses list to check support before a run."
+        ),
+    )
 
 
 class AggregateMetrics(BaseModel):

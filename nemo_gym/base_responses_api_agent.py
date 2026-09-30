@@ -280,6 +280,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Default: same RewardProfiler aggregation as resources server. Override to proxy."""
+        self.validate_imputed_rewards(body)
         if self.config.skip_verification:
             warn(
                 "Skipping aggregate metrics because skip_verification=True; "

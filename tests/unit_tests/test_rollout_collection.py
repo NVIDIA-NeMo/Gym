@@ -45,7 +45,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
 )
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.reward_profile import IMPUTED_REWARD_FIELD, compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     AGENT_REQUEST_FAILED_FAILURE_CLASS,
@@ -1500,9 +1500,12 @@ class TestRolloutCollection:
         # aggregator, which averages every number it is handed.
         scoreless = next(row for row in rows if row[TASK_INDEX_KEY_NAME] == 2)
         assert scoreless["reward"] == 0.0
+        assert scoreless[IMPUTED_REWARD_FIELD] == "count_failure_classes_as_zero"
+        assert all(IMPUTED_REWARD_FIELD not in row for row in rows if row[TASK_INDEX_KEY_NAME] != 2)
         assert not any(key.startswith("_ng_failure_") for key in scoreless)
         sidecar = [orjson.loads(line) for line in failures_fpath.read_bytes().splitlines()]
         assert "reward" not in sidecar[3]
+        assert all(IMPUTED_REWARD_FIELD not in row for row in sidecar)
         assert sidecar[3]["_ng_failure_http_status"] == 500
 
     @pytest.mark.parametrize(
@@ -1600,6 +1603,9 @@ class TestRolloutCollection:
         async def post(server_name: str, url_path: str, json, **kwargs):
             if url_path == "/run":
                 return FakeResponse(200, failure if json["x"] == 0 else {"reward": 1.0})
+            if not json.verify_responses:
+                assert json.imputed_reward_options == ["count_failure_classes_as_zero"]
+                return FakeResponse(200, {})
             metric_inputs.append(json.verify_responses)
             result = compute_aggregate_metrics(json.verify_responses)
             metrics.append(result)
@@ -1672,6 +1678,9 @@ class TestRolloutCollection:
         async def post(server_name: str, url_path: str, json, **kwargs):
             if url_path == "/run":
                 return FakeResponse(200, deepcopy(failure))
+            if not json.verify_responses:
+                assert json.imputed_reward_options == ["count_failure_classes_as_zero"]
+                return FakeResponse(200, {})
             metric_inputs.append(json.verify_responses)
             return FakeResponse(200, compute_aggregate_metrics(json.verify_responses).model_dump())
 
@@ -2050,6 +2059,10 @@ class TestRolloutCollection:
             orjson.dumps({**rows[2], NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS, NG_TERMINAL_KEY: True})
             + b"\n"
         )
+        client = install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, {})))
+        client.global_config_dict[
+            "my_environment_server"
+        ].environment_servers.legacy_agent.agent_server.name = "my agent name"
 
         class Helper(RolloutCollectionHelper):
             def _run_examples_with_metadata(self, examples: list[dict], *args, **kwargs):
@@ -4495,14 +4508,91 @@ class TestExpandInputGlob:
         assert result == [str(a)]
 
 
+class TestImputedRewardPreflight:
+    @pytest.mark.parametrize("resume", [False, True])
+    async def test_rejects_before_dispatch_or_artifact_changes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, resume: bool
+    ) -> None:
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_bytes(orjson.dumps(failing_row()) + b"\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_path),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=resume,
+            count_failure_classes_as_zero=[AGENT_RUN_ERROR_FAILURE_CLASS],
+            disable_health_check=True,
+        )
+        output_path = Path(config.output_jsonl_fpath)
+        # A rejected run must leave existing files as they are, even a partial last line.
+        output_path.write_bytes(orjson.dumps({**failing_row(), "reward": 1.0}) + b'\n{"partial":')
+        config.materialized_jsonl_fpath.write_bytes(orjson.dumps(failing_row()) + b"\n")
+        sidecar_path = _failures_path_for(output_path)
+        sidecar_path.write_bytes(orjson.dumps({**failing_row(), NG_FAILURE_CLASS_KEY: "agent_run_error"}) + b"\n")
+        artifacts = {p: p.read_bytes() for p in (output_path, config.materialized_jsonl_fpath, sidecar_path)}
+        post = AsyncMock(side_effect=http_error(500, body=b"asr: count_failure_classes_as_zero is unsupported"))
+        install_fake_server_client(monkeypatch, post)
+        dispatch = MagicMock()
+        monkeypatch.setattr(RolloutCollectionHelper, "_run_examples_with_metadata", dispatch)
+
+        with pytest.raises(ConfigError, match="my_environment_server.*asr: count_failure_classes_as_zero"):
+            await RolloutCollectionHelper().run_from_config(config)
+
+        dispatch.assert_not_called()
+        assert {p: p.read_bytes() for p in artifacts} == artifacts
+        assert post.await_count == 1
+        request = post.call_args.kwargs["json"]
+        assert request.verify_responses == []
+        assert request.imputed_reward_options == ["count_failure_classes_as_zero"]
+
+    @pytest.mark.parametrize("only_failures", [False, True])
+    async def test_offline_rejects_before_merge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, only_failures: bool
+    ) -> None:
+        shard = tmp_path / "shard.jsonl"
+        shard.write_bytes(b"" if only_failures else orjson.dumps({**failing_row(0), "reward": 1.0}) + b"\n")
+        sidecar = _failures_path_for(shard)
+        sidecar.write_bytes(orjson.dumps({**failing_row(1), NG_FAILURE_CLASS_KEY: "agent_run_error"}) + b"\n")
+        output = tmp_path / "merged.jsonl"
+        output.write_bytes(b"previous output\n")
+        before = {p: p.read_bytes() for p in (shard, sidecar, output)}
+        post = AsyncMock(side_effect=http_error(422, body=b"tau2: custom metrics require verifier fields"))
+        install_fake_server_client(monkeypatch, post)
+
+        with pytest.raises(ConfigError, match="count_failure_classes_as_zero.*tau2"):
+            await RolloutAggregationHelper().run_from_config(
+                RolloutAggregationConfig(
+                    input_glob=str(shard),
+                    output_jsonl_fpath=str(output),
+                    count_failure_classes_as_zero=[AGENT_RUN_ERROR_FAILURE_CLASS],
+                    disable_health_check=True,
+                )
+            )
+
+        assert {p: p.read_bytes() for p in before} == before
+        assert post.await_count == 1
+        assert not output.with_stem("merged_aggregate_metrics").with_suffix(".json").exists()
+
+    async def test_checks_each_resolved_environment_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        post = AsyncMock(return_value=FakeResponse(200, {}))
+        client = install_fake_server_client(monkeypatch, post)
+        client.global_config_dict["native"] = {"environment_servers": {"single_agent": {}}}
+        rows = [failing_row(), failing_row(1), {NG_ENVIRONMENT_SERVER_KEY: "native"}]
+
+        await RolloutCollectionHelper()._validate_imputed_reward_support(rows, [AGENT_RUN_ERROR_FAILURE_CLASS])
+
+        assert [call.kwargs["server_name"] for call in post.await_args_list] == ["my_environment_server", "native"]
+        assert all(call.kwargs["url_path"] == "/aggregate_metrics" for call in post.await_args_list)
+
+
 class TestDisableAggregationAndCallerTaskIndex:
     """Branches added for sharded rollouts: `disable_aggregation` flag and
     caller-provided `_ng_task_index`. Both must be backward-compatible with
     the existing default-on aggregation + auto-numbering behaviour.
     """
 
+    @pytest.mark.parametrize("counted_classes", [[], [AGENT_RUN_ERROR_FAILURE_CLASS]])
     async def test_run_from_config_disable_aggregation_skips_call(
-        self, tmp_path: Path, empty_global_config: MagicMock
+        self, tmp_path: Path, empty_global_config: MagicMock, counted_classes: list[str]
     ) -> None:
         """When disable_aggregation=True, _call_aggregate_metrics MUST NOT run.
 
@@ -4519,6 +4609,7 @@ class TestDisableAggregationAndCallerTaskIndex:
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(output_jsonl_fpath),
             disable_aggregation=True,
+            count_failure_classes_as_zero=counted_classes,
             num_repeats=1,
         )
 

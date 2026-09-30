@@ -721,6 +721,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         if self.config.reward_mode != "comparison":
             return await super().aggregate_metrics(body)
 
+        self.validate_imputed_rewards(body, has_custom_metrics=True)
+
         from resources_servers.gdpval.comparison import (
             calculate_elo,
             calculate_mle_elo,
