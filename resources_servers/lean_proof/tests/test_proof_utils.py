@@ -96,6 +96,15 @@ def test_extract_lean_code(text, expected):
         ('def s := r#"a"b"#\naxiom cheat : False', ["axiom"]),
         # ...and what is inside a char or raw string is still not code.
         ("def c := 'a'\ndef s := r\"sorry\"", []),
+        # Ways to run code during elaboration, or skip the kernel, are banned like `axiom`.
+        ('#eval IO.println "x"\ntheorem t : True := trivial', ["#eval"]),
+        ('run_cmd Lean.logInfo "x"', ["run_cmd"]),
+        ('elab "foo" : command => pure ()', ["elab"]),
+        ("set_option debug.skipKernelTC true in\ntheorem t : True := trivial", ["skipKernelTC"]),
+        ("initialize r : IO.Ref Nat <- IO.mkRef 0", ["initialize"]),
+        # ...but only as whole words, and not inside comments or strings.
+        ("theorem elaborate_me : True := trivial\ndef my_elab := 1", []),
+        ('-- #eval is banned\ndef s := "run_cmd"', []),
         # A prime ending an identifier is not a char literal.
         ("theorem h' (x' : Nat) : x' = x' := rfl\ndef d := \"sorry\"", []),
     ],

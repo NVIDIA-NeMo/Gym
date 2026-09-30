@@ -168,7 +168,15 @@ _LEAN_FILE_START_RE = re.compile(
 
 # Upstream's shortcut list. Banning the `axiom` keyword does not ban classical reasoning:
 # Mathlib's axioms are used by name, not declared.
-_BANNED_TOKEN_RE = re.compile(r"\b(sorry|admit|axiom|unsafe)\b")
+#
+# Also the ways a file can run code while Lean compiles it (`#eval`, `run_cmd`, `elab`, ...) or
+# switch off the kernel (`skipKernelTC`): a proof has no use for them, and code that executes
+# during elaboration can tamper with the sandbox and with the checks run on the file. No stored
+# LeanCat rollout passed while using any of them.
+_BANNED_TOKEN_RE = re.compile(
+    r"(?<!\w)(#eval|sorry|admit|axiom|unsafe|run_cmd|run_tac|run_elab|elab|elab_rules"
+    r"|initialize|builtin_initialize|command_elab|term_elab|skipKernelTC)(?!\w)"
+)
 
 # Appended to the submission and run by the same compile: asks Lean which axioms every declaration
 # in the file depends on, so it does not matter how an `axiom` or `sorry` was written or hidden.
