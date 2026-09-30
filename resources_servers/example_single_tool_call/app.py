@@ -66,7 +66,6 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
         app = super().setup_webserver()
 
         app.post("/get_weather")(self.get_weather)
-        app.post("/close_session")(self.close_session)
 
         return app
 
@@ -86,7 +85,8 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
             raise ValueError("resources_session_id is already bound to another episode or task")
         return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
 
-    async def close_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        # Sessions are keyed by resources_session_id, not the cookie's session id, so the body names the session.
         resources_session_id = body.resources_session_id
         # Nothing below awaits, so no other request can run between the check and the update.
         identity = self._native_sessions.get(resources_session_id)
