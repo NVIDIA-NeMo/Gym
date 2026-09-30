@@ -50,6 +50,7 @@ from nemo_gym.hf_utils import (
     download_hf_dataset_as_jsonl,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.single_agent_task import materialize_single_agent_task
 from nemo_gym.task_data import (
     TaskDataSchemaError,
     TaskDataValidator,
@@ -702,9 +703,11 @@ class TrainDataProcessor(BaseModel):
                 aggregate_metrics = state.metrics.aggregate()
 
                 aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
-                # The agent: pin is routing config, not dataset identity; excluding it keeps
-                # pre-pin metrics sidecars valid (no conflict churn from the decoupling).
-                aggregate_metrics_dict = d.model_dump(mode="json", exclude={"agent"}) | aggregate_metrics_dict
+                # Agent and taskset select routing, not source data. Exclude both so native
+                # and flat declarations of the same file can share its metrics sidecar.
+                aggregate_metrics_dict = (
+                    d.model_dump(mode="json", exclude={"agent", "taskset"}) | aggregate_metrics_dict
+                )
 
                 data_fpath = Path(d.jsonl_fpath)
                 metrics_fpath = data_fpath.with_name(f"{data_fpath.stem}_metrics.json")
@@ -823,6 +826,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
     ) -> List[Path]:
         paths_to_collate = []
         used_prepare_paths: set[Path] = set()
+        source_task_index = -1
         for c in server_instance_configs:
             for d in c.datasets:
                 if d.type != type:
@@ -873,6 +877,12 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         if row.pop(AGENT_REF_KEY, None) is not None:
                             legacy_agent_ref_rows += 1
                         row[TASK_SOURCE_KEY_NAME] = c.name
+                        if row_index % d.num_repeats == 0:
+                            source_task_index += 1
+                        if d.taskset is not None:
+                            row = materialize_single_agent_task(
+                                row, taskset=d.taskset, task_index=source_task_index
+                            ).model_dump(mode="json", exclude_unset=True)
                         # num_repeats duplicates each line consecutively; validate only the first
                         # copy so reports count each source row once, with its jsonl line index.
                         if validator is not None and row_index % d.num_repeats == 0:
@@ -917,9 +927,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 None,
             )
             if d is not None:
-                # The agent: pin is routing config, not dataset identity; excluding it keeps
-                # pre-pin metrics sidecars valid (no conflict churn from the decoupling).
-                aggregate_metrics_dict = d.model_dump(mode="json", exclude={"agent"}) | aggregate_metrics_dict
+                # Routing choices do not change source metrics.
+                aggregate_metrics_dict = (
+                    d.model_dump(mode="json", exclude={"agent", "taskset"}) | aggregate_metrics_dict
+                )
 
             parent = Path(config.output_dirpath)
             parent.mkdir(exist_ok=True, parents=True)
