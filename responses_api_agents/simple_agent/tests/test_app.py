@@ -1481,7 +1481,7 @@ class TestCheckpointContinuation:
         server, server_client = _make_agent(False)
         participant = AgentSessionParticipant(server)
         server._checkpoint_participant = participant
-        participant.restore_records(
+        await participant.install(
             [
                 AgentSessionRecord(
                     session_key="run:0-0",

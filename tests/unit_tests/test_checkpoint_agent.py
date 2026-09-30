@@ -19,7 +19,7 @@ from nemo_gym._checkpoint.control import (
     RestoreRequest,
     RetireRequest,
 )
-from nemo_gym._checkpoint.errors import AdmissionClosedError, StaleAttemptError
+from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.episode_types import EpisodeId
@@ -32,13 +32,13 @@ class Hooks:
         self.restored: list[RestoredAgentSession] = []
         self.retired: list[str] = []
 
-    def export_agent_session(self, session_key: str) -> dict[str, JsonValue]:
-        return self.sessions.get(session_key, {})
+    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+        return {session_key: self.sessions.get(session_key, {}) for session_key in session_keys}
 
-    def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
+    async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
         self.restored.extend(sessions)
 
-    def retire_agent_session(self, session_key: str) -> None:
+    async def retire_agent_session(self, session_key: str) -> None:
         self.retired.append(session_key)
 
 
@@ -73,7 +73,7 @@ async def test_activation_parks_at_its_next_boundary_and_resumes() -> None:
 
     step_done.set()
     prepared = await prepare
-    records = participant.export_records(None)
+    records = await participant.export(None)
     await controller.resume(CheckpointRequest(**control()))
     for _ in range(2):
         await asyncio.sleep(0.01)
@@ -118,7 +118,7 @@ async def test_legacy_run_steps_block_prepare_only_when_waited_on() -> None:
             assert participant.readiness().blockers == ["r"]
         async with run.step("replay"):
             assert participant.readiness().ready
-            [record] = participant.export_records(None)
+            [record] = await participant.export(None)
 
     assert participant.readiness().ready
     assert record.episode == {"next": "verify"}
@@ -213,7 +213,7 @@ async def test_awaiting_a_model_call_counts_as_parked_at_the_last_boundary() -> 
     task = asyncio.create_task(loop())
     await asyncio.sleep(0.01)
     prepared = await controller.prepare(CheckpointRequest(**control()))
-    [record] = participant.export_records(None)
+    [record] = await participant.export(None)
     response.set()
     await asyncio.sleep(0.01)
     # The call returned during the checkpoint, so the activation parks at its next boundary.
@@ -314,7 +314,7 @@ async def test_an_agent_without_session_hooks_blocks_checkpoints_until_its_rollo
     assert refused.json()["error"]["code"] == "admission_closed"
     assert unattributed.json()["error"]["code"] == "rollout_id_required"
     assert prepared.json()["phase"] == "prepared"
-    assert agent._restart_only.export_records(None) == []
+    assert await agent._restart_only.export(None) == []
 
 
 async def test_restored_sessions_not_yet_claimed_survive_the_next_checkpoint(tmp_path: Path) -> None:
@@ -333,7 +333,7 @@ async def test_restored_sessions_not_yet_claimed_survive_the_next_checkpoint(tmp
         ),
     ]
     source = AgentSessionParticipant(Hooks())
-    source.restore_records(restored_records)
+    await source.install(restored_records)
     await source.open_admission()
     controller = ParticipantControlPlane(source, instance_name="agent", lease_grace_seconds=60)
     # A checkpoint lands after the restore but before either replacement attempt starts.
@@ -395,3 +395,15 @@ async def test_a_session_woken_by_resume_stays_parked_if_a_new_checkpoint_closes
     await asyncio.wait_for(task, 1)
 
     assert parked_through_second_checkpoint
+
+
+async def test_an_agent_that_leaves_a_session_out_of_its_export_fails_the_commit() -> None:
+    class ForgetfulHooks(Hooks):
+        async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+            return {}
+
+    participant = AgentSessionParticipant(ForgetfulHooks())
+    participant.open_session("s", EpisodeId(rollout_id="r"))
+
+    with pytest.raises(ControlError, match="did not export sessions"):
+        await participant.export(None)
