@@ -457,6 +457,9 @@ class DatasetConfig(BaseModel):
     name: str
     type: DatasetType
     jsonl_fpath: str
+    taskset: Optional[str] = Field(
+        default=None, min_length=1, description="Materialize flat rows as single-agent-turn tasks for this taskset."
+    )
 
     num_repeats: int = Field(default=1, ge=1)
     # Unified, self-describing dataset source. Prefer this over the legacy *_identifier fields below.
@@ -548,6 +551,9 @@ class BenchmarkDatasetConfig(BaseModel):
     type: Literal["benchmark"]
     jsonl_fpath: Path
     prepare_script: Path
+    taskset: Optional[str] = Field(
+        default=None, min_length=1, description="Materialize flat rows as single-agent-turn tasks for this taskset."
+    )
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
     agent: Optional[str] = Field(
