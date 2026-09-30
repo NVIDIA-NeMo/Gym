@@ -63,6 +63,7 @@ class ReflectionState(TypedDict):
 
 
 class ReflectionAgent(LangGraphAgentAdapter):
+    ray_enabled = False
     config: ReflectionAgentConfig
 
     def build_graph(self):

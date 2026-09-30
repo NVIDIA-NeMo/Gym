@@ -486,6 +486,8 @@ def e2e_rollout_collection():  # pragma: no cover
             asyncio.run(rch.run_from_config(rollout_collection_config))
         collection_completed = True
     except KeyboardInterrupt:
+        if rollout_collection_config.require_complete:
+            raise RuntimeError("EVAL FAILED: rollout collection interrupted; partial artifacts retained.") from None
         pass
     finally:
         rh.shutdown()
@@ -544,6 +546,16 @@ def health_check_rollouts(
         ignored_checks=ignored_checks,
         json_output=json_output,
     )
+
+
+@exit_cleanly_on_config_error
+def export_rollouts_as_atif() -> None:  # pragma: no cover
+    from nemo_gym.atif_export import ExportAtifConfig, export_rollouts_to_atif
+
+    config = ExportAtifConfig.model_validate(get_global_config_dict())
+    result = export_rollouts_to_atif(config)
+    print(f"Exported {result.trajectory_count} ATIF trajectory file(s) to {result.output_dirpath}")
+    print(f"Manifest: {result.manifest_fpath}")
 
 
 @exit_cleanly_on_config_error

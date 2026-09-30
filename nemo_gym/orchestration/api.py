@@ -80,6 +80,12 @@ class BaseServiceConfig(_StrictModel):
     container: str
     # Resolved to the sole compute resource name at validation time when not set.
     placement: str | None = None
+    # Name of a node pool in the placed compute's `node_pools`. Pins this service to
+    # that pool's slice of the allocation instead of letting it land wherever srun
+    # starts, which is how two services get nodes of their own -- a scorer or judge
+    # that cannot share a GPU with the policy, or a prefill/decode split. Pools take
+    # contiguous node ranges in declaration order. None means the whole allocation.
+    node_pool: str | None = None
     health_check: HealthCheckConfig | None = None
     # Values may be prefixed `lit:` (literal), `host:VAR` (read from the submitting
     # machine's env), or `runtime:VAR` (resolved from the job's own env at run time).
@@ -152,6 +158,34 @@ def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per
 
 class RayServiceConfig(BaseServiceConfig):
     type: Literal["ray"]
+    # Node pools the cluster spans. The head starts on the driver's node and every
+    # other node of these pools joins it as a worker. Empty: a single-node cluster.
+    node_pools: list[str] = []
+    port: int = 6379
+    # Custom Ray resources advertised by each spanned pool's nodes, keyed by pool,
+    # e.g. {"aux": {"extra_gpu": 4}}. A benchmark asks for these by name when it
+    # manages device placement itself.
+    resources: dict[str, dict[str, float]] = {}
+    num_cpus: int | None = None
+    num_gpus: int | None = None
+    # Raw extra flags appended verbatim to `ray start` on every node (e.g. fixed ports).
+    extra_args: str = ""
+
+    @model_validator(mode="after")
+    def _validate_shape(self) -> "RayServiceConfig":
+        if self.node_pool is not None:
+            raise ValueError(
+                f"A ray service spans `node_pools`, not a single `node_pool`; use node_pools: [{self.node_pool}]."
+            )
+        if len(set(self.node_pools)) != len(self.node_pools):
+            raise ValueError(f"A ray service's node_pools lists a pool more than once: {self.node_pools}.")
+        unspanned = sorted(set(self.resources) - set(self.node_pools))
+        if unspanned:
+            raise ValueError(
+                f"A ray service sets resources for {', '.join(unspanned)}, which it does not span "
+                f"(node_pools: {self.node_pools}). Add the pool to node_pools or drop its resources."
+            )
+        return self
 
 
 # Discriminated union keyed on `type`; Pydantic rejects unknown type values at parse time.
@@ -196,6 +230,22 @@ class BenchmarkRunConfig(_StrictModel):
     # Hydra overrides forwarded to `gym eval run`. policy_model wiring is injected here at
     # validation time so all executors see it uniformly via flatten_run_args.
     run: dict[str, Any] = {}
+    # Shell script the driver runs INSTEAD of `gym eval run`, for a benchmark whose
+    # harness is not Gym's own runner -- one that provisions external machines and
+    # drives Gym from there, for instance. `prepare` still runs first, and the
+    # driver exports NEMO_GYM_BENCH_DIR plus the policy's base URL, model name and
+    # API key (when driver.policy_model is set) so the script can reach the served
+    # model without repeating its address.
+    command: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_command(self) -> "BenchmarkRunConfig":
+        if self.command is not None and self.run:
+            raise ValueError(
+                "A benchmark sets both `command` and `run`, but `run` only configures `gym eval run`, which "
+                "`command` replaces. Fold those settings into the command, or drop it."
+            )
+        return self
 
 
 class GymInstallConfig(_StrictModel):
@@ -238,11 +288,59 @@ class JobConfig(_StrictModel):
     output_path: str
 
 
+class OtelConfig(_StrictModel):
+    """An OpenTelemetry collector beside every benchmark job: scrapes each model service's
+    Prometheus `/metrics`, receives OTLP from the job's own processes on :4317/:4318, and ships
+    both to an OTLP/HTTP backend while keeping a copy under `<job dir>/otel/`. On by default, so
+    a run is observable unless it opts out; `endpoint` and `service_name` come from the
+    deployment's own config (a cluster fragment, typically) and are required while enabled."""
+
+    enabled: bool = True
+    # Collector binary: a path on the compute nodes (the release tarball's static `otelcol-contrib`
+    # on shared storage) when `container` is unset, else a path inside `container`.
+    binary: str = "otelcol-contrib"
+    # Optional image for the collector step. Unset runs the binary directly on the node, which is
+    # what enroot-based clusters need: the upstream collector image is distroless, and enroot
+    # cannot start a container without /bin/sh.
+    container: str | None = None
+    # OTLP/HTTP ingest base URL (`/v1/metrics` etc. are appended by the exporter).
+    endpoint: str | None = None
+    # Env var holding the ingest bearer token on the machine running `gym eval submit`. Read at
+    # submit time and forwarded into the job's environment; never written into the job directory.
+    token_env: str = "OTEL_TOKEN"
+    # Sent as the `service.name` resource attribute: the identity the backend routes the token by.
+    service_name: str | None = None
+    # Display identity of the scraped metrics in the backend (`service.name.override`).
+    component: str = "gym-vllm"
+    # Node-level exporters that clusters commonly run as system services on every compute node;
+    # scraped on localhost when set, skipped when null. DCGM gives per-GPU activity/memory/power,
+    # node_exporter gives CPU/memory/network/disk. A closed port only logs scrape errors.
+    gpu_metrics_port: int | None = 9400
+    node_metrics_port: int | None = 9100
+    scrape_interval_seconds: int = 15
+    health_check_timeout_seconds: int = 300
+
+    @field_validator("token_env")
+    @classmethod
+    def _validate_token_env(cls, v: str) -> str:
+        if not _ENV_VAR_NAME_RE.match(v):
+            raise ValueError(f"otel.token_env: {v!r} is not a valid environment variable name")
+        return v
+
+    @field_validator("scrape_interval_seconds", "health_check_timeout_seconds")
+    @classmethod
+    def _validate_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+
 class SubmitConfig(_StrictModel):
     services: dict[str, ServiceConfig]
     compute: dict[str, ComputeConfig]
     driver: DriverConfig
     job: JobConfig
+    otel: OtelConfig = OtelConfig()
 
     @model_validator(mode="after")
     def _resolve_and_validate_placements(self) -> "SubmitConfig":
@@ -256,12 +354,8 @@ class SubmitConfig(_StrictModel):
         total_nodes = (
             sum(p.nodes for p in compute.node_pools.values()) if isinstance(compute, SlurmComputeConfig) else 1
         )
-        is_multi_node = total_nodes > 1
-        gpus_per_node_values = (
-            [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
-            if isinstance(compute, SlurmComputeConfig)
-            else []
-        )
+
+        pool_names = set(compute.node_pools) if isinstance(compute, SlurmComputeConfig) else set()
 
         for service_name, service in self.services.items():
             if service.placement is None:
@@ -272,25 +366,50 @@ class SubmitConfig(_StrictModel):
                     f"({', '.join(sorted(compute_names))})."
                 )
 
+            if isinstance(service, RayServiceConfig):
+                unknown = [pool for pool in service.node_pools if pool not in pool_names]
+                if unknown:
+                    raise ValueError(
+                        f"Service '{service_name}' node_pools {unknown} do not match any node pool of compute "
+                        f"'{service.placement}' ({', '.join(sorted(pool_names)) or 'none declared'})."
+                    )
+
+            if service.node_pool is not None and service.node_pool not in pool_names:
+                raise ValueError(
+                    f"Service '{service_name}' node_pool '{service.node_pool}' does not match any node pool of "
+                    f"compute '{service.placement}' ({', '.join(sorted(pool_names)) or 'none declared'})."
+                )
+
             if not isinstance(service, VllmServiceConfig):
                 continue
 
-            is_ray_serve = effective_ray_serve(service, total_nodes, gpus_per_node_values)
+            # A pinned service is sized against its own pool, not the whole job: one node of a
+            # ten-node allocation is a single-node deployment with that pool's GPUs, and judging
+            # it by the allocation total both mis-builds the command and mis-reports idle GPUs.
+            service_pools = (
+                {service.node_pool: compute.node_pools[service.node_pool]}
+                if service.node_pool is not None and isinstance(compute, SlurmComputeConfig)
+                else (compute.node_pools if isinstance(compute, SlurmComputeConfig) else {})
+            )
+            service_nodes = sum(p.nodes for p in service_pools.values()) or total_nodes
+            service_gpus = [p.gpus_per_node for p in service_pools.values() if p.gpus_per_node is not None]
+
+            is_ray_serve = effective_ray_serve(service, service_nodes, service_gpus)
 
             if (
-                is_multi_node
+                service_nodes > 1
                 and service.number_of_instances > 1
-                and service.number_of_instances % total_nodes != 0
+                and service.number_of_instances % service_nodes != 0
                 and not is_ray_serve
             ):
                 raise ValueError(
                     f"Service '{service_name}' has number_of_instances={service.number_of_instances}, which must "
-                    f"be evenly divisible by the number of nodes ({total_nodes}) for multi-node data-parallel "
+                    f"be evenly divisible by the number of nodes ({service_nodes}) for multi-node data-parallel "
                     "deployment - each node hosts an equal share of the data-parallel replicas."
                 )
 
             self._validate_vllm_gpu_footprint(
-                service_name, service, total_nodes, compute, gpus_per_node_values, is_ray_serve
+                service_name, service, service_nodes, service_pools, service_gpus, is_ray_serve
             )
 
         if self.driver.policy_model is not None:
@@ -322,7 +441,7 @@ class SubmitConfig(_StrictModel):
         service_name: str,
         service: "VllmServiceConfig",
         total_nodes: int,
-        compute: "SlurmComputeConfig",
+        node_pools: dict[str, "NodePool"],
         gpus_per_node_values: list[int],
         is_ray_serve: bool,
     ) -> None:
@@ -335,9 +454,7 @@ class SubmitConfig(_StrictModel):
         if total_nodes > 1 and is_ray_serve:
             # Ray Serve's placement-group scheduler packs the aggregate footprint across the cluster.
             gpus_needed = tp_pp * service.number_of_instances
-            gpus_available = sum(
-                pool.nodes * pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node
-            )
+            gpus_available = sum(pool.nodes * pool.gpus_per_node for pool in node_pools.values() if pool.gpus_per_node)
             footprint = (
                 f"tensor_parallel_size={service.tensor_parallel_size} x "
                 f"pipeline_parallel_size={service.pipeline_parallel_size} x "
@@ -360,9 +477,7 @@ class SubmitConfig(_StrictModel):
         elif total_nodes > 1:
             # Single instance's TP/PP footprint spans the whole allocation via the ray backend.
             gpus_needed = tp_pp
-            gpus_available = sum(
-                pool.nodes * pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node
-            )
+            gpus_available = sum(pool.nodes * pool.gpus_per_node for pool in node_pools.values() if pool.gpus_per_node)
             footprint = (
                 f"tensor_parallel_size={service.tensor_parallel_size} x "
                 f"pipeline_parallel_size={service.pipeline_parallel_size}"

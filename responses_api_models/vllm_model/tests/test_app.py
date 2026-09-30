@@ -770,6 +770,7 @@ class TestApp:
         *,
         propagate_context_overflow_errors: bool = False,
         external_staging_backend: str | None = None,
+        forward_session_id_as_conversation_id: bool = False,
     ):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -782,6 +783,7 @@ class TestApp:
             return_token_id_information=False,
             uses_reasoning_parser=False,
             propagate_context_overflow_errors=propagate_context_overflow_errors,
+            forward_session_id_as_conversation_id=forward_session_id_as_conversation_id,
         )
 
         get_global_config_dict_mock = MagicMock()
@@ -807,7 +809,10 @@ class TestApp:
         assert not self._setup_server(monkeypatch).config.propagate_context_overflow_errors
 
     @mark.parametrize("propagate", [False, True])
-    def test_context_overflow_propagation_flag(self, monkeypatch: MonkeyPatch, propagate: bool) -> None:
+    @mark.parametrize("responses_api", [False, True])
+    def test_context_overflow_propagation_flag(
+        self, monkeypatch: MonkeyPatch, propagate: bool, responses_api: bool
+    ) -> None:
         server = self._setup_server(monkeypatch, propagate_context_overflow_errors=propagate)
         request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
         error = ClientResponseError(request_info, (), status=400, message="Bad Request")
@@ -819,8 +824,10 @@ class TestApp:
         app = server.setup_webserver()
         server.setup_exception_middleware(app)
         response = TestClient(app).post(
-            "/v1/chat/completions",
-            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+            "/v1/responses" if responses_api else "/v1/chat/completions",
+            json={"model": "dummy_model", "input": [{"role": "user", "content": "hi"}]}
+            if responses_api
+            else {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
         )
 
         if propagate:
@@ -828,7 +835,10 @@ class TestApp:
             assert response.json() == {"error": {"message": "maximum context length", "code": 400}}
         else:
             assert response.status_code == 200
-            assert '"finish_reason": "length"' in response.text
+            if responses_api:
+                assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
+            else:
+                assert '"finish_reason": "length"' in response.text
 
     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
@@ -1007,6 +1017,48 @@ class TestApp:
             client_indices.append(next(i for i, client in enumerate(worker._clients) if client is selected_client))
 
         assert client_indices[0] == client_indices[1]
+
+    @mark.parametrize("forward", [False, True])
+    async def test_chat_completions_forwards_session_id_as_conversation_id(
+        self, monkeypatch: MonkeyPatch, forward: bool
+    ) -> None:
+        server = self._setup_server(monkeypatch, forward_session_id_as_conversation_id=forward)
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl-conv",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="done", tool_calls=[]),
+                )
+            ],
+        )
+        captured_kwargs = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_chat_completion.model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "session-1"}
+        request.headers = {}
+
+        await server.chat_completions(
+            request,
+            NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "go"}]),
+        )
+
+        if forward:
+            assert captured_kwargs["conversation_params"] == {"conversation_id": "session-1"}
+        else:
+            assert "conversation_params" not in captured_kwargs
 
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)

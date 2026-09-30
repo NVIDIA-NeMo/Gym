@@ -313,6 +313,8 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
 class Terminus2Agent(SimpleResponsesAPIAgent):
     """NeMo Gym Responses API wrapper for the Terminus-2 terminal loop."""
 
+    ray_enabled = False
+
     config: Terminus2AgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
