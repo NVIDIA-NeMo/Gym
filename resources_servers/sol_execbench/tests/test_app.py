@@ -1,474 +1,308 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-"""Synthetic command-contract tests; no SOL installation or GPU is needed."""
+"""Native result classification and mocked OpenSandbox lifecycle contracts."""
 
 import asyncio
 import hashlib
 import json
-import os
-import sys
-import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
-from pydantic import ConfigDict, ValidationError
+from pydantic import ValidationError
 
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.sol_execbench.app import (
-    EvaluationManifest,
-    EvaluatorResult,
+    VERIFIER_FIXTURE,
     SolExecBenchResourcesServer,
     SolExecBenchResourcesServerConfig,
     SolExecBenchVerifyRequest,
+    classify_native_result,
+)
+from resources_servers.sol_execbench.fixture import synthetic_problem
+from resources_servers.sol_execbench.problem_store import (
+    NATIVE_REVISION,
+    Asset,
     canonical_json,
+    checked_asset,
+    load_manifest,
+    problem_digest,
+    safe_relative_path,
 )
 
 
-PROTOCOL = "a" * 64
-GPU = "GPU-00000000-0000-0000-0000-000000000000"
-RAW_TEXT = "reasoning\r\n<answer>\rλ\n</answer>"
-
-# This trusted synthetic command records actual process overlap and device environment.
-RUNNER = r"""
-import argparse, json, os, pathlib, signal, subprocess, sys, time
-p = argparse.ArgumentParser()
-p.add_argument('--request', required=True)
-p.add_argument('--result', required=True)
-a = p.parse_args()
-request = json.loads(pathlib.Path(a.request).read_bytes())
-metadata = request['verifier_metadata']
-root = pathlib.Path(a.request).parent.parent
-lock = root / 'synthetic.lock'
-with lock.open('x'):
-    pass
-with (root / 'executions.jsonl').open('a') as stream:
-    stream.write(json.dumps({'request_id': request['request_id'], 'pid': os.getpid()}) + '\n')
-mode = metadata.get('mode', 'pass')
-if mode in ('hang', 'exit_leader'):
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
-    if mode == 'exit_leader':
-        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    pathlib.Path(a.request).with_name('child.pid').write_text(str(child.pid))
-    time.sleep(60)
-if mode == 'detached':
-    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
-    def terminate(*_):
-        os.killpg(child.pid, signal.SIGTERM)
-        child.wait(timeout=1)
-        pathlib.Path(a.request).with_name('detached-cleaned').write_text('yes')
-        sys.exit(0)
-    signal.signal(signal.SIGTERM, terminate)
-    pathlib.Path(a.request).with_name('child.pid').write_text(str(child.pid))
-    time.sleep(60)
-time.sleep(0.05)
-if mode == 'exit':
-    sys.exit(7)
-if mode == 'missing':
-    lock.unlink()
-    sys.exit(0)
-outcome = {'timeout': 'EVALUATION_TIMEOUT', 'infra': 'ENVIRONMENT_FAILURE',
-           'candidate': 'CANDIDATE_FAILED'}.get(mode, 'PASSED')
-infra = mode in ('timeout', 'infra')
-result = {k: request[k] for k in ('request_id', 'task_id', 'protocol_sha256')}
-result.update(outcome=outcome, infrastructure_error=infra, solved=outcome == 'PASSED',
-              sol_score=None if infra else (0.25 if outcome == 'PASSED' else 0.0),
-              native_result={'gpu_uuid': os.environ['CUDA_VISIBLE_DEVICES'], 'raw': request['response']})
-if mode == 'identity':
-    result['request_id'] = 'f' * 64
-if mode == 'bool':
-    result['infrastructure_error'] = 'false'
-if mode == 'nan':
-    result['sol_score'] = float('nan')
-if mode == 'nested_nan':
-    result['native_result']['detail'] = float('nan')
-pathlib.Path(a.result).write_text(json.dumps(result))
-lock.unlink()
-"""
+def trace(status="PASSED"):
+    payload = json.loads((Path(__file__).parent / "verifier_cases.jsonl").read_text().splitlines()[0])["request"][
+        "traces"
+    ][0]
+    payload["evaluation"]["status"] = status
+    if status != "PASSED":
+        payload["evaluation"]["performance"] = None
+        if status != "INCORRECT_NUMERICAL":
+            payload["evaluation"]["correctness"] = None
+    return payload
 
 
-def request(response_id: str = "response-one", **metadata) -> SolExecBenchVerifyRequest:
-    response = NeMoGymResponse(
-        id=response_id,
-        created_at=0,
-        model="synthetic",
-        object="response",
-        output=[
-            {
-                "id": "message-one",
-                "type": "message",
-                "role": "assistant",
-                "status": "completed",
-                "content": [{"type": "output_text", "text": RAW_TEXT, "annotations": []}],
-            }
-        ],
-        parallel_tool_calls=False,
-        tool_choice="auto",
-        tools=[],
-    )
+def request(name="synthetic_solution", text=None):
+    solution = {
+        "name": name,
+        "definition": "synthetic_identity",
+        "author": "synthetic",
+        "spec": {"languages": ["triton"], "target_hardware": ["B200"], "entry_point": "main.py::run"},
+        "sources": [{"path": "main.py", "content": "def run(x): return x"}],
+    }
     return SolExecBenchVerifyRequest(
-        task_id="synthetic-task",
-        verifier_metadata=metadata,
-        responses_create_params={"input": "Synthetic prompt"},
-        response=response,
+        verifier_metadata={
+            "task_id": synthetic_problem().task_id,
+            "problem_digest": synthetic_problem().problem_digest,
+        },
+        responses_create_params={"input": "Original synthetic test prompt"},
+        response={
+            "id": name,
+            "created_at": 0,
+            "model": "fixture",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": text if text is not None else json.dumps(solution),
+                            "annotations": [],
+                        }
+                    ],
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "none",
+            "tools": [],
+        },
     )
+
+
+class FakeSandbox:
+    instances = []
+    mode = "pass"
+
+    def __init__(self, provider, spec):
+        self.provider, self.spec = provider, spec
+        self.files, self.commands = {}, []
+        self.stopped = False
+        self.instances.append(self)
+
+    async def start(self):
+        if self.mode == "create_failure":
+            raise RuntimeError("provider unavailable")
+
+    async def upload(self, local, remote):
+        self.files[remote] = Path(local).read_bytes()
+
+    async def download(self, remote, local):
+        Path(local).write_bytes(self.files[remote])
+
+    async def exec(self, command, **kwargs):
+        self.commands.append((command, kwargs))
+        if command.startswith("mkdir"):
+            return SandboxExecResult("", "", 0)
+        await asyncio.sleep(0.01)
+        if self.mode == "timeout":
+            return SandboxExecResult("partial", "watchdog", 125, error_type="timeout")
+        solution = json.loads(self.files["/sol-eval/solution.json"])
+        native_trace = trace("INCORRECT_NUMERICAL" if self.mode == "candidate_failure" else "PASSED")
+        native_trace["solution"] = solution["name"]
+        records = {
+            "hardware.json": {
+                "nvidia_smi": "NVIDIA B200, GPU-synthetic, synthetic",
+                "native_revision": NATIVE_REVISION,
+            },
+            "validation.json": {"valid": True},
+            "execution.json": {
+                "return_code": 1 if self.mode == "candidate_failure" else 0,
+                "native_schema_validated": True,
+            },
+        }
+        for name, data in records.items():
+            self.files[f"/sol-eval/{name}"] = canonical_json(data)
+        if self.mode != "missing_trace":
+            self.files["/sol-eval/trace.jsonl"] = canonical_json(native_trace) + b"\n"
+        self.files["/sol-eval/native.stdout"] = b"native stdout"
+        self.files["/sol-eval/native.stderr"] = b"native stderr"
+        return SandboxExecResult("runner stdout", "runner stderr", 0)
+
+    async def stop(self):
+        self.stopped = True
+        if self.mode == "cleanup_failure":
+            raise RuntimeError("sandbox cleanup not confirmed")
 
 
 @pytest.fixture
-def server(tmp_path: Path, monkeypatch) -> SolExecBenchResourcesServer:
-    monkeypatch.setattr("resources_servers.sol_execbench.app.TERMINATION_GRACE_S", 0.2)
-    manifest = tmp_path / "manifest.json"
-    manifest.write_bytes(
+def server(tmp_path, monkeypatch):
+    monkeypatch.setattr("resources_servers.sol_execbench.app.AsyncSandbox", FakeSandbox)
+    FakeSandbox.instances = []
+    FakeSandbox.mode = "pass"
+    path = tmp_path / "problem_manifest.json"
+    path.write_bytes(
         canonical_json(
             {
                 "schema_version": 1,
-                "protocol_sha256": PROTOCOL,
-                "samples_per_task": 2,
-                "tasks": [{"task_id": "synthetic-task"}],
+                "source": {"repository": "synthetic", "revision": "synthetic"},
+                "native_revision": NATIVE_REVISION,
+                "problems": [synthetic_problem().model_dump()],
             }
         )
     )
-    runner = tmp_path / "runner.py"
-    runner.write_text(RUNNER)
     config = SolExecBenchResourcesServerConfig(
         host="127.0.0.1",
         port=8080,
         entrypoint="app.py",
         name="sol_execbench",
-        manifest_path=manifest,
-        manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
-        evaluator_command=[sys.executable, str(runner)],
+        problem_manifest_path=path,
+        problem_manifest_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         artifact_root=tmp_path / "artifacts",
-        gpu_uuid=GPU,
+        sandbox_image="synthetic/image@sha256:" + "a" * 64,
+        sandbox_provider={"opensandbox": {"operations": {"command_retries": 0}}},
     )
-    return SolExecBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-
-
-def executions(server: SolExecBenchResourcesServer) -> list[dict]:
-    path = server.config.artifact_root / "executions.jsonl"
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {}
+    return SolExecBenchResourcesServer(config=config, server_client=client)
 
 
 @pytest.mark.asyncio
-async def test_concurrent_retries_run_once_and_different_requests_serialize(server):
-    first, duplicate, second = await asyncio.gather(
-        server.verify(request()),
-        server.verify(request()),
-        server.verify(request("response-two")),
-    )
+async def test_native_success_uses_gpu_latency_records_evidence_and_replays(server):
+    first, duplicate = await asyncio.gather(server.verify(request()), server.verify(request()))
     assert first == duplicate
-    assert first.request_id != second.request_id
-    assert len(executions(server)) == 2
-    assert all(item.outcome == "PASSED" and item.reward == 0.25 for item in (first, second))
-    assert first.native_result["gpu_uuid"] == GPU
-    assert first.native_result["raw"]["output"][0]["content"][0]["text"] == RAW_TEXT
-    restarted = SolExecBenchResourcesServer(config=server.config, server_client=server.server_client)
-    assert (await restarted.verify(request())).request_id == first.request_id
-    assert len(executions(server)) == 2
-
-
-@pytest.mark.asyncio
-async def test_metadata_is_data_and_changes_request_identity(server):
-    first = await server.verify(request(command="touch forbidden", provenance={"sample": 0}))
-    second = await server.verify(request(command="touch forbidden", provenance={"sample": 1}))
-    assert first.request_id != second.request_id
-    saved = json.loads((server.config.artifact_root / first.request_id / "request.json").read_bytes())
-    assert saved["verifier_metadata"] == {
-        "command": "touch forbidden",
-        "provenance": {"sample": 0},
-    }
-    assert first.verifier_metadata == saved["verifier_metadata"]
-
-
-@pytest.mark.asyncio
-async def test_prompt_sampling_and_trusted_argv_are_part_of_identity(server):
-    body = request()
-    first = await server.verify(body)
-    body.responses_create_params.input = "A different prompt"
-    second = await server.verify(body)
-    body.responses_create_params.temperature = 0.75
-    third = await server.verify(body)
-    server.config.evaluator_command.insert(1, "-u")
-    fourth = await server.verify(body)
-    assert len({row.request_id for row in (first, second, third, fourth)}) == 4
-    saved = json.loads((server.config.artifact_root / third.request_id / "request.json").read_bytes())
-    assert saved["responses_create_params"]["input"] == "A different prompt"
-    assert saved["responses_create_params"]["temperature"] == 0.75
-    assert len(executions(server)) == 4
-
-
-@pytest.mark.asyncio
-async def test_native_timeout_stays_null_masked_and_worker_continues(server):
-    timeout = await server.verify(request(mode="timeout"))
-    success = await server.verify(request("response-two"))
-    assert timeout.outcome == "EVALUATION_TIMEOUT"
-    assert timeout.sol_score is None and timeout.reward == 0 and timeout.mask_sample
-    assert not timeout.solved and timeout.failure_kind == "sol_execbench:evaluation_timeout"
-    assert success.outcome == "PASSED" and len(executions(server)) == 2
-
-
-@pytest.mark.asyncio
-async def test_candidate_failure_is_measured_zero(server):
-    result = await server.verify(request(mode="candidate"))
-    assert result.sol_score == 0 and result.reward == 0 and not result.mask_sample
-    assert not result.solved and result.failure_kind is None
+    assert first.reward == 1 and not first.mask_sample and first.sol_score is None
+    assert first.latency_ms == {"synthetic-workload": 0.01}
+    assert first.reference_latency_ms == {}
+    assert len(FakeSandbox.instances) == 1
+    sandbox = FakeSandbox.instances[0]
+    assert sandbox.stopped and sandbox.spec.resources.gpu == 1
+    assert sandbox.spec.image.endswith("@sha256:" + "a" * 64)
+    assert sandbox.spec.entrypoint == ["/bin/sh", "-c", "exec sleep infinity"]
+    assert sandbox.provider["opensandbox"]["operations"]["command_retries"] == 0
+    assert sandbox.commands[-1] == ("/venv/bin/python /sol-eval/native_runner.py", {"timeout_s": 900})
+    assert json.loads(sandbox.files["/sol-eval/config.json"])["benchmark_reference"] is False
+    assert json.loads(sandbox.files["/sol-eval/protocol.json"])["native_revision"] == NATIVE_REVISION
+    attempt = Path(first.artifact_path)
+    assert (attempt / "native.stdout").read_text() == "native stdout"
+    assert (attempt / "native.stderr").read_text() == "native stderr"
+    assert json.loads((attempt / "trace.jsonl").read_bytes())["evaluation"]["status"] == "PASSED"
+    assert (await server.verify(request())).reward == 1
+    assert len(FakeSandbox.instances) == 1
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "mode, expected",
+    "mode,masked,reward",
     [
-        ("infra", "ENVIRONMENT_FAILURE"),
-        ("missing", "INVALID_RESULT"),
-        ("identity", "INVALID_RESULT"),
-        ("bool", "INVALID_RESULT"),
-        ("nan", "INVALID_RESULT"),
-        ("nested_nan", "INVALID_RESULT"),
-        ("exit", "RUNNER_FAILED"),
+        ("candidate_failure", False, 0),
+        ("missing_trace", True, 0),
+        ("timeout", True, 0),
+        ("create_failure", True, 0),
+        ("cleanup_failure", True, 0),
     ],
 )
-async def test_infrastructure_failures_stop_queued_and_restarted_worker(server, mode, expected):
-    failed, queued = await asyncio.gather(server.verify(request(mode=mode)), server.verify(request("response-two")))
-    assert failed.outcome == expected and failed.mask_sample and failed.sol_score is None
-    assert queued.outcome == "WORKER_STOPPED" and queued.mask_sample
-    assert len(executions(server)) == 1
-    restarted = SolExecBenchResourcesServer(config=server.config, server_client=server.server_client)
-    assert (await restarted.verify(request("response-three"))).outcome == "WORKER_STOPPED"
-    assert (await restarted.verify(request(mode=mode))).outcome == expected
-    assert len(executions(server)) == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("corrupt_request", [False, True])
-async def test_uncertain_attempt_never_reruns(server, corrupt_request):
+async def test_native_failure_lifecycle(server, mode, masked, reward):
+    FakeSandbox.mode = mode
     result = await server.verify(request())
-    attempt = server.config.artifact_root / result.request_id
-    (attempt / "accepted.json").unlink()
-    if corrupt_request:
-        (attempt / "request.json").write_text("{}")
-    unknown = await server.verify(request())
-    assert unknown.outcome == "ATTEMPT_UNRESOLVED" and unknown.sol_score is None
-    assert len(executions(server)) == 1
-    assert (await server.verify(request("response-two"))).outcome == "WORKER_STOPPED"
-
-
-async def wait_for_child(server) -> Path:
-    for _ in range(200):
-        children = list(server.config.artifact_root.glob("*/child.pid"))
-        if children:
-            return children[0]
-        await asyncio.sleep(0.01)
-    raise AssertionError("Synthetic child did not start")
-
-
-def assert_reaped(attempt: Path, expected_returncode: int = -9):
-    process = json.loads((attempt / "process.json").read_bytes())
-    assert process["returncode"] == expected_returncode
-    with pytest.raises(ProcessLookupError):
-        os.kill(process["pid"], 0)
-    child = int((attempt / "child.pid").read_text())
-    # An orphan may briefly remain a zombie, but must not be executing.
-    for _ in range(100):
-        stat = Path(f"/proc/{child}/stat")
-        if stat.exists() and stat.read_text().split()[2] == "Z":
-            return
-        try:
-            os.kill(child, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(0.01)
-    raise AssertionError("Synthetic child still executing after process-group cleanup")
+    assert result.mask_sample is masked and result.reward == reward
+    assert result.infrastructure_error is masked and result.sol_score is None
+    assert FakeSandbox.instances[0].stopped
+    assert json.loads((Path(result.artifact_path) / "result.json").read_bytes())["outcome"] == result.outcome
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "posix", reason="Evaluator process-group isolation requires POSIX")
-async def test_transport_timeout_reaps_descendants_and_stops_worker(server):
-    server.config.runner_timeout_s = 0.4
-    result = await server.verify(request(mode="hang"))
-    assert result.outcome == "RUNNER_TIMEOUT" and result.mask_sample and result.sol_score is None
-    assert_reaped(server.config.artifact_root / result.request_id)
+async def test_bad_output_does_not_allocate_gpu_and_metadata_cannot_choose_paths(server):
+    result = await server.verify(request(text="not JSON"))
+    assert result.outcome == "INVALID_SOLUTION" and result.reward == 0 and not result.mask_sample
+    assert not FakeSandbox.instances
+    body = request().model_dump()
+    body["verifier_metadata"]["path"] = "/untrusted"
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        SolExecBenchVerifyRequest.model_validate(body)
+    bad = request()
+    bad.verifier_metadata.problem_digest = "f" * 64
+    with pytest.raises(ValueError, match="server-owned"):
+        await server.verify(bad)
+    assert not FakeSandbox.instances
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "posix", reason="Evaluator process-group isolation requires POSIX")
-@pytest.mark.parametrize("mode", ["detached", "exit_leader"])
-async def test_graceful_shutdown_cleans_detached_child_and_group_after_leader_exit(server, mode):
-    server.config.runner_timeout_s = 0.4
-    result = await server.verify(request(mode=mode))
-    assert result.outcome == "RUNNER_TIMEOUT" and result.mask_sample
-    attempt = server.config.artifact_root / result.request_id
-    assert_reaped(attempt, expected_returncode=0)
-    if mode == "detached":
-        assert (attempt / "detached-cleaned").read_text() == "yes"
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "posix", reason="Evaluator process-group isolation requires POSIX")
-async def test_disconnected_caller_does_not_cancel_shared_work_but_shutdown_reaps_it(
-    server,
-):
-    app = server.setup_webserver()
-    async with app.router.lifespan_context(app):
-        caller = asyncio.create_task(server.verify(request(mode="hang")))
-        child = await wait_for_child(server)
-        caller.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await caller
-        assert len(server._inflight) == 1
-    accepted = json.loads((child.parent / "accepted.json").read_bytes())
-    assert accepted["outcome"] == "RUNNER_CANCELLED" and accepted["sol_score"] is None
-    assert_reaped(child.parent)
-
-
-@pytest.mark.asyncio
-async def test_manifest_rejects_unknown_task_without_execution(server):
-    body = request().model_copy(update={"task_id": "unselected-task"})
-    result = await server.verify(body)
-    assert result.outcome == "UNKNOWN_TASK" and result.mask_sample and result.sol_score is None
-    assert not executions(server)
-
-
-@pytest.mark.asyncio
-async def test_persistence_failure_halts_worker_before_another_launch(server, monkeypatch):
-    from resources_servers.sol_execbench import app
-
-    original_write = app.write_json
-
-    def fail_accept(path, value):
-        if path.name == "accepted.json":
-            raise OSError("Synthetic persistence failure")
-        original_write(path, value)
-
-    monkeypatch.setattr(app, "write_json", fail_accept)
-    failed = await server.verify(request())
-    assert failed.outcome == "PERSISTENCE_FAILURE" and failed.mask_sample
-    monkeypatch.setattr(app, "write_json", original_write)
-    assert (await server.verify(request("response-two"))).outcome == "WORKER_STOPPED"
-    assert len(executions(server)) == 1
-
-
-def test_manifest_pin_and_strict_schema(server):
-    with pytest.raises(ValueError, match="SHA256 mismatch"):
-        SolExecBenchResourcesServer(
-            config=server.config.model_copy(update={"manifest_sha256": "b" * 64}),
-            server_client=server.server_client,
-        )
-    manifest = json.loads(server.config.manifest_path.read_bytes())
-    for patch in (
-        {"schema_version": True},
-        {"samples_per_task": True},
-        {"tasks": []},
-        {"tasks": [{"task_id": "same"}, {"task_id": "same"}]},
-        {"tasks": [{"task_id": " "}]},
-        {"extra": "forbidden"},
-    ):
-        with pytest.raises(ValidationError):
-            EvaluationManifest.model_validate(manifest | patch)
-
-
-@pytest.mark.parametrize("workers", [None, 0, 2, -1, True, "1"])
-def test_server_rejects_multiple_or_ambiguous_workers(server, workers):
-    with pytest.raises(ValidationError):
-        SolExecBenchResourcesServerConfig.model_validate(server.config.model_dump() | {"num_workers": workers})
-
-
-def test_one_process_and_no_ray_are_explicit(server):
-    from nemo_gym.server_utils import _server_uses_ray
-
-    assert server.config.num_workers == 1
-    assert _server_uses_ray(SolExecBenchResourcesServer) is False
+async def test_incomplete_cached_attempt_is_not_retried(server):
+    result = await server.verify(request())
+    (Path(result.artifact_path) / "result.json").unlink()
+    repeated = await server.verify(request())
+    assert repeated.mask_sample and repeated.outcome == "ATTEMPT_UNRESOLVED"
+    assert len(FakeSandbox.instances) == 1
 
 
 @pytest.mark.parametrize(
-    "patch",
+    "traces,code,outcome",
     [
-        {"solved": False},
-        {"infrastructure_error": True},
-        {"sol_score": None},
-        {"sol_score": True},
-        {"solved": 1},
-        {"outcome": "FAILED"},
-        {"outcome": "EVALUATION_TIMEOUT", "solved": False, "sol_score": 0.0},
-        {"outcome": "UNRECOGNIZED", "solved": False, "sol_score": 0.0},
+        ([], 0, "INCOMPLETE_TRACE"),
+        ([trace(), trace()], 0, "INCOMPLETE_TRACE"),
+        ([trace("RUNTIME_ERROR")], 1, "NATIVE_UNRESOLVED"),
+        ([trace("INVALID_REFERENCE")], 1, "NATIVE_UNRESOLVED"),
+        ([trace("TIMEOUT")], 1, "NATIVE_UNRESOLVED"),
+        ([trace("INCORRECT_NUMERICAL")], 1, "CANDIDATE_FAILED"),
+        ([trace()], 1, "INVALID_EXIT_STATUS"),
     ],
 )
-def test_result_contract_rejects_inconsistent_native_outcomes(patch):
-    result = {
-        "request_id": "b" * 64,
-        "task_id": "synthetic-task",
-        "protocol_sha256": PROTOCOL,
-        "outcome": "PASSED",
-        "solved": True,
-        "infrastructure_error": False,
-        "sol_score": 0.25,
-    }
-    with pytest.raises(ValidationError):
-        EvaluatorResult.model_validate(result | patch)
-
-
-def test_real_fastapi_request_and_response_schema(server):
-    with TestClient(server.setup_webserver()) as client:
-        assert client.get("/reverify_mode").json() == "stateless"
-        response = client.post("/verify", json=request().model_dump(mode="json"))
-        assert response.status_code == 200, response.text
-        assert response.json()["outcome"] == "PASSED"
-        assert response.json()["response"]["output"][0]["content"][0]["text"] == RAW_TEXT
-        invalid = request().model_dump(mode="json")
-        invalid["response"] = {"id": "incomplete"}
-        assert client.post("/verify", json=invalid).status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_evaluator_and_gym_result_fields_override_request_extras(server):
-    class ExtraRequest(SolExecBenchVerifyRequest):
-        model_config = ConfigDict(extra="allow")
-
-    body = ExtraRequest.model_validate(
-        request(mode="candidate").model_dump()
-        | {
-            "outcome": "PASSED",
-            "reward": 99.0,
-            "sol_score": 99.0,
-            "solved": True,
-            "request_id": "f" * 64,
-            "mask_sample": True,
-            "native_result": {"forged": True},
-            "failure_kind": "forged",
-            "failure_reason": "forged",
-        }
+def test_native_status_and_exact_workload_coverage(traces, code, outcome):
+    result = classify_native_result(
+        problem=synthetic_problem(),
+        solution_name="synthetic_solution",
+        return_code=code,
+        traces=traces,
+        benchmark_reference=False,
     )
-    result = await server.verify(body)
-    assert result.outcome == "CANDIDATE_FAILED" and not result.solved
-    assert result.reward == result.sol_score == 0.0
-    assert result.request_id != "f" * 64 and not result.mask_sample
-    assert "forged" not in result.native_result
-    assert result.failure_kind is None and result.failure_reason is None
+    assert result.outcome == outcome
+    assert result.infrastructure_error == (outcome != "CANDIDATE_FAILED")
+
+
+@pytest.mark.parametrize("latency", [float("nan"), float("inf"), -1, 0, True])
+def test_invalid_native_latency_is_unresolved(latency):
+    native_trace = trace()
+    native_trace["evaluation"]["performance"]["latency_ms"] = latency
+    result = classify_native_result(
+        problem=synthetic_problem(),
+        solution_name="synthetic_solution",
+        return_code=0,
+        traces=[native_trace],
+        benchmark_reference=False,
+    )
+    assert result.infrastructure_error
+
+
+def test_manifest_digest_and_safe_asset_paths(tmp_path):
+    with pytest.raises(ValueError, match="Unsafe"):
+        safe_relative_path("../outside")
+    blob = tmp_path / "blob.safetensors"
+    blob.write_bytes(b"synthetic content, not a corpus asset")
+    asset = Asset(path=blob.name, sha256=hashlib.sha256(blob.read_bytes()).hexdigest())
+    assert checked_asset(tmp_path, asset) == blob
+    blob.write_bytes(b"modified")
+    with pytest.raises(ValueError, match="SHA256 mismatch"):
+        checked_asset(tmp_path, asset)
+    outside = tmp_path.parent / "outside.sol-test"
+    outside.write_bytes(b"outside")
+    (tmp_path / "link").symlink_to(outside)
+    with pytest.raises(ValueError, match="inside"):
+        checked_asset(tmp_path, Asset(path="link", sha256=hashlib.sha256(b"outside").hexdigest()))
+    assert problem_digest("a", {"inputs": {"x": 1, "y": 2}}, [], []) != problem_digest(
+        "a", {"inputs": {"y": 2, "x": 1}}, [], []
+    )
+    with pytest.raises(ValueError, match="manifest SHA256"):
+        load_manifest(blob, "a" * 64)
 
 
 @pytest.mark.asyncio
-async def test_aggregate_override_receives_masked_rows_and_external_denominator(server, monkeypatch):
-    from nemo_gym.config_types import AggregateMetrics
-    from resources_servers.sol_execbench import app
-
-    seen = {}
-
-    def aggregate(rows, **kwargs):
-        seen.update(rows=rows, **kwargs)
-        return AggregateMetrics(agent_metrics={"official": None})
-
-    monkeypatch.setattr(app, "aggregate_sol_results", aggregate)
-    masked = {"task_id": "synthetic-task", "mask_sample": True, "sol_score": None}
-    result = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[masked]))
-    assert seen == {
-        "rows": [masked],
-        "task_ids": ["synthetic-task"],
-        "samples_per_task": 2,
-        "protocol_sha256": PROTOCOL,
-        "timeout_zero_sensitivity": False,
-    }
-    assert result.agent_metrics["official"] is None
+async def test_verifier_fixture_contract():
+    cases = await exercise_verifier_fixture(VERIFIER_FIXTURE, reward_range=[0, 1], determinism="unknown")
+    assert [case.kind for case in cases] == ["full_reward", "zero_reward", "malformed"]

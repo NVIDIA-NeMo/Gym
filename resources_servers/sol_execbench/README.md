@@ -1,163 +1,104 @@
-# SOL evaluator integration
+# Native SOL-ExecBench verifier
 
-This resource server connects Gym to an explicitly configured SOL evaluator.
-It supports the `simple_agent` verification interface and stateless
-`gym eval reverify`. The evaluator owns solution extraction, native GPU
-execution, workload coverage checks, candidate/error attribution, and the SOL
-score formula. Gym transports responses and reports complete-coverage metrics.
-No dataset, subset selection, prompts, baseline table, or evaluation results
-are bundled here. Keep those files and all runtime artifacts **outside this
-repository**, including in local development.
+This resources server runs the public [SOL-ExecBench evaluator](https://github.com/NVIDIA/SOL-ExecBench)
+at revision `a9fa0804c793d438e70850c33fe34426e66d53dd` in a fresh OpenSandbox sandbox with one GPU per response.
+It accepts native Solution JSON with inline source files, uses server-owned problem definitions and workloads,
+and records native correctness traces and GPU timing. The Gym reward is **all-workloads correctness (0 or 1)**.
+`sol_score` is null: current reference timing is not a published SOL anchor, and this integration does not infer
+anchors.
 
-This is an unbaselined integration (`verified: false`), not a new benchmark
-release. The CPU tests exercise transport, retry recovery, and aggregation with
-synthetic evaluators; they do not establish GPU correctness or performance.
+This integration is experimental. Mocked transport and synthetic result tests do not establish a working GPU image,
+OpenSandbox deployment, or model rollout. These must be qualified before reporting benchmark results.
 
-## Configure a trusted evaluator
+## Inputs and configuration
 
-For new generation, use `configs/sol_execbench.yaml` with an external YAML
-override for its required fields and a configured model server. For replay,
-use the resources-only configuration below; no model or agent process is needed.
-Paths must be absolute. A private manifest looks like:
+Prepare data with [`benchmarks/solexecbench`](../../benchmarks/solexecbench/README.md).
+The model returns a native Solution JSON object (optionally in one `json` fence), including `name`, `definition`,
+`author`, `spec`, and nonempty `sources` with relative `path` and inline `content`.
+The native language/build schema is validated inside the pinned image. Native hardware labels are `B200` and `LOCAL`;
+`H100` is not a native solution-schema hardware label. The public benchmark uses B200.
 
-```json
-{
-  "schema_version": 1,
-  "protocol_sha256": "<SHA256 of the evaluator protocol>",
-  "samples_per_task": 8,
-  "tasks": [{"task_id": "example-task"}]
-}
-```
+Rows supply only `verifier_metadata: {task_id, problem_digest}`. The server loads
+`problem_manifest_path` and verifies its exact bytes against `problem_manifest_sha256`.
+Each trusted problem contains the inline native definition, all workloads, and SHA256-pinned relative asset paths.
+Definition dictionary order is preserved because it defines the argument ABI. Asset paths must remain inside the
+manifest directory, including after symlink resolution. Assets are checked before upload. Corpus files are downloaded
+at runtime and are not included in this repository.
 
-`manifest_sha256` pins the exact bytes of that file. `evaluator_command` is a
-trusted argv list, for example an isolated runtime launcher followed by its
-Python interpreter and adapter script. The server appends
-`--request /absolute/request.json --result /absolute/result.json`. It never
-passes candidate text to a shell. Pin the adapter, native evaluator, images,
-inputs, workloads, and scoring dependencies in the external protocol; the
-adapter must validate those bindings before admission.
+Compose `configs/sol_execbench.yaml`, the benchmark config, an existing model config, and
+`nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`. Supply:
 
-The server is **not a candidate-code sandbox** and does not install a compiler,
-CUDA runtime, or the SOL evaluator. Run the configured adapter inside the
-appropriate isolated, pinned execution environment. That launcher or runtime
-must also own cleanup of descendants that create separate process sessions.
-Runtime preparation must not silently upgrade the evaluator or alter its
-measurement settings.
+- `problem_manifest_path` and the bare SHA256 from the preparation sidecar;
+- an absolute writable `artifact_root`;
+- `sandbox_image` in immutable `registry/image@sha256:...` form;
+- a configured OpenSandbox endpoint, credentials, and one-GPU-capable deployment;
+- `samples_per_task` matching the evaluation repeat count.
 
-Use one resource-server process for each exclusively assigned physical GPU.
-`gpu_uuid` is recorded and supplied as `CUDA_VISIBLE_DEVICES`; requests within
-that process execute serially. Separate processes must not share that GPU.
-`runner_timeout_s` is the adapter watchdog, distinct from the native evaluator's
-measurement budget. Configure it to leave time for the native evaluator's own
-timeouts and cleanup. Wrapper failures remain infrastructure failures.
+OpenSandbox command retries must remain zero. Each resources worker serializes its evaluations and each evaluation
+creates one disposable sandbox, so no two evaluators share a sandbox. The sandbox image entrypoint is overridden with
+an idle process. One visible GPU and the exact `NVIDIA B200` product name are checked before running the candidate;
+GB200 and MIG device names are rejected. The deployment must provide exclusive GPU allocation; visible-device count
+and process observations alone do not prove exclusivity.
+`LOCAL` is available for explicit noncanonical development runs and changes protocol identity.
 
-## Request and result contract
+The native defaults are explicit: compilation 120 seconds, evaluation 600 seconds, 10 warmups, 50 timing iterations,
+seed 200, `lock_clocks=false`, `benchmark_reference=false`. The outer command watchdog defaults to 900 seconds and
+must exceed compilation plus evaluation budgets. Changing these settings changes the recorded protocol digest.
+Enable `benchmark_reference` explicitly to expose current native reference GPU timings; some references are expensive.
+RPC or wall time is never used as kernel latency.
 
-Gym inputs carry the exact original `responses_create_params`, `task_id`, and
-`verifier_metadata`. Saved rollout files carry `response`, `_ng_task_index`, and
-`_ng_rollout_index`. Put source hashes and replay provenance in input
-`verifier_metadata`: Gym replay forwards the saved response, not arbitrary
-extra fields from the old rollout. Never import old rewards or timing results
-as fresh verification. Preserve response text bytes and reported usage; do not
-fabricate generation-time token IDs by re-tokenizing saved text.
+## Runtime image
 
-The evaluator request file contains `schema_version`, `request_id`, `task_id`,
-`protocol_sha256`, `gpu_uuid`, the original `responses_create_params`, the full
-Gym `response`, and `verifier_metadata`.
-It must write one JSON object at the requested result path and exit zero:
-
-```json
-{
-  "request_id": "<echo the request ID>",
-  "task_id": "example-task",
-  "protocol_sha256": "<echo the pinned protocol hash>",
-  "outcome": "PASSED",
-  "infrastructure_error": false,
-  "solved": true,
-  "sol_score": 0.25,
-  "native_result": {"detail": "Native traces and process logs retained by the adapter"}
-}
-```
-
-Only the evaluator may establish a candidate failure. A passing result requires
-its exact full workload coverage, correctness, and valid timing checks. An
-unknown infrastructure failure must be unsolved with `sol_score: null`.
-`EVALUATION_TIMEOUT` is always an infrastructure outcome. Retain native stdout,
-stderr, timeout diagnostics, workload UUIDs, and trace files in the attempt
-directory. A native timeout may allow the next candidate; any other
-infrastructure error stops this worker until operator reconciliation.
-
-The resource server validates result identity and invariants. Gym requires a
-numeric `reward`, so unresolved records use a **masked** transport value of zero
-while retaining `sol_score: null`. This zero is not a measured candidate score.
-
-## Replay and recovery
-
-Create an external resources-only YAML file, replacing the placeholder values
-with your pinned manifest, evaluator command, and allocated physical GPU UUID:
-
-```yaml
-# /private/sol/runtime.yaml
-sol_execbench:
-  resources_servers:
-    sol_execbench:
-      entrypoint: app.py
-      num_workers: 1
-      manifest_path: /private/sol/manifest.json
-      manifest_sha256: "<SHA256 of the exact manifest bytes>"
-      evaluator_command:
-        - /private/sol/pinned-runtime-launcher
-        - /private/sol/evaluator-adapter.py
-      artifact_root: /private/sol/new-evaluation-artifacts
-      gpu_uuid: "<allocated GPU UUID>"
-      runner_timeout_s: 1800
-      timeout_zero_sensitivity: false
-```
-
-Do not include the bundled agent/model config in this replay file. Run Gym's
-existing command; it starts the configured resources server itself:
+Build the upstream image from the pinned public source, then extend it with the revision marker:
 
 ```bash
-gym eval reverify --config /private/sol/runtime.yaml \
-  --inputs /private/sol/inputs.jsonl \
-  --rollouts /private/sol/saved-responses.jsonl \
-  --output /private/sol/fresh-results.jsonl --concurrency 1
+git clone https://github.com/NVIDIA/SOL-ExecBench.git /tmp/sol-execbench-native
+git -C /tmp/sol-execbench-native checkout a9fa0804c793d438e70850c33fe34426e66d53dd
+docker build -f /tmp/sol-execbench-native/docker/Dockerfile \
+  -t sol-execbench-native:a9fa080 /tmp/sol-execbench-native
+docker build --build-arg SOL_EXECBENCH_BASE_IMAGE=sol-execbench-native:a9fa080 \
+  -f resources_servers/sol_execbench/Dockerfile -t REGISTRY/solexecbench-gym:qualification .
 ```
 
-For paired comparisons, the external orchestrator must preserve model order
-and assignment to the same GPU; this server's semaphore alone does not do so.
-Each `(task_index, rollout_index)` must be globally unique within a replay file,
-including when mixing model arms. Aggregate each model separately. For sharded
-runs, use `--disable-aggregation` and aggregate only after assembling all shards.
+Publish to an operator-controlled registry and configure the resulting **registry manifest digest** after
+qualification.
+No ready-to-use image digest is provided here. The runner checks both `/opt/sol-execbench-revision` and every installed
+native package Python source against `native_source_hashes.json`; a matching marker alone is insufficient.
+Hashes are metadata from the pinned Apache-2.0 evaluator, not vendored source.
 
-Transport retries with the same immutable request coalesce and reuse a validated
-completed attempt. This only deduplicates retries within the new evaluation;
-the adapter must never read old experiment results as new measurements. Each
-attempt retains its request, process record, stdout, stderr, evaluator result,
-and accepted result. An interrupted attempt without a valid accepted result is
-unresolved and is **not automatically re-executed**. Preserve it and reconcile
-the scheduler/process state before explicitly creating a replacement run.
+## Failure and evidence contract
 
-## Metrics
+A pass requires native-schema-validated traces with each trusted workload UUID exactly once, matching definition and
+solution identities, all `PASSED`, and the native CLI's success exit code. Complete candidate-failure traces are
+accepted
+with exit code 1. Incorrect shape, dtype, numerical results and native compile/reward-hack statuses receive zero
+correctness.
+Malformed Solution JSON also receives zero. Native CLI compile failures that produce no traces remain unresolved.
 
-This server overrides the entire `/aggregate_metrics` endpoint because Gym's
-default aggregator removes masked samples before custom metric hooks. Its
-external manifest fixes the task set and repeat count, including missing slots.
+Timeouts, missing/partial traces, invalid references, unexpected exits, transport errors, and cleanup failures set
+`mask_sample=true`, with an explicit failure kind and null SOL score. The native `RUNTIME_ERROR` status is ambiguous
+(it also covers missing inputs, clock failures and timing failures), so it remains masked. The required numeric Gym
+reward field is zero on masked responses; it is not a candidate-failure measurement. Official aggregate metrics are
+null
+until every declared task/repeat slot is present and measured. No timeout-zero sensitivity score is reported.
 
-- `official/sol_bestK`: `max(0, best passing SOL score)` of K candidates per task,
-  averaged equally across all expected tasks; unsolved tasks contribute zero.
-  This headline zero floor does not alter raw scores or the observed per-task
-  best passing score, and scores above one are not clipped.
-- `official/correctness_at_1`: passing candidates divided by all expected slots.
-- `official/pass_at_K`: tasks with at least one passing candidate divided by all
-  expected tasks. These rates are fractions, not percentages.
-- Every official metric is null with any missing or unresolved evaluation.
-- Optional `timeout_zero/*` values are explicitly labeled sensitivity estimates.
-  They require every record and permit only native `EVALUATION_TIMEOUT` holes.
-  Raw outcomes are unchanged; other errors or missing records suppress them.
+Every attempt records the request, protocol, candidate, native input/config files, runner stdout/stderr, native
+stdout/stderr, raw traces, GPU identity, memory/power/clock observations, compute-process observations and result under
+`artifact_root/<request_sha256>/`. Native source hashes,
+image digest, trusted manifest digest, runner digest, and native configuration define protocol identity.
+Concurrent identical requests share the same attempt; completed results replay without GPU work. An existing incomplete
+attempt stays unresolved rather than silently rerunning. Sandboxes are stopped in `finally`, including on cancellation.
 
-Per-task counts and observed best passing scores are retained for diagnosis.
-Use `gym eval aggregate` and this server's official keys for SOL reporting;
-generic `gym eval profile` measured-subset means are not SOL completion metrics.
-Keep hardware-specific scoring anchors distinct from freshly measured reference
-latencies, and retain the evaluator's original score definition.
+Isolation protects the Gym host and separates candidates. The native evaluator imports candidate code in its worker
+and owns its correctness/timing defenses. This adapter does not establish a new adversarial oracle boundary or validate
+every timed output independently of the native evaluator.
+
+## Validation and license
+
+Run `pytest resources_servers/sol_execbench/tests` and the environment's verifier fixture in Gym's dependency
+environment.
+The fixture tests the production native-result classifier with original synthetic traces; transport tests mock the
+OpenSandbox API. Neither claims GPU execution. A representative real model rollout remains required before readiness.
+
+This integration is Apache-2.0. The evaluator is Apache-2.0. Public dataset terms are separate: download and review its
+license at runtime; no evaluation-only corpus content or private subset is redistributed in these fixtures.
