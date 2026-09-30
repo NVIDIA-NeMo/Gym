@@ -181,13 +181,12 @@ See [`../.agents/skills/nemo-gym-docs/SKILL.md`](../.agents/skills/nemo-gym-docs
 | Workflow | Trigger | Purpose |
 |---|---|---|
 | `fern-docs-ci.yml` | `push: pull-request/[0-9]+` (FW-CI mirror) | `fern check` on PRs |
-| `fern-docs-preview-build.yml` | `pull_request` | Untrusted half: collect `fern/` artifact (no secrets) |
-| `fern-docs-preview-comment.yml` | `workflow_run` after build | Trusted half: build preview with `DOCS_FERN_TOKEN`, post 🌿 comment |
+| `fern-docs-preview.yml` | `push: pull-request/[0-9]+` (approved mirror) | Verify current PR/head, publish with fixed trusted tooling, and comment the verified preview URL |
 | `publish-fern-docs.yml` | push to `main` (`fern/**`), `docs/v*` tag, or manual | Publish to docs.nvidia.com/nemo/gym |
 
 Required org secret: **`DOCS_FERN_TOKEN`** (issued via `fern token` on a privileged dashboard account).
 
-PRs that touch `fern/**` get an automatic preview URL posted as a 🌿 comment.
+Approved PR mirrors that touch `fern/**` get an automatic preview URL posted as a 🌿 comment.
 
 ## Commits
 
