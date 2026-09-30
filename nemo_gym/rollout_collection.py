@@ -953,7 +953,8 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
             "built-in helper. Lets a benchmark plug in a custom procedure (e.g. an adaptive, "
             "multi-pass run) while still producing the standard rollout + aggregate-metrics "
             "artifacts. The function is awaited with (rollout_collection_config, global_config_dict). "
-            "When unset, the standard single-pass collection runs."
+            "When unset, the standard single-pass collection runs. A driver must honour "
+            "``resume_from_cache`` itself; one that ignores it restarts from zero on an auto-resumed job."
         ),
     )
     environment_routing_mode: Literal["agent", "legacy", "taskset"] = Field(

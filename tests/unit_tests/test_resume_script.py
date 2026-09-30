@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -65,7 +67,7 @@ def test_invalid_day_component_raises():
 def test_default_prologue_has_no_walltime_check():
     out = render_resume_prologue(ResumeConfig())
     assert "_gym_accumulated >=" not in out
-    assert "-ge 3" in out  # default max_retries
+    assert "-gt 3" in out  # default max_retries
 
 
 def test_prologue_with_max_walltime_adds_check():
@@ -75,7 +77,7 @@ def test_prologue_with_max_walltime_adds_check():
 
 def test_prologue_uses_custom_max_retries():
     out = render_resume_prologue(ResumeConfig(max_retries=9))
-    assert "-ge 9" in out
+    assert "-gt 9" in out
     assert "Infra retry limit (9)" in out
 
 
@@ -90,3 +92,91 @@ def test_rendered_prologue_is_valid_bash(resume, tmp_path):
     script = tmp_path / "prologue.sh"
     script.write_text(render_resume_prologue(resume))
     subprocess.run(["bash", "-n", str(script)], check=True)
+
+
+# ---------------------------------------------------------------------------
+# Running the prologue against fake sacct/sbatch
+# ---------------------------------------------------------------------------
+
+_FAKE_SACCT = """#!/bin/bash
+echo call >> "$FAKE_LOG_DIR/sacct_calls"
+if [[ "$*" == *ElapsedRaw* ]]; then echo "${FAKE_ELAPSED:-}"; else echo "${FAKE_STATE:-}"; fi
+"""
+_FAKE_SBATCH = """#!/bin/bash
+echo "$*" >> "$FAKE_LOG_DIR/sbatch_calls"
+echo "Submitted batch job 999"
+"""
+
+
+def _run_prologue(tmp_path, resume: ResumeConfig, prev_state: str | None) -> subprocess.CompletedProcess:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name, body in (("sacct", _FAKE_SACCT), ("sbatch", _FAKE_SBATCH), ("sleep", "#!/bin/bash\n")):
+        tool = bin_dir / name
+        tool.write_text(body)
+        tool.chmod(0o755)
+    script = tmp_path / "job.sh"
+    script.write_text(render_resume_prologue(resume) + "\necho REACHED_WORK\n")
+    args = ["bash", str(script)] + ([] if prev_state is None else ["100"])
+    env = {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "SLURM_JOB_ID": "200",
+        "FAKE_LOG_DIR": str(tmp_path),
+        "FAKE_STATE": prev_state or "",
+        "FAKE_ELAPSED": "60" if prev_state else "",
+    }
+    return subprocess.run(args, cwd=tmp_path, env=env, capture_output=True, text=True)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_max_retries_allows_exactly_that_many_retries(tmp_path):
+    resume = ResumeConfig(max_retries=3)
+    for _ in range(3):
+        result = _run_prologue(tmp_path, resume, "FAILED")
+        assert result.returncode == 0, result.stdout
+        assert "REACHED_WORK" in result.stdout
+
+    result = _run_prologue(tmp_path, resume, "FAILED")
+    assert result.returncode == 1
+    assert "REACHED_WORK" not in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_empty_sacct_resumes_without_spending_a_retry(tmp_path):
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=1), "")
+
+    assert result.returncode == 0, result.stdout
+    assert "REACHED_WORK" in result.stdout
+    assert "state unknown" in result.stdout
+    assert not (tmp_path / ".gym_infra_retries").exists()
+    assert len((tmp_path / "sacct_calls").read_text().splitlines()) > 2
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_successor_is_killed_if_its_dependency_can_never_be_met(tmp_path):
+    result = _run_prologue(tmp_path, ResumeConfig(), None)
+
+    assert result.returncode == 0, result.stdout
+    sbatch_args = (tmp_path / "sbatch_calls").read_text()
+    assert "--dependency=afternotok:200" in sbatch_args
+    assert "--kill-on-invalid-dep=yes" in sbatch_args
+
+
+@pytest.mark.docs
+def test_job_dir_files_are_documented():
+    """Downstream tools read these names, so the docs page must list every one the scripts write."""
+    root = Path(__file__).resolve().parents[2]
+    page = (root / "fern/versions/latest/pages/evaluation/submit-auto-resume.mdx").read_text()
+    state_files = set(re.findall(r"\.gym_\w+", render_resume_prologue(ResumeConfig())))
+    script_source = (root / "nemo_gym/orchestration/executors/slurm_script.py").read_text()
+    log_stems = set(re.findall(r"logs/([\w{}]+)-\$SLURM_JOB_ID\.log", script_source))
+
+    assert state_files == {".gym_job_chain", ".gym_accumulated_walltime", ".gym_infra_retries"}
+    assert log_stems == {"{name}", "driver"}
+    for documented in [
+        *state_files,
+        "logs/driver-<SLURM_JOB_ID>.log",
+        "logs/<service>-<SLURM_JOB_ID>.log",
+        "logs/otel_collector-<SLURM_JOB_ID>.log",
+    ]:
+        assert f"`{documented}`" in page, f"{documented} is missing from the auto-resume docs"

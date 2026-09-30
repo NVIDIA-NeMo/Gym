@@ -41,10 +41,10 @@ _walltime_file="$OUTPUT_DIR/.gym_accumulated_walltime"
 _retry_file="$OUTPUT_DIR/.gym_infra_retries"
 
 if [[ "$_prev_slurm_job_id" != "" ]]; then
-    for _sacct_try in 1 2 3 4 5; do
+    for _sacct_try in 1 2 3 4 5 6; do
         _prev_state=$(sacct -j $_prev_slurm_job_id -P -n -o State | head -n 1)
         [[ -n "$_prev_state" ]] && break
-        sleep 2
+        sleep 10
     done
     _prev_elapsed=$(sacct -j $_prev_slurm_job_id -P -n -o ElapsedRaw | head -n 1)
     _prev_elapsed=${{_prev_elapsed:-0}}
@@ -52,7 +52,10 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
     _gym_accumulated=$((_gym_accumulated + _prev_elapsed))
     echo $_gym_accumulated > "$_walltime_file"
 
-    if [[ $_prev_state == 'COMPLETED' ]]; then
+    if [[ -z "$_prev_state" ]]; then
+        # Accounting lag: the state is unknown, so resume without spending an infra retry.
+        echo "Previous job $_prev_slurm_job_id: state unknown (sacct returned nothing). Resuming..."
+    elif [[ $_prev_state == 'COMPLETED' ]]; then
         echo "Previous job $_prev_slurm_job_id completed successfully. Exiting."
         exit 0
     elif [[ $_prev_state == CANCELLED* ]]; then
@@ -65,7 +68,7 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         _retries=$(cat "$_retry_file" 2>/dev/null || echo 0)
         _retries=$((_retries + 1))
         echo $_retries > "$_retry_file"
-        if [[ $_retries -ge {max_retries} ]]; then
+        if [[ $_retries -gt {max_retries} ]]; then
             echo "Infra retry limit ({max_retries}) reached after $_prev_state. Stopping."
             exit 1
         fi
@@ -74,7 +77,8 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
 fi
 
 echo "$SLURM_JOB_ID" >> "$OUTPUT_DIR/.gym_job_chain"
-_next_output=$(sbatch --dependency=afternotok:$SLURM_JOB_ID "$_this_script" $SLURM_JOB_ID 2>&1) && {{
+# kill-on-invalid-dep: without it, clusters lacking kill_invalid_depend keep the successor pending forever.
+_next_output=$(sbatch --dependency=afternotok:$SLURM_JOB_ID --kill-on-invalid-dep=yes "$_this_script" $SLURM_JOB_ID 2>&1) && {{
     _next_id=$(echo "$_next_output" | grep -oE '[0-9]+')
     if [[ -n "$_next_id" ]]; then
         echo "Auto-resume follow-up queued: $_next_id (afternotok:$SLURM_JOB_ID)"

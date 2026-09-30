@@ -802,7 +802,7 @@ def test_build_sbatch_script_resumable_adds_prologue_and_resume_flag(bench_dir):
     assert "# --- Auto-resume chain ---" in script
     assert '_this_script="$OUTPUT_DIR/job.sh"' in script
     assert "_gym_accumulated >= 36000" in script
-    assert "-ge 5" in script
+    assert "-gt 5" in script
     assert "+resume_from_cache=True" in script
 
 
