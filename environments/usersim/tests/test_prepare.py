@@ -5,17 +5,28 @@ import json
 import subprocess
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from environments.usersim import prepare as prepare_module
 from nemo_gym.benchmarks import BenchmarkConfig
 
 
-def _write_parquet(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pylist([{"first_name": "Morgan", "age": 42}]), path)
+REGISTERED_PROBES = (
+    "financial_services",
+    "general_educational",
+    "general_open_ended",
+    "health_decision_support_disclosure",
+    "health_general_disclosure",
+    "health_therapy_disclosure",
+    "health_triage_disclosure",
+    "identity_disclosure",
+    "safety_agentic",
+    "safety_chat_pressure",
+    "sov_ai_dynamic",
+    "sov_ai_facts",
+    "sov_ai_multilingual_parity",
+    "tool_calling",
+)
 
 
 def test_environment_config_resolves_one_resources_owned_benchmark() -> None:
@@ -29,32 +40,55 @@ def test_environment_config_resolves_one_resources_owned_benchmark() -> None:
     assert benchmark.dataset.prepare_script == Path("environments/usersim/prepare.py")
 
 
-def test_prepare_invokes_usersim_panel_and_records_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prepare_materializes_every_registered_probe_with_usersim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     tasks_path = tmp_path / "example.jsonl"
     monkeypatch.setattr(prepare_module, "TASKS_FPATH", tasks_path)
     monkeypatch.setattr(prepare_module.shutil, "which", lambda executable: f"/bin/{executable}")
     calls: list[tuple[list[str], dict[str, object]]] = []
 
-    def fake_panel(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+    def fake_materialize(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
         calls.append((command, kwargs))
-        _write_parquet(Path(command[-1]))
+        output = Path(command[-1])
+        output.write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "probe_type": probe,
+                        "probe_family": f"native-{probe}",
+                        "probe_variant": "usersim-resolved",
+                        "persona": {"source": "usersim"},
+                        "theme": {"source": "usersim"},
+                        "trajectory_id": f"usersim-{probe}",
+                        "usersim_provenance": {"code_sha": prepare_module.USERSIM_REVISION},
+                        "usersim_config": {"random_seed": 1042 + index},
+                    }
+                )
+                + "\n"
+                for index, probe in enumerate(REGISTERED_PROBES)
+            )
+        )
         return subprocess.CompletedProcess(command, 0)
 
-    monkeypatch.setattr(prepare_module.subprocess, "run", fake_panel)
+    monkeypatch.setattr(prepare_module.subprocess, "run", fake_materialize)
 
-    result = prepare_module.prepare(personas_cache_dir=tmp_path / "personas", personas_panel_size=1)
+    result = prepare_module.prepare(random_seed=1042)
 
     assert result == tasks_path.absolute()
     rows = [json.loads(line) for line in tasks_path.read_text().splitlines()]
     assert len(rows) == 14
     assert all(row["task_id"]["taskset"] == "usersim:example" for row in rows)
-    assert all(row["task_input"]["scenario"]["persona"]["first_name"] == "Morgan" for row in rows)
-    assert {row["task_input"]["usersim_context"]["seed"] for row in rows} == set(range(1001, 1015))
+    assert {row["task_input"]["resolved_row"]["probe_type"] for row in rows} == set(REGISTERED_PROBES)
+    assert all(row["task_input"]["resolved_row"]["persona"] == {"source": "usersim"} for row in rows)
+    assert all(row["task_input"]["resolved_row"]["theme"] == {"source": "usersim"} for row in rows)
     assert all(
-        row["task_input"]["usersim_context"]["usersim_revision"] == prepare_module.USERSIM_REVISION for row in rows
+        row["task_input"]["resolved_row"]["usersim_provenance"]["code_sha"] == prepare_module.USERSIM_REVISION
+        for row in rows
     )
+    assert len(calls) == 1
     command, kwargs = calls[0]
-    assert command[:12] == [
+    assert command[:9] == [
         "/bin/uv",
         "run",
         "--no-config",
@@ -62,45 +96,18 @@ def test_prepare_invokes_usersim_panel_and_records_manifest(tmp_path: Path, monk
         "--isolated",
         "--with-requirements",
         str(prepare_module.PREPARE_REQUIREMENTS_FPATH),
-        "usersim",
-        "panel",
-        "--locale",
-        "en_US",
-        "--num-personas",
+        "python",
+        "-c",
     ]
-    assert command[12] == "1"
-    assert "env" not in kwargs
-    assert Path(str(kwargs["cwd"])).name.startswith("usersim-panel-")
-    panel_path = tmp_path / "personas" / "0.0.2" / "panels" / "en_US.parquet"
-    manifest = json.loads(panel_path.with_suffix(".manifest.json").read_text())
-    assert manifest["panel_rows"] == 1
-    assert len(manifest["panel_sha256"]) == 64
-    assert manifest["generator"] == "usersim panel"
-    assert manifest["usersim_revision"] == prepare_module.USERSIM_REVISION
+    assert "materialize_episode_inputs" in command[9]
+    assert "known_probes" in command[9]
+    assert kwargs["env"]["USERSIM_CODE_SHA"] == prepare_module.USERSIM_REVISION
+    assert Path(str(kwargs["cwd"])).name.startswith("usersim-materialize-")
 
 
-def test_prepare_reuses_matching_panel_without_invoking_usersim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    example_path = tmp_path / "example.jsonl"
-    monkeypatch.setattr(prepare_module, "TASKS_FPATH", example_path)
-    monkeypatch.setattr(prepare_module.shutil, "which", lambda executable: f"/bin/{executable}")
+def test_gym_does_not_author_sampling_content() -> None:
+    source = Path(prepare_module.__file__).read_text()
 
-    def fake_panel(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
-        _write_parquet(Path(command[-1]))
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(prepare_module.subprocess, "run", fake_panel)
-    prepare_module.prepare(personas_cache_dir=tmp_path / "personas", personas_panel_size=1)
-    monkeypatch.setattr(
-        prepare_module.subprocess,
-        "run",
-        lambda *_args, **_kwargs: pytest.fail("matching prepared panel must not invoke UserSim"),
-    )
-
-    prepare_module.prepare(personas_cache_dir=tmp_path / "personas", personas_panel_size=1)
-
-    assert example_path.is_file()
-    assert len(example_path.read_text().splitlines()) == 14
-    panel_path = tmp_path / "personas" / "0.0.2" / "panels" / "en_US.parquet"
-    assert panel_path.with_suffix(".manifest.json").is_file()
+    assert "_stable_index" not in source
+    assert "example_source.jsonl" not in source
+    assert "personas_panel" not in source

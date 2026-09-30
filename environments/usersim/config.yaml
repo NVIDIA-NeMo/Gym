@@ -1,11 +1,10 @@
-# NeMo UserSim environment composition. Preparation materializes the persona panel; runtime only reads it.
+# NeMo UserSim environment composition. Preparation materializes canonical resolved episode rows.
 config_paths:
   - resources_servers/usersim/configs/usersim.yaml
 
 usersim_resources:
   resources_servers:
     usersim:
-      personas_cache_dir: environments/usersim/data/personas
       datasets:
         - name: example
           type: benchmark
