@@ -102,6 +102,12 @@ def load_task(path: Path) -> HarborTask:
         raise HarborTaskError(f"{path} has no {INSTRUCTION_FILE}")
     if not (path / "tests").is_dir():
         raise HarborTaskError(f"{path} has no tests/ folder")
+    if not config.is_shared_verifier and not config.artifacts:
+        raise HarborTaskError(
+            f"{path / TASK_FILE} uses separate verification but declares no artifacts, so the verifier "
+            "would grade a fresh container without the agent's work. Declare `artifacts` "
+            '(`artifacts = ["/logs/artifacts"]` to grade only what the agent puts there).'
+        )
 
     environment = config.environment
     image = environment.docker_image
