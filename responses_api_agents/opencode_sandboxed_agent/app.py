@@ -25,7 +25,7 @@ from uuid import uuid4
 
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, JsonValue
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -61,6 +61,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
+from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
@@ -467,19 +468,37 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
-    async def _start_sandbox(self, sandbox_id: Optional[str] = None, workdir: Optional[str] = None) -> AsyncSandbox:
+    async def _start_sandbox(
+        self,
+        sandbox_id: Optional[str] = None,
+        workdir: Optional[str] = None,
+        *,
+        sandbox_access: SandboxAccess | None = None,
+        sandbox_provider: dict[str, JsonValue] | None = None,
+        sandbox_descriptor: dict[str, JsonValue] | None = None,
+    ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
-        resolved_sandbox_provider = create_provider(
-            resolve_provider_config(self.config.sandbox_provider, global_config_dict)
-        )
-        provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+        provider_source = self.config.sandbox_provider if sandbox_provider is None else sandbox_provider
+        descriptor = sandbox_descriptor
+        if sandbox_access is not None:
+            provider_source = sandbox_access.connection.provider_config_ref
+            descriptor = sandbox_access.connection.descriptor
+            workdir = sandbox_access.workdir
+        elif descriptor is None and sandbox_id:
+            descriptor = {"sandbox_id": sandbox_id, "workdir": workdir}
+        resolved_sandbox_provider = create_provider(resolve_provider_config(provider_source, global_config_dict))
 
-        if sandbox_id:
-            sandbox = await AsyncSandbox.connect(
-                {"sandbox_id": sandbox_id, "workdir": workdir}, provider=resolved_sandbox_provider
-            )
-            return sandbox
+        if descriptor is not None:
+            descriptor = dict(descriptor)
+            if workdir is not None:
+                descriptor["workdir"] = workdir
+            try:
+                return await AsyncSandbox.connect(descriptor, provider=resolved_sandbox_provider)
+            except BaseException:
+                await resolved_sandbox_provider.aclose()
+                raise
 
+        provider_default_metadata = resolve_provider_metadata(provider_source, global_config_dict)
         if self.config.debug:
             print("Creating new sandbox since one wasn't provided", file=sys.stderr)
 
@@ -923,6 +942,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         sandbox = await self._start_sandbox(
             sandbox_id=seed_session_result.get("sandbox_handle"),
             workdir=seed_session_result.get("workdir"),
+            sandbox_access=SandboxAccess.model_validate(seed_session_result["sandbox_access"])
+            if seed_session_result.get("sandbox_access") is not None
+            else None,
+            sandbox_provider=seed_session_result.get("sandbox_provider"),
+            sandbox_descriptor=seed_session_result.get("sandbox_descriptor"),
         )
         self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
 

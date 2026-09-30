@@ -600,3 +600,56 @@ class TestOpenCodeSandboxedAgent:
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+
+
+@mark.parametrize("mode", ["named", "inline", "legacy"])
+async def test_resource_selected_provider_and_legacy_fallback(monkeypatch, mode):
+    from nemo_gym.sandbox.access import SandboxAccess
+
+    configs = {"harness": {"local": {"root": "/harness"}}, "gpu": {"local": {"root": "/gpu"}}}
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: configs)
+    create = MagicMock(return_value=SimpleNamespace(aclose=AsyncMock()))
+    connect = AsyncMock()
+    monkeypatch.setattr(app_module, "create_provider", create)
+    monkeypatch.setattr(app_module.AsyncSandbox, "connect", connect)
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.sandbox_provider = "harness"
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    kwargs = {"sandbox_id": "old", "workdir": "/task"}
+    expected_provider = configs["harness"]
+    expected_descriptor = {"sandbox_id": "old", "workdir": "/task"}
+    if mode == "inline":
+        kwargs.update(sandbox_provider=configs["gpu"], sandbox_descriptor={"sandbox_id": "selected", "ports": [80]})
+        expected_provider = configs["gpu"]
+        expected_descriptor = {"sandbox_id": "selected", "ports": [80], "workdir": "/task"}
+    elif mode == "named":
+        kwargs.update(
+            sandbox_provider={"invalid": {}},
+            sandbox_access=SandboxAccess.model_validate({
+                "connection": {"provider_config_ref": "gpu", "descriptor": {"sandbox_id": "selected"}},
+                "workdir": "/resource",
+            }),
+        )
+        expected_provider = configs["gpu"]
+        expected_descriptor = {"sandbox_id": "selected", "workdir": "/resource"}
+    assert await server._start_sandbox(**kwargs) is connect.return_value
+    create.assert_called_once_with(expected_provider)
+    connect.assert_awaited_once_with(expected_descriptor, provider=create.return_value)
+
+
+async def test_invalid_resource_provider_does_not_fall_back(monkeypatch):
+    import pytest
+    from nemo_gym.sandbox.access import SandboxAccess
+
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {"harness": {"local": {}}})
+    create = MagicMock()
+    monkeypatch.setattr(app_module, "create_provider", create)
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.sandbox_provider = "harness"
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    with pytest.raises(ValueError, match="not defined"):
+        await server._start_sandbox(sandbox_access=SandboxAccess.model_validate({
+            "connection": {"provider_config_ref": "missing", "descriptor": {"sandbox_id": "box"}},
+            "workdir": "/task",
+        }))
+    create.assert_not_called()
