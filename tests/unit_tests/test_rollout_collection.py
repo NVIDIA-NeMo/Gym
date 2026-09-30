@@ -67,6 +67,7 @@ from nemo_gym.rollout_collection import (
     _build_ng_perf,
     _build_trajectory_record,
     _CompletedRollout,
+    _drop_truncated_tail,
     _expand_input_glob,
     _failure_rows_counted_as_zero,
     _failures_path_for,
@@ -1395,6 +1396,68 @@ class TestRolloutCollection:
         assert dispatched[0][ATTEMPT_INDEX_KEY_NAME] == 1
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
         assert [r["reward"] for r in persisted] == [0.0]
+
+    async def test_run_from_config_resume_drops_a_truncated_final_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """A hard kill mid-write leaves half a line; resume drops it and re-runs that rollout."""
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        materialized_fpath = tmp_path / "output_materialized_inputs.jsonl"
+        materialized_fpath.write_bytes(
+            b"".join(
+                orjson.dumps(
+                    {
+                        "responses_create_params": {"input": []},
+                        AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                        TASK_INDEX_KEY_NAME: task_index,
+                        ROLLOUT_INDEX_KEY_NAME: 0,
+                    }
+                )
+                + b"\n"
+                for task_index in (0, 1)
+            )
+        )
+        done = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "my_agent"}}
+        output_jsonl_fpath.write_bytes(orjson.dumps({**done, "reward": 1.0}) + b"\n" + b'{"_ng_task_index": 1, "rew')
+
+        dispatched: list[dict] = []
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            if url_path == "/run":
+                dispatched.append(json)
+                return FakeResponse(200, {"reward": 0.0})
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=True,
+            disable_health_check=True,
+            require_complete=True,
+        )
+        await RolloutCollectionHelper().run_from_config(config)
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in dispatched] == [1]
+        persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert sorted((r[TASK_INDEX_KEY_NAME], r["reward"]) for r in persisted) == [(0, 1.0), (1, 0.0)]
+
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [
+            (b'{"a": 1}\n{"b": 2', b'{"a": 1}\n'),
+            (b'{"a": 1}\n{"b": 2}', b'{"a": 1}\n{"b": 2}\n'),
+            (b'{"a": 1}\n', b'{"a": 1}\n'),
+            (b'{"a"', b""),
+            (b"", b""),
+        ],
+    )
+    def test_drop_truncated_tail(self, tmp_path: Path, content: bytes, expected: bytes) -> None:
+        fpath = tmp_path / "rollouts.jsonl"
+        fpath.write_bytes(content)
+        _drop_truncated_tail(fpath)
+        assert fpath.read_bytes() == expected
 
     def test_failure_rows_counted_as_zero_selects_the_last_attempt_of_each_rollout(self, tmp_path: Path) -> None:
         """The last attempt stands, so it is chosen before the wanted classes are picked out."""
