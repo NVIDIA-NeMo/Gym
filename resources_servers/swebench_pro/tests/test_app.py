@@ -288,7 +288,7 @@ async def test_episode_seed_returns_direct_access_and_resources_close_owns_stop(
     sandbox.stop.assert_not_awaited()
 
     with pytest.raises(ValueError, match="episode_id does not match"):
-        await server.close_session(
+        await server.close_resources_session(
             request,
             ResourcesCloseSessionRequest(
                 resources_session_id="session",
@@ -297,7 +297,7 @@ async def test_episode_seed_returns_direct_access_and_resources_close_owns_stop(
         )
     sandbox.stop.assert_not_awaited()
 
-    await server.close_session(
+    await server.close_resources_session(
         request,
         ResourcesCloseSessionRequest(
             resources_session_id="session",
@@ -305,7 +305,7 @@ async def test_episode_seed_returns_direct_access_and_resources_close_owns_stop(
         ).model_dump(mode="json"),
     )
     sandbox.stop.assert_awaited_once()
-    await server.close_session(
+    await server.close_resources_session(
         request,
         ResourcesCloseSessionRequest(
             resources_session_id="session",
@@ -314,7 +314,7 @@ async def test_episode_seed_returns_direct_access_and_resources_close_owns_stop(
     )
     sandbox.stop.assert_awaited_once()
     with pytest.raises(ValueError, match="episode_id does not match the closed resources session"):
-        await server.close_session(
+        await server.close_resources_session(
             request,
             ResourcesCloseSessionRequest(
                 resources_session_id="session",
@@ -382,7 +382,7 @@ async def test_episode_close_retains_state_when_sandbox_stop_fails() -> None:
     request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
 
     with pytest.raises(RuntimeError, match="stop failed"):
-        await server.close_session(
+        await server.close_resources_session(
             request,
             ResourcesCloseSessionRequest(
                 resources_session_id="session",
@@ -933,9 +933,9 @@ async def test_patch_extraction_retains_failed_stop_for_native_close(cancel_stop
     sandbox.stop.side_effect = None
     request = SimpleNamespace(session={})
     close_body = ResourcesCloseSessionRequest(resources_session_id="session", episode_id=identity[0])
-    receipt = await server.close_session(request, close_body.model_dump(mode="json"))
+    receipt = await server.close_resources_session(request, close_body.model_dump(mode="json"))
     assert receipt.resources_session_id == "session"
-    assert await server.close_session(request, close_body.model_dump(mode="json")) == receipt
+    assert await server.close_resources_session(request, close_body.model_dump(mode="json")) == receipt
     assert sandbox.stop.await_count == 2
     assert "session" not in server._session_id_to_sandbox
     assert "session" not in server._session_id_to_identity
@@ -972,8 +972,8 @@ async def test_seed_returns_reconnect_descriptor_and_cleanup_releases_container(
     assert server._session_id_to_sandbox["session"] is sandbox
 
     # An agent that fails before verification must still release the benchmark's state.
-    await server.close_session(request)
-    await server.close_session(request)
+    await server.close_resources_session(request)
+    await server.close_resources_session(request)
     sandbox.stop.assert_awaited_once()
     assert server._session_id_to_sandbox == {}
     assert server._session_id_to_pristine_untracked == {}
@@ -1018,7 +1018,7 @@ async def test_close_session_without_session_is_a_noop() -> None:
     server = make_server(golden=False)
     sandbox = SimpleNamespace(stop=AsyncMock())
     server._session_id_to_sandbox["other"] = sandbox
-    assert await server.close_session(SimpleNamespace(session={})) == {"closed": True}
+    assert await server.close_resources_session(SimpleNamespace(session={})) == {"closed": True}
     sandbox.stop.assert_not_awaited()
 
 

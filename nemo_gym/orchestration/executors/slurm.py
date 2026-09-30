@@ -31,6 +31,7 @@ from nemo_gym.orchestration.executors.otel import (
     render_collector_config,
     resolve_token,
     validate_destination,
+    validate_gym_telemetry,
 )
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
@@ -158,6 +159,7 @@ class SlurmExecutor(BaseExecutor):
         token = None
         if otel_active(config):
             validate_destination(config)
+            validate_gym_telemetry(config)
             token = resolve_token(config)
         now = utc_now()
         gym_job_id = new_gym_job_id(now)
