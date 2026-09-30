@@ -93,7 +93,7 @@ The model-server url is resolved at request time and passed to `AIAgent(base_url
 
 For SWE-bench Pro, use [`hermes.yaml`](../../benchmarks/swebench/pro/hermes.yaml).
 See [Evaluate SWE-bench Pro with Hermes](../../fern/versions/latest/pages/evaluation-tutorials/hermes-swe-bench-pro.mdx)
-for task preparation, EnvironmentServer configuration, evaluation commands, and session limits.
+for task preparation, Environment Server configuration, evaluation commands, and session limits.
 
 ## Sandbox-mode requirements
 
