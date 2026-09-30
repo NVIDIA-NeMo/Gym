@@ -1082,9 +1082,13 @@ the check."""
             for server in servers.values():
                 if not isinstance(server, DictConfig):
                     continue
-                for reference in server.values():
+                standard_reference = server.get(AGENT_SERVER_REF_KEY_NAME)
+                if isinstance(standard_reference, DictConfig):
+                    with_environment_server.add(standard_reference.get("name"))
+                for key, reference in server.items():
                     if (
-                        isinstance(reference, DictConfig)
+                        key != AGENT_SERVER_REF_KEY_NAME
+                        and isinstance(reference, DictConfig)
                         and reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME
                         and reference.get("name") is not None
                     ):
