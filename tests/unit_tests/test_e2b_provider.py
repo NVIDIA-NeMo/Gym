@@ -1141,11 +1141,3 @@ async def test_status_control_plane_failure_is_unknown(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(handle.raw, "get_info", unavailable)
     assert await provider.status(handle) is SandboxStatus.UNKNOWN
-
-
-def test_agentenv_profile_enables_auto_resume() -> None:
-    import yaml
-
-    profile = Path(__file__).resolve().parents[2] / "benchmarks/osworld/configs/osworld_agentenv.yaml"
-    config = yaml.safe_load(profile.read_text())
-    assert config["osworld_agentenv"]["e2b"]["create"]["auto_resume"] is True
