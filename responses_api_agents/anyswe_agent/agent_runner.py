@@ -14,6 +14,7 @@
 import asyncio
 import base64
 import importlib
+import inspect
 import json
 import os
 import subprocess
@@ -220,7 +221,15 @@ def main() -> None:
         **sampling,
     )
     request = Request({"type": "http", "path_params": {}})
-    response = asyncio.run(agent.responses(request=request, body=body))
+    # _create_episode also returns the harness's full session tree (subagent turns included),
+    # which responses() drops. Saved only for inspection.
+    create_episode = getattr(agent, "_create_episode", None)
+    if create_episode is not None and "collect_observations" in inspect.signature(create_episode).parameters:
+        episode = asyncio.run(create_episode(body, collect_observations=True))
+        response = episode.response
+        Path("/trajectories_mount/observations.json").write_text(episode.observations.model_dump_json())
+    else:
+        response = asyncio.run(agent.responses(request=request, body=body))
     Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
     print(f"agent finished: {len(response.output)} output items", flush=True)
 

@@ -647,6 +647,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             for remote, local in (
                 ("/trajectories_mount/response.json", params.persistent_dir / "response.json"),
                 ("/trajectories_mount/patch.diff", params.persistent_dir / "patch.diff"),
+                ("/trajectories_mount/observations.json", params.persistent_dir / "observations.json"),
             ):
                 exists = await sandbox.exec(f"test -f {shlex.quote(remote)}", timeout_s=30, user="root")
                 if exists.return_code == 0:
