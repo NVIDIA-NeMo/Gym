@@ -23,7 +23,7 @@ from typing import Any, Optional
 
 import verifiers as vf
 from fastapi import Body, Request, Response
-from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+from openai import DEFAULT_TIMEOUT, AsyncOpenAI, DefaultAsyncHttpxClient, Timeout
 from pydantic import ConfigDict, Field
 from verifiers.clients import NeMoRLChatCompletionsClient
 
@@ -180,6 +180,24 @@ class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     temperature: float = Field(default=1.0)
     top_p: float = Field(default=1.0)
 
+    # Policy-client deadlines. The openai SDK defaults are a 5s connect and a
+    # 600s read/write/pool timeout with 2 retries; one long agentic turn from a
+    # large policy on a shared engine can exceed 600s under load, a burst of new
+    # connections can exceed 5s, and a retry reruns the whole generation. None
+    # keeps the SDK default, so configs that set none of these are unaffected.
+    client_timeout_s: float | None = Field(
+        default=None,
+        description="Read/write/pool timeout in seconds for requests to the policy model server. None keeps the openai SDK default (600s).",
+    )
+    client_connect_timeout_s: float | None = Field(
+        default=None,
+        description="Connect timeout in seconds for the policy model server. None keeps the openai SDK default (5s), which a burst of new connections against a loaded or just-started server can exceed.",
+    )
+    client_max_retries: int | None = Field(
+        default=None,
+        description="openai SDK retry count for the policy client. None keeps the SDK default (2).",
+    )
+
 
 class VerifiersAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
@@ -196,6 +214,7 @@ class VerifiersAgentRunRequest(BaseRunRequest):
 
 
 class VerifiersAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
     config: VerifiersAgentConfig
 
@@ -230,6 +249,23 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         if not isinstance(path_params, Mapping):
             return None
         return path_params.get("rollout_id") or None
+
+    def _policy_client_options(self) -> dict[str, Any]:
+        """AsyncOpenAI timeout and retry options from the config.
+
+        An unset field keeps its SDK default: setting only the connect timeout
+        keeps the 600s read/write/pool deadline, and vice versa.
+        """
+        options: dict[str, Any] = {}
+        connect = self.config.client_connect_timeout_s
+        other = self.config.client_timeout_s
+        if connect is not None or other is not None:
+            connect = DEFAULT_TIMEOUT.connect if connect is None else connect
+            other = DEFAULT_TIMEOUT.read if other is None else other
+            options["timeout"] = Timeout(connect=connect, read=other, write=other, pool=other)
+        if self.config.client_max_retries is not None:
+            options["max_retries"] = self.config.client_max_retries
+        return options
 
     def _get_client(self, body: Any = None, request: Optional[Request] = None) -> NeMoRLChatCompletionsClient:
         """Return a rollout-prefixed client over one shared policy transport.
@@ -268,7 +304,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         path closes it -- neither this agent nor ``run_group``/``generate`` on
         the verifiers legacy API, and every ``.close()`` call site in verifiers
         sits under ``verifiers/v1/``, which this agent does not use -- but the
-        wrapper looks disposable, so the rule is written down here.
+        wrapper looks disposable, so the rule is written down here. It also
+        inherits the shared client's timeout and retry settings.
         """
         cache_key = self.config.model_server.name
         if cache_key not in self.client_cache:
@@ -280,6 +317,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 # instance as-is but COPIES an httpx.Cookies into a fresh stdlib
                 # jar, which would silently discard the no-store behaviour.
                 http_client=DefaultAsyncHttpxClient(cookies=_NoStoreCookieJar()),
+                **self._policy_client_options(),
             )
             self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
 

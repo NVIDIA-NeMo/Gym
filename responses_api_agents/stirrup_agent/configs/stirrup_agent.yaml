@@ -72,3 +72,11 @@ stirrup_agent:
         - name: gdpval_gold
           type: example
           jsonl_fpath: responses_api_agents/stirrup_agent/data/gdpval.jsonl
+
+stirrup_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: stirrup_agent
