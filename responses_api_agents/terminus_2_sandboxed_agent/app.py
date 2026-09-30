@@ -144,6 +144,7 @@ class NeMoGymSandboxEnvironment:
                     invocation_id=self._invocation_id,
                     tool_call_id=f"cmd_{uuid4().hex[:12]}",
                     tool_name="terminal",
+                    operation=command[:512] if command else None,
                     started_at=started_at,
                     completed_at=completed_at,
                     duration_ms=(completed_at - started_at) * 1000,
@@ -276,7 +277,7 @@ class NeMoGymLLM(BaseLLM):
 
         completed_at = time()
         model_call_id = uuid4().hex
-        invocation_kind: str = "compaction" if self._is_compacting else "main"
+        model_call_purpose: str = "compaction_summary" if self._is_compacting else "agent_step"
         observed = (
             self.observations.record_response(
                 observed_input,
@@ -284,7 +285,7 @@ class NeMoGymLLM(BaseLLM):
                 completed_at,
                 model_call_id=model_call_id,
                 started_at=started_at,
-                invocation_kind=invocation_kind,
+                model_call_purpose=model_call_purpose,
                 attempts_total=attempts_total,
                 time_lost_to_retries_ms=time_lost_to_retries_ms if time_lost_to_retries_ms > 0 else None,
             )
@@ -405,21 +406,30 @@ class NeMoGymTerminus2(Terminus2):
         observations = self._nemo_gym_llm.observations
         if observations is not None:
             observations.gap("compaction_outside_main_turns")
+            tokens_before = (
+                self._nemo_gym_llm.usages[-1].total_tokens if self._nemo_gym_llm.usages else None
+            )
             observations.compaction = ContextCompactionObservation(
-                invocation_id=observations.invocation_id, observed_at=time(), trigger="harbor_summarize"
+                invocation_id=observations.invocation_id,
+                observed_at=time(),
+                trigger="harbor_summarize",
+                tokens_before=tokens_before,
             )
         try:
             res = await super()._summarize(*args, **kwargs)
             if observations is not None:
                 observations.compaction.outcome = "completed"
+                observations.compaction.completed_at = time()
             return res
         except asyncio.CancelledError:
             if observations is not None:
                 observations.compaction.outcome = "aborted"
+                observations.compaction.completed_at = time()
             raise
         except BaseException:
             if observations is not None:
                 observations.compaction.outcome = "failed"
+                observations.compaction.completed_at = time()
             raise
         finally:
             self._nemo_gym_llm._is_compacting = False

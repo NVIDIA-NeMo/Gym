@@ -9,7 +9,7 @@ from typing import Any
 from harbor.llms.base import LLMResponse
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseFunctionToolCall, NeMoGymResponseOutputMessage
 from nemo_gym.rollout_observability import (
     ContextCompactionObservation,
     ModelCallRef,
@@ -54,6 +54,16 @@ class TerminusObservations:
         if scope_gap not in self.trajectory.gaps:
             self.trajectory.gaps.append(scope_gap)
 
+    @staticmethod
+    def _response_kind(response: NeMoGymResponse) -> str:
+        for item in response.output:
+            if isinstance(item, NeMoGymResponseFunctionToolCall):
+                return "tool_call"
+        for item in response.output:
+            if isinstance(item, NeMoGymResponseOutputMessage) and item.content:
+                return "text"
+        return "other"
+
     def record_response(
         self,
         question: list[dict[str, Any]],
@@ -62,7 +72,7 @@ class TerminusObservations:
         *,
         model_call_id: str | None = None,
         started_at: float | None = None,
-        invocation_kind: str | None = None,
+        model_call_purpose: str | None = None,
         attempts_total: int | None = None,
         time_lost_to_retries_ms: float | None = None,
     ) -> ObservedResponse:
@@ -112,7 +122,8 @@ class TerminusObservations:
                         model_ref=self.model_ref,
                     ),
                     token_stats=token_stats,
-                    invocation_kind=invocation_kind,
+                    model_call_purpose=model_call_purpose,
+                    model_response_kind=self._response_kind(response),
                     attempts_total=attempts_total,
                     time_lost_to_retries_ms=time_lost_to_retries_ms,
                 )
