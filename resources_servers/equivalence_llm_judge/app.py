@@ -26,7 +26,7 @@ import re
 from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, ClassVar, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
@@ -115,6 +115,8 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
         {question}, {expected_answer}, {generated_answer}
     - judge_equal_label / judge_not_equal_label: labels the judge must output.
     """
+
+    CHECKPOINT_RECOVERY_MODE: ClassVar[Literal["stateless"]] = "stateless"
 
     # Default logical name for this resources server
     name: str = "equivalence_llm_judge"

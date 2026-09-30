@@ -36,11 +36,12 @@ import logging
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
+from nemo_gym._checkpoint import ControlCapabilities, GroupScoringCapability
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -134,6 +135,11 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         use_principle: Enable principle-based comparison
         default_principle: Default principle when none provided in request
     """
+
+    # Cohort membership is process-local coordination, not durable state. After
+    # a restart the agent replays every sibling's /verify request and rebuilds
+    # the complete cohort from those request payloads.
+    CHECKPOINT_RECOVERY_MODE: ClassVar[Literal["stateless"]] = "stateless"
 
     name: str = "genrm_compare"
     genrm_model_server: ModelServerRef  # Default: genrm_model (see config)
@@ -282,6 +288,17 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     _verify_cohorts: Dict[str, _CohortState] = PrivateAttr(default_factory=dict)
     _latest_group_attempts: Dict[str, _GroupAttemptWatermark] = PrivateAttr(default_factory=dict)
     _cohort_registry_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
+
+    def control_capabilities(self) -> ControlCapabilities:
+        """Advertise the cohort contract RL must satisfy before dispatch."""
+        capabilities = super().control_capabilities()
+        if self.config.num_rollouts_per_prompt > 1:
+            capabilities.group_scoring = GroupScoringCapability(
+                expected_group_size=self.config.num_rollouts_per_prompt,
+                verification_replayable=True,
+                collection_timeout_s=self.config.cohort_collection_timeout_s,
+            )
+        return capabilities
 
     async def verify(self, body: GenRMCompareVerifyRequest) -> GenRMCompareVerifyResponse:
         """Verify one logical rollout slot as part of a prompt cohort."""

@@ -251,8 +251,9 @@ def _assert_poisoned(
     payload: dict[str, Any],
     reason: str,
 ) -> None:
-    """Assert a call failed closed: not committed, exactly one poison row, transport scrubbed."""
-    assert context.committed is False
+    """Assert a call failed closed with one durable poison row and scrubbed transport."""
+    assert context.committed is True
+    assert context.capture_outcome == "capture_failed"
     assert manifest["records"] == []
     assert manifest["failures"] == [
         {

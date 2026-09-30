@@ -180,6 +180,7 @@ def install_model_admission(
             "model-admission/resume",
             allowed_phases=frozenset(
                 {
+                    CheckpointPhase.IDLE,
                     CheckpointPhase.PREPARING,
                     CheckpointPhase.PREPARED,
                     CheckpointPhase.COMMITTED_PAUSED,
@@ -187,7 +188,7 @@ def install_model_admission(
                     CheckpointPhase.RESTORED_PAUSED,
                 }
             ),
-            phase_during=fence.phase,
+            phase_during=None,
             phase_after=CheckpointPhase.IDLE,
             run=run,
             retire_outcome="resumed",
@@ -200,7 +201,6 @@ def install_model_admission(
     ) -> dict[str, Any]:
         require_control_auth(authorization, auth_token)
         _require_policy()
-        entry_phase = fence.phase
 
         async def run() -> dict[str, Any]:
             aborted = limiter.abort_inflight(body.rollout_id, body.attempt_index)
@@ -215,7 +215,7 @@ def install_model_admission(
             body.checkpoint_id,
             f"model-admission/abort_inflight:{body.rollout_id}:{body.attempt_index}",
             allowed_phases=frozenset({CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
-            phase_during=entry_phase,
-            phase_after=entry_phase,
+            phase_during=None,
+            phase_after=None,
             run=run,
         )

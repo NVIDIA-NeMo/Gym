@@ -32,6 +32,7 @@ from typing import Any, AsyncIterator, Literal, Optional
 from fastapi import FastAPI, Header, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+from nemo_gym._checkpoint.agent import AgentCheckpointError, load_agent_checkpoint_records
 from nemo_gym._checkpoint.control import (
     CheckpointControlRequest,
     CheckpointPhase,
@@ -1098,16 +1099,15 @@ def _reconcile_agent_resource_revisions(
         return
     selected: dict[tuple[str, int], set[int]] = {}
     for manifest_path in agent_root.rglob("manifest.json"):
-        manifest = json.loads(manifest_path.read_text())
-        for name, digest in manifest.get("files", {}).items():
-            record_path = manifest_path.parent / name
-            if not record_path.exists() or _digest(record_path) != digest:
-                raise ResourcesCheckpointError(f"agent checkpoint record {name!r} is missing or corrupted")
-            record = json.loads(record_path.read_text())
-            revisions = record.get("resource_state_revisions") or {}
+        try:
+            records = load_agent_checkpoint_records(checkpoint_dir, manifest_path)
+        except AgentCheckpointError as error:
+            raise ResourcesCheckpointError("agent checkpoint records are missing or corrupted") from error
+        for record in records:
+            revisions = record.resource_state_revisions
             if server_name not in revisions:
                 continue
-            key = (record["rollout_id"], int(record["attempt_index"]))
+            key = (record.rollout_id, record.attempt_index)
             selected.setdefault(key, set()).add(int(revisions[server_name]))
 
     actual = {(snapshot.rollout_id, snapshot.attempt_index): snapshot.state_revision for snapshot in snapshots}
@@ -1227,7 +1227,7 @@ def install_resources_checkpoint(
                     CheckpointPhase.RESTORED_PAUSED,
                 }
             ),
-            phase_during=fence.phase,
+            phase_during=None,
             phase_after=CheckpointPhase.IDLE,
             run=run,
             retire_outcome="resumed",

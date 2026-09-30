@@ -294,6 +294,17 @@ def test_committed_call_satisfies_its_intent(tmp_path):
     assert snapshot.incomplete is False
 
 
+def test_cancelled_no_generation_call_satisfies_its_intent(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    asyncio.run(store.begin_call("no-generation", "c1"))
+    asyncio.run(store.cancel_call("no-generation", "c1"))
+
+    snapshot = store.freeze_now("no-generation")
+
+    assert snapshot.entries == ()
+    assert snapshot.incomplete is False
+
+
 def test_register_call_intent_uses_optional_sink_extension():
     calls: list[tuple[str, str]] = []
 
@@ -1086,6 +1097,27 @@ def test_a_sink_without_mark_incomplete_is_refused_at_install():
 
     with pytest.raises(TypeError, match="mark_incomplete"):
         install_token_sink(_PutOnlySink())
+    assert installed_token_sink() is None
+
+
+def test_a_sink_with_call_intents_requires_no_generation_cancellation() -> None:
+    class _IntentSink:
+        async def put(self, _entry):
+            pass
+
+        async def mark_incomplete(self, _rollout_id, _model_call_id=""):
+            pass
+
+        async def close(self):
+            pass
+
+        async def begin_call(self, _rollout_id, _model_call_id):
+            pass
+
+    from nemo_gym.token_id_capture import installed_token_sink
+
+    with pytest.raises(TypeError, match="begin_call and cancel_call together"):
+        install_token_sink(_IntentSink())
     assert installed_token_sink() is None
 
 

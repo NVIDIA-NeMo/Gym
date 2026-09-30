@@ -1810,3 +1810,130 @@ def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path
 
     assert forwarded == ["/v1/chat/completions"]
     assert not token_store.is_incomplete("hole-2")
+
+
+def test_no_generation_response_closes_intent_without_model_call_id(tmp_path):
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.rollout_correlation import (
+        MODEL_CALL_CAPTURE_OUTCOME_HEADER,
+        MODEL_CALL_ID_HEADER,
+    )
+    from nemo_gym.token_id_capture import (
+        TokenCaptureStore,
+        capture_tokens,
+        mark_no_generation,
+        register_call_intent,
+    )
+
+    token_store = TokenCaptureStore(tmp_path)
+    sent = []
+
+    async def app(_scope, receive, send):
+        await receive()
+        await register_call_intent()
+        await mark_no_generation()
+        await capture_tokens({})
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}", "more_body": False})
+
+    async def receive():
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(
+        _CaptureMiddleware(
+            app,
+            store=None,
+            model_server_name="srv",
+            token_store=token_store,
+            token_capture_enabled=True,
+        )(
+            {
+                "type": "http",
+                "path": "/ng-rollout/no-generation/training-token-capture/v1/responses",
+                "raw_path": b"/ng-rollout/no-generation/training-token-capture/v1/responses",
+                "headers": [],
+            },
+            receive,
+            send,
+        )
+    )
+
+    response_headers = {key.decode(): value.decode() for key, value in sent[0]["headers"]}
+    assert response_headers[MODEL_CALL_CAPTURE_OUTCOME_HEADER] == "no_generation"
+    assert MODEL_CALL_ID_HEADER not in response_headers
+    snapshot = token_store.freeze_now("no-generation")
+    assert snapshot.entries == ()
+    assert snapshot.incomplete is False
+
+
+def test_external_no_generation_closes_intent_without_poisoning_lineage(tmp_path):
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.rollout_correlation import (
+        MODEL_CALL_CAPTURE_OUTCOME_HEADER,
+        MODEL_CALL_ID_HEADER,
+    )
+    from nemo_gym.token_id_capture import (
+        FileLineageStore,
+        TokenCaptureStore,
+        capture_tokens,
+        mark_no_generation,
+        register_call_intent,
+        resolve_parent,
+    )
+
+    token_store = TokenCaptureStore(tmp_path / "tokens")
+    lineage_store = FileLineageStore(tmp_path / "lineage")
+    sent = []
+
+    async def app(_scope, receive, send):
+        await receive()
+        await resolve_parent([{"role": "user", "content": "hello"}])
+        await register_call_intent()
+        await mark_no_generation()
+        await capture_tokens({})
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}", "more_body": False})
+
+    async def receive():
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(
+        _CaptureMiddleware(
+            app,
+            store=None,
+            model_server_name="srv",
+            token_store=token_store,
+            lineage_store=lineage_store,
+            external_staging=True,
+            token_capture_enabled=True,
+        )(
+            {
+                "type": "http",
+                "path": "/ng-rollout/no-generation/training-token-capture/v1/responses",
+                "raw_path": b"/ng-rollout/no-generation/training-token-capture/v1/responses",
+                "headers": [],
+            },
+            receive,
+            send,
+        )
+    )
+
+    response_headers = {key.decode(): value.decode() for key, value in sent[0]["headers"]}
+    assert response_headers[MODEL_CALL_CAPTURE_OUTCOME_HEADER] == "no_generation"
+    assert MODEL_CALL_ID_HEADER not in response_headers
+    snapshot = token_store.freeze_now("no-generation")
+    assert snapshot.entries == ()
+    assert snapshot.incomplete is False
+    manifest = asyncio.run(lineage_store.manifest("no-generation"))
+    assert manifest["records"] == []
+    assert manifest["failures"] == []

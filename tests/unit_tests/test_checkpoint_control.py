@@ -72,6 +72,47 @@ def test_checkpoint_auth_is_independent_of_capture(monkeypatch: pytest.MonkeyPat
     assert checkpoint_control_auth_token({"token_id_capture": {"enabled": False}}) == "checkpoint-secret"
 
 
+def test_token_capture_auth_does_not_install_agent_checkpoint_participant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(CHECKPOINT_CONTROL_TOKEN_ENV, raising=False)
+    monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "capture-secret")
+    global_config = OmegaConf.create(
+        {
+            "token_id_capture": {
+                "enabled": True,
+                "external_staging": True,
+                "rebuild_response": False,
+            }
+        }
+    )
+
+    class _Agent(SimpleResponsesAPIAgent):
+        async def responses(self, body):
+            raise NotImplementedError
+
+        async def run(self, body):
+            raise NotImplementedError
+
+    agent = _Agent(
+        config=BaseResponsesAPIAgentConfig(
+            host="agent.test",
+            port=80,
+            entrypoint="app.py",
+            name="agent",
+        ),
+        server_client=ServerClient(
+            head_server_config=BaseServerConfig(host="head.test", port=80),
+            global_config_dict=global_config,
+        ),
+    )
+
+    agent.setup_agent_checkpoint(FastAPI())
+
+    assert checkpoint_control_auth_token(global_config) is None
+    assert agent._checkpoint_participant is None
+
+
 def test_control_request_rejects_invalid_identity_and_deadline() -> None:
     with pytest.raises(ValidationError):
         CheckpointControlRequest(checkpoint_id="../bad", deadline_ts=1000.0)
@@ -143,6 +184,154 @@ async def test_fence_coalesces_concurrent_duplicates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fence_serializes_resume_before_delayed_commit() -> None:
+    fence = ControlFence()
+
+    async def prepare() -> dict:
+        return {"state": "prepared"}
+
+    await fence.run_operation("ckpt-1", "pause", run=prepare, **_prepare_kwargs())
+    resume_started = asyncio.Event()
+    release_resume = asyncio.Event()
+    commit_started = asyncio.Event()
+
+    async def resume() -> dict:
+        resume_started.set()
+        await release_resume.wait()
+        return {"state": "resumed"}
+
+    async def commit() -> dict:
+        commit_started.set()
+        return {"state": "committed"}
+
+    resume_task = asyncio.create_task(
+        fence.run_operation(
+            "ckpt-1",
+            "resume",
+            allowed_phases=frozenset({CheckpointPhase.PREPARED}),
+            phase_during=None,
+            phase_after=CheckpointPhase.IDLE,
+            run=resume,
+            retire_outcome="resumed",
+        )
+    )
+    await resume_started.wait()
+    commit_task = asyncio.create_task(
+        fence.run_operation(
+            "ckpt-1",
+            "commit",
+            allowed_phases=frozenset({CheckpointPhase.PREPARED}),
+            phase_during=CheckpointPhase.COMMITTING,
+            phase_after=CheckpointPhase.COMMITTED_PAUSED,
+            run=commit,
+        )
+    )
+    await asyncio.sleep(0)
+    assert not commit_started.is_set()
+
+    release_resume.set()
+    assert await resume_task == {"state": "resumed"}
+    with pytest.raises(StaleCheckpointError):
+        await commit_task
+    assert not commit_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_fence_serializes_commit_before_resume() -> None:
+    fence = ControlFence()
+
+    async def prepare() -> dict:
+        return {"state": "prepared"}
+
+    await fence.run_operation("ckpt-1", "pause", run=prepare, **_prepare_kwargs())
+    commit_started = asyncio.Event()
+    release_commit = asyncio.Event()
+    resume_started = asyncio.Event()
+    operation_order: list[str] = []
+
+    async def commit() -> dict:
+        operation_order.append("commit")
+        commit_started.set()
+        await release_commit.wait()
+        return {"state": "committed"}
+
+    async def resume() -> dict:
+        operation_order.append("resume")
+        resume_started.set()
+        assert fence.phase == CheckpointPhase.COMMITTED_PAUSED
+        return {"state": "resumed"}
+
+    commit_task = asyncio.create_task(
+        fence.run_operation(
+            "ckpt-1",
+            "commit",
+            allowed_phases=frozenset({CheckpointPhase.PREPARED}),
+            phase_during=CheckpointPhase.COMMITTING,
+            phase_after=CheckpointPhase.COMMITTED_PAUSED,
+            run=commit,
+        )
+    )
+    await commit_started.wait()
+    resume_task = asyncio.create_task(
+        fence.run_operation(
+            "ckpt-1",
+            "resume",
+            allowed_phases=frozenset({CheckpointPhase.PREPARED, CheckpointPhase.COMMITTED_PAUSED}),
+            phase_during=None,
+            phase_after=CheckpointPhase.IDLE,
+            run=resume,
+            retire_outcome="resumed",
+        )
+    )
+    await asyncio.sleep(0)
+    assert not resume_started.is_set()
+
+    release_commit.set()
+    assert await commit_task == {"state": "committed"}
+    assert await resume_task == {"state": "resumed"}
+    assert operation_order == ["commit", "resume"]
+    assert fence.phase == CheckpointPhase.IDLE
+
+
+@pytest.mark.asyncio
+async def test_fence_phase_preserving_operation_keeps_live_phase_update() -> None:
+    fence = ControlFence()
+
+    async def prepare() -> dict:
+        return {"state": "preparing"}
+
+    await fence.run_operation(
+        "ckpt-1",
+        "pause",
+        run=prepare,
+        **_prepare_kwargs(phase_after=CheckpointPhase.PREPARING),
+    )
+    operation_started = asyncio.Event()
+    release_operation = asyncio.Event()
+
+    async def preserve_phase() -> dict:
+        operation_started.set()
+        await release_operation.wait()
+        return {}
+
+    operation = asyncio.create_task(
+        fence.run_operation(
+            "ckpt-1",
+            "abort-inflight",
+            allowed_phases=frozenset({CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
+            phase_during=None,
+            phase_after=None,
+            run=preserve_phase,
+        )
+    )
+    await operation_started.wait()
+    fence.mark_prepared("ckpt-1")
+    release_operation.set()
+    await operation
+    assert fence.phase == CheckpointPhase.PREPARED
+
+
+@pytest.mark.asyncio
 async def test_fence_rejects_conflicting_checkpoint() -> None:
     fence = ControlFence()
 
@@ -152,6 +341,25 @@ async def test_fence_rejects_conflicting_checkpoint() -> None:
     await fence.run_operation("ckpt-1", "pause", run=run, **_prepare_kwargs())
     with pytest.raises(CheckpointConflictError):
         await fence.run_operation("ckpt-2", "pause", run=run, **_prepare_kwargs())
+
+
+@pytest.mark.asyncio
+async def test_fence_rejects_conflicting_checkpoint_while_operation_runs() -> None:
+    fence = ControlFence()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def run() -> dict:
+        started.set()
+        await release.wait()
+        return {}
+
+    active = asyncio.create_task(fence.run_operation("ckpt-1", "pause", run=run, **_prepare_kwargs()))
+    await started.wait()
+    with pytest.raises(CheckpointConflictError):
+        await fence.run_operation("ckpt-2", "pause", run=run, **_prepare_kwargs())
+    release.set()
+    await active
 
 
 @pytest.mark.asyncio
@@ -252,13 +460,25 @@ def _server_client() -> ServerClient:
     )
 
 
+class _StatelessResourcesConfig(BaseResourcesServerConfig):
+    CHECKPOINT_RECOVERY_MODE = "stateless"
+
+
 class _StatelessResources(SimpleResourcesServer):
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         return BaseVerifyResponse(**body.model_dump(), reward=0.0)
 
 
-def _resources_config(num_workers=None) -> BaseResourcesServerConfig:
-    return BaseResourcesServerConfig(
+class _RestartOnlyResources(SimpleResourcesServer):
+    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        return BaseVerifyResponse(**body.model_dump(), reward=0.0)
+
+
+def _resources_config(
+    num_workers=None,
+    config_cls=BaseResourcesServerConfig,
+) -> BaseResourcesServerConfig:
+    return config_cls(
         host="resources.test",
         port=80,
         entrypoint="app.py",
@@ -268,7 +488,10 @@ def _resources_config(num_workers=None) -> BaseResourcesServerConfig:
 
 
 def test_stateless_resources_server_capabilities() -> None:
-    server = _StatelessResources(config=_resources_config(), server_client=_server_client())
+    server = _StatelessResources(
+        config=_resources_config(config_cls=_StatelessResourcesConfig),
+        server_client=_server_client(),
+    )
     client = TestClient(server.setup_webserver())
     body = client.get(f"{CONTROL_URL_PREFIX}/capabilities").json()
     assert body["component"] == "resources_servers"
@@ -280,6 +503,13 @@ def test_stateless_resources_server_capabilities() -> None:
     assert body["multi_process"] == {"mode": "single_worker", "num_workers": 1}
     assert body["phase"] == "idle"
     assert body["active_checkpoint_id"] is None
+
+
+def test_resources_server_defaults_to_restart_only() -> None:
+    server = _RestartOnlyResources(config=_resources_config(), server_client=_server_client())
+    body = TestClient(server.setup_webserver()).get(f"{CONTROL_URL_PREFIX}/capabilities").json()
+    assert body["checkpoint_mode"] == "restart_only"
+    assert body["concurrency_contract"] == "stateless"
 
 
 def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -299,10 +529,17 @@ def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     body = TestClient(agent.setup_webserver()).get(f"{CONTROL_URL_PREFIX}/capabilities").json()
     assert body["component"] == "responses_api_agents"
     assert body["name"] == "agent"
-    assert body["checkpoint_mode"] == "stateless"
+    assert body["checkpoint_mode"] == "export_restore"
+    assert body["concurrency_contract"] == "serialized_per_session"
+    assert body["features"] == [
+        "completed_result_acknowledgement",
+        "completion_receipt_in_run_response_v1",
+    ]
+    assert agent._checkpoint_participant is not None
 
     class _WhiteboxAgent(_Agent):
         checkpoint_continuation_supported = True
+        checkpoint_resource_dependencies_supported = True
 
     whitebox = _WhiteboxAgent(
         config=BaseResponsesAPIAgentConfig(host="agent.test", port=80, entrypoint="app.py", name="whitebox"),
@@ -312,6 +549,13 @@ def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     whitebox_body = whitebox_client.get(f"{CONTROL_URL_PREFIX}/capabilities").json()
     assert whitebox_body["checkpoint_mode"] == "export_restore"
     assert whitebox_body["concurrency_contract"] == "serialized_per_session"
+    assert whitebox_body["features"] == [
+        "completed_result_acknowledgement",
+        "completion_receipt_in_run_response_v1",
+        "agent_continuation_index_v1",
+        "discard_restored_continuation_v1",
+        "agent_resource_dependency_index_v1",
+    ]
 
 
 def test_capabilities_route_reflects_live_fence_phase() -> None:

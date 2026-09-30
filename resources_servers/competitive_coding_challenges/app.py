@@ -16,7 +16,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field, PrivateAttr
@@ -77,6 +77,8 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
 
 
 class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig):
+    CHECKPOINT_RECOVERY_MODE: ClassVar[Literal["stateless"]] = "stateless"
+
     # These fields are populated from the NeMo-Gym config tree, so they can be
     # overridden from `run_grpo_nemo_gym.py` via Hydra CLI args instead of being
     # hard-coded in the server implementation.

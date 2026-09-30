@@ -65,6 +65,7 @@ AGENT_RUN_ERROR = "agent_run_error"
 AGENT_REQUEST_FAILED = "agent_request_failed"
 AGENT_TIMEOUT = "agent_timeout"
 AGENT_COMMAND_NOT_ALLOWED = "agent_command_not_allowed"
+AGENT_NO_GENERATION = "agent_no_generation"
 
 # --- verifier and judge --------------------------------------------------------------- #
 # ``judge_failed`` is produced today by judge_failsafe and by reverification.
@@ -104,6 +105,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         AGENT_REQUEST_FAILED,
         AGENT_TIMEOUT,
         AGENT_COMMAND_NOT_ALLOWED,
+        AGENT_NO_GENERATION,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,

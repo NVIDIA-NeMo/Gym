@@ -12,11 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel
@@ -41,6 +43,9 @@ class _CheckpointParentState:
     source_capture_key: str
     parent_model_call_id: str
     consumed: bool = False
+    # Child tasks inherit this context state. Record which task claimed the
+    # parent so a refused request cannot release another request's claim.
+    claimed_by: Optional["asyncio.Task[Any]"] = None
 
 
 _CHECKPOINT_PARENT: ContextVar[Optional[_CheckpointParentState]] = ContextVar(
@@ -54,9 +59,48 @@ _CHECKPOINT_PARENT: ContextVar[Optional[_CheckpointParentState]] = ContextVar(
 ROLLOUT_ID_HEADER = "x-nemo-gym-rollout-id"
 ATTEMPT_INDEX_HEADER = "x-nemo-gym-attempt-index"
 MODEL_CALL_ID_HEADER = "x-nemo-gym-model-call-id"
+MODEL_CALL_CAPTURE_OUTCOME_HEADER = "x-nemo-gym-model-call-capture-outcome"
 SOURCE_CAPTURE_KEY_HEADER = "x-nemo-gym-source-capture-key"
 PARENT_MODEL_CALL_ID_HEADER = "x-nemo-gym-parent-model-call-id"
 LOGICAL_REQUEST_HEADER = "x-nemo-gym-logical-request-id"
+
+
+class ModelCallCaptureOutcome(str, Enum):
+    """Durable capture disposition advertised by a model response."""
+
+    CAPTURED = "captured"
+    NO_GENERATION = "no_generation"
+    CAPTURE_FAILED = "capture_failed"
+
+
+@dataclass(frozen=True)
+class ModelCallCaptureResult:
+    """Validated model-call capture evidence for a checkpoint-aware agent."""
+
+    outcome: ModelCallCaptureOutcome
+    model_call_id: Optional[str]
+
+
+def checkpoint_model_call_capture(headers: Mapping[str, Any] | None) -> ModelCallCaptureResult:
+    """Validate capture headers returned to a checkpoint-aware agent.
+
+    A model-call ID is proof of durable capture only when the model server also
+    reports ``captured``. Intentional no-generation and capture-failure
+    responses must not expose an ID that an agent could persist as lineage.
+    """
+    raw_outcome = headers.get(MODEL_CALL_CAPTURE_OUTCOME_HEADER) if headers is not None else None
+    model_call_id = headers.get(MODEL_CALL_ID_HEADER) if headers is not None else None
+    try:
+        outcome = ModelCallCaptureOutcome(raw_outcome)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("checkpointed model response is missing a valid capture outcome") from error
+    if outcome == ModelCallCaptureOutcome.CAPTURED:
+        if not isinstance(model_call_id, str) or not model_call_id:
+            raise RuntimeError("captured model response is missing its model-call ID")
+    elif model_call_id is not None:
+        raise RuntimeError(f"{outcome.value} model response unexpectedly carried a model-call ID")
+    return ModelCallCaptureResult(outcome=outcome, model_call_id=model_call_id)
+
 
 # The transport id appends ``-a{n}`` for re-dispatch attempts. The suffix is a
 # capture and routing key, never the logical identity. This pattern recovers
@@ -207,7 +251,33 @@ def take_checkpoint_parent() -> tuple[Optional[str], Optional[str]]:
     if state is None or state.consumed:
         return None, None
     state.consumed = True
+    state.claimed_by = _current_task()
     return state.source_capture_key, state.parent_model_call_id
+
+
+def _current_task() -> Optional["asyncio.Task[Any]"]:
+    try:
+        return asyncio.current_task()
+    except RuntimeError:
+        return None
+
+
+def pending_checkpoint_parent() -> Optional[_CheckpointParentState]:
+    """Return the restored parent when no model request has claimed it yet."""
+    state = _CHECKPOINT_PARENT.get()
+    if state is None or state.consumed:
+        return None
+    return state
+
+
+def release_checkpoint_parent(state: _CheckpointParentState) -> bool:
+    """Release this task's claim after refusal before model admission."""
+    task = _current_task()
+    if not state.consumed or task is None or state.claimed_by is not task:
+        return False
+    state.consumed = False
+    state.claimed_by = None
+    return True
 
 
 @contextmanager

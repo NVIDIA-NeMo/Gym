@@ -1247,6 +1247,56 @@ class TestRolloutCollection:
         assert isinstance(completed.rollout_latency_ms, float)
         assert completed.rollout_latency_ms >= 0
 
+    async def test_run_examples_with_metadata_carries_completion_receipt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym._checkpoint import (
+            AGENT_COMPLETION_RECEIPT_HEADER,
+            AgentAcknowledgeRequest,
+            encode_agent_completion_receipt,
+        )
+
+        row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+        }
+        receipt = AgentAcknowledgeRequest(
+            rollout_id="rollout-a",
+            attempt_index=0,
+            execution_generation=1,
+            result_identity="result-rollout-a-0",
+            result_digest="1" * 64,
+        )
+        response = MagicMock()
+        response.status = 200
+        response.headers = {AGENT_COMPLETION_RECEIPT_HEADER: encode_agent_completion_receipt(receipt)}
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "raise_for_status",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_response_json",
+            AsyncMock(return_value={"response": {}}),
+        )
+
+        returned_row, result, metadata = await next(RolloutCollectionHelper().run_examples_with_metadata([row]))
+
+        assert returned_row is row
+        assert result == {"response": {}}
+        assert metadata == {"completion_receipt": receipt.model_dump(mode="json")}
+
     async def test_run_from_config_does_not_route_failures_unless_asked(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:

@@ -86,6 +86,9 @@ def _sleeping_library_verifier_process(result_connection: Any) -> None:
 
 
 class TestApp:
+    def test_checkpoint_recovery_mode_is_stateless(self) -> None:
+        assert LibraryJudgeMathResourcesServerConfig.CHECKPOINT_RECOVERY_MODE == "stateless"
+
     @fixture
     def config(self) -> LibraryJudgeMathResourcesServerConfig:
         return LibraryJudgeMathResourcesServerConfig(

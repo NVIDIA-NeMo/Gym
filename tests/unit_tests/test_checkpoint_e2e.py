@@ -28,6 +28,7 @@ from omegaconf import OmegaConf
 
 from nemo_gym._checkpoint import (
     AGENT_CHECKPOINT_URL_PREFIX,
+    AGENT_RECORD_INDEX_NAME,
     GATED_MODEL_ROUTE_SUFFIXES,
     MODEL_ADMISSION_URL_PREFIX,
     MODEL_CHECKPOINT_URL_PREFIX,
@@ -235,15 +236,17 @@ async def _record_lineage(
     request_items: list[dict],
     output_items: list[dict],
     parent_call_id: str | None = None,
+    parent_staging_chain: tuple[str, ...] = (),
 ) -> None:
     prev_len = 0 if parent_call_id is None else 3
+    staging_key = f"stage/{rollout_id}/{call_id}"
     await FileLineageStore(root).record(
         CaptureLedgerCommit(
             rollout_id=rollout_id,
             record=CallRecord(
                 model_call_id=call_id,
                 parent_call_id=parent_call_id,
-                staging_key=f"stage/{rollout_id}/{call_id}",
+                staging_key=staging_key,
                 weight_version=7,
                 prev_len=prev_len,
                 delta_len=3,
@@ -259,7 +262,7 @@ async def _record_lineage(
                 continuation_fingerprint=assistant_fingerprint(request_items + output_items) or None,
                 fingerprint_version=FINGERPRINT_VERSION,
             ),
-            staging_chain=(f"stage/{rollout_id}/{call_id}",),
+            staging_chain=(*parent_staging_chain, staging_key),
             request_items=request_items,
             response_items=output_items,
         )
@@ -403,8 +406,15 @@ async def test_complete_partial_rollout_checkpoint_cycle(tmp_path, monkeypatch) 
         assert retired_resources.json()["retired"] is True
 
         commit_body = {**prepare_body, "checkpoint_dir": str(checkpoint_dir)}
-        model_commit = await _post(model, f"{MODEL_CHECKPOINT_URL_PREFIX}/commit", commit_body)
         agent_commit = await _post(agent, f"{AGENT_CHECKPOINT_URL_PREFIX}/commit", commit_body)
+        model_commit = await _post(
+            model,
+            f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+            {
+                **commit_body,
+                "continuation_indexes": [agent_commit.json()["continuation_index"]],
+            },
+        )
         resources_commit = await _post(resources, f"{RESOURCES_CHECKPOINT_URL_PREFIX}/commit", commit_body)
         assert model_commit.json()["excluded_tombstoned"] == 1
         assert agent_commit.json()["records"] == 1
@@ -415,6 +425,9 @@ async def test_complete_partial_rollout_checkpoint_cycle(tmp_path, monkeypatch) 
     )
     assert (checkpoint_dir / "model-ledger" / "policy" / "manifest.json").exists()
     assert agent_namespace.exists()
+    assert len(list(agent_namespace.parent.glob("agent-part-*.tar"))) == 1
+    assert (agent_namespace.parent / AGENT_RECORD_INDEX_NAME).exists()
+    assert list(agent_namespace.parent.glob("*.a*.json")) == []
     assert (checkpoint_dir / "resources" / "resources" / "manifest.json").exists()
     assert len(list(checkpoint_dir.rglob("manifest.json"))) == 3
 
@@ -513,6 +526,7 @@ async def test_complete_partial_rollout_checkpoint_cycle(tmp_path, monkeypatch) 
                     request_items=boundary_items,
                     output_items=first_payload["output"],
                     parent_call_id=PARENT_CALL_ID,
+                    parent_staging_chain=(f"stage/{ROLLOUT_ID}/{PARENT_CALL_ID}",),
                 )
                 second_input = boundary_items + first_payload["output"]
                 second = await server_client.post("policy", "/v1/responses", json={"input": second_input})

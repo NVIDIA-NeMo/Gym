@@ -22,6 +22,7 @@ from fastapi import HTTPException
 from pytest import MonkeyPatch, approx
 
 import resources_servers.genrm_compare.app
+import resources_servers.genrm_compare.checkpoint_test_app
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
@@ -44,6 +45,9 @@ from resources_servers.genrm_compare.app import (
     GenRMCompareResponse,
     GenRMCompareVerifyRequest,
     _input_to_conversation_history,
+)
+from resources_servers.genrm_compare.checkpoint_test_app import (
+    CheckpointTestGenRMResourcesServer,
 )
 from resources_servers.genrm_compare.utils import get_prompt_key_from_input
 
@@ -77,6 +81,7 @@ class TestGenRMCompareConfig:
         assert config.aggregator_method == "simple_tiebreaker"
         assert config.default_score == 3.0
         assert config.default_ranking == 3.5
+        assert config.CHECKPOINT_RECOVERY_MODE == "stateless"
 
 
 class TestGenRMCompareRequest:
@@ -128,6 +133,35 @@ class TestGenRMCompareResourcesServer:
             num_judges_per_comparison=1,
             debug_logging=False,
         )
+
+    def test_checkpoint_capability_is_stateless(self, config):
+        server = GenRMCompareResourcesServer.model_construct(
+            config=config,
+            server_client=MagicMock(),
+        )
+
+        assert server.checkpoint_recovery_mode() == "stateless"
+        assert server.control_capabilities().checkpoint_mode == "stateless"
+        assert server.control_capabilities().group_scoring is None
+
+    def test_checkpoint_capability_reports_group_scoring_contract(self, config):
+        config = config.model_copy(
+            update={
+                "num_rollouts_per_prompt": 8,
+                "cohort_collection_timeout_s": 30.0,
+            }
+        )
+        server = GenRMCompareResourcesServer.model_construct(
+            config=config,
+            server_client=MagicMock(),
+        )
+
+        capability = server.control_capabilities().group_scoring
+
+        assert capability is not None
+        assert capability.expected_group_size == 8
+        assert capability.verification_replayable is True
+        assert capability.collection_timeout_s == 30.0
 
     @staticmethod
     def _verify_request(
@@ -512,6 +546,75 @@ class TestGenRMCompareResourcesServer:
         assert [result.reward for result in results] == [1.0, 1.0, 2.0]
         run_compare.assert_awaited_once()
         assert server._verify_cohorts == {}
+
+    async def test_fresh_server_rebuilds_partially_collected_cohort_from_replayed_requests(
+        self,
+        config,
+        monkeypatch: MonkeyPatch,
+    ):
+        """A process restart loses only coordination state, not recoverability."""
+        config = config.model_copy(update={"num_rollouts_per_prompt": 2})
+        source = GenRMCompareResourcesServer.model_construct(
+            config=config,
+            server_client=MagicMock(),
+        )
+        first_request = self._verify_request(0, group_id="restart-group")
+        second_request = self._verify_request(1, group_id="restart-group")
+
+        waiting = asyncio.create_task(source.verify(first_request))
+        while not source._verify_cohorts:
+            await asyncio.sleep(0)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+
+        restored = GenRMCompareResourcesServer.model_construct(
+            config=config,
+            server_client=MagicMock(),
+        )
+        run_compare = AsyncMock(return_value=([1.0, 2.0], None, None, None))
+        monkeypatch.setattr(restored, "_run_compare", run_compare)
+
+        results = await asyncio.gather(
+            restored.verify(first_request),
+            restored.verify(second_request),
+        )
+
+        assert [result.reward for result in results] == [1.0, 2.0]
+        run_compare.assert_awaited_once()
+
+    async def test_checkpoint_fixture_uses_production_cohort_logic(
+        self,
+        config,
+        monkeypatch: MonkeyPatch,
+    ):
+        """The functional fixture stubs scoring, not GenRM coordination."""
+        config = config.model_copy(update={"num_rollouts_per_prompt": 2})
+        server = CheckpointTestGenRMResourcesServer.model_construct(
+            config=config,
+            server_client=MagicMock(),
+        )
+        audit = MagicMock()
+        monkeypatch.setattr(
+            resources_servers.genrm_compare.checkpoint_test_app,
+            "_audit",
+            audit,
+        )
+        requests = [
+            self._verify_request(index, group_id="checkpoint-group").model_copy(
+                update={"capture_rollout_id": f"sibling-{index}-a1"}
+            )
+            for index in range(2)
+        ]
+
+        results = await asyncio.gather(*(server.verify(request) for request in requests))
+
+        assert [result.reward for result in results] == [1.0, 1.0]
+        cohort = server._verify_cohorts["group_id::checkpoint-group::group_attempt::0"]
+        assert cohort.phase == "completed"
+        assert cohort.rewards == {0: 1.0, 1: 1.0}
+        assert server._latest_group_attempts["checkpoint-group"].latest_attempt == 0
+        assert [call.args[0] for call in audit.call_args_list].count("reward_computed") == 1
 
     async def test_conflicting_duplicate_is_rejected_without_growing_cohort(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})

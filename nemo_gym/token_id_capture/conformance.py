@@ -316,6 +316,13 @@ async def _check_lineage_visibility(
 
 async def _check_begin_call_custody(sink: TokenSink, src: TokenSource, rollout_id: str) -> None:
     name = "begin_call_custody"
-    await sink.begin_call(rollout_id, "call-lost")  # type: ignore[attr-defined]
-    snapshot = await src.freeze(rollout_id)
+    lost_rollout_id = f"{rollout_id}-lost"
+    await sink.begin_call(lost_rollout_id, "call-lost")  # type: ignore[attr-defined]
+    snapshot = await src.freeze(lost_rollout_id)
     _require(snapshot.incomplete, name, "a dangling pre-dispatch intent did not mask the rollout")
+
+    cancelled_rollout_id = f"{rollout_id}-cancelled"
+    await sink.begin_call(cancelled_rollout_id, "call-no-generation")  # type: ignore[attr-defined]
+    await sink.cancel_call(cancelled_rollout_id, "call-no-generation")  # type: ignore[attr-defined]
+    cancelled = await src.freeze(cancelled_rollout_id)
+    _require(not cancelled.incomplete, name, "a cancelled no-generation intent masked the rollout")

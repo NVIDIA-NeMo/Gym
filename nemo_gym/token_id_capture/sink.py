@@ -31,7 +31,7 @@ import threading
 import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import stamp_continuation
@@ -87,6 +87,11 @@ class CaptureContext:
     model: str = ""
     # ``commit_entry`` sets this after another capture path records the call.
     committed: bool = False
+    # Distinguish a durable capture from an intentional no-generation response
+    # and a genuine capture failure. The middleware exposes this outcome to
+    # checkpoint-aware agents only after the handler has finished.
+    capture_outcome: Literal["pending", "captured", "no_generation", "capture_failed"] = "pending"
+    call_intent_registered: bool = False
     # Store resolved continuations as parent-relative suffixes.
     delta_records: bool = False
     # This records the model server's intent to request prefix supply.
@@ -100,7 +105,6 @@ class CaptureContext:
     # store doubles as the rollout's capture ledger and admission is the
     # strict tri-state of the lineage result.
     external_staging: bool = False
-    logical_request_id: str | None = None
     source_capture_key: str | None = None
     explicit_parent_call_id: str | None = None
     # Stamped once when the middleware admits the call. The ledger row reuses
@@ -181,6 +185,7 @@ def mark_external_staging_committed(*, rollout_id: str, model_call_id: str) -> N
             f"{context.rollout_id}/{context.model_call_id})"
         )
     context.committed = True
+    context.capture_outcome = "captured"
     from nemo_gym._checkpoint.admission import mark_current_generation_safe
 
     mark_current_generation_safe("durable_completed")
@@ -198,9 +203,35 @@ def mark_external_staging_failed(*, rollout_id: str, model_call_id: str) -> None
             f"{context.rollout_id}/{context.model_call_id})"
         )
     context.committed = True
+    context.capture_outcome = "capture_failed"
     from nemo_gym._checkpoint.admission import mark_current_generation_safe
 
     mark_current_generation_safe("durable_failure")
+
+
+async def mark_no_generation() -> None:
+    """Finish the current capture intent without creating model lineage.
+
+    Model wrappers call this when they return a local response without asking
+    the inference backend to generate tokens. Such a response is prepare-safe,
+    but it is neither a captured model call nor a capture failure.
+    """
+    context = _CAPTURE_CONTEXT.get()
+    if context is None:
+        return
+    if context.capture_outcome != "pending":
+        raise RuntimeError(
+            f"cannot mark a resolved training-token capture as no-generation: outcome={context.capture_outcome!r}"
+        )
+    if context.call_intent_registered:
+        cancel = getattr(context.token_sink, "cancel_call", None)
+        if cancel is None:
+            raise RuntimeError("token sink records call intents but cannot cancel a no-generation call")
+        await cancel(context.rollout_id, context.model_call_id)
+    context.capture_outcome = "no_generation"
+    from nemo_gym._checkpoint.admission import mark_current_generation_safe
+
+    mark_current_generation_safe("no_generation")
 
 
 def reset_token_sink(token: Token) -> None:
@@ -324,7 +355,7 @@ async def resolve_parent(request_messages: list | None) -> None:
             )
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
-    if is_root or (context.source_capture_key is None and not await ledger.has_rows(context.rollout_id)):
+    if is_root or (context.source_capture_key is None and not await ledger.has_committed_rows(context.rollout_id)):
         context.capture_admission = CaptureAdmission(
             rollout_id=context.rollout_id,
             model_call_id=context.model_call_id,
@@ -363,6 +394,7 @@ async def register_call_intent() -> None:
     if begin is None:
         return
     await begin(context.rollout_id, context.model_call_id)
+    context.call_intent_registered = True
 
 
 async def capture_tokens(
@@ -378,6 +410,8 @@ async def capture_tokens(
     """
     context = _CAPTURE_CONTEXT.get()
     if context is None:
+        return
+    if context.capture_outcome == "no_generation":
         return
     # Worker custody has already staged and committed through the external
     # response hook. It must never fall back to a local/no-op token sink.
@@ -462,9 +496,11 @@ async def commit_entry(
             context.rollout_id,
         )
         await _mark_incomplete(context)
+        context.capture_outcome = "capture_failed"
         return
     if context.token_sink is None:
         context.committed = True
+        context.capture_outcome = "captured"
         return
     try:
         # Use the resolution decided before dispatch.
@@ -503,6 +539,7 @@ async def commit_entry(
         entry.parent_resolution_reason = resolution.reason or ""
         await context.token_sink.put(entry)
         context.committed = True
+        context.capture_outcome = "captured"
         from nemo_gym._checkpoint.admission import mark_current_generation_safe
 
         mark_current_generation_safe("durable_completed")
@@ -530,6 +567,7 @@ async def _capture_failed(context: CaptureContext, stage: str) -> None:
         exc_info=True,
     )
     await _mark_incomplete(context)
+    context.capture_outcome = "capture_failed"
 
 
 async def _capture_missing(context: CaptureContext, reason: str) -> None:
@@ -553,6 +591,7 @@ async def _capture_missing(context: CaptureContext, reason: str) -> None:
         reason,
     )
     await _mark_incomplete(context)
+    context.capture_outcome = "capture_failed"
 
 
 async def _mark_incomplete(context: CaptureContext) -> None:

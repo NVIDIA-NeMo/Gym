@@ -300,13 +300,37 @@ class TokenCaptureStore:
     async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
         await asyncio.to_thread(self._begin_call, rollout_id, model_call_id)
 
+    def _cancel_call(self, rollout_id: str, model_call_id: str) -> None:
+        """Durably close a call intent that exited without generation."""
+        with self._locked(rollout_id):
+            state = self._read_state(rollout_id)
+            if state.get("retired", False):
+                raise RuntimeError(f"Token capture for rollout {rollout_id} is retired")
+            if state.get("frozen", False):
+                raise RuntimeError(f"Token capture for rollout {rollout_id} is already frozen")
+            with self.intents_path_for(rollout_id).open("ab") as handle:
+                handle.write(b"-" + model_call_id.encode("utf-8") + b"\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+
+    async def cancel_call(self, rollout_id: str, model_call_id: str) -> None:
+        await asyncio.to_thread(self._cancel_call, rollout_id, model_call_id)
+
     def _dangling_intents(self, rollout_id: str, entries: tuple[TokenEntry, ...]) -> list[str]:
         path = self.intents_path_for(rollout_id)
         if not path.exists():
             return []
         recorded = {entry.model_call_id for entry in entries}
-        intents = [line.strip().decode("utf-8") for line in path.read_bytes().splitlines() if line.strip()]
-        return [call_id for call_id in intents if call_id not in recorded]
+        active: set[str] = set()
+        for raw_line in path.read_bytes().splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(b"-"):
+                active.discard(line[1:].decode("utf-8"))
+            else:
+                active.add(line.decode("utf-8"))
+        return sorted(active - recorded)
 
     async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:
         return await asyncio.to_thread(self.freeze_now, rollout_id)

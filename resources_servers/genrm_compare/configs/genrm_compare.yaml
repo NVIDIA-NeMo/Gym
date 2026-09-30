@@ -122,6 +122,8 @@ genrm_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      # Cohort verification is stateless and may be replayed after recovery.
+      checkpoint_replayable_verify: true
       datasets:
       - name: example
         type: example
@@ -137,6 +139,8 @@ genrm_simple_agent_reasoning_off:
       model_server:
         type: responses_api_models
         name: policy_model_reasoning_off
+      # Cohort verification is stateless and may be replayed after recovery.
+      checkpoint_replayable_verify: true
       datasets:
       - name: example
         type: example
