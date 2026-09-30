@@ -59,3 +59,11 @@ leancat_simple_agent:
         jsonl_fpath: resources_servers/leancat/data/example.jsonl
         prompt_config: benchmarks/prompts/eval/leancat/paper.yaml
         license: Creative Commons Attribution 4.0 International
+
+leancat_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: leancat_simple_agent

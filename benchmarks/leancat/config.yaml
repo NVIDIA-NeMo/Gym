@@ -34,3 +34,10 @@ leancat_leancat_simple_agent:
         # `recommended_k_values`. Table 3's specialized provers use k=32 -- override with
         # --num-repeats. Applied at preprocessing; --num-repeats multiplies on top of it.
         num_repeats: 4
+
+leancat_leancat_environment_server:
+  _inherit_from: leancat_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: leancat_leancat_simple_agent
