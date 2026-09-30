@@ -12,10 +12,19 @@ def test_compute_task_metrics_reports_usersim_input_contract() -> None:
 
     metrics = hook(
         {
-            "sampling": {
+            "scenario": {
+                "locale": "en_US",
+                "persona": {"first_name": "Morgan"},
+                "probe_type": "general_open_ended",
+                "theme": {"type": "local food", "description": "Find dinner."},
+                "goal": "Find dinner.",
+            },
+            "usersim_context": {
                 "locale": "en_US",
                 "seed": 1042,
-                "probe_type": "general_open_ended",
+                "personas_dataset_version": "0.0.2",
+                "personas_panel_sha256": "a" * 64,
+                "usersim_revision": "b" * 40,
             },
             "responses_create_params": {
                 "assistant": {"input": []},

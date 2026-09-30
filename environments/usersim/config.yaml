@@ -9,7 +9,7 @@ usersim_resources:
       datasets:
         - name: example
           type: example
-          jsonl_fpath: resources_servers/usersim/data/example.jsonl
+          jsonl_fpath: environments/usersim/data/example.jsonl
           prepare_script: environments/usersim/prepare.py
           prompt_config: null
           num_repeats: 1

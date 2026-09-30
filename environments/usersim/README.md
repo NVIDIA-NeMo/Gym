@@ -24,24 +24,24 @@ environments/usersim/data/personas/
         └── en_US.manifest.json
 ```
 
-The 14 committed tasks in `resources_servers/usersim/data/example.jsonl`
-provide one example for every first-party UserSim probe. The Resources Server
-validates and loads the prepared panel; it does not duplicate UserSim's
-person-sampling logic.
+The 14 tracked templates in `resources_servers/usersim/data/example_source.jsonl`
+provide one example for every first-party UserSim probe. Preparation resolves
+each template against the generated panel and writes the ignored
+`environments/usersim/data/example.jsonl` consumed by the dataset config.
+Every prepared row contains its persona, locale, seed, probe, theme, goal,
+probe data, and panel/UserSim provenance. The Resources Server validates that
+resolved row against the prepared panel and uses it unchanged.
 
 While UserSim is private, the Environment Server installs the pinned source
 revision over Git+SSH from `github.com/NVIDIA-NeMo/UserSim`; the host therefore
 needs GitHub SSH access. This temporary source dependency should become a normal
 published-package dependency when UserSim is open-sourced.
 
-NeMo UserSim behavior is pinned once in the environment's typed
-`UserSimEnvironmentServerConfig.protocol_config`; it is not repeated in task
-rows. The Environment Server separately owns `max_turns`, fixes the Data
-Designer output-column name internally, and supplies each scenario's locale
-after `/seed_session`.
-Dataset rows contain only per-task sampling inputs and optional model-call
-parameter overrides. Resolved scenarios are output-only and cannot be supplied
-by a dataset row.
+NeMo UserSim behavior is pinned once in the Resources Server's typed
+`protocol_config`; it is not repeated in task rows. The Resources Server also
+owns `max_turns`, fixes internal column names, and passes the complete protocol
+configuration into the canonical runtime. `context_compression` remains
+disabled and finance retrieval uses UserSim's `hybrid` default.
 
 `tool_calling`, `safety_agentic`, and `financial_services` expose
 probe-selected tool schemas to the Assistant Agent. The Agent owns model/tool
@@ -61,9 +61,9 @@ The User and Assistant Agents share `policy_model`. The Environment Server
 routes UserSim's Judge and Summary calls directly to `support_model`, without
 creating support Agent sessions. Resources-owned tool-result synthesis and
 native probe scoring retain their purpose-specific `tool_simulation_model` and
-`probe_scorer_model` fields, but both reference the same support server. Its
-endpoint settings default to the standard policy settings and can be overridden
-independently.
+`probe_scorer_model` fields, but both reference the same support server. Policy
+and support are distinct model aliases, and all three support endpoint settings
+must be configured explicitly.
 
 After preparation:
 
@@ -76,10 +76,10 @@ gym eval run \
   ++model_call_capture_dir=/absolute/path/to/model-calls
 ```
 
-Configure `policy_base_url`, `policy_api_key`, and `policy_model_name` for any
-OpenAI-compatible endpoint. The role-specific settings can override that
-endpoint independently without embedding provider-specific credentials or
-model names in the repository.
+Configure `policy_base_url`, `policy_api_key`, and `policy_model_name`, plus
+the corresponding explicit `support_model_*` settings, for OpenAI-compatible
+endpoints. The two aliases may use the same upstream service only when it
+satisfies both participant and structured support-call requirements.
 
 For participant-specific SFT or custom collation, filter
 `result.invocations` by the `assistant` or `user` role and use each selected
