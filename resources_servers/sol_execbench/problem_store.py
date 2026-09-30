@@ -10,7 +10,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 
-NATIVE_REVISION = "a9fa0804c793d438e70850c33fe34426e66d53dd"
+NATIVE_REVISION = "a9fa0804c793d438e70850c33fe34426e66d53dd"  # pragma: allowlist secret -- public upstream commit
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$", strict=True)]
 
 

@@ -15,9 +15,11 @@ from pathlib import Path
 BENCHMARK_DIR = Path(__file__).resolve().parent
 DATA_DIR = BENCHMARK_DIR / "data"
 REPO_ID = "nvidia/SOL-ExecBench"
-SOURCE_REVISION = "63699402f003496acc3af4eb534a5304a8ac1ea9"
+SOURCE_REVISION = "63699402f003496acc3af4eb534a5304a8ac1ea9"  # pragma: allowlist secret -- public upstream commit
 FLASHINFER_TRACE_REPO_ID = "flashinfer-ai/flashinfer-trace"
-FLASHINFER_TRACE_REVISION = "4ee6fc905cdef5ef6b941b73ff4a220c92aec470"
+FLASHINFER_TRACE_REVISION = (
+    "4ee6fc905cdef5ef6b941b73ff4a220c92aec470"  # pragma: allowlist secret -- public upstream commit
+)
 FLASHINFER_TRACE_LOCAL_PREFIX = Path("data/flashinfer-trace")
 SUBSET_COUNTS = {"L1": 94, "L2": 82, "Quant": 33, "FlashInfer-Bench": 26}
 LANGUAGES = ("cuda_cpp", "triton")
