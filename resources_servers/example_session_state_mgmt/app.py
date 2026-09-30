@@ -58,10 +58,10 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
     config: StatefulCounterResourcesServerConfig
     session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
 
-    def export_session_state(self, session_id: str) -> JsonValue:
-        return {"count": self.session_id_to_counter.get(session_id, 0)}
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        return {session_id: {"count": self.session_id_to_counter.get(session_id, 0)} for session_id in session_ids}
 
-    def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
         counters = {}
         for session_id, state in states.items():
             count = state.get("count") if isinstance(state, dict) else None
@@ -70,7 +70,7 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
             counters[session_id] = count
         self.session_id_to_counter.update(counters)
 
-    def retire_session_state(self, session_id: str) -> None:
+    async def retire_session_state(self, session_id: str) -> None:
         self.session_id_to_counter.pop(session_id, None)
 
     def setup_webserver(self) -> FastAPI:
