@@ -2428,6 +2428,28 @@ class TestRolloutCollection:
         assert [r[ROLLOUT_INDEX_KEY_NAME] for r in rows if r[AGENT_REF_KEY_NAME]["name"] == "alpha"] == [0, 1]
         assert [r[ROLLOUT_INDEX_KEY_NAME] for r in rows if r[AGENT_REF_KEY_NAME]["name"] == "beta"] == [0, 1, 2, 3]
 
+    def test_preprocess_rows_interleave_repeats(self, tmp_path: Path) -> None:
+        """interleave_repeats dispatches round by round: every task's first repeat, then every second one."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}, "x": i})
+            for i in range(3)
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        def order(interleave: bool) -> list:
+            config = RolloutCollectionConfig(
+                input_jsonl_fpath=str(fpath),
+                output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+                num_repeats=2,
+                interleave_repeats=interleave,
+            )
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+            return [(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in rows]
+
+        assert order(False) == [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)]
+        assert order(True) == [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)]
+
     def test_preprocess_rows_num_repeats_dict_with_default(self, tmp_path: Path) -> None:
         """`_default` key acts as the fallback for agents not explicitly listed."""
         fpath = tmp_path / "input.jsonl"
