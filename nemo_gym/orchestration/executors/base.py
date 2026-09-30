@@ -37,7 +37,7 @@ class BaseExecutor(ABC):
         self,
         record: SubmissionRecord,
         config: SubmitConfig,
-        write_manifest: Callable[[Path, str], None],
+        write_manifest: Callable[..., None],
     ) -> None:
         """Store the record and the resolved config, in the order that survives a partial failure.
 
@@ -65,7 +65,10 @@ class BaseExecutor(ABC):
         resolved_config = run_dir / RESOLVED_CONFIG_NAME
         manifest = run_dir / MANIFEST_NAME
         try:
-            write_manifest(resolved_config, yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False))
+            # Owner-only: `host:` env values are resolved into it in cleartext.
+            write_manifest(
+                resolved_config, yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False), private=True
+            )
             write_manifest(manifest, record.dumps())
         except Exception as error:
             queued = ", ".join(f"{b.benchmark}={b.job_id}" for b in record.benchmarks if b.job_id)

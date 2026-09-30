@@ -886,7 +886,7 @@ See [Repeat-Level Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) f
 
 Compare a baseline eval run against a candidate run and write a report.
 
-The report contains a metric table (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Confidence intervals are read from what each run recorded; this command does not yet perform statistical tests or issue a pass/fail verdict.
+The report contains a table of point-estimate metrics (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Existing statistics such as percentile and confidence interval fields do not get separate rows. Confidence intervals are read from what each run recorded; this command does not yet perform statistical tests or issue a pass/fail verdict.
 
 | Option | Description |
 | --- | --- |
@@ -1075,6 +1075,8 @@ The most common Hydra overrides now have dedicated flags:
 | `+output_fpath=...` | `--output` |
 | `+create_pr=true` | `--create-pr` |
 | `+outdated=true` | `--outdated` |
+
+For standalone rollout collection, `num_samples_in_parallel` limits active requests, while `max_resident_rollout_tasks` limits how many rollout tasks the driver creates at once. When both are set, active requests cannot exceed the lower limit. Both settings are optional; leaving the task window unset preserves the previous admission behavior. Set `retain_results_in_memory=false` for artifact-oriented runs: results are appended and flushed as they complete, and `run_from_config()` returns `[]` instead of the ordered full result list. Aggregation and upload may still load the persisted results into memory. These settings are available through the collection config or Hydra overrides such as `+max_resident_rollout_tasks=64` and `+retain_results_in_memory=false`.
 
 ### Common workflows, before and after
 

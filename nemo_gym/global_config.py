@@ -16,7 +16,7 @@ import logging
 import re
 import sys
 from argparse import ArgumentParser
-from collections import defaultdict
+from collections import Counter, defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
@@ -27,7 +27,7 @@ from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import ClassVar, Dict, List, Optional, Set, Tuple, Type
+from typing import Any, ClassVar, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Type
 
 import hydra
 import rich
@@ -92,6 +92,7 @@ PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
 UVICORN_TIMEOUT_WORKER_HEALTHCHECK = "uvicorn_timeout_worker_healthcheck"
+SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME = "server_spinup_timeout_seconds"
 MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
 ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
@@ -123,7 +124,6 @@ ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME = "NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING"
 ENVIRONMENT_SERVER_NAME_KEY_NAME = "environment_server_name"
 ENVIRONMENT_SERVER_ROUTES_KEY_NAME = "environment_server_routes"
 ENVIRONMENT_ROUTING_MODE_KEY_NAME = "environment_routing_mode"
-TASKSETS_KEY_NAME = "tasksets"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -141,6 +141,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PORT_RANGE_LOW_KEY_NAME,
     PORT_RANGE_HIGH_KEY_NAME,
     DRY_RUN_KEY_NAME,
+    SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     ALLOW_OPENAI_VERSION_SKEW_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
@@ -164,7 +165,6 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ENVIRONMENT_SERVER_NAME_KEY_NAME,
     ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
     ENVIRONMENT_ROUTING_MODE_KEY_NAME,
-    TASKSETS_KEY_NAME,
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
@@ -203,56 +203,14 @@ ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
+# Stamped by rollout collection on every record: the Environment Server that ran the rollout.
+ENVIRONMENT_SERVER_STAMP_KEY_NAME = "_ng_environment_server"
 # The config instance that declares the row's dataset (a resources server normally; the agent
 # itself for self-contained environments). Stamped into derived artifacts at collate/load time;
 # resolved to an agent at dispatch time. See the dataset-decoupling RFC.
 TASK_SOURCE_KEY_NAME = "task_source"
 SKILLS_REF_KEY_NAME = "skills_ref"
 REWARD_KEY_NAME = "reward"
-
-# Metric key names. `RewardProfiler` builds its metric names from these prefixes and suffixes, and
-# consumers of `*_aggregate_metrics.json` (e.g. `gym eval compare`) parse them back out -- so they
-# live here, where both sides can import them without pulling in pandas/scipy/wandb.
-MEAN_STAT_NAME = "mean"
-MAX_STAT_NAME = "max"
-MIN_STAT_NAME = "min"
-MEDIAN_STAT_NAME = "median"
-STD_STAT_NAME = "std"
-SEM_STAT_NAME = "sem"
-P25_STAT_NAME = "p25"
-P75_STAT_NAME = "p75"
-CI_LOW_95_STAT_NAME = "ci_low_95"
-CI_HIGH_95_STAT_NAME = "ci_high_95"
-HISTOGRAM_STAT_NAME = "histogram"
-
-# `<stat>/<field>`, e.g. `mean/reward`.
-STAT_SEPARATOR = "/"
-MEAN_PREFIX = f"{MEAN_STAT_NAME}{STAT_SEPARATOR}"
-MAX_PREFIX = f"{MAX_STAT_NAME}{STAT_SEPARATOR}"
-MIN_PREFIX = f"{MIN_STAT_NAME}{STAT_SEPARATOR}"
-MEDIAN_PREFIX = f"{MEDIAN_STAT_NAME}{STAT_SEPARATOR}"
-STD_PREFIX = f"{STD_STAT_NAME}{STAT_SEPARATOR}"
-SEM_PREFIX = f"{SEM_STAT_NAME}{STAT_SEPARATOR}"
-P25_PREFIX = f"{P25_STAT_NAME}{STAT_SEPARATOR}"
-P75_PREFIX = f"{P75_STAT_NAME}{STAT_SEPARATOR}"
-CI_LOW_95_PREFIX = f"{CI_LOW_95_STAT_NAME}{STAT_SEPARATOR}"
-CI_HIGH_95_PREFIX = f"{CI_HIGH_95_STAT_NAME}{STAT_SEPARATOR}"
-
-# `<stat>_across_repeats/mean/<field>`: one repeat's estimate aggregated over the run's repeats.
-ACROSS_REPEATS_MARKER = f"_across_repeats{STAT_SEPARATOR}"
-MEAN_ACROSS_REPEATS_PREFIX = f"{MEAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-MEDIAN_ACROSS_REPEATS_PREFIX = f"{MEDIAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-STD_ACROSS_REPEATS_PREFIX = f"{STD_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-MIN_ACROSS_REPEATS_PREFIX = f"{MIN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-MAX_ACROSS_REPEATS_PREFIX = f"{MAX_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-SE_ACROSS_REPEATS_PREFIX = f"se{ACROSS_REPEATS_MARKER}"
-CI_LOW_95_ACROSS_REPEATS_PREFIX = f"{CI_LOW_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-CI_HIGH_95_ACROSS_REPEATS_PREFIX = f"{CI_HIGH_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-
-# Suffixes `compute_pass_majority_metrics` appends to a pass@k metric name.
-STD_DEV_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_dev_across_runs"
-STD_ERR_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_err_across_runs"
-AVG_SAMPLE_STD_DEV_SUFFIX = f"{STAT_SEPARATOR}avg_sample_std_dev"
 
 # Per-task keys in `group_level_metrics`.
 ROLLOUT_INFOS_KEY_NAME = "rollout_infos"
@@ -276,6 +234,66 @@ def get_hf_token() -> Optional[str]:  # pragma: no cover
 # OmegaConf new resolvers
 OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
 OmegaConf.register_new_resolver("copy", lambda a: f"${{copy:{a}}}")
+
+
+def rollout_run_key(row: Mapping[str, Any]) -> Optional[str]:
+    """Identify what ran a rollout, for grouping: its Environment Server.
+
+    Records written before rollout collection stamped the Environment Server fall back to their agent.
+    """
+    server = row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+    if server is not None:
+        return server
+    return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+
+
+def label_runs(agent_by_key: Mapping[str, Optional[str]]) -> Dict[str, str]:
+    """Label each run key by its agent's name when that name identifies exactly one run, else by the key.
+
+    A run with one Environment Server per agent keeps its agent's name, so existing labels do not change.
+    Every run of an agent that several Environment Servers front is labelled by its own Environment Server.
+    A label that would still repeat, because one server's name equals another run's agent name, also falls back
+    to the key. The result depends only on the mapping, not on its order, and every label is unique.
+    """
+    keys_by_agent: Dict[str, set] = defaultdict(set)
+    for key, agent_name in agent_by_key.items():
+        if agent_name is not None:
+            keys_by_agent[agent_name].add(key)
+    labels = {
+        key: agent_name if agent_name is not None and len(keys_by_agent[agent_name]) == 1 else key
+        for key, agent_name in agent_by_key.items()
+    }
+    while True:
+        counts = Counter(labels.values())
+        clashing = [key for key, label in labels.items() if counts[label] > 1 and label != key]
+        if not clashing:
+            return labels
+        for key in clashing:
+            labels[key] = key
+
+
+def rollout_run_labels(rows: Iterable[Mapping[str, Any]]) -> Dict[str, str]:
+    """Label each ``rollout_run_key`` for reports, the same way rollout collection labels aggregate metrics.
+
+    See ``label_runs``. A row without an ``agent_ref`` is labelled by its Environment Server.
+    """
+    agent_by_key: Dict[str, Optional[str]] = {}
+    for row in rows:
+        key = rollout_run_key(row)
+        if key is not None and key not in agent_by_key:
+            agent_by_key[key] = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+    return label_runs(agent_by_key)
+
+
+def rollout_agent_label(row: Mapping[str, Any]) -> Optional[str]:
+    """Name the agent that acted in one rollout, for per-rollout output such as trajectories and debug lines.
+
+    Rows without an ``agent_ref``, such as episode rows, use their Environment Server.
+    """
+    agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+    if agent_name is not None:
+        return agent_name
+    return row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -1432,6 +1450,10 @@ Found global config dict yaml:
             global_config_dict.setdefault(SKIP_VENV_IF_PRESENT_KEY_NAME, False)
 
             global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
+
+            # Bound server startup independently of model-endpoint readiness. Multi-worker
+            # supervisors can otherwise replace a deterministically failing worker forever.
+            global_config_dict.setdefault(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME, 600)
 
             # How long `gym env start` waits for the model endpoints named in the config to accept
             # a connection. Generous because vLLM can take minutes to load weights; 0 skips it.
