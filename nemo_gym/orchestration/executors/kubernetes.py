@@ -58,9 +58,8 @@ def _validate_benchmark_names(benchmarks: list[str]) -> None:
         )
 
 
-# kubectl can hang indefinitely -- e.g. an expired `tsh` session attempting an interactive
-# relogin that can never complete non-interactively in this subprocess -- which would otherwise
-# block the whole submit across every benchmark, not just the one affected.
+# kubectl can hang indefinitely (e.g. an expired tsh session retrying login), blocking the whole
+# submit -- bound it and let the caller treat it as a per-benchmark failure instead.
 _KUBECTL_TIMEOUT_SECONDS = 60
 
 

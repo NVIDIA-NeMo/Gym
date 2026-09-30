@@ -227,9 +227,8 @@ class KubernetesComputeConfig(BaseComputeConfig):
     node_selector: dict[str, str] = {}
     service_account: str | None = None
     # A pre-existing PVC, mounted at job.output_path in every container. Required: the driver
-    # container's own volumeMounts always references this volume (build_job_manifest), so an
-    # unset pvc_name would leave that reference dangling and the pod rejected outright by the API
-    # server ("volumeMounts[0].name: Not found") -- fail clearly at config-validation time instead.
+    # container always mounts this volume, so an unset pvc_name would leave that reference
+    # dangling and the pod rejected outright ("volumeMounts[0].name: Not found").
     pvc_name: str
     # Memory *request* (Kubernetes quantity string, e.g. "32Gi") per requested GPU on a service
     # container. Without a memory request a pod gets QoS class BestEffort, which the kubelet
@@ -239,15 +238,11 @@ class KubernetesComputeConfig(BaseComputeConfig):
     # leaving every GPU pod first-in-line for eviction by default.
     memory_per_gpu: str = "32Gi"
     extra_args: dict[str, str] = {}  # Forwarded verbatim as pod labels/annotations.
-    # Seconds after a Job finishes (Complete or Failed) before Kubernetes garbage-collects it and
-    # its pods -- without this, finished Jobs stick around forever and need manual cleanup. 24h by
-    # default: long enough to inspect logs/results after a run, short enough not to accumulate.
+    # Seconds after a Job finishes before k8s garbage-collects it and its pods. 24h by default so
+    # finished Jobs don't need manual cleanup, but logs/results stay around long enough to check.
     ttl_seconds_after_finished: int = 60 * 60 * 24
-    # Kills a still-Running Job (and frees its GPUs) once it's been running this long, regardless
-    # of state -- e.g. a hung vLLM that never becomes healthy, or a benchmark that never
-    # terminates. None (default) sets no deadline, since benchmark runtimes vary too widely for
-    # one default to be safe for every workload; set this explicitly once you know a reasonable
-    # upper bound for a given benchmark/model.
+    # Kills a still-Running Job (e.g. a hung vLLM) after this long, freeing its GPUs. None (the
+    # default) sets no deadline -- benchmark runtimes vary too widely for one default to be safe.
     active_deadline_seconds: int | None = None
 
 
