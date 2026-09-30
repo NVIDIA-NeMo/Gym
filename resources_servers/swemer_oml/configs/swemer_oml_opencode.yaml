@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Wires the opencode sandboxed agent to swemer_oml_resources_server for a training run.
+# `swemer_oml.yaml` alone only defines the resources server (enough for golden-patch validation,
+# which never touches an agent); this separate file keeps that path free of the agent's much
+# larger opencode/sandbox config -- same split as swemer_v2.
+#
+#   gym env start --config resources_servers/swemer_oml/configs/swemer_oml_opencode.yaml
+
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - resources_servers/swemer_oml/configs/swemer_oml.yaml
+
+swemer_oml_opencode_sandboxed_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: swemer_oml_resources_server
+      datasets:
+        - name: swemer_oml
+          type: train
+          jsonl_fpath: resources_servers/swemer_oml/data/swemer_oml_training.jsonl
+          num_repeats: 1
+          license: NVIDIA Internal Use Only, Do Not Distribute

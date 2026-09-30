@@ -551,6 +551,15 @@ def _standalone_resources_server_config(module_name: str) -> str:
               model_server:
                 type: responses_api_models
                 name: policy_model
+
+        # Expose the agent through an environment server for rollout collection.
+        {module_name}_environment_server:
+          environment_servers:
+            legacy_agent:
+              entrypoint: app.py
+              agent_server:
+                type: responses_api_agents
+                name: {module_name}_simple_agent
         """
     )
 

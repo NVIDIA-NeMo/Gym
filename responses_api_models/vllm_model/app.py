@@ -33,6 +33,7 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
     _decode_capture_parent,
     _request_messages,
+    start_model_execution,
 )
 from nemo_gym.openai_utils import (
     REQUIRED_TOKEN_METADATA_FIELDS,
@@ -536,7 +537,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._apply_sampling_overrides(body_dict)
 
         client = self._resolve_client(request)
-        response_dict = await client.create_response(**body_dict)
+        execution = start_model_execution(request, upstream_attempted=True)
+        try:
+            response_dict = await client.create_response(**body_dict)
+        except ClientResponseError as error:
+            execution.update(response_source="upstream", upstream_status_code=error.status)
+            raise
+        execution["response_source"] = "upstream"
 
         return NeMoGymResponse.model_validate(response_dict)
 
@@ -915,11 +922,13 @@ class VLLMModel(SimpleResponsesAPIModel):
             _session_id = request.session.get(SESSION_ID_KEY)
             if _session_id:
                 body_dict["conversation_params"] = {"conversation_id": str(_session_id)}
+        execution = start_model_execution(request, upstream_attempted=False)
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "content_filter"
+                execution.update(response_source="local", local_response_reason="empty_assistant")
                 return res
 
         transport_io_enabled = bool(os.environ.get("NEMO_GYM_VLLM_TRANSPORT_LOG", "").strip())
@@ -947,9 +956,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                 }
             )
 
+        execution["upstream_attempted"] = True
         try:
             chat_completion_dict = await client.create_chat_completion(**body_dict)
         except ClientResponseError as e:
+            execution.update(response_source="upstream", upstream_status_code=e.status)
             if transport_io_enabled:
                 finished_ns = time_ns()
                 _append_transport_io(
@@ -988,6 +999,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
+                execution.update(response_source="local", local_response_reason="context_length_exceeded")
                 return res
             else:
                 raise e
@@ -1009,6 +1021,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 )
             raise
 
+        execution["response_source"] = "upstream"
         if transport_io_enabled:
             finished_ns = time_ns()
             _append_transport_io(
@@ -1307,9 +1320,11 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         client = self._resolve_client(request)
 
+        execution = start_model_execution(request, upstream_attempted=True)
         try:
             completion_dict = await client.create_completion(**completion_body)
         except ClientResponseError as e:
+            execution.update(response_source="upstream", upstream_status_code=e.status)
             result_content_str = e.response_content.decode()
             is_out_of_context_length = e.status == 400 and (
                 "context length" in result_content_str or "max_tokens" in result_content_str
@@ -1320,9 +1335,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
+                execution.update(response_source="local", local_response_reason="context_length_exceeded")
                 return res
             raise
 
+        execution["response_source"] = "upstream"
         if self.config.return_token_id_information:
             choice_dict = completion_dict["choices"][0]
             if choice_dict.get("prompt_token_ids") is None:
