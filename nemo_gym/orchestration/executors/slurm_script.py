@@ -25,10 +25,11 @@ from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
     NodePool,
     RayServiceConfig,
-    RouterServiceConfig,
     ServiceConfig,
     SlurmComputeConfig,
     SubmitConfig,
+    VllmPDServiceConfig,
+    VllmPDTierConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
     effective_ray_serve,
 )
@@ -231,16 +232,9 @@ def _kv_transfer_flag(service: VllmServiceConfig) -> str:
     single-quoted `bash -c` block as everything else, and the escaping helper
     handles it there.
     """
-    if service.kv_role is None:
+    if not isinstance(service, VllmPDTierConfig):
         return ""
-    config = json.dumps(
-        {
-            "kv_connector": service.kv_connector,
-            "kv_role": f"kv_{service.kv_role}",
-            "kv_load_failure_policy": service.kv_load_failure_policy,
-        },
-        separators=(",", ":"),
-    )
+    config = json.dumps(service._kv_transfer_config, separators=(",", ":"))
     return f" --kv-transfer-config {shlex.quote(config)}"
 
 
@@ -401,7 +395,7 @@ def _nixl_pre_command(service: VllmServiceConfig) -> str:
     The side-channel host is the node's own hostname and can only be known on the
     node, so it is a shell statement rather than an `env` entry.
     """
-    if service.kv_role is None:
+    if not isinstance(service, VllmPDTierConfig):
         return ""
     return (
         "export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname)\n"
@@ -409,22 +403,14 @@ def _nixl_pre_command(service: VllmServiceConfig) -> str:
     )
 
 
-def _build_router_command(
-    router: RouterServiceConfig,
-    services: dict[str, ServiceConfig],
-    offsets: dict[str, tuple[int, int]],
-) -> str:
+def _build_router_command(router: VllmPDServiceConfig, offsets: dict[str, tuple[int, int]]) -> str:
     """The vllm-router invocation fronting a prefill/decode pair.
 
     Both tiers are addressed at their pool's head node, which is where each tier's
     API rank runs (the remaining ranks in a tier are headless).
     """
-    prefill = services[router.prefill]
-    decode = services[router.decode]
-    assert isinstance(prefill, VllmServiceConfig) and isinstance(decode, VllmServiceConfig)
-    assert prefill.node_pool is not None and decode.node_pool is not None
     endpoints = ""
-    for flag, tier in (("--prefill", prefill), ("--decode", decode)):
+    for flag, tier in (("--prefill", router.prefill), ("--decode", router.decode)):
         start, count = offsets[tier.node_pool]
         # A per-node tier is one server per node; otherwise the tier's API rank is its head.
         for i in range(count if tier.server_per_node else 1):
@@ -493,7 +479,7 @@ def pool_nodes_var(pool: str) -> str:
 
 def _places_services(config: SubmitConfig, is_multi_node: bool) -> bool:
     """Whether the script declares the allocation's host array to place services with."""
-    return is_multi_node or any(s.node_pool for s in config.services.values())
+    return is_multi_node or any(s.node_pool for s in config.deployed_services.values())
 
 
 def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig, is_multi_node: bool) -> str:
@@ -541,7 +527,7 @@ def _render_ray_head_addresses(config: SubmitConfig, compute: SlurmComputeConfig
     The head runs beside the driver. Workers and the driver join it without knowing,
     when the config is written, which host the job will land on.
     """
-    services = {n: s for n, s in config.services.items() if isinstance(s, RayServiceConfig)}
+    services = {n: s for n, s in config.deployed_services.items() if isinstance(s, RayServiceConfig)}
     if not services:
         return ""
     head_node = _driver_node(config, compute)
@@ -612,6 +598,7 @@ def _render_ray_service(
 
 _BUILDERS = {
     VllmServiceConfig: _build_vllm_command,
+    VllmPDTierConfig: _build_vllm_command,
     RayServiceConfig: _build_ray_command,
 }
 
@@ -627,12 +614,11 @@ def _build_service_command(
     service: ServiceConfig,
     total_nodes: int,
     gpus_per_node_values: list[int],
-    services: dict[str, ServiceConfig] | None = None,
     offsets: dict[str, tuple[int, int]] | None = None,
 ) -> str:
-    if isinstance(service, RouterServiceConfig):
-        assert services is not None and offsets is not None
-        return _build_router_command(service, services, offsets)
+    if isinstance(service, VllmPDServiceConfig):
+        assert offsets is not None
+        return _build_router_command(service, offsets)
     if isinstance(service, VllmServiceConfig) and effective_ray_serve(service, total_nodes, gpus_per_node_values):
         return _build_vllm_ray_serve_command(service, total_nodes, gpus_per_node_values)
     if _vllm_spans_multiple_nodes(service, total_nodes):
@@ -749,7 +735,7 @@ def _driver_node(config: SubmitConfig, compute: SlurmComputeConfig) -> int:
     The driver reaches the policy on localhost. A multi-node policy serves its API
     from node 0, and a pinned one from its pool's first node.
     """
-    policy = config.services.get(config.driver.policy_model or "")
+    policy = config.deployed_services.get(config.driver.policy_model or "")
     if policy is not None and policy.node_pool is not None:
         return _pool_offsets(compute)[policy.node_pool][0]
     return 0
@@ -771,7 +757,7 @@ def _service_nodelist(service: ServiceConfig, driver_node: int | None, total_nod
 
 def _build_nodes(service: ServiceConfig, compute: SlurmComputeConfig, total_nodes: int) -> int:
     """Nodes the service command is written for; a per-node server is a single-node command."""
-    if isinstance(service, VllmServiceConfig) and service.server_per_node:
+    if isinstance(service, VllmPDTierConfig) and service.server_per_node:
         return 1
     return _service_nodes(service, compute, total_nodes)
 
@@ -892,7 +878,7 @@ def build_sbatch_script(
         block
         for block in (
             render_ray_prelude()
-            if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.services.values())
+            if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.deployed_services.values())
             else "",
             _render_pool_nodes(config, compute, is_multi_node),
             _render_ray_head_addresses(config, compute),
@@ -919,7 +905,6 @@ def build_sbatch_script(
                     service,
                     _build_nodes(service, compute, total_nodes),
                     gpus_per_node_values,
-                    config.services,
                     offsets,
                 ),
                 service.env or None,
@@ -933,12 +918,12 @@ def build_sbatch_script(
                 pre_command=_service_pre_command(service),
                 nodelist=_service_nodelist(service, driver_node, total_nodes),
             )
-            for name, service in config.services.items()
+            for name, service in config.deployed_services.items()
             if not isinstance(service, RayServiceConfig)
         ]
         + [
             _render_ray_service(name, service, config, compute, driver_node)
-            for name, service in config.services.items()
+            for name, service in config.deployed_services.items()
             if isinstance(service, RayServiceConfig)
         ]
     )
@@ -953,7 +938,7 @@ def build_sbatch_script(
                 service.health_check.timeout_seconds,
                 _health_check_host(service, config, compute, driver_node, total_nodes),
             )
-            for name, service in config.services.items()
+            for name, service in config.deployed_services.items()
             if service.health_check
         ]
     )

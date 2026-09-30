@@ -72,7 +72,9 @@ SHUTDOWN_WAIT_SECONDS = 30
 def scrape_targets(config: SubmitConfig) -> dict[str, int]:
     """Service name to serving port for every service that exposes a model (and so `/metrics`)."""
     return {
-        name: service.port for name, service in config.services.items() if isinstance(service, BaseModelServiceConfig)
+        name: service.port
+        for name, service in config.deployed_services.items()
+        if isinstance(service, BaseModelServiceConfig)
     }
 
 
