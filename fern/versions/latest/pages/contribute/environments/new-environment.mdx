@@ -23,15 +23,15 @@ The agent/environment separation design keeps task behavior independent of the s
 | Agent Server | Harness behavior, model interaction, dependencies, and harness-local sessions |
 | Model Server | Model inference and provider-specific adaptation |
 | Environment | Configuration that selects the task, participants, model bindings, episode protocol, and run policy |
-| Environment Server (proposed) | Episode admission, ordering, timeout, result assembly, and coordination of participant cleanup |
+| Environment Server | Episode entrypoint and protocol orchestration; legacy adapters delegate episode execution to the agent |
 
 A Resources Server is one participant in an environment. Reuse an existing harness when adding tasks or scoring; a new benchmark does not by itself need a new Agent Server. Expose every tool or artifact the verifier depends on through the task contract. For example, a verifier that reads deliverables must document how any compatible harness can create them, without relying on a private handoff in one agent.
 
 <Note>
-The agent/environment separation RFC, tracked by [the composability epic](https://github.com/NVIDIA-NeMo/Gym/issues/1866), proposes an independently deployed Environment Server as the owner of `POST /run`. The commands below use the current agent/resources-server runtime. A manifest describes that runtime; it does not migrate it or introduce an `environment_server` field.
+Every runnable agent must be referenced by an Environment Server in Gym config; rollout collection routes `POST /run` through that server. The scaffold currently wires [`legacy_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/legacy_agent), which forwards the agent's existing `/run` and `/aggregate_metrics` contracts without taking over its lifecycle controls. Native protocols such as [`single_agent_turn`](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/single_agent_turn) coordinate participant sessions, verification, timeouts, and cleanup. Migrating legacy components to those protocols is separate from adding the compatibility routing. The manifest describes composition; it does not perform that migration or define an `environment_server` field.
 </Note>
 
-An external framework may expose a reusable harness, task tools and scoring, or an entire episode engine. Adapt the reusable components where possible and document the boundary when the engine cannot be separated. The RFC targets a standalone Environment Server for a fused engine; the current manifest uses `external-agent-loop` for the existing adapter shape.
+An external framework may expose a reusable harness, task tools and scoring, or an entire episode engine. Adapt the reusable components where possible and document the boundary when the engine cannot be separated. Existing `external-agent-loop` adapters run behind the compatibility Environment Server; moving a fused engine to its own native episode protocol is a separate migration tracked by [the composability epic](https://github.com/NVIDIA-NeMo/Gym/issues/1866).
 
 ## Environment Manifest
 
