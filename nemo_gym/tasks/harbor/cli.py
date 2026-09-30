@@ -273,8 +273,10 @@ def build_run(
     ]
     if sandbox is not None:
         config_paths.append(resolve_sandbox_config(sandbox))
-    tokens = [token for token in overrides if not token.startswith("+agent_name=")]
-    tokens.append(f"+config_paths=[{','.join(str(path) for path in config_paths)}]")
+    # Component and provider defaults first, the caller's tokens after: a later config_paths entry wins
+    # (and replaces lists), so an overlay passed with +config_paths must merge on top of the defaults.
+    tokens = [f"+config_paths=[{','.join(str(path) for path in config_paths)}]"]
+    tokens += [token for token in overrides if not token.startswith("+agent_name=")]
     if not _has_override(tokens, "split"):
         tokens.append("+split=validation")
     if not _has_override(tokens, "output_jsonl_fpath"):
