@@ -77,6 +77,26 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+def mark_missing_assistant_output(response: NeMoGymResponse) -> str:
+    """Share the ordinary agent's reasoning-only/empty-output termination semantics."""
+    termination_message = (
+        "Ending trajectory: model returned no assistant message or tool calls "
+        "(reasoning-only or empty output) without reported truncation. "
+        "This is the stop-token case (finish_reason='stop'), not length truncation "
+        "(finish_reason='length', handled separately via incomplete_details). "
+        "This indicates either a badly trained model requiring training-level fixes "
+        "or a bug in the inference engine."
+    )
+    termination_reason = "incomplete_reasoning" if response.output else "empty_output"
+    response.status = "incomplete"
+    response.metadata = {
+        **(response.metadata or {}),
+        "ng_termination_reason": termination_reason,
+        "ng_termination_message": termination_message,
+    }
+    return termination_message
+
+
 class SimpleAgent(SimpleResponsesAPIAgent):
     ray_enabled = False
     config: SimpleAgentConfig
@@ -175,21 +195,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             if not all_fn_calls:
                 if not all_output_messages:
                     invocation_status = "incomplete"
-                    termination_message = (
-                        "Ending trajectory: model returned no assistant message or tool calls "
-                        "(reasoning-only or empty output) without reported truncation. "
-                        "This is the stop-token case (finish_reason='stop'), not length truncation "
-                        "(finish_reason='length', handled separately via incomplete_details). "
-                        "This indicates either a badly trained model requiring training-level fixes "
-                        "or a bug in the inference engine."
-                    )
-                    termination_reason = "incomplete_reasoning" if output else "empty_output"
-                    model_response.status = "incomplete"
-                    model_response.metadata = {
-                        **(model_response.metadata or {}),
-                        "ng_termination_reason": termination_reason,
-                        "ng_termination_message": termination_message,
-                    }
+                    termination_message = mark_missing_assistant_output(model_response)
                     LOG.warning(
                         "%s model_server=%s response_id=%s rollout_id=%s step=%s",
                         termination_message,

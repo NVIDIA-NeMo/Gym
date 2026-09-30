@@ -32,11 +32,10 @@ from nemo_gym.token_id_capture.staging.records import (
     StageResult,
 )
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
-from responses_api_models.vllm_model_with_compaction.app import VLLMModelWithCompaction
 
 
 PREFIX = "/ng-rollout/r1/training-token-capture"
-DIALECTS = ["chat/completions", "responses", "messages", "compaction"]
+DIALECTS = ["chat/completions", "responses", "messages"]
 
 
 class _Worker:
@@ -137,7 +136,7 @@ def make_harness(tmp_path, monkeypatch):
         if evaluation:
             global_config.update(observability_enabled=True, model_call_capture_dir=str(root))
         monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "test-control-token")
-        cls = VLLMModelWithCompaction if dialect == "compaction" else VLLMModel
+        cls = VLLMModel
         config = VLLMModelConfig(
             host="localhost",
             port=8080,
@@ -267,7 +266,7 @@ async def test_external_capture_routes(make_harness, dialect, stream, evaluation
     if stream:
         assert dict(messages[0]["headers"])[b"content-type"].startswith(b"text/event-stream")
         events = _events(messages)
-        if dialect in ("responses", "compaction"):
+        if dialect in ("responses",):
             assert events[-1]["type"] == "response.completed"
 
 
@@ -382,7 +381,7 @@ def test_static_streaming_override_rejected(make_harness, override):
         make_harness(**{override: {"stream": True}})
 
 
-@pytest.mark.parametrize("dialect", ["responses", "compaction"])
+@pytest.mark.parametrize("dialect", ["responses"])
 @pytest.mark.parametrize("evaluation", [False, True])
 async def test_runtime_override_is_scoped_to_captured_calls(make_harness, dialect, evaluation):
     h = make_harness(dialect, evaluation)
@@ -439,7 +438,7 @@ async def test_two_call_continuation_from_served_sse(make_harness, dialect, cont
         raw = b"".join(message.get("body", b"") for message in messages)
         expected = b"I cannot help with that." if h.worker.refusal else b"Check the requested calculation."
         assert expected in raw
-        wire_dialect = {"chat/completions": "chat_completions", "compaction": "responses"}.get(dialect, dialect)
+        wire_dialect = {"chat/completions": "chat_completions"}.get(dialect, dialect)
         response = _reconstruct_streamed_response(raw, wire_dialect)
         if dialect == "chat/completions" and h.worker.refusal:
             assert any(
@@ -451,7 +450,7 @@ async def test_two_call_continuation_from_served_sse(make_harness, dialect, cont
         return response
 
     first = await complete()
-    if dialect in ("responses", "compaction"):
+    if dialect in ("responses",):
         body["input"].extend(first["output"])
         body["input"].append(
             {"type": "function_call_output", "call_id": "call-1", "output": "sunny"}
@@ -513,9 +512,8 @@ async def test_two_call_continuation_from_served_sse(make_harness, dialect, cont
 @pytest.mark.parametrize("evaluation", [False, True])
 @pytest.mark.parametrize(
     "dialect,failure,stream",
-    [(dialect, "conversion", True) for dialect in ("responses", "messages", "compaction")]
-    + [(dialect, "serialization", True) for dialect in DIALECTS]
-    + [("compaction", failure, False) for failure in ("conversion", "serialization")],
+    [(dialect, "conversion", True) for dialect in ("responses", "messages")]
+    + [(dialect, "serialization", True) for dialect in DIALECTS],
 )
 async def test_response_preparation_failure_does_not_commit(
     make_harness, monkeypatch, dialect, failure, stream, evaluation
@@ -530,11 +528,7 @@ async def test_response_preparation_failure_does_not_commit(
             monkeypatch.setattr(AnthropicConverter, "responses_to_anthropic_response", fail_conversion)
         else:
             monkeypatch.setattr(type(h.model._converter), "chat_completion_to_response", fail_conversion)
-    elif not stream:
-        monkeypatch.setattr(
-            "responses_api_models.vllm_model_with_compaction.app._orjson_dispatch_response", fail_conversion
-        )
-    elif dialect in ("responses", "compaction"):
+    elif dialect in ("responses",):
         original = responses_streaming._sse_event
 
         def serialize(payload):
@@ -571,7 +565,7 @@ async def test_response_preparation_failure_does_not_commit(
             assert not manifest["records"]
             assert any(row["reason"] == UNCOMMITTED_CALL_REASON for row in manifest["failures"])
 
-    if stream and dialect in ("responses", "compaction"):
+    if stream and dialect in ("responses",):
         await _request(h.app, _path(dialect), _body(dialect), check_send)
         assert _events(sent)[-1]["type"] == "response.failed"
         assert all(event["type"] != "response.output_item.done" for event in _events(sent))

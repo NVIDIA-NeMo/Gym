@@ -924,6 +924,18 @@ class TestRolloutCollection:
         with pytest.raises(ClientResponseError):
             await next(RolloutCollectionHelper().run_examples([failing_row()]))
 
+    @pytest.mark.parametrize("retry_requests", [True, False])
+    async def test_run_examples_controls_transport_replay(
+        self, monkeypatch: pytest.MonkeyPatch, retry_requests: bool
+    ) -> None:
+        """CC callers can prevent retrying a /run whose first attempt may have mutated state."""
+        post = AsyncMock(side_effect=ServerDisconnectedError())
+        install_fake_server_client(monkeypatch, post)
+        with pytest.raises(ServerDisconnectedError):
+            await next(RolloutCollectionHelper().run_examples([failing_row()], retry_requests=retry_requests))
+        assert post.await_count == 1
+        assert post.call_args.kwargs["_retry"] is retry_requests
+
     @pytest.mark.parametrize("error", [RuntimeError("dispatcher bug"), asyncio.CancelledError()])
     async def test_run_examples_propagates_non_request_failures(
         self, monkeypatch: pytest.MonkeyPatch, error: BaseException

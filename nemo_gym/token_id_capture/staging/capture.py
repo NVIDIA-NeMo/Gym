@@ -112,6 +112,8 @@ class RolloutTokenCapture:
         """
         if not isinstance(admission, CaptureAdmission):
             raise TypeError("admission must be a CaptureAdmission")
+        if admission.mode == "candidate":
+            raise CaptureError("The framework must resolve candidate admission before capture")
         if stream:
             raise StreamingUnsupportedError(
                 f"rollout {admission.rollout_id} call {admission.model_call_id}: "

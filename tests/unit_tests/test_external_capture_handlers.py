@@ -256,7 +256,7 @@ def _assert_poisoned(
     assert manifest["records"] == []
     assert manifest["failures"] == [
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "model_call_id": "c1",
             "reason": reason,
         }

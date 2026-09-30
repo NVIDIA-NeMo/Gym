@@ -72,6 +72,9 @@ class VLLMCaptureAdapter:
             if not isinstance(routed_experts, (str, dict, list)):
                 raise ValueError("vLLM routed_experts must use a JSON-compatible envelope")
             extras[ROUTED_EXPERTS_FIELD] = routed_experts
+            message = _message(_single_choice(response_payload))
+            if "predecessor_tail_route" in message:
+                extras["predecessor_tail_route"] = message["predecessor_tail_route"]
         # Expanded-space prefix replacement needs the original placeholder
         # positions. Pixels travel beside the record as sink attachments.
         if MEDIA_SPANS_FIELD in response_payload:

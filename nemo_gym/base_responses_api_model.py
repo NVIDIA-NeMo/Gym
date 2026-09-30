@@ -42,10 +42,10 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
-from fastapi import Body, FastAPI, Request, Response
+from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
@@ -84,6 +84,7 @@ from nemo_gym.token_id_capture import (
     resolve_parent,
     set_token_sink,
 )
+from nemo_gym.token_id_capture.completion import completion_metadata
 
 # The store factory needs Gym's server stack.
 # The leaf package does not re-export it.
@@ -92,6 +93,7 @@ from nemo_gym.token_id_capture.control_routes import install_rollout_control_rou
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
 from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.token_id_capture.sink import CAPTURE_PARENT_HEADER
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -100,6 +102,17 @@ logger = logging.getLogger(__name__)
 
 # Stateless; shared by every model server's default /v1/messages handler.
 _ANTHROPIC_CONVERTER = AnthropicConverter()
+
+
+def _decode_capture_parent(value: str) -> str | None:
+    """Decode the accepted-response hint shared by generation and measurement."""
+    try:
+        parent = orjson.loads(value)
+    except orjson.JSONDecodeError as error:
+        raise HTTPException(status_code=422, detail="capture parent must be JSON null or a response ID") from error
+    if parent is not None and (not isinstance(parent, str) or not parent):
+        raise HTTPException(status_code=422, detail="capture parent must be JSON null or a response ID")
+    return parent
 
 
 class ModelExecutionOutcome(TypedDict):
@@ -210,6 +223,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     # Subclasses can declare successful metadata or health routes here.
     # Unknown successful routes fail closed during training-token capture.
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
+    _capture_lineage: LineageResolver | None = PrivateAttr(default=None)
 
     async def _finalize_served_response(self, response: Any) -> None:
         """Finalize capture after conversion to the response returned to the client."""
@@ -228,7 +242,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         self.setup_session_middleware(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        install_model_call_capture(
+        self._capture_lineage = install_model_call_capture(
             app,
             capture_config,
             model_server_name=self.config.name,
@@ -285,6 +299,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
         still fails eagerly, before the stream is committed).
         """
+        context = current_capture_context()
+        if context is not None and context.framework_owned_context:
+            if body.get("stream") or body.get("previous_response_id") or body.get("conversation"):
+                raise HTTPException(
+                    status_code=422, detail="Framework context requires explicit non-streaming history"
+                )
         if not body.get("stream"):
             params = _validate_responses_params(body)
             response = await self._invoke_responses(request, params)
@@ -336,6 +356,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
         malformed ``stream`` with the same 422 as before.
         """
+        context = current_capture_context()
+        if context is not None and context.framework_owned_context and (body.get("stream") or body.get("n", 1) != 1):
+            raise HTTPException(status_code=422, detail="Framework context requires one non-streaming Chat completion")
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
             response = await self._invoke_chat_completions(request, params)
@@ -406,9 +429,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # all of them.
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
-        if current_capture_context() is not None:
+        context = current_capture_context()
+        parent_header = request.headers.get(CAPTURE_PARENT_HEADER)
+        if parent_header is not None and (
+            context is None or not context.external_staging or not context.framework_owned_context
+        ):
+            raise HTTPException(status_code=409, detail="accepted parent selection requires framework-owned capture")
+        if parent_header is not None and request.url.path != "/v1/responses":
+            raise HTTPException(status_code=422, detail="accepted parent selection requires the Responses API")
+        if context is not None:
             request_messages = _request_messages(params)
-            await resolve_parent(request_messages)
+            if parent_header is None:
+                await resolve_parent(request_messages)
+            else:
+                await resolve_parent(request_messages, parent_response_id=_decode_capture_parent(parent_header))
             await register_call_intent()
         else:
             request_messages = None
@@ -800,23 +834,7 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
     tool_calls, reasoning_content = _tool_calls_and_reasoning(response)
     raw_request = exchange.get("request")
     request = raw_request if isinstance(raw_request, dict) else {}
-    choices = response.get("choices")
-    first_choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
-    incomplete_details = response.get("incomplete_details")
-    if not isinstance(incomplete_details, dict):
-        incomplete_details = {}
-    finish_reason = next(
-        (
-            value
-            for value in (
-                response.get("stop_reason"),
-                first_choice.get("finish_reason"),
-                incomplete_details.get("reason"),
-            )
-            if isinstance(value, str)
-        ),
-        None,
-    )
+    _, finish_reason = completion_metadata(response)
     model = response.get("model") or request.get("model")
     return ModelCallRecord(
         model_call_id=exchange.get("model_call_id"),
@@ -1349,6 +1367,7 @@ class _CaptureMiddleware:
         lineage_store: LineageResolver | None = None,
         delta_records: bool = False,
         external_staging: bool = False,
+        framework_owned_context: bool = False,
         token_capture_enabled: bool = False,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
     ) -> None:
@@ -1364,6 +1383,7 @@ class _CaptureMiddleware:
         # A framework inference worker owns record staging; the lineage store
         # doubles as the per-rollout capture ledger.
         self._external_staging = external_staging
+        self._framework_owned_context = framework_owned_context
         self._capture_ledger: CaptureLedger | None = (
             lineage_store if external_staging and isinstance(lineage_store, CaptureLedger) else None
         )
@@ -1408,6 +1428,18 @@ class _CaptureMiddleware:
         # Installed sinks are resolved for each request.
         token_sink = self._configured_sink or installed_token_sink() or self._token_store
         capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
+        if (
+            capture_wanted
+            and self._framework_owned_context
+            and dialect is not None
+            and dialect not in ("responses", "chat")
+        ):
+            await Response(
+                content='{"detail":"Framework-owned context currently requires Responses or Chat"}',
+                status_code=422,
+                media_type="application/json",
+            )(scope, receive, send)
+            return
         if token_capture_requested and dialect is None and token_sink is not None:
             marked_incomplete = False
             response_started = False
@@ -1485,6 +1517,7 @@ class _CaptureMiddleware:
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
+                framework_owned_context=self._framework_owned_context,
                 admitted_at=time.time(),
             )
             sink_token = set_token_sink(capture_context)
@@ -1683,7 +1716,7 @@ def install_model_call_capture(
     global_config_dict: Any = None,
     num_workers: int | None = None,
     non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
-) -> None:
+) -> LineageResolver | None:
     """Install model-call capture middleware.
 
     Always strip ``/ng-rollout/<id>/...`` before routing.
@@ -1770,9 +1803,14 @@ def install_model_call_capture(
         lineage_store=lineage_store,
         delta_records=(capture_settings.token_id_capture.delta_records if capture_settings is not None else False),
         external_staging=external_staging,
+        framework_owned_context=(
+            capture_settings.token_id_capture.framework_owned_context if capture_settings is not None else False
+        ),
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,
     )
+
+    return lineage_store
 
 
 # --- Run-level capture helpers (rollout-collection side) ---
