@@ -128,6 +128,12 @@ def _vllm_command(service: VllmServiceConfig, port: int) -> list[str]:
         cmd += ["--tensor-parallel-size", str(service.tensor_parallel_size)]
     if service.pipeline_parallel_size > 1:
         cmd += ["--pipeline-parallel-size", str(service.pipeline_parallel_size)]
+    if service.number_of_instances > 1:
+        # vLLM's plain single-node data-parallel mode: all replicas run as local ranks inside one
+        # process, sharing this one pod/port -- no multi-node split, no head/worker roles. Only
+        # viable when the whole replica*TP*PP footprint fits this one node's GPUs, already enforced
+        # by SubmitConfig._resolve_and_validate_placements' gpus_per_node check.
+        cmd += ["--data-parallel-size", str(service.number_of_instances)]
     if service.trust_remote_code:
         cmd.append("--trust-remote-code")
     if service.extra_args:
@@ -151,13 +157,10 @@ def _sidecar_containers(config: SubmitConfig, compute: KubernetesComputeConfig) 
             raise ValueError(f"Service '{name}': ray services are not supported by the kubernetes executor yet.")
         if service.use_ray_serve:
             raise ValueError(f"Service '{name}': use_ray_serve is not supported by the kubernetes executor yet.")
-        if service.number_of_instances > 1:
-            raise ValueError(
-                f"Service '{name}': number_of_instances={service.number_of_instances} is not supported by the "
-                "kubernetes executor yet (v1 is single-instance-per-pod)."
-            )
         _reject_unsupported_mounts(service.mounts)
-        gpu_count = service.tensor_parallel_size * service.pipeline_parallel_size
+        # number_of_instances replicas all run in this one pod (vLLM's single-node data-parallel
+        # mode -- see _vllm_command), so the pod needs GPUs for all of them.
+        gpu_count = service.tensor_parallel_size * service.pipeline_parallel_size * service.number_of_instances
         container: dict[str, Any] = {
             "name": _dns_label(name),
             "image": service.container,

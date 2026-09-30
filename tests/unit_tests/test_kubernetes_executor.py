@@ -212,3 +212,71 @@ def test_ray_serve_service_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="use_ray_serve"):
         KubernetesExecutor().run(config, dry_run=True)
+
+
+def test_multi_instance_uses_plain_data_parallel_flag(tmp_path):
+    # All replicas run as local ranks in this one pod -- vLLM's plain single-node data-parallel
+    # mode, no head/worker split, no second pod.
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    services = {
+        "vllm_model": {
+            "type": "vllm",
+            "container": "vllm/vllm-openai:latest",
+            "model": "org/model",
+            "tensor_parallel_size": 2,
+            "number_of_instances": 4,
+        }
+    }
+    config = _submit_config(tmp_path, ["bench_a"], services=services)
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    sidecar = job["spec"]["template"]["spec"]["initContainers"][0]
+    assert sidecar["command"][-2:] == ["--data-parallel-size", "4"]
+
+
+def test_multi_instance_sidecar_requests_gpus_for_all_replicas(tmp_path):
+    # tensor_parallel_size=2 x number_of_instances=4 = 8 GPUs, not just tensor_parallel_size=2 --
+    # all replicas share this one pod.
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    services = {
+        "vllm_model": {
+            "type": "vllm",
+            "container": "vllm/vllm-openai:latest",
+            "model": "org/model",
+            "tensor_parallel_size": 2,
+            "number_of_instances": 4,
+        }
+    }
+    config = _submit_config(tmp_path, ["bench_a"], services=services)
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    sidecar = job["spec"]["template"]["spec"]["initContainers"][0]
+    assert sidecar["resources"]["limits"]["nvidia.com/gpu"] == 8
