@@ -66,6 +66,16 @@ class TaskData(BaseModel):
         description="Upstream instance id, e.g. 'ordering_001_1'; carried for traceability.",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
+    dataset_name: Optional[str] = Field(
+        default=None,
+        description="Always 'chemreason_bench'; written by prepare.py so rows stay identifiable once merged.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
+    split: Optional[str] = Field(
+        default=None,
+        description="Always 'test'. Upstream publishes a single split; declared so the field is not silently extra.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     benchmark_id: Optional[int] = Field(
         default=None,
         description="Source reaction id in 1..500; upstream slices its report on this.",

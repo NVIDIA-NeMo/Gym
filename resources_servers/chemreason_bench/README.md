@@ -63,6 +63,7 @@ A prepared row is flat:
 | Field | Purpose |
 | --- | --- |
 | `task_id`, `benchmark_id` | Provenance. `benchmark_id` is the source reaction, 1-500 |
+| `dataset_name`, `split` | Always `chemreason_bench` / `test`; upstream publishes one split |
 | `task_type` | Selects the scorer |
 | `protocol` | `gen` or `lm` |
 | `question` | The rendered user prompt |
@@ -92,20 +93,26 @@ option 0. Step-completion slots additionally pass through upstream's `canonicali
 which resolves alias keys, splits blobs like `"10 mL"`, maps reagent names to `$n$` through the
 legend, and drops anything outside the whitelist.
 
-One further departure: every raw-text fallback receives the reply with reasoning blocks
-stripped. Upstream's `_raw` is the whole answer, so this differs deliberately — scoring a
-reasoning model's trace measures the trace, not the answer. The rule is applied uniformly to
-ordering, contrastive choice and rationalization. Note also that upstream sets `_raw` only when
-JSON parsing *fails*, so a dict that parsed but lacks the requested key scores empty rather
-than being scored on its own text; that behaviour is matched.
+All three of upstream's raw-text fallbacks read `obj.get("_raw", "")`, and the extractor writes
+`_raw` only when JSON parsing *fails*. So a dict that parsed but lacks the requested key scores
+empty rather than being scored on its own text; that is matched. One consequence is worth
+recording because it looks like a porting bug: ordering's raw scan is unreachable. It runs only
+when `predicted_order` is present and not a list — which means the reply parsed, so `_raw` is
+absent — while a total parse failure leaves `got` at `[]`, already a list.
 
-Two upstream inconsistencies were resolved deliberately:
+One deliberate departure inside those fallbacks: they receive the reply with reasoning blocks
+stripped, where upstream's `_raw` is the whole answer. Scoring a reasoning model's trace
+measures the trace, not the answer.
 
-- `eval/eval_config.yaml` states step completion as `0.5*action_em + 0.5*slot_f1`, while
-  `eval/eval.py` and the paper both use `0.8/0.2` with a format-error penalty. The config
-  string is stale; code and paper agree and produced the published numbers.
-- A reply that is not a JSON dict forces `label=False` (upstream's conservative fallback),
-  while a dict merely missing `score` falls through to `0.5 >= 0.5` and counts positive.
+An upstream inconsistency resolved deliberately: `eval/eval_config.yaml` states step completion
+as `0.5*action_em + 0.5*slot_f1`, while `eval/eval.py` and the paper both use `0.8/0.2` with a
+format-error penalty. The config string is stale; code and paper agree and produced the
+published numbers.
+
+The binary tasks have one easily-inverted rule. Because the extractor returns `{"_raw": answer}`
+on *every* failure, `post_binary` never sees a non-dict: its non-dict branch is dead, and an
+unparseable reply falls through to the `0.5 >= 0.5` default and counts **positive**. Labelling
+those negative instead moves `f1_positive` on both validation tasks.
 
 One deliberate departure, recorded rather than hidden: when a reply contains several JSON
 objects this server scores the **rightmost**, on the grounds that a later object is the

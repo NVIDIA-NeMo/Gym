@@ -36,6 +36,7 @@ from resources_servers.chemreason_bench.app import (
 from resources_servers.chemreason_bench.response_parsing import (
     MAX_RESPONSE_CHARS,
     to_prediction,
+    to_prediction_lm,
 )
 
 
@@ -168,6 +169,28 @@ class TestHarnessFailures:
         assert result.status == "bad_task_type"
         assert result.harness_failure is True
 
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"task_type": "not_a_task", "ground_truth": {}},
+            {"task_type": "ordering", "ground_truth": None},
+            {"task_type": "ordering", "ground_truth": {}, "protocol": "lm"},
+        ],
+    )
+    def test_harness_failures_are_masked(self, fields):
+        """The 0.0 measures the harness, not the model, so it must not reach the score.
+
+        compute_metrics drops these, but mask_sample is what keeps them out of the
+        downstream reward statistics Gym computes on its own.
+        """
+        result = _verify(_make_server(), "{}", **fields)
+        assert result.harness_failure is True
+        assert result.mask_sample is True
+
+    def test_a_scored_row_is_not_masked(self):
+        result = _verify(_make_server(), GOLD_REPLY["ordering"], task_type="ordering", ground_truth=GOLD["ordering"])
+        assert result.mask_sample is False
+
     @pytest.mark.parametrize("bad", [None, [], "a string", 7, True])
     def test_ground_truth_wrong_type(self, bad):
         result = _verify(_make_server(), "{}", task_type="ordering", ground_truth=bad)
@@ -280,21 +303,23 @@ class TestModelOutputHandling:
         with_trace = _verify(_make_server(), traced, task_type="rationalization", ground_truth=GOLD["rationalization"])
         assert with_trace.reward == pytest.approx(plain.reward)
 
-    def test_non_dict_reply_forces_negative_label(self):
-        """Upstream's conservative fallback: a non-JSON reply must not count positive.
+    @pytest.mark.parametrize("reply", ["YES", '{"note":"unsure"}', "[1, 2]", "{broken"])
+    def test_unparseable_binary_reply_scores_the_0_5_default(self, reply):
+        """Every binary reply lacking `score` lands on 0.5, which is >= 0.5: positive.
 
-        Labelling unparseable replies positive is worth ~0.63-0.73 f1_positive on
-        its own, given the 46-57% positive gold rate.
+        Upstream's extractor returns {"_raw": answer} on every failure path, so
+        post_binary never receives a non-dict and its non-dict branch is dead. The
+        difference is not cosmetic: labelling these negative moves f1_positive on
+        both validation tasks, which are two of the six primaries.
         """
-        result = _verify(_make_server(), "YES", task_type="step_validation", ground_truth={"label": True})
-        assert result.reward == 0.0
+        server = _make_server()
+        assert _verify(server, reply, task_type="step_validation", ground_truth={"label": True}).reward == 1.0
+        assert _verify(server, reply, task_type="step_validation", ground_truth={"label": False}).reward == 0.0
 
-    def test_dict_without_score_follows_upstream_threshold(self):
-        """A dict missing `score` falls through to 0.5 >= 0.5 and counts positive."""
-        result = _verify(
-            _make_server(), '{"note":"unsure"}', task_type="step_validation", ground_truth={"label": True}
-        )
-        assert result.reward == pytest.approx(1.0)
+    def test_binary_score_below_threshold_is_negative(self):
+        """The 0.5 default is a default, not a constant: a real score still decides."""
+        result = _verify(_make_server(), '{"score": 0.2}', task_type="step_validation", ground_truth={"label": True})
+        assert result.reward == 0.0
 
     def test_unknown_amount_unit_is_scrubbed_not_fatal(self):
         """Canonicalization drops an out-of-set amount_unit before scoring.
@@ -474,6 +499,34 @@ class TestParsingContract:
         filler = "x" * 100
         assert response_parsing.extract_json(payload + filler)[1] == "ok"
         assert response_parsing.extract_json(filler + payload) == (None, "no_json_found")
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            'He said "maybe. {"predicted_option_idx": 1}',
+            'I am 5" tall. {"score": 1.0}',
+        ],
+    )
+    def test_a_prose_quote_does_not_hide_the_object(self, reply):
+        """An unbalanced quote outside any object must not swallow the reply.
+
+        The brace scanner tracks strings so a `}` inside one is not an end; before
+        the first `{` there is no string to track, and treating prose as one made
+        every following brace invisible.
+        """
+        assert response_parsing.extract_json(reply)[1] == "ok"
+
+    def test_an_enormous_json_number_is_malformed_not_a_crash(self):
+        """float() of a 400-digit int raises OverflowError, not ValueError.
+
+        An unhandled one leaves verify() as a 500, which ends the whole run -- the
+        outcome every other malformed-input path here exists to avoid.
+        """
+        huge = '{"score": 1' + "0" * 400 + "}"
+        result = _verify(_make_server(), huge, task_type="step_validation", ground_truth={"label": True})
+        assert result.harness_failure is False
+        # Falls back to the 0.5 default, which is >= 0.5 and therefore positive.
+        assert result.reward == pytest.approx(1.0)
 
     def test_shipped_cap_is_bounded(self):
         """Separate from the mechanism: the value actually shipped must be finite."""
@@ -751,21 +804,16 @@ class TestRationalizationFallbackScope:
 
 
 class TestOneCleaningRule:
-    """Every raw-text fallback receives the think-stripped reply, not output_text."""
+    """Every raw-text fallback receives the think-stripped reply, not output_text.
 
-    def test_ordering_recovery_ignores_a_reasoning_trace(self):
-        """Digits inside a trace must not be recovered as step ids.
-
-        `predicted_order` must be PRESENT but not a list: that is the only input
-        that reaches post_ordering's raw-text scan. With no JSON at all, `got`
-        defaults to [] -- already a list -- so the scan never runs and the test
-        would pass whether or not the text was cleaned.
-        """
-        traced = '<think>2 then 0 then 1</think>{"predicted_order": "see above"}'
-        result = _verify(_make_server(), traced, task_type="ordering", ground_truth=GOLD["ordering"])
-        assert result.reward == 0.0
+    The case must be an UNPARSED reply: a parsed dict gets no recovery text at all
+    (see TestRawRecoveryScope), so the cleaning rule would never be reached.
+    Ordering has no testable case -- see TestRawRecoveryScope for why its recovery
+    path is unreachable.
+    """
 
     def test_contrastive_recovery_ignores_a_reasoning_trace(self):
+        """An option named only inside a trace must not become the answer."""
         traced = "<think>the answer is surely $5$</think>I cannot decide."
         result = _verify(
             _make_server(),
@@ -774,3 +822,60 @@ class TestOneCleaningRule:
             ground_truth=GOLD["contrastive_choice"],
         )
         assert result.reward == 0.0
+
+
+class TestRawRecoveryScope:
+    """Recovery text exists only where upstream sets _raw: on a parse FAILURE.
+
+    Upstream's three recovery paths all read ``obj.get("_raw", "")``, which the
+    extractor writes only when parsing fails. A dict that parsed but lacks the
+    requested key therefore scores empty. Scanning it as text instead would award
+    credit upstream never gives.
+    """
+
+    def test_parsed_contrastive_dict_naming_the_option_is_not_rescanned(self):
+        """The wrong key holds the gold option string, so a rescan would score 1.0."""
+        result = _verify(
+            _make_server(),
+            '{"note": "I pick $5$"}',
+            task_type="contrastive_choice",
+            ground_truth=GOLD["contrastive_choice"],
+        )
+        assert result.status == "ok"
+        assert result.reward == 0.0
+
+    def test_unparsed_contrastive_reply_still_falls_back(self):
+        result = _verify(
+            _make_server(), "I pick $5$", task_type="contrastive_choice", ground_truth=GOLD["contrastive_choice"]
+        )
+        assert result.status == "no_json_found"
+        assert result.reward == pytest.approx(1.0)
+
+    def test_ordering_recovery_is_unreachable_as_upstream(self):
+        """Both ordering branches score empty, and upstream's does too.
+
+        Upstream reaches its raw scan only when `predicted_order` is present and
+        not a list -- but that means the reply parsed, so `_raw` is absent and the
+        scan reads "". With no JSON at all, `got` defaults to [], already a list,
+        so the scan never runs. Recorded because the dead path is easy to mistake
+        for a porting bug.
+        """
+        server = _make_server()
+        for reply in ('{"predicted_order": "id1 id2 id0"}', "id1 id2 id0"):
+            assert _verify(server, reply, task_type="ordering", ground_truth=GOLD["ordering"]).reward == 0.0
+
+
+class TestLmIndexRecovery:
+    """An lm contrastive index is a bare small integer, not any digit run."""
+
+    @pytest.mark.parametrize(
+        ("reply", "expected"),
+        [
+            ("2", 2),
+            ("Option 2", 2),
+            ("$2$", -1),  # a reagent placeholder is not an option index
+            ("0" * 5000, -1),  # int() raises above 4,300 digits; must not escape verify()
+        ],
+    )
+    def test_index_is_read_only_from_a_bare_integer(self, reply, expected):
+        assert to_prediction_lm("contrastive_choice", reply)["predicted_option_idx"] == expected

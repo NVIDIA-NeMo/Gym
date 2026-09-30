@@ -49,7 +49,9 @@ def _iter_json_objects(text: str):
             elif ch == '"':
                 in_string = False
             continue
-        if ch == '"':
+        # Only inside an object: a prose quote before any "{" would otherwise
+        # swallow the rest of the reply and hide a valid trailing object.
+        if ch == '"' and depth > 0:
             in_string = True
         elif ch == "{":
             if depth == 0:
@@ -103,9 +105,14 @@ def extract_json(raw: Optional[str]) -> Tuple[Optional[Dict[str, Any]], str]:
 
 
 def _as_float(value: Any, default: float) -> float:
+    """Coerce to float, treating every conversion limit as malformed output.
+
+    A JSON number with hundreds of digits raises OverflowError, not ValueError,
+    and an unhandled one escapes verify() as a 500 that aborts the run.
+    """
     try:
         out = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     if out != out or out in (float("inf"), float("-inf")):  # NaN / inf
         return default
@@ -189,29 +196,35 @@ def to_prediction(
 ) -> Dict[str, Any]:
     """Coerce a parsed object into the shape ``metrics.score_row`` expects.
 
-    A malformed object is not excused: it takes upstream's conservative fallback
-    and scores as a wrong answer rather than leaving the denominator.
+    UPSTREAM'S PARSE-FAILURE CONTRACT, which is easy to get backwards.
+    ``_extract_json_from_answer`` returns ``{"_raw": answer}`` on EVERY failure
+    path -- bad JSON, a JSON list, an exception. So the post-processors never
+    receive a non-dict, ``post_binary``'s non-dict branch is unreachable in the
+    real pipeline, and an unparseable binary reply becomes ``score=0.5`` and
+    therefore ``label=True``. An earlier version of this file ported that dead
+    branch and assigned ``label=False``, which moved both validation metrics.
 
-    "No object" and "object without the key" are deliberately NOT collapsed:
-    upstream forces ``label=False`` only for a non-dict, while a dict missing
-    ``score`` falls through to ``0.5 >= 0.5`` and counts positive. Collapsing
-    them would credit every unparseable reply with the do-nothing floor.
+    The same fact scopes the raw-text fallbacks: ``_raw`` exists only when
+    parsing failed, so a successfully parsed object must never be re-scanned as
+    text. ``{"predicted_order": "1 2 0"}`` scores empty upstream, not full
+    credit.
     """
     no_object = not isinstance(obj, dict)
     obj = obj if isinstance(obj, dict) else {}
-    # One rule for every raw-text fallback; see clean_text on why this departs.
-    raw = clean_text(raw).strip()
+    # Upstream only has _raw when parsing failed, so recovery text is available
+    # only then. Cleaned first; see clean_text on why that departs.
+    recovery = clean_text(raw).strip() if no_object else ""
 
     if task_type == "ordering":
-        return {"predicted_order": post_ordering(None if no_object else obj, expected_step_ids or [], raw)}  # noqa: E501
+        return {"predicted_order": post_ordering(None if no_object else obj, expected_step_ids or [], recovery)}
 
     if task_type == "contrastive_choice":
-        return {"predicted_option_idx": post_contrastive(None if no_object else obj, options or [], raw)}
+        return {"predicted_option_idx": post_contrastive(None if no_object else obj, options or [], recovery)}
 
     if task_type in ("step_validation", "condition_validation"):
         # The prompt asks for `score` only; the label is derived, never requested.
-        if no_object:
-            return {"score": 0.5, "label": False}
+        # No special case for a failed parse: upstream hands post_binary
+        # {"_raw": ...}, a dict with no score, which is exactly the path below.
         score = obj.get("score", obj.get("prob_positive"))
         score = min(1.0, max(0.0, _as_float(score, 0.5)))
         return {"score": score, "label": bool(score >= BINARY_LABEL_THRESHOLD)}
@@ -236,9 +249,7 @@ def to_prediction(
         # Upstream sets _raw ONLY when parsing fails (predict.py:303), so a dict
         # that parsed but lacks every rationale key scores "" there -- not its own
         # JSON text. Mirror that: fall back to the reply only when nothing parsed.
-        if no_object:
-            return {"gold_rationale": raw[:MAX_RATIONALE_CHARS]}
-        return {"gold_rationale": ""}
+        return {"gold_rationale": recovery[:MAX_RATIONALE_CHARS]}
 
     raise ValueError(f"unknown task_type: {task_type!r}")
 
@@ -249,7 +260,10 @@ def to_prediction(
 
 _YES_RE = re.compile(r"\byes\b", re.IGNORECASE)
 _NO_RE = re.compile(r"\bno\b", re.IGNORECASE)
-_INDEX_RE = re.compile(r"-?\d+")
+# An lm option index is a bare small integer. Bounded and delimiter-guarded so a
+# `$5$` reagent placeholder is not read as option 5, and a 5,000-digit run does
+# not reach int(), whose 4,300-digit limit raises ValueError.
+_INDEX_RE = re.compile(r"(?<![\w$.])-?\d{1,6}(?![\w$.])")
 
 
 def _norm_token(token: str) -> str:
@@ -333,7 +347,10 @@ def to_prediction_lm(task_type: str, raw: Optional[str], logprobs: Any = None) -
             return {"score": 1.0, "label": True, "status": "ok"}
         if no:
             return {"score": 0.0, "label": False, "status": "ok"}
-        # Neither token present: upstream's conservative fallback.
+        # Neither token present. Deliberately unlike the gen path, where 0.5 is
+        # upstream's own >= 0.5 default and counts positive: here there is no
+        # upstream default to match, since upstream reads probability mass and
+        # abstains outright. Negative is the conservative reading. See README.
         return {"score": 0.5, "label": False, "status": "no_decision_token"}
 
     if task_type == "contrastive_choice":

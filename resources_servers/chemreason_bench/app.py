@@ -109,12 +109,16 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
         payload = body.model_dump()
         payload["task_id"] = _sanitize(payload.get("task_id"))
 
-        # A malformed row is a status, not a 500: a 500 ends the whole run.
+        # A malformed row is a status, not a 500: a 500 ends the whole run. The 0.0
+        # is not a measurement of the model, so mask_sample keeps it out of the
+        # downstream score as well as out of compute_metrics.
         if not isinstance(task_type, str) or task_type not in M.TASK_TYPES:
-            return ChemReasonBenchVerifyResponse(**payload, reward=0.0, status="bad_task_type", harness_failure=True)
+            return ChemReasonBenchVerifyResponse(
+                **payload, reward=0.0, status="bad_task_type", harness_failure=True, mask_sample=True
+            )
         if not isinstance(ground_truth, dict):
             return ChemReasonBenchVerifyResponse(
-                **payload, reward=0.0, status="bad_ground_truth", harness_failure=True
+                **payload, reward=0.0, status="bad_ground_truth", harness_failure=True, mask_sample=True
             )
 
         # Optional: a wrong-typed value degrades to empty rather than failing the row.
@@ -125,7 +129,7 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
         if body.protocol == "lm":
             if task_type not in M.DUAL_PROTOCOL_TASKS:
                 return ChemReasonBenchVerifyResponse(
-                    **payload, reward=0.0, status="no_lm_protocol", harness_failure=True
+                    **payload, reward=0.0, status="no_lm_protocol", harness_failure=True, mask_sample=True
                 )
             prediction = to_prediction_lm(task_type, body.response.output_text, _first_output_logprobs(body.response))
             status = prediction.pop("status")

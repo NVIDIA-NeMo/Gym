@@ -170,6 +170,29 @@ class TestProtocolsAndLimit:
         with pytest.raises(SystemExit):
             P.main(["--limit", bad])
 
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"limit": 0}, "limit"),
+            ({"limit": -1}, "limit"),
+            ({"protocol": "Gen"}, "protocol"),
+            ({"protocol": ""}, "protocol"),
+        ],
+    )
+    def test_prepare_validates_its_own_arguments(self, monkeypatch, tmp_path, kwargs, message):
+        """Gym calls prepare() directly from prepare_script_args; argparse never runs.
+
+        Without this a `protocol="Gen"` typo silently writes the full corpus, and
+        `limit=0` writes it too, both reading as if a subset had been requested.
+        """
+
+        def _explode(url):
+            raise AssertionError("fetch attempted before argument validation")
+
+        monkeypatch.setattr(P, "_fetch_jsonl", _explode)
+        with pytest.raises(ValueError, match=message):
+            P.prepare(output_fpath=tmp_path / "out.jsonl", **kwargs)
+
     def test_arguments_are_validated_before_any_fetch(self, monkeypatch):
         def _explode(url):
             raise AssertionError("fetch attempted before argument validation")
@@ -194,6 +217,12 @@ class TestRowContract:
         # and it is not attached where it has no meaning
         assert "legend" not in by_type["ordering"]
         assert "options" not in by_type["rationalization"]
+
+    def test_rows_carry_dataset_name_and_split(self, stub_fetch, tmp_path):
+        """Declared in task_data.py, so they must actually be written."""
+        for row in _prepare(tmp_path):
+            assert row["dataset_name"] == "chemreason_bench"
+            assert row["split"] == "test"
 
     def test_lm_rows_request_nothing_special(self, stub_fetch, tmp_path):
         """top_logprobs alone empties every completion; see prepare.py's note."""

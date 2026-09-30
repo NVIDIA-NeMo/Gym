@@ -272,6 +272,10 @@ def _format_row(prompt_row: Dict[str, Any], answer_row: Dict[str, Any], protocol
     suffix = "" if protocol == "gen" else "::lm"
     row: Dict[str, Any] = {
         "task_id": prompt_row["task_id"] + suffix,
+        # Upstream publishes one split; both fields are provenance, so a row stays
+        # identifiable after being merged into a mixed-benchmark file.
+        "dataset_name": "chemreason_bench",
+        "split": "test",
         "task_type": task_type,
         "protocol": protocol,
         "benchmark_id": prompt_row.get("benchmark_id"),
@@ -302,7 +306,17 @@ def prepare(
 
     Everything is loaded and validated before anything is written, so a failure
     leaves no truncated file behind for the next run to score.
+
+    Arguments are checked here rather than only in ``main``, because Gym calls
+    ``prepare`` directly from ``prepare_script_args``: argparse never runs, and a
+    silently ignored ``protocol=Gen`` would write a full corpus that reads like a
+    subset was requested.
     """
+    if limit is not None and limit <= 0:
+        raise ValueError(f"limit must be a positive integer, got {limit!r}")
+    if protocol is not None and protocol not in ("gen", "lm"):
+        raise ValueError(f"protocol must be 'gen' or 'lm', got {protocol!r}")
+
     print(f"Downloading {GITHUB_REPO} @ {GITHUB_REVISION[:7]} ...")
     prompts = _fetch_jsonl(PROMPTS_URL)
     answers = _fetch_jsonl(ANSWERS_URL)
