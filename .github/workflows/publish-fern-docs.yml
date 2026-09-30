@@ -40,6 +40,9 @@ concurrency:
   group: fern-publish
   cancel-in-progress: true
 
+env:
+  FERN_NO_VERSION_REDIRECTION: "true"
+
 jobs:
   publish:
     runs-on: ubuntu-latest

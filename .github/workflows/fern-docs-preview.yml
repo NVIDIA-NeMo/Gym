@@ -27,6 +27,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  FERN_NO_VERSION_REDIRECTION: "true"
+
 jobs:
   changed-files:
     runs-on: ubuntu-latest
