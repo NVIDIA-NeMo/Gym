@@ -54,11 +54,19 @@ Build the upstream image from the pinned public source, then extend it with the 
 ```bash
 git clone https://github.com/NVIDIA/SOL-ExecBench.git /tmp/sol-execbench-native
 git -C /tmp/sol-execbench-native checkout a9fa0804c793d438e70850c33fe34426e66d53dd
-docker build -f /tmp/sol-execbench-native/docker/Dockerfile \
+docker build --platform linux/amd64 \
+  --build-arg HOST_UID=1001 --build-arg HOST_GID=1001 \
+  -f /tmp/sol-execbench-native/docker/Dockerfile \
   -t sol-execbench-native:a9fa080 /tmp/sol-execbench-native
-docker build --build-arg SOL_EXECBENCH_BASE_IMAGE=sol-execbench-native:a9fa080 \
+docker build --platform linux/amd64 \
+  --build-arg SOL_EXECBENCH_BASE_IMAGE=sol-execbench-native:a9fa080 \
   -f resources_servers/sol_execbench/Dockerfile -t REGISTRY/solexecbench-gym:qualification .
 ```
+
+The explicit platform supports GPU hosts when building from an ARM development machine. UID/GID 1001 avoid the
+Ubuntu base image's existing UID 1000; these are supported upstream build arguments. With a Buildx builder that
+does not load images into the local Docker image store automatically, use `--load` and ensure the second build can
+resolve the first image.
 
 Publish to an operator-controlled registry and configure the resulting **registry manifest digest** after
 qualification.
