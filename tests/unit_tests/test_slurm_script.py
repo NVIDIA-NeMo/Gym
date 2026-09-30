@@ -1235,7 +1235,9 @@ def test_build_sbatch_script_no_service_mounts_by_default(submit_config, bench_d
     service_lines = [
         line
         for line in script.splitlines()
-        if "srun" in line and "--output=logs/driver-$SLURM_JOB_ID.log" not in line and "--output=logs/otel_collector.log" not in line
+        if "srun" in line
+        and "--output=logs/driver-$SLURM_JOB_ID.log" not in line
+        and "--output=logs/otel_collector-$SLURM_JOB_ID.log" not in line
     ]
     assert service_lines, "expected at least one service srun line"
     for line in service_lines:
@@ -1871,7 +1873,7 @@ def test_the_driver_runs_on_node_0_of_a_multi_node_job(tmp_path):
         tmp_path,
         {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "tensor_parallel_size": 8}},
     )
-    driver_line = next(line for line in script.splitlines() if "logs/driver.log" in line)
+    driver_line = next(line for line in script.splitlines() if "logs/driver-$SLURM_JOB_ID.log" in line)
     assert '--nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1' in driver_line
     assert 'gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))' in script
 
@@ -2047,7 +2049,7 @@ def test_the_driver_goes_to_the_policys_node_when_services_are_pinned(tmp_path):
         }
     )
     script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
-    driver = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    driver = next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
     assert '--nodelist="${gym_nodes[1]}" --nodes=1 --ntasks=1' in driver
 
 
