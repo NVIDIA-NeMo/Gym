@@ -711,14 +711,14 @@ class ServerClient(BaseModel):
             **kwargs,
         )
 
-    def poll_for_status(self, server_name: str) -> ServerStatus:  # pragma: no cover
+    def poll_for_status(self, server_name: str, *, timeout_seconds: float = 5) -> ServerStatus:  # pragma: no cover
         if server_name == HEAD_SERVER_KEY_NAME:
             server_config_dict = self.global_config_dict[HEAD_SERVER_KEY_NAME]
         else:
             server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
 
         try:
-            requests.get(self._build_server_base_url(server_config_dict), timeout=5)
+            requests.get(self._build_server_base_url(server_config_dict), timeout=timeout_seconds)
             # We don't check the status code since there may not be a route at /
             return "success"
         except requests.exceptions.ConnectionError:
