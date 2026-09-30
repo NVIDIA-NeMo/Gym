@@ -35,6 +35,7 @@ decision to require statement preservation by default.
 """
 
 import logging
+import uuid
 from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import model_validator
@@ -59,6 +60,8 @@ from resources_servers.lean_proof.lean_sandbox import (
     LeanSandbox,
 )
 from resources_servers.lean_proof.proof_utils import (
+    axiom_check_passed,
+    axiom_check_suffix,
     check_statement_preserved,
     extract_lean_code,
     find_banned_declarations,
@@ -229,7 +232,9 @@ class LeanCatResourcesServer(SimpleResourcesServer):
             # that will not start surfaced here as a 500 while the identical failure during
             # the compile came back as a status.
             await self._check_toolchain_once(body.lean_toolchain)
-            result = await self._run_lean(code)
+            token = f"AXIOMS_{uuid.uuid4().hex}"
+            suffix = axiom_check_suffix(token) if self.config.ban_proof_shortcuts else ""
+            result = await self._run_lean(code + suffix)
         except Exception as exc:  # noqa: BLE001 - any start/exec failure is a sandbox outcome
             # Without this a sandbox that will not start raises out of verify() as a 500,
             # while the same failure during exec comes back as `sandbox_error`. One rollout
@@ -255,6 +260,9 @@ class LeanCatResourcesServer(SimpleResourcesServer):
                 "error_type": result.error_type,
             }
         )
+        if suffix and proof_status == STATUS_COMPLETED and not axiom_check_passed(result.stdout or "", token):
+            proof_status = STATUS_BANNED_TOKENS
+            failure_reason = "Axiom check failed: an axiom outside the standard set, or the file stopped early."
         limit = self.config.max_output_characters
         compiler_output = CompilerOutput(
             process_status=proof_status,

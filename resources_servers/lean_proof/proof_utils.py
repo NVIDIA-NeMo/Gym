@@ -170,6 +170,31 @@ _LEAN_FILE_START_RE = re.compile(
 # Mathlib's axioms are used by name, not declared.
 _BANNED_TOKEN_RE = re.compile(r"\b(sorry|admit|axiom|unsafe)\b")
 
+# Appended to the submission and run by the same compile: asks Lean which axioms every declaration
+# in the file depends on, so it does not matter how an `axiom` or `sorry` was written or hidden.
+# `Lean.ofReduceBool` is what `native_decide` adds; upstream does not ban it, so neither do we.
+# The token is random per compile so a submission cannot print the success line itself; one that
+# stops the file early (`#exit`, which Lean accepts with exit 0) never prints it.
+_AXIOM_CHECK = """
+open Lean Elab Command in
+#eval show CommandElabM Unit from do
+  let ok := [``propext, ``Quot.sound, ``Classical.choice, ``Lean.ofReduceBool]
+  let mut bad : Array String := #[]
+  for (n, _) in (← getEnv).constants.map₂.toList do
+    for a in (← collectAxioms n) do
+      unless ok.contains a do bad := bad.push s!"{n} uses {a}"
+  IO.println (if bad.isEmpty then "%TOKEN%_OK" else s!"%TOKEN%_BAD: {bad}")
+"""
+
+
+def axiom_check_suffix(token: str) -> str:
+    return _AXIOM_CHECK.replace("%TOKEN%", token)
+
+
+def axiom_check_passed(stdout: str, token: str) -> bool:
+    return f"{token}_OK" in stdout and f"{token}_BAD" not in stdout
+
+
 # The placeholder upstream uses for the holes in a reference file.
 _SORRY_RE = re.compile(r"\bsorry\b")
 

@@ -16,6 +16,7 @@
 import pytest
 
 from resources_servers.lean_proof.proof_utils import (
+    axiom_check_passed,
     check_statement_preserved,
     extract_lean_code,
     find_banned_declarations,
@@ -87,8 +88,8 @@ def test_extract_lean_code(text, expected):
         # `\b` must not match inside a snake_case identifier.
         ("theorem no_sorry_needed : True := trivial", []),
         # A char literal is not a string opener: `'"'` must not hide what follows it.
-        ("def c := '\"'\naxiom cheat : False\ndef d := \"x\"", ["axiom"]),
-        ("def c := '\\\"'\naxiom cheat : False\ndef d := \"x\"", ["axiom"]),
+        ('def c := \'"\'\naxiom cheat : False\ndef d := "x"', ["axiom"]),
+        ('def c := \'\\"\'\naxiom cheat : False\ndef d := "x"', ["axiom"]),
         ("def c := '\"'\ntheorem t : True := by sorry", ["sorry"]),
         # A raw string has no escapes: `r"\"` is complete, so the axiom after it is code.
         ('def s := r"\\"\naxiom cheat : False\ndef d := "x"', ["axiom"]),
@@ -203,3 +204,24 @@ def test_check_statement_preserved_across_multiple_holes():
     # the model was told to copy back.
     swapped = "import Mathlib\n\ntheorem b : False ∨ True := by\n  trivial\n\ntheorem a : True := by\n  trivial"
     assert not check_statement_preserved(reference, swapped)[0]
+
+
+TOKEN = "AXIOMS_" + "a" * 32
+
+
+@pytest.mark.parametrize(
+    "stdout,failing",
+    [
+        (f"{TOKEN}_OK\n", False),
+        (f"warning: x\n{TOKEN}_OK\n", False),
+        (f"{TOKEN}_BAD: #[t uses cheat]\n", True),
+        # A submission that prints its own success line cannot know the token.
+        ("AXIOMS_" + "b" * 32 + "_OK\n", True),
+        # ...and one that also trips the real check is still rejected.
+        (f"{TOKEN}_OK\n{TOKEN}_BAD: #[t uses cheat]\n", True),
+        # `#exit` or a crash: the check never ran.
+        ("", True),
+    ],
+)
+def test_axiom_check_passed(stdout, failing):
+    assert axiom_check_passed(stdout, TOKEN) is not failing

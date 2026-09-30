@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -133,10 +134,22 @@ class TestLeanCatApp:
             domain=["Category"],
         )
 
-    def _stub_sandbox(self, server: LeanCatResourcesServer, **result) -> AsyncMock:
-        """Stub the compile step, so no sandbox is created and no Lean runs."""
-        exec_result = SandboxExecResult(**({"stdout": "", "stderr": "", "return_code": 0} | result))
-        mock = AsyncMock(return_value=exec_result)
+    def _stub_sandbox(self, server: LeanCatResourcesServer, axiom_check: str = "ok", **result) -> AsyncMock:
+        """Stub the compile step, so no sandbox is created and no Lean runs.
+
+        Lean would run the appended axiom check and print its verdict under the per-compile
+        token; ``axiom_check`` is that verdict: ``ok``, ``bad`` or ``missing`` (never ran).
+        """
+        base = {"stdout": "", "stderr": "", "return_code": 0} | result
+
+        async def run(code: str, timeout_s: float | None = None) -> SandboxExecResult:
+            token = re.search(r"AXIOMS_[0-9a-f]{32}", code)
+            verdict = {"ok": "_OK", "bad": "_BAD: #[t uses cheat]", "missing": None}[axiom_check]
+            if token is None or verdict is None:
+                return SandboxExecResult(**base)
+            return SandboxExecResult(**(base | {"stdout": f"{base['stdout']}\n{token.group(0)}{verdict}\n"}))
+
+        mock = AsyncMock(side_effect=run)
         server._run_lean = mock
         return mock
 
@@ -209,6 +222,31 @@ class TestLeanCatApp:
         mock.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("axiom_check", ["bad", "missing"])
+    async def test_verify_rejects_a_file_that_fails_the_axiom_check(self, server, axiom_check):
+        """A clean exit is not enough: the file must also pass the axiom check Lean ran on it."""
+        self._stub_sandbox(server, axiom_check=axiom_check)
+        result = await server.verify(self._create_request(f"```lean4\n{SOLVED}\n```"))
+        assert result.reward == 0.0
+        assert result.proof_status == STATUS_BANNED_TOKENS
+
+    @pytest.mark.asyncio
+    async def test_verify_ignores_a_success_line_the_submission_printed_itself(self, server):
+        """The token is random per compile, so a printed `_OK` line proves nothing."""
+        self._stub_sandbox(server, axiom_check="missing", stdout="AXIOMS_" + "0" * 32 + "_OK")
+        result = await server.verify(self._create_request(f"```lean4\n{SOLVED}\n```"))
+        assert result.reward == 0.0
+        assert result.proof_status == STATUS_BANNED_TOKENS
+
+    @pytest.mark.asyncio
+    async def test_verify_skips_the_axiom_check_when_shortcuts_are_not_banned(self, server):
+        server.config.ban_proof_shortcuts = False
+        mock = self._stub_sandbox(server, axiom_check="missing")
+        result = await server.verify(self._create_request(f"```lean4\n{SOLVED}\n```"))
+        assert result.reward == 1.0
+        assert mock.await_args.args[0] == SOLVED
+
+    @pytest.mark.asyncio
     async def test_verify_statement_guard_can_be_disabled(self, server):
         server.config.require_statement_preserved = False
         self._stub_sandbox(server)
@@ -229,7 +267,7 @@ class TestLeanCatApp:
 
         server._run_lean = capture_code
         await server.verify(self._create_request(f"Reasoning...\n```lean4\n{SOLVED}\n```"))
-        assert captured["code"] == SOLVED
+        assert captured["code"].startswith(SOLVED)
 
 
 class TestMetrics:
