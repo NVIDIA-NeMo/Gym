@@ -553,14 +553,15 @@ def test_retry_requires_a_transient_dependency_error() -> None:
     assert _is_retryable_dependency_error(ValueError("invalid response")) is False
 
 
-def test_hermes_native_recipe_resolves_to_session_environment():
-    recipe = Path(__file__).parents[2] / "benchmarks/swebench/pro/hermes_native.yaml"
+def test_hermes_recipe_resolves_to_session_environment() -> None:
+    recipe = Path(__file__).parents[2] / "benchmarks/swebench/pro/hermes.yaml"
     parser = GlobalConfigDictParser()
     _, configs = parser.load_extra_config_paths([str(recipe)])
     config = OmegaConf.merge(*configs)
     parser._recursively_swap_keys(config)
     assert config.environment_routing_mode == "taskset"
-    environment_name = config.environment_server_routes["swebench_pro:smoke"]
+    environment_name = config.environment_server_routes["swebench_pro"]
+    assert environment_name == "swebench_pro_hermes"
     environment = SingleAgentTurnEnvironmentServerConfig(
         name=environment_name,
         host="localhost",
@@ -571,4 +572,7 @@ def test_hermes_native_recipe_resolves_to_session_environment():
     assert agent.num_workers == 1
     assert agent.resources_server.name == environment.resources_server.name
     assert agent.model_server.name == "policy_model"
-    assert config[environment.resources_server.name].resources_servers.swebench_pro.allowed_agents == ["hermes_agent"]
+    resources = config[environment.resources_server.name].resources_servers.swebench_pro
+    assert resources.allowed_agents == ["hermes_agent"]
+    assert resources.datasets[0].jsonl_fpath == "benchmarks/swebench/data/swebench_pro_benchmark.jsonl"
+    assert resources.datasets[0].prepare_script == "benchmarks/swebench/pro/prepare.py"
