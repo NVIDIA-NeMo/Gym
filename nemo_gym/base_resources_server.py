@@ -182,13 +182,7 @@ class MCPServerMetadata(BaseModel):
 
 
 class ResourcesSeedSessionRequest(BaseModel):
-    """Idempotently initialize resources state under a caller-assigned identifier.
-
-    Repeating the same identifier and episode must return the existing session.
-    Closing an unknown identifier must prevent a racing seed from creating it later.
-    External resources should use provider TTLs when available. Current process-local
-    session records may remain until the server shuts down.
-    """
+    """Idempotently initialize resources state under a caller-assigned identifier."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -289,13 +283,14 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Compute aggregate metrics from verify responses.
 
-        RewardProfiler provides baseline stats. Override compute_metrics() and/or
-        get_key_metrics() for benchmark-specific customization.
+        RewardProfiler provides baseline stats. Override compute_metrics(),
+        compute_repeat_metrics(), and/or get_key_metrics() for benchmark-specific customization.
         """
         return compute_aggregate_metrics(
             body.verify_responses,
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
+            compute_repeat_metrics_fn=self.compute_repeat_metrics,
         )
 
     async def get_reverify_mode(self) -> ReverifyMode:

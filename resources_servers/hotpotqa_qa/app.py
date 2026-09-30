@@ -99,6 +99,8 @@ class HotpotQAQAResourcesServer(SimpleResourcesServer):
     so downstream metric aggregation can compute pass@k for every channel.
     """
 
+    ray_enabled = False
+
     config: HotpotQAQAResourcesServerConfig
 
     async def verify(self, body: HotpotQAQAVerifyRequest) -> HotpotQAQAVerifyResponse:

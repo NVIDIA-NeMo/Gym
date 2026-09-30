@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 config_paths:
-  - resources_servers/swebench_pro/configs/swebench_pro_resources_server.yaml
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
   - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
   - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
 

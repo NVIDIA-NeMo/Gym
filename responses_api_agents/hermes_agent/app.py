@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import atexit
+import importlib.metadata
 import json
 import logging
 import os
@@ -35,6 +36,7 @@ from uuid import uuid4
 import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed  # pyright: ignore[reportMissingImports]
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
+from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -78,6 +80,7 @@ from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
 
 
@@ -142,14 +145,46 @@ def _trajectory_to_output_items(messages, n_input):
 
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
-_SANDBOX_RUNTIME_DIR = "/tmp/nemo-gym-hermes-runtime-26bb847a"
+
+
+def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
+    """Rename Hermes' ``mcp_<server>_<tool>`` to Gym's ``mcp__<server>__<tool>``, which Gym strips before verify.
+
+    Hermes replaces "-" and "." with "_" in both parts. The server part is matched against the granted names,
+    longest first so one name that extends another cannot capture its tools; a tool name that contained "-" or
+    "." keeps Hermes' replacement.
+    """
+    for server in sorted(server_names, key=len, reverse=True):
+        prefix = "mcp_" + server.replace("-", "_").replace(".", "_") + "_"
+        if name.startswith(prefix):
+            return f"mcp__{server}__{name[len(prefix) :]}"
+    return name
+
+
+def _sandbox_hermes_install() -> tuple[str, str]:
+    """Return the requirement the sandbox installs and the key that names its runtime directory.
+
+    Both come from the Hermes installed with this server, so ``requirements.txt`` is the only version pin and
+    the sandbox runs the same Hermes as the host. A git install is fetched as a GitHub archive, so the sandbox
+    does not need git. The ``mcp`` extra carries Hermes' MCP client, which episode tool grants use.
+    """
+    distribution = importlib.metadata.distribution("hermes-agent")
+    direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
+    commit = (direct_url.get("vcs_info") or {}).get("commit_id")
+    if commit is None:
+        return f"hermes-agent[mcp]=={distribution.version}", distribution.version
+    url = str(direct_url.get("url") or "").removesuffix(".git")
+    if not url.startswith("https://github.com/"):
+        raise RuntimeError(f"Cannot build a sandbox install URL for hermes-agent installed from {url!r}")
+    return f"hermes-agent[mcp] @ {url}/archive/{commit}.tar.gz", commit[:12]
+
+
+_HERMES_REQUIREMENT, _HERMES_RUNTIME_KEY = _sandbox_hermes_install()
+_SANDBOX_RUNTIME_DIR = f"/tmp/nemo-gym-hermes-runtime-{_HERMES_RUNTIME_KEY}"
 _SANDBOX_UV = f"{_SANDBOX_RUNTIME_DIR}/uv"
 _SANDBOX_PYTHON = f"{_SANDBOX_RUNTIME_DIR}/venv/bin/python"
 _SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
 _SANDBOX_OBSERVER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_observer.py"
-_HERMES_REQUIREMENT = (
-    "hermes-agent @ https://github.com/cmunley1/hermes-agent/archive/26bb847a88493342ca1b194e0455b479073ae21d.tar.gz"
-)
 _AGENT_SESSION_ID_KEY = "agent_session_id"
 
 
@@ -281,6 +316,7 @@ class HermesAgentVerifyResponse(BaseVerifyResponse):
 
 
 class HermesAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: HermesAgentConfig
     sem: Semaphore = None
     # Set of agents currently running run_conversation, plus a flag tracking whether the single
@@ -310,8 +346,26 @@ class HermesAgent(SimpleResponsesAPIAgent):
         body: AgentSeedSessionRequest,
     ) -> AgentSeedSessionResponse:
         """Idempotently initialize the caller's session with an immutable seed binding."""
-        if any(access.required for access in body.tool_accesses):
-            raise HTTPException(422, "Native Hermes does not support required HTTP/MCP Resources tools")
+        # Sessions live in this worker's memory, so every call for a session must reach this worker.
+        # The legacy /run path keeps no session and still supports several workers.
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("Hermes Agent sessions require num_workers=1")
+        tool_accesses = self.effective_tool_accesses(body)
+        unsupported = [
+            access.name for access in tool_accesses if access.required and not isinstance(access, MCPToolAccess)
+        ]
+        if unsupported:
+            raise HTTPException(
+                422,
+                "Hermes Agent supports only MCP tool grants; required grants it cannot use: "
+                + ", ".join(sorted(unsupported)),
+            )
+        # Hermes exposes each MCP server as a toolset of the same name, so a name must not shadow a built-in one.
+        colliding = [
+            access.name for access in tool_accesses if isinstance(access, MCPToolAccess) and access.name in TOOLSETS
+        ]
+        if colliding:
+            raise ValueError("MCP tool grants collide with Hermes toolsets: " + ", ".join(sorted(colliding)))
         self._expire_closed_agent_sessions()
         agent_session_id = body.agent_session_id
         current = self._agent_session_id_from_request(request)
@@ -456,7 +510,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         except (NotImplementedError, OSError):
             pass  # not supported on this platform (e.g. Windows, non-main thread)
 
-    def _build_config(self) -> str:
+    def _build_config(self, mcp_accesses: list[MCPToolAccess] | None = None) -> str:
         import yaml
 
         config: dict[str, Any] = {
@@ -483,12 +537,20 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 "enabled": self.config.checkpoints_enabled,
             },
         }
+        if mcp_accesses:
+            # A grant is for tools, so Hermes' resource and prompt helper tools stay off.
+            config["mcp_servers"] = {
+                access.name: {
+                    "url": str(access.connection.url),
+                    "headers": access.connection.headers,
+                    "tools": {"resources": False, "prompts": False},
+                }
+                for access in mcp_accesses
+            }
         return yaml.dump(config, default_flow_style=False)
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Process-local Hermes sessions require num_workers=1")
         self.sem = Semaphore(self.config.concurrency)
         self.active_agents = set()
         self.interrupted_agents = set()
@@ -517,8 +579,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
         agent_session_id: str,
         body: AgentSeedSessionRequest,
     ) -> HermesAgentSessionState:
-        if any(access.required for access in self.effective_tool_accesses(body)):
-            raise HTTPException(422, "Native Hermes does not support required HTTP/MCP Resources tools")
+        if any(
+            access.required and not isinstance(access, MCPToolAccess) for access in self.effective_tool_accesses(body)
+        ):
+            raise HTTPException(422, "Native Hermes supports only MCP tools among required Resources grants")
         owns_sandbox = body.sandbox_access is None
         if owns_sandbox:
             if self.config.sandbox_provider is None:
@@ -583,13 +647,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     async def _sandbox_hermes_installed(sandbox: AsyncSandbox, workdir: str | None) -> bool:
-        """Whether the pinned Hermes imports from its runtime path.
+        """Whether the pinned Hermes and its MCP client import from its runtime path.
 
         The path is keyed by the pinned commit, so a runtime baked into the image or left by an earlier
         session in this sandbox is reused.
         """
         check = await sandbox.exec(
-            f"{quote(_SANDBOX_PYTHON)} -c 'import run_agent'",
+            f"{quote(_SANDBOX_PYTHON)} -c 'import run_agent, mcp'",
             cwd=workdir,
             timeout_s=120,
         )
@@ -796,13 +860,22 @@ class HermesAgent(SimpleResponsesAPIAgent):
         stderr_path = f"{state.session_dir}/stderr.log"
         pid_path = f"{state.session_dir}/runner.pid"
         stop_path = f"{state.session_dir}/runner.stop"
+        mcp_accesses = [
+            access for access in self.effective_tool_accesses(state.request) if isinstance(access, MCPToolAccess)
+        ]
+        enabled_toolsets = self.config.enabled_toolsets
+        if enabled_toolsets is not None:
+            # A restricted tool list would otherwise hide the tools this episode was granted.
+            enabled_toolsets = [*enabled_toolsets, *(access.name for access in mcp_accesses)]
         payload = {
             "agent_session_id": agent_session_id,
             "chat_template_kwargs_enabled": self.config.chat_template_kwargs_enabled,
-            "config_yaml": self._build_config(),
+            "config_yaml": self._build_config(mcp_accesses),
             "cleanup_timeout": self.config.session_close_timeout_seconds / 3,
             "disabled_toolsets": self.config.disabled_toolsets,
-            "enabled_toolsets": self.config.enabled_toolsets,
+            "enabled_toolsets": enabled_toolsets,
+            "mcp_servers": [access.name for access in mcp_accesses],
+            "required_mcp_servers": [access.name for access in mcp_accesses if access.required],
             "history": history,
             "max_tokens": body.max_output_tokens if body.max_output_tokens is not None else self.config.max_tokens,
             "max_turns": self.config.max_turns,
@@ -822,7 +895,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         await self._upload_json(state.sandbox, input_path, payload)
         # The shell records its PID and then becomes the runner, so an interrupted activation can stop it.
         command = (
-            f"[ -e {quote(stop_path)} ] && exit 0; echo $ > {quote(pid_path)} && "
+            f"[ -e {quote(stop_path)} ] && exit 0; echo $$ > {quote(pid_path)} && "
             f"exec {quote(_SANDBOX_PYTHON)} {quote(_SANDBOX_RUNNER)} {quote(input_path)} {quote(output_path)} "
             f">{quote(stdout_path)} 2>{quote(stderr_path)}"
         )
@@ -868,6 +941,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
             fail_on_error=False,
             n_input=len(history) + 1,
         )
+        # Verifiers see Gym's MCP naming; the model's own names stay in the captured model calls.
+        server_names = [access.name for access in mcp_accesses]
+        for item in response.output:
+            if getattr(item, "type", None) == "function_call":
+                item.name = _gym_mcp_tool_name(item.name, server_names)
         response.metadata = {
             **(response.metadata or {}),
             "harness_execution": "sandbox",

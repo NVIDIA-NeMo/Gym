@@ -310,7 +310,8 @@ async def test_runner_exit_without_cleanup_receipt_blocks_close(agent, state, re
 
 
 @pytest.mark.parametrize("overrides", [{}, {"max_output_tokens": 32, "temperature": 0.0}])
-async def test_native_prompt_and_limits_reach_runner(agent, state, overrides):
+async def test_native_prompt_and_limits_reach_runner(agent, state, overrides, tmp_path):
+    state.session_dir = str(tmp_path)
     agent.config.system_prompt = "Configured instruction"
     agent._upload_json = AsyncMock()
     agent._download_json = AsyncMock(
@@ -326,6 +327,13 @@ async def test_native_prompt_and_limits_reach_runner(agent, state, overrides):
         input="Fix the bug", instructions="Request instruction", **overrides
     )
     await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
+    launch_command = state.sandbox.exec.await_args_list[0].args[0]
+    # Execute the real launch prefix: cleanup must receive the shell's PID, not a literal "$".
+    launch_prefix, separator, _ = launch_command.partition(" && exec ")
+    assert separator
+    process = await asyncio.create_subprocess_exec("sh", "-c", launch_prefix)
+    assert await process.wait() == 0
+    assert int((tmp_path / "runner.pid").read_text()) == process.pid
     payload = agent._upload_json.await_args.args[2]
     assert payload["user_message"] == "Fix the bug"
     assert payload["history"] == []
@@ -439,7 +447,7 @@ async def test_required_resources_tools_are_rejected_before_connect(agent, state
     from nemo_gym.tool_access import DirectHTTPToolAccess
 
     state.request.tool_accesses = [DirectHTTPToolAccess(name="required", required=True, base_url="http://tools")]
-    with pytest.raises(HTTPException, match="required HTTP/MCP"):
+    with pytest.raises(HTTPException, match="only MCP tools"):
         await agent._initialize_agent_session_state("session", state.request)
 
 

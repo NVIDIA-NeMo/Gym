@@ -25,7 +25,12 @@ from nemo_gym import PARENT_DIR, component_search_roots
 from nemo_gym.benchmarks import MANIFEST_FILENAME, _benchmark_config_name, _benchmark_config_paths
 from nemo_gym.config_types import ConfigError
 from nemo_gym.discovery import iter_server_configs, read_config_metadata
-from nemo_gym.environment.manifest import EnvironmentManifest, ManifestError, load_manifest
+from nemo_gym.environment.manifest import (
+    EnvironmentManifest,
+    ManifestError,
+    load_manifest,
+    resolve_manifest_config_path,
+)
 
 
 ENVIRONMENTS_SUBDIR = "environments"
@@ -103,9 +108,12 @@ def _manifest_entry(
             f"but its catalog path requires '{expected_name}'."
         )
 
-    config_path = manifest_path.with_name(ENVIRONMENT_CONFIG_FILENAME)
+    config_path = resolve_manifest_config_path(manifest_path, manifest)
     if not config_path.is_file():
-        raise RegistryError(f"Manifest '{manifest_path}' requires a sibling config.yaml.")
+        expected = (
+            "a sibling config.yaml" if manifest.config_path == ENVIRONMENT_CONFIG_FILENAME else manifest.config_path
+        )
+        raise RegistryError(f"Manifest '{manifest_path}' requires {expected} (resolved to '{config_path}').")
 
     values = {
         "name": manifest.name,

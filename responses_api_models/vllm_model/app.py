@@ -227,6 +227,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Connection-error retry bound applied to clients when endpoint_file is set.
     endpoint_connection_retries: Optional[int] = 8
 
+    # Expose the Gym session (one per rollout) as the backend's conversation id.
+    # ``conversation_params`` is a TensorRT-LLM extension outside the OpenAI Chat Completions
+    # schema, and strict OpenAI-compatible backends reject it, so this is off by default and
+    # enabled only by deployments that route on conversation/rank affinity.
+    forward_session_id_as_conversation_id: bool = False
+
     # How often endpoint_file may be stat'd; otherwise the `os.stat` results is cached and reused.
     endpoint_check_interval_s: float = 10.0
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
@@ -277,6 +283,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
 
 class VLLMModel(SimpleResponsesAPIModel):
+    ray_enabled = False
     config: VLLMModelConfig
 
     _TOKENIZE_CHAT_FIELDS: ClassVar[tuple[str, ...]] = (
@@ -841,6 +848,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
         client = self._resolve_client(request)
+        # Rank-affine routing downstream: expose the Gym session (one per rollout)
+        # as the backend's canonical conversation id so a disaggregated server can
+        # pin every turn of a conversation to the ADP rank holding its prefix.
+        if self.config.forward_session_id_as_conversation_id:
+            _session_id = request.session.get(SESSION_ID_KEY)
+            if _session_id:
+                body_dict["conversation_params"] = {"conversation_id": str(_session_id)}
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):

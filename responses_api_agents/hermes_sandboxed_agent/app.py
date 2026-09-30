@@ -138,6 +138,8 @@ def trajectory_response(result, body, model, error_type=None):
 
 
 class HermesSandboxedAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
+
     config: HermesSandboxedAgentConfig
 
     def model_post_init(self, context):
