@@ -18,6 +18,7 @@ terminal_bench_4_miniswe:
       model_server:
         type: responses_api_models
         name: policy_model
+      sandbox_model_base_url: ${oc.select:tb4_sandbox_model_base_url,null}
       harness:
         step_limit: ${oc.select:tb4_max_steps,500}
         step_timeout_sec: ${oc.select:tb4_step_timeout_sec,30}

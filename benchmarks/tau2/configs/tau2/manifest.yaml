@@ -1,0 +1,31 @@
+name: tau2/configs/tau2
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: agent
+description: 'Tau benchmark tasks with a native agent loop, simulated user, tool execution,
+  and task-completion reward. Profile: tau2.'
+modality: text
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../tau2.yaml
+agent_server: tau2
+datasets:
+- name: tau2
+  type: benchmark
+  jsonl_fpath: benchmarks/tau2/data/tau2_benchmark.jsonl
+  prepare_script: benchmarks/tau2/prepare.py
+  num_repeats: 8
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active
+resources_server: null
