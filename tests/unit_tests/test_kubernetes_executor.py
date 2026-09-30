@@ -360,6 +360,16 @@ def test_multi_node_vllm_sidecar_branches_on_job_completion_index(tmp_path):
     assert "gym-test-bench-a-head.eng-test.svc.cluster.local" in script
 
 
+def test_multi_node_sidecar_requests_gpus_for_all_local_replicas(tmp_path):
+    # _MULTI_NODE_SERVICES: tensor_parallel_size=2, number_of_instances=4, nodes=2 -> 2 local
+    # replicas/node x TP2 = 4 GPUs/pod, not just tensor_parallel_size=2. Under-requesting this
+    # starves the container of GPU devices vLLM's local DP workers then need ("No CUDA GPUs are
+    # available"), observed for real against a cluster.
+    job = _multi_node_job(tmp_path)
+    sidecar = job["spec"]["template"]["spec"]["initContainers"][0]
+    assert sidecar["resources"]["limits"]["nvidia.com/gpu"] == 4
+
+
 def test_multi_node_worker_strips_api_server_count(tmp_path):
     job = _multi_node_job(tmp_path)
     script = job["spec"]["template"]["spec"]["initContainers"][0]["command"][2]

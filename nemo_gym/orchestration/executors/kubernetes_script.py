@@ -245,6 +245,13 @@ def _sidecar_containers(
         _reject_unsupported_mounts(service.mounts)
         gpu_count = service.tensor_parallel_size * service.pipeline_parallel_size
         if is_multi_node:
+            # Each node runs its own equal share of the data-parallel replicas locally (see
+            # _vllm_multi_node_command's --data-parallel-size-local) -- the pod needs GPUs for all
+            # of them, not just one instance's tensor/pipeline-parallel footprint. Missing this
+            # under-requests nvidia.com/gpu (e.g. 2 instead of 8 for TP2 x 4 local replicas),
+            # starving the container of GPU devices it then crashes on ("No CUDA GPUs are
+            # available") -- observed for real against a cluster.
+            gpu_count *= service.number_of_instances // total_nodes
             assert head_service_fqdn is not None
             command = _vllm_multi_node_command(
                 service, service.port, total_nodes=total_nodes, head_service_fqdn=head_service_fqdn
