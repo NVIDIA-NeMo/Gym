@@ -57,8 +57,9 @@ This one-task run uses the configured timeout defaults and consumes model and sa
 ## OpenCode binary: online or pre-staged
 
 By default, the agent downloads the [OpenCode installer](https://opencode.ai/install)
-and the configured version inside each task sandbox. This needs installation tools
-(Bash, curl and archive extraction), a writable home directory, and network access
+and the configured version inside each task sandbox. If `curl` is absent, a Python 3 standard-library fallback downloads and verifies
+the pinned Linux binary. This needs installation tools
+(Bash and either curl with archive extraction or Python 3), a writable home directory, and network access
 to OpenCode and GitHub release assets.
 
 For sandboxes without that network access, provide a compatible installer and binary

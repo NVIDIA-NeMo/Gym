@@ -222,6 +222,7 @@ class TestOpenCodeSandboxedAgent:
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
             ]
         )
+        sandbox_mock.upload = AsyncMock()
         sandbox_mock.download = AsyncMock()
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
@@ -516,6 +517,7 @@ class TestOpenCodeSandboxedAgent:
                 subprocess.run(shlex.split(sandbox.exec.await_args_list[-1].kwargs["command"]), check=True)
                 local_path.write_bytes(snapshot_path.read_bytes())
 
+        sandbox.upload = AsyncMock()
         sandbox.download = AsyncMock(side_effect=download)
         sandbox.stop = AsyncMock(side_effect=RuntimeError("resource server already stopped the sandbox"))
         server._start_sandbox = AsyncMock(return_value=sandbox)
