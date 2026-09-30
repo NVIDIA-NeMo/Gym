@@ -319,3 +319,50 @@ async def test_mcp_initialization_failure_is_a_request_failure(agent):
     assert server.server_client.post.await_count == 1
     sandbox.stop.assert_awaited_once()
     assert _RUN.get() is None
+
+
+@pytest.mark.parametrize("stop_reason", ["length", "stop", "aborted", "error"])
+@pytest.mark.parametrize("collect_observations", [False, True])
+@pytest.mark.parametrize("force_zero", [False, True])
+async def test_terminal_stop_controls_scoring_without_observations(
+    agent, stop_reason, collect_observations, force_zero
+):
+    server, sandbox = agent
+    server.config.execution_failure_reward_zero = force_zero
+    server._capture_correlation_enabled = lambda: collect_observations
+    download = sandbox.download.side_effect
+
+    async def terminal_event(remote, local):
+        await download(remote, local)
+        if remote.endswith("events.jsonl"):
+            # An earlier length stop followed by a clean final answer is recoverable.
+            events = [json.loads(line) for line in local.read_text().splitlines()]
+            events[-1][1]["messages"] = [
+                {"role": "assistant", "stopReason": "length"},
+                {"role": "assistant", "stopReason": stop_reason},
+            ]
+            local.write_text("\n".join(json.dumps(event) for event in events))
+
+    sandbox.download.side_effect = terminal_event
+    result = await server.run(SimpleNamespace(cookies={}), request_body())
+    failed = stop_reason != "stop"
+    assert result.pi_failed is failed
+    assert result.finished_naturally is (not failed)
+    assert result.reward == (0 if force_zero and failed else 1)
+    assert result.model_dump()["library_reward"] == result.reward
+    assert result.response.output  # Preserve the answer even when the verifier receives empty output.
+    assert bool(server.server_client.post.await_args.kwargs["json"]["response"]["output"]) is not (
+        force_zero and failed
+    )
+    assert (result.response.status == "incomplete") is (stop_reason == "length")
+    if stop_reason == "length":
+        assert result.response.incomplete_details.reason == "max_output_tokens"
+    if collect_observations:
+        invocation = next(r for r in result.ng_agent_observations.records if isinstance(r, AgentInvocation))
+        assert (
+            invocation.status
+            == {"length": "incomplete", "aborted": "incomplete", "error": "failed", "stop": "completed"}[stop_reason]
+        )
+    receipt = json.loads((Path(result.pi_results_dir) / "generation.json").read_text())
+    assert receipt["pi_failed"] is failed and receipt["response"]["output"]
+    assert receipt["response"]["status"] == result.response.status

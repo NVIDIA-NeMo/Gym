@@ -948,6 +948,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             for message in opencode_export.get("messages", [])
             if message.get("info", {}).get("role") == "assistant"
         ]
+        length_limited = bool(assistant_infos and assistant_infos[-1].get("finish") == "length")
         terminal_error = assistant_infos[-1].get("error") if assistant_infos else None
         if terminal_error and not run_error_type:
             run_error_type = (
@@ -973,7 +974,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         "cancelled": "incomplete",
                     }.get(agent_sandbox_observation.outcome)
                     if status is not None:
-                        record.status = status
+                        record.status = "incomplete" if status == "completed" and length_limited else status
             observations.records.append(agent_sandbox_observation)
             observations.gaps.append(ObservationGap(code="sandbox_lifecycle_timing_unavailable"))
 
@@ -981,7 +982,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_failed": bool(run_error_type or getattr(result, "error_type", None))
             or getattr(result, "return_code", None) != 0
             or not opencode_finished
-            or not opencode_export_found,
+            or not opencode_export_found
+            or length_limited,
             "opencode_exit_code": getattr(result, "return_code", None),
             "opencode_error_type": run_error_type or getattr(result, "error_type", None),
             "opencode_results_fpath": str(results_local_fpath) if opencode_export_found else "",
@@ -1005,6 +1007,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
             usage=usage,
+            status="incomplete" if length_limited else None,
+            incomplete_details={"reason": "max_output_tokens"} if length_limited else None,
         )
         receipt = {
             "response": response.model_dump(mode="json"),

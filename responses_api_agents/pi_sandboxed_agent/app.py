@@ -29,6 +29,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import Request
+from openai.types.responses.response import IncompleteDetails
 from pydantic import Field
 
 from nemo_gym.base_responses_api_agent import Body, SimpleResponsesAPIAgent
@@ -236,8 +237,21 @@ class PiSandboxedAgent(PiAgent):
                     },
                 )
             )
+        terminal_messages = next(
+            (event.get("messages", []) for _, event in reversed(events) if event.get("type") == "agent_end"), []
+        )
+        stop_reason = next(
+            (
+                message.get("stopReason")
+                for message in reversed(terminal_messages if isinstance(terminal_messages, list) else [])
+                if isinstance(message, dict) and message.get("role") == "assistant"
+            ),
+            None,
+        )
+        context["length_limited"] = stop_reason == "length"
         context["execution"] = {
-            "pi_failed": bool(error_type or return_code != 0),
+            # Scoring must not depend on whether observation collection is enabled.
+            "pi_failed": bool(error_type or return_code != 0 or stop_reason in {"length", "error", "aborted"}),
             "pi_exit_code": return_code,
             "pi_error_type": error_type,
             "pi_results_dir": str(root),
@@ -277,6 +291,9 @@ class PiSandboxedAgent(PiAgent):
             token = _RUN.set(context)
             try:
                 episode = await self._create_episode(body.responses_create_params, rollout_id=rollout_id)
+                if context["length_limited"]:
+                    episode.response.status = "incomplete"
+                    episode.response.incomplete_details = IncompleteDetails(reason="max_output_tokens")
                 observations = episode.observations
                 observations.gaps = [g for g in observations.gaps if g.code != "no_sandbox_runtime"]
                 execution = context["execution"]

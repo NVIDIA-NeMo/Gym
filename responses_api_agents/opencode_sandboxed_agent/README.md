@@ -102,6 +102,11 @@ Generation receipts and native logs are written before grading. OpenCode include
 native turns in top-level `ng_trajectory`; Pi preserves its native event stream,
 per-event timing, response tool calls, and agent observations. Completed execution
 failures receive zero reward when `execution_failure_reward_zero` is enabled.
+A terminal token-limit stop is also an execution failure: the benchmark presets
+score it zero even if the partial answer is correct. The returned response is
+marked `incomplete` with reason `max_output_tokens`, and retains the partial output
+for inspection. This changes OpenCode's previous behavior of grading truncated
+answers, and makes Pi's zero-score behavior independent of observation collection.
 Both adapters label provider-reported timeouts as `timeout`, including exit code
 124 when no provider error type is supplied.
 The adapter verifies an empty output to obtain the resource's native score fields,

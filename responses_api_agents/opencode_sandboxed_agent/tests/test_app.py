@@ -878,3 +878,89 @@ def test_required_mcp_extension():
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@mark.parametrize("stop_reason", ["length", "stop"])
+@mark.parametrize("collect_observations", [False, True])
+@mark.parametrize("force_zero", [False, True])
+async def test_terminal_length_stop_scores_zero_and_preserves_output(
+    tmp_path, monkeypatch, stop_reason, collect_observations, force_zero
+):
+    from fastapi import Request
+
+    from nemo_gym.rollout_observability import AgentObservationBundle
+
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    config.execution_failure_reward_zero = force_zero
+    client = MagicMock(spec=ServerClient)
+
+    async def post(**kwargs):
+        payload = kwargs["json"]
+        if kwargs["url_path"] == "/verify":
+            score = float(bool(payload["response"]["output"]))
+            payload = payload | {"reward": score, "library_reward": score}
+        return SimpleNamespace(
+            cookies={},
+            json=AsyncMock(return_value={}),
+            ok=True,
+            read=AsyncMock(return_value=json.dumps(payload).encode()),
+            raise_for_status=lambda: None,
+        )
+
+    client.post = AsyncMock(side_effect=post)
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
+    monkeypatch.setattr(server, "_capture_correlation_enabled", lambda: collect_observations)
+    sandbox = MagicMock(stop=AsyncMock(), upload=AsyncMock())
+
+    async def execute(command, **kwargs):
+        stdout = '[{"id":"session"}]' if "session list" in command else "Shell: bash\nOpenCode run finished"
+        return SimpleNamespace(return_code=0, error_type=None, stdout=stdout, stderr="")
+
+    sandbox.exec = AsyncMock(side_effect=execute)
+    export = json.loads(Path(__file__).with_name("opencode_export_test_data.json").read_text())
+    export["messages"][1]["info"]["finish"] = "length"
+    export["messages"][-1]["info"]["finish"] = stop_reason
+
+    async def download(remote, local):
+        local.write_text(json.dumps(export))
+
+    sandbox.download = AsyncMock(side_effect=download)
+    server._start_sandbox = AsyncMock(return_value=sandbox)
+    server._create_opencode_config = AsyncMock(return_value={})
+    monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(
+        app_module,
+        "parse_opencode_observations",
+        lambda *args: AgentObservationBundle(
+            source="opencode", records=[AgentInvocation(invocation_id="rollout", status="completed")]
+        ),
+    )
+    body = OpenCodeSandboxedAgentRunRequest.model_validate(
+        {
+            "_ng_rollout_id": "rollout" if collect_observations else None,
+            "responses_create_params": {"input": [{"role": "user", "content": "Solve"}]},
+        }
+    )
+    request = Request(
+        {"type": "http", "method": "POST", "path": "/run", "headers": [], "session": {SESSION_ID_KEY: "trial"}}
+    )
+    result = await server.run(request, body)
+    limited = stop_reason == "length"
+    assert result.opencode_failed is limited
+    assert result.reward == (0 if limited and force_zero else 1)
+    assert result.model_dump()["library_reward"] == result.reward
+    assert result.response.output
+    assert bool(client.post.await_args.kwargs["json"]["response"]["output"]) is not (limited and force_zero)
+    assert (result.response.status == "incomplete") is limited
+    if limited:
+        assert result.response.incomplete_details.reason == "max_output_tokens"
+    if collect_observations:
+        invocation = next(r for r in result.ng_agent_observations.records if isinstance(r, AgentInvocation))
+        assert invocation.status == ("incomplete" if limited else "completed")
+    receipt = json.loads((tmp_path / "trial" / "generation.json").read_text())
+    assert receipt["execution"]["opencode_failed"] is limited
+    assert receipt["response"]["output"]
+    assert receipt["response"]["status"] == result.response.status
+    sandbox.stop.assert_awaited_once()
