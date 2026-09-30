@@ -2549,7 +2549,12 @@ async def test_direct_create_runs_setup_commands_as_root_and_a_failure_fails_the
     fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
-        probe={"command": None}, setup={"commands": ["apt-get update", "false"], "timeout_s": 12}
+        probe={"command": None},
+        setup={
+            "commands": ["apt-get update", "false"],
+            "timeout_s": 12,
+            "env": {"EXECD_API_GRACE_SHUTDOWN": "50ms", "A": "provider"},
+        },
     )
     calls: list[tuple[str, str | None, float | None]] = []
     cleaned: list[str] = []
@@ -2566,6 +2571,8 @@ async def test_direct_create_runs_setup_commands_as_root_and_a_failure_fails_the
     monkeypatch.setattr(provider, "exec", exec_)
     monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
     with pytest.raises(opensandbox_provider.OpenSandboxSetupError, match="setup command failed.*false"):
-        await provider.create(SandboxSpec(image="python:3.11"))
+        await provider.create(SandboxSpec(image="python:3.11", env={"A": "spec"}))
     assert calls == [("apt-get update", "root", 12), ("false", "root", 12)]
     assert cleaned == ["sandbox-1"]
+    # The provider's environment sits under the spec's own variables.
+    assert FakeSandbox.created_kwargs["env"] == {"EXECD_API_GRACE_SHUTDOWN": "50ms", "A": "spec"}

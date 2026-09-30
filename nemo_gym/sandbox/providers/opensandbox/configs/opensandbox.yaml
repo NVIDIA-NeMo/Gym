@@ -66,6 +66,8 @@ sandbox:
     setup:
       commands: []
       timeout_s: 600
+      # Environment set in every sandbox, under the spec's own variables (platform knobs only).
+      env: {}
     operations:
       retries: 5
       retry_delay_s: 1.0
