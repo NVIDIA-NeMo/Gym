@@ -102,7 +102,7 @@ so the setting is zero-shot with a skill library, as upstream's harnesses had.
 - **Scaffold.** Upstream's published rows come from the Codex harness (GPT models) and the
   Claude Code harness (others). Results from this environment measure a different agent
   system and are a comparison, not a reproduction.
-- **Image.** `docker/Dockerfile` is upstream's `docker/base/Dockerfile` verbatim plus one layer
+- **Image.** `image/Dockerfile` is upstream's `docker/base/Dockerfile` verbatim plus one layer
   installing `tmux` and `procps`, which Terminus 2 needs and the no-network container cannot
   fetch. Upstream pins no package versions (`FROM python:3.11-slim` and unversioned `pip install`),
   so the solver stack is whatever `pip` resolves on build day, and a different SCIP build can

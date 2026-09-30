@@ -38,7 +38,7 @@ def test_fixture_task_parses_and_its_reference_is_present():
 
 
 def test_base_dockerfile_reproduces_upstream_base_then_adds_tmux():
-    text = (SERVER_DIR / "docker" / "Dockerfile").read_text()
+    text = (SERVER_DIR / "image" / "Dockerfile").read_text()
     upstream = [
         "FROM python:3.11-slim",
         "ENV ORCLAW_SOLVE_TIME_LIMIT_SECONDS=300",

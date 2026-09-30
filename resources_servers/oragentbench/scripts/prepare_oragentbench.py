@@ -6,7 +6,7 @@ Clones https://github.com/ORAgentBench/ORAgentBench at ``PINNED_COMMIT`` (or ver
 existing checkout is at that commit), loads every ``harbor_tasks/<task>/`` through the same
 parser the server uses, checks the corpus against the published manifest (107 tasks; 32 easy /
 41 medium / 34 hard) and only then writes one Gym row per task. Optionally builds the task
-container images: the shared base image from ``docker/Dockerfile`` next to this server and
+container images: the shared base image from ``image/Dockerfile`` next to this server and
 one image per task from upstream's own ``environment/Dockerfile``.
 
 Nothing is written when any task fails to load or the counts do not match; ``--limit`` is the
@@ -36,7 +36,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = SERVER_DIR.parents[1]
 DEFAULT_CHECKOUT_DIR = SERVER_DIR / "data" / "ORAgentBench"
 DEFAULT_OUTPUT = SERVER_DIR / "data" / "benchmark.jsonl"
-BASE_DOCKERFILE = SERVER_DIR / "docker" / "Dockerfile"
+BASE_DOCKERFILE = SERVER_DIR / "image" / "Dockerfile"
 BASE_IMAGE_TAG = "oragentbench-base:py311-scip"  # the tag every upstream task Dockerfile builds FROM
 AGENT_NAME = "oragentbench_agent"
 
