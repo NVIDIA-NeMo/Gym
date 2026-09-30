@@ -2,7 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
+import os
+import shutil
+import signal
+import sys
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,6 +22,7 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
+from responses_api_agents.hermes_agent import app as hermes_app
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
     HermesAgentConfig,
@@ -278,7 +285,8 @@ async def test_close_failure_keeps_session_for_retry(
 
 
 @pytest.mark.parametrize("failure", [TimeoutError, asyncio.CancelledError])
-async def test_unknown_launch_blocks_close(agent, state, failure):
+async def test_unavailable_remote_fence_still_blocks_close(agent, state, failure):
+    # Losing contact with the sandbox is not proof that its pending launch is fenced.
     state.sandbox.exec.side_effect = [failure("launch status unavailable"), SimpleNamespace(return_code=0)]
     agent._download_json = AsyncMock(side_effect=FileNotFoundError("missing cleanup receipt"))
     agent._upload_json = AsyncMock()
@@ -293,6 +301,187 @@ async def test_unknown_launch_blocks_close(agent, state, failure):
     with pytest.raises(RuntimeError, match="launch outcome is unknown"):
         await agent._close_agent_session_state(state)
     state.sandbox.disconnect.assert_not_awaited()
+
+
+@pytest.fixture
+def local_runner(agent, state, monkeypatch, tmp_path):
+    """Execute the actual launch/close shell commands and exchange files, without a remote provider."""
+    directory = tmp_path / "session"
+    directory.mkdir()
+    state.session_dir = str(directory)
+    state.workdir = str(tmp_path)
+    agent.config.session_close_timeout_seconds = 2
+    monkeypatch.setattr(hermes_app, "_SANDBOX_PYTHON", sys.executable)
+    monkeypatch.setattr(hermes_app, "_SANDBOX_RUNNER", str(Path(hermes_app.__file__).with_name("sandbox_runner.py")))
+    state.sandbox.upload.side_effect = shutil.copyfile
+    state.sandbox.download.side_effect = shutil.copyfile
+
+    async def execute(command, **kwargs):
+        process = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            command,
+            cwd=kwargs.get("cwd"),
+            start_new_session=True,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=8)
+            return SimpleNamespace(
+                return_code=process.returncode,
+                stdout=stdout.decode(errors="replace"),
+                stderr=stderr.decode(errors="replace"),
+                error_type=None,
+            )
+        finally:
+            if process.returncode is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                await process.wait()
+
+    state.sandbox.exec.side_effect = execute
+    return execute
+
+
+@pytest.mark.parametrize("failure", ["cancel", "failed-before-spawn"])
+async def test_close_fences_a_launch_that_never_reached_the_shell(agent, state, local_runner, failure):
+    waiting = asyncio.Event()
+    semaphore = asyncio.Semaphore(0)
+    commands = []
+
+    async def queued_exec(command, **kwargs):
+        if " && exec " in command:
+            commands.append(command)
+            waiting.set()
+            if failure == "cancel":
+                await semaphore.acquire()
+            raise OSError("provider failed before spawning the shell")
+        return await local_runner(command, **kwargs)
+
+    state.sandbox.exec.side_effect = queued_exec
+    state.task = asyncio.create_task(
+        agent._run_sandbox_episode(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+        )
+    )
+    await asyncio.wait_for(waiting.wait(), timeout=2)
+    if failure == "cancel":
+        state.task.cancel()
+    with pytest.raises(asyncio.CancelledError if failure == "cancel" else OSError):
+        await state.task
+    assert state.runner_cleanup is RunnerCleanup.CONFIRMED
+    directory = Path(state.session_dir)
+    assert (directory / "launch.claim").readlink() == Path("stop")
+    assert json.loads((directory / "cleanup.json").read_text())["cleanup_confirmed"] is True
+
+    # A delayed delivery cannot launch, before or after close removes the session directory.
+    assert (await local_runner(commands[0])).return_code == 0
+    assert not (directory / "runner.pid").exists()
+    agent._agent_sessions["session"] = state
+    close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
+    first = await agent.close_agent_session(request(state), close)
+    assert await agent.close_agent_session(request(state), close) == first
+    state.sandbox.disconnect.assert_awaited_once()
+    assert not directory.exists()
+    assert (await local_runner(commands[0])).return_code == 0
+    assert not directory.exists()
+
+
+async def test_close_can_recover_a_stop_claim_with_no_receipt(agent, state, local_runner):
+    directory = Path(state.session_dir)
+    # The first close won the claim but was interrupted before publishing its receipt.
+    (directory / "launch.claim").symlink_to("stop")
+    state.runner_cleanup = RunnerCleanup.UNCONFIRMED
+    await agent._terminate_sandbox_runner(state)
+    assert state.runner_cleanup is RunnerCleanup.CONFIRMED
+    assert json.loads((directory / "cleanup.json").read_text())["cleanup_confirmed"] is True
+
+
+async def test_close_retires_the_launch_path_before_removing_its_fence(
+    agent, state, local_runner, monkeypatch, tmp_path
+):
+    directory = Path(state.session_dir)
+    retired = Path(f"{state.session_dir}.closed")
+    state.runner_cleanup = RunnerCleanup.UNCONFIRMED
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    remove = commands / "rm"
+    remove.write_text("#!/bin/sh\nexit 1\n")
+    remove.chmod(0o755)
+    with monkeypatch.context() as patch:
+        patch.setenv("PATH", f"{commands}{os.pathsep}{os.environ['PATH']}")
+        with pytest.raises(RuntimeError, match="Could not remove Hermes session files"):
+            await agent._close_agent_session_state(state)
+    assert not directory.exists()
+    assert (retired / "launch.claim").readlink() == Path("stop")
+    state.sandbox.disconnect.assert_not_awaited()
+    # Retry completes removal using the stable retired path, without reopening the launch path.
+    await agent._close_agent_session_state(state)
+    assert not retired.exists()
+    state.sandbox.disconnect.assert_awaited_once()
+
+
+async def test_launch_claim_without_pid_is_not_proof_of_cleanup(agent, state, local_runner):
+    directory = Path(state.session_dir)
+    (directory / "launch.claim").symlink_to("launch")
+    state.runner_cleanup = RunnerCleanup.UNCONFIRMED
+    with pytest.raises(RuntimeError, match="launch outcome is unknown"):
+        await agent._close_agent_session_state(state)
+    assert state.runner_cleanup is RunnerCleanup.UNCONFIRMED
+    assert not (directory / "cleanup.json").exists()
+    state.sandbox.disconnect.assert_not_awaited()
+
+
+@pytest.mark.parametrize("stop_timing", ["before-shell", "before-handler"])
+async def test_stop_during_interpreter_startup_closes_without_starting_a_worker(
+    agent, state, local_runner, monkeypatch, tmp_path, stop_timing
+):
+    directory = Path(state.session_dir)
+    ready = tmp_path / "before-handler"
+    worker_started = tmp_path / "worker-started"
+    wrapper = tmp_path / "delayed_runner.py"
+    wrapper.write_text(
+        "import pathlib,runpy,sys,time\n"
+        f"sys.path.insert(0, {str(Path(hermes_app._SANDBOX_RUNNER).parent)!r})\n"
+        f"pathlib.Path({str(ready)!r}).touch()\n"
+        f"while not pathlib.Path({str(directory / 'runner.stop')!r}).exists(): time.sleep(0.01)\n"
+        # Keep the interpreter in the pre-handler window while close sends TERM.
+        "time.sleep(0.15)\n"
+        f"runner=runpy.run_path({hermes_app._SANDBOX_RUNNER!r})\n"
+        "def unexpected_worker(*args, **kwargs):\n"
+        f"    pathlib.Path({str(worker_started)!r}).touch()\n"
+        "    raise AssertionError('Worker must not start after the stop marker')\n"
+        "runner['subprocess'].Popen=unexpected_worker\n"
+        "raise SystemExit(runner['main']())\n"
+    )
+    monkeypatch.setattr(hermes_app, "_SANDBOX_RUNNER", str(wrapper))
+    if stop_timing == "before-shell":
+        (directory / "runner.stop").touch()
+    state.task = asyncio.create_task(
+        agent._run_sandbox_episode(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+        )
+    )
+    try:
+        if stop_timing == "before-handler":
+            async with asyncio.timeout(3):
+                while not ready.exists():
+                    await asyncio.sleep(0.01)
+            await agent._terminate_sandbox_runner(state)
+        with pytest.raises(RuntimeError, match="exited without output"):
+            await state.task
+        assert state.runner_cleanup is RunnerCleanup.CONFIRMED
+        assert not worker_started.exists()
+        assert json.loads((directory / "cleanup.json").read_text()) == {
+            "cleanup_confirmed": True,
+            "error": None,
+        }
+        await agent._close_agent_session_state(state)
+        state.sandbox.disconnect.assert_awaited_once()
+    finally:
+        if not state.task.done():
+            state.task.cancel()
+        await asyncio.gather(state.task, return_exceptions=True)
 
 
 @pytest.mark.parametrize("receipt", [{}, {"cleanup_confirmed": False}, {"cleanup_confirmed": "true"}])

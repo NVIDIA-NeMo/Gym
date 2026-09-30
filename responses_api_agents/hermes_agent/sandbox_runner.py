@@ -179,7 +179,7 @@ def _drain_children(timeout: float) -> None:
         time.sleep(0.01)
 
 
-def _supervise(command: list[str], *, cleanup_timeout: float) -> dict[str, Any]:
+def _supervise(command: list[str], *, cleanup_timeout: float, stop_path: Path) -> dict[str, Any]:
     """Run Hermes as a child and acknowledge cleanup only after its descendants are gone."""
     process = None
     cleanup_confirmed = False
@@ -193,14 +193,17 @@ def _supervise(command: list[str], *, cleanup_timeout: float) -> dict[str, Any]:
 
     signal.signal(signal.SIGTERM, interrupt)
     try:
-        if sys.platform != "linux":
-            raise RuntimeError("Native Hermes sessions require a Linux sandbox")
-        libc = ctypes.CDLL(None, use_errno=True)
-        if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-            raise OSError(ctypes.get_errno(), "Cannot establish Hermes child-subreaper boundary")
-        process = subprocess.Popen(command, start_new_session=True)
-        while process.poll() is None and not stopping:
-            time.sleep(0.05)
+        # TERM may have been ignored during interpreter startup. The marker makes that stop
+        # durable; once the handler is installed, later signals are handled by the loop below.
+        if not stopping and not stop_path.exists():
+            if sys.platform != "linux":
+                raise RuntimeError("Native Hermes sessions require a Linux sandbox")
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                raise OSError(ctypes.get_errno(), "Cannot establish Hermes child-subreaper boundary")
+            process = subprocess.Popen(command, start_new_session=True)
+            while process.poll() is None and not stopping:
+                time.sleep(0.05)
     except Exception as exception:
         error = str(exception)
     finally:
@@ -231,6 +234,7 @@ def main() -> int:
     receipt = _supervise(
         [sys.executable, str(Path(__file__).resolve()), "--worker", str(input_path), str(output_path)],
         cleanup_timeout=payload["cleanup_timeout"],
+        stop_path=input_path.parent / "runner.stop",
     )
     _write_atomic(input_path.parent / "cleanup.json", receipt)
     return 0 if receipt["cleanup_confirmed"] and receipt["error"] is None else 1
