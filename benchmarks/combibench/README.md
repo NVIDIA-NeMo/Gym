@@ -88,24 +88,13 @@ python benchmarks/combibench/prepare.py --source hf
 
 ## Which upstream copy
 
-Upstream's harness loads the Hugging Face dataset, last updated 2025-07-13.
-The repository's Lean files were corrected afterwards (statement fixes for
-`hackmath_4`, `brualdi_ch4_35` and others; answer fixes for `brualdi_ch1_5`
-and `brualdi_ch2_36`) and bumped to Lean v4.24.0 on 2025-11-11. With comments
-stripped from both copies the way `prepare.py` strips them, **20 of the 100**
-`test` statements differ byte for byte; **12** differ once whitespace is
-normalised as well, i.e. 8 of the 20 differ only in spacing and line breaks.
-
-Measured against Mathlib v4.24.0 with the statements' `sorry`s in place:
-
-| Source | Statements that compile | Failing |
-| --- | --- | --- |
-| GitHub `c67e4213` | 100 / 100 | — |
-| Hugging Face `882ba08b` | 94 / 100 | `hackmath_6`, `imo_2008_p5`, `imo_2011_p2`, `imo_2021_p5`, `imo_2022_p6`, `imo_2023_p5` |
-
-A statement that does not compile cannot be solved by any model, and the
-failure would be charged to the model, so the repository files are the default.
-The rows record which copy they came from.
+Upstream's harness loads the Hugging Face dataset (last updated 2025-07-13). The repository's
+Lean files were corrected afterwards and bumped to Lean v4.24.0, so **20 of the 100** `test`
+statements differ between the two copies once comments are stripped. Against Mathlib v4.24.0 all
+100 GitHub statements compile but only 94 Hugging Face ones do (failing: `hackmath_6`,
+`imo_2008_p5`, `imo_2011_p2`, `imo_2021_p5`, `imo_2022_p6`, `imo_2023_p5`). An uncompilable
+statement would be charged to the model, so the repository files are the default. Rows record
+which copy they came from.
 
 ## Running
 
@@ -135,7 +124,6 @@ reproduction.
 
 ## Measured
 
-Model scores live with the run that produced them, not here — see the pull request
-that added this benchmark for the open-weights baseline, and the
-[server README](../../resources_servers/combibench/README.md#harness-validation)
+Model scores live with the run that produced them: see the pull request that added this
+benchmark, and the [server README](../../resources_servers/combibench/README.md#harness-validation)
 for the model-free harness validation.
