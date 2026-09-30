@@ -4,11 +4,12 @@
 import asyncio
 import runpy
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal
 
 import orjson
 import pytest
-from aiohttp import ClientConnectionError, ClientPayloadError
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict
 
@@ -464,7 +465,19 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
 
 
 @pytest.mark.parametrize("stage", ["agent", "verification"])
-@pytest.mark.parametrize("error", [ClientConnectionError("connection lost"), ValueError("invalid payload")])
+@pytest.mark.parametrize(
+    "error",
+    [
+        ClientConnectionError("connection lost"),
+        ValueError("invalid payload"),
+        ClientResponseError(
+            request_info=SimpleNamespace(real_url="http://agent/v1/responses"),
+            history=(),
+            status=500,
+            message="Hermes agent failed: HTTP 429 Too Many Requests",
+        ),
+    ],
+)
 async def test_dependency_failure_closes_sessions(stage: str, error: Exception) -> None:
     environment, client = _environment_server()
     responses = client.responses
