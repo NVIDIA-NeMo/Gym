@@ -127,7 +127,7 @@ async def test_commit_leaves_out_undelivered_calls_on_every_worker(tmp_path: Pat
         await coordinator.controller.commit(
             CommitRequest(**control(checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r"}]))
         )
-        [record] = coordinator.participant.export_records([EpisodeId(rollout_id="r")])
+        [record] = await coordinator.participant.export([EpisodeId(rollout_id="r")])
 
     assert [row["model_call_id"] for row in record.rows] == ["c1"]
 

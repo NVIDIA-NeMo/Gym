@@ -45,7 +45,7 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1058,23 +1058,38 @@ class FileLineageStore(IncrementalLineageStore):
 
         Importing identical rows again is a no-op; any other existing ledger is an error.
         """
-        with self._locked(rollout_id):
-            existing = self._read(rollout_id)
-            if existing == rows:
-                return
-            if existing:
-                raise ValueError(f"lineage ledger for {rollout_id} already holds different rows")
-            path = self._ledger_path(rollout_id)
-            payload = b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows)
-            temporary = path.with_name(f".{path.name}.import")
-            with temporary.open("wb") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
+        self.import_rows_many({rollout_id: rows})
+
+    def import_rows_many(self, ledgers: Mapping[str, list[dict]]) -> None:
+        """Install several rollouts' ledgers from a checkpoint, then sync the directory once.
+
+        The files are not synced one by one: the checkpoint they come from is the durable copy, and importing it
+        again is a no-op for ledgers that match, so a crash during or after the import only repeats it. A later
+        append to a ledger syncs its file, imported rows included.
+        """
+        present = {entry.name for entry in os.scandir(self._ledger_root)} if self._ledger_root.exists() else set()
+        installed = []
+        for rollout_id, rows in ledgers.items():
+            with self._locked(rollout_id):
+                path = self._ledger_path(rollout_id)
+                if path.name in present:
+                    existing = self._read(rollout_id)
+                    if existing == rows:
+                        continue
+                    if existing:
+                        raise ValueError(f"lineage ledger for {rollout_id} already holds different rows")
+                payload = b"".join(
+                    json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows
+                )
+                temporary = path.with_name(f".{path.name}.import")
+                with temporary.open("wb") as handle:
+                    handle.write(payload)
+                os.replace(temporary, path)
+                self._ledger_cache_pop(rollout_id)
+                installed.append(rollout_id)
+        if installed:
             directory_fd = os.open(self._ledger_root, os.O_RDONLY)
             try:
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
-            self._ledger_cache_pop(rollout_id)
