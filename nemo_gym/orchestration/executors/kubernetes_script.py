@@ -449,9 +449,10 @@ def build_job_manifest(
     total_nodes = compute.nodes
     head_service_fqdn = _head_service_fqdn(_head_service_name(name), compute.namespace) if total_nodes > 1 else None
 
-    volumes = [{"name": SHM_VOLUME_NAME, "emptyDir": {"medium": "Memory", "sizeLimit": SHM_SIZE}}]
-    if compute.pvc_name:
-        volumes.append({"name": OUTPUT_VOLUME_NAME, "persistentVolumeClaim": {"claimName": compute.pvc_name}})
+    volumes = [
+        {"name": SHM_VOLUME_NAME, "emptyDir": {"medium": "Memory", "sizeLimit": SHM_SIZE}},
+        {"name": OUTPUT_VOLUME_NAME, "persistentVolumeClaim": {"claimName": compute.pvc_name}},
+    ]
 
     driver_cmd = _driver_command(config, benchmark_name, benchmark, run_dir_str, manifest_writes)
     if total_nodes > 1:

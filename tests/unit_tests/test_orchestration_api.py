@@ -385,7 +385,7 @@ def test_gpu_footprint_no_node_pools_skips_validation():
 # KubernetesComputeConfig
 # ---------------------------------------------------------------------------
 
-COMPUTE_K8S = {"cluster": {"type": "kubernetes", "namespace": "eng-test", "gpus_per_node": 8}}
+COMPUTE_K8S = {"cluster": {"type": "kubernetes", "namespace": "eng-test", "gpus_per_node": 8, "pvc_name": "workspace"}}
 
 
 def test_kubernetes_compute_accepted():
@@ -424,11 +424,22 @@ def test_kubernetes_unknown_type_rejected():
         SubmitConfig.model_validate(_config(compute={"cluster": {"type": "not-a-real-backend"}}))
 
 
+def test_kubernetes_pvc_name_is_required():
+    # The driver container's own volumeMounts always references the output volume
+    # (kubernetes_script.py's build_job_manifest); without a pvc_name that volume is never
+    # declared, and the pod is rejected outright by the API server. Fail at config-validation
+    # time with a clear message instead.
+    with pytest.raises(ValidationError, match="pvc_name"):
+        SubmitConfig.model_validate(_config(compute={"cluster": {"type": "kubernetes", "namespace": "eng-test"}}))
+
+
 # ---------------------------------------------------------------------------
 # KubernetesComputeConfig - multi-node data-parallel deployment
 # ---------------------------------------------------------------------------
 
-COMPUTE_K8S_MULTI_NODE = {"cluster": {"type": "kubernetes", "namespace": "eng-test", "gpus_per_node": 4, "nodes": 2}}
+COMPUTE_K8S_MULTI_NODE = {
+    "cluster": {"type": "kubernetes", "namespace": "eng-test", "gpus_per_node": 4, "nodes": 2, "pvc_name": "workspace"}
+}
 
 
 def test_kubernetes_nodes_defaults_to_one_and_is_unaffected():

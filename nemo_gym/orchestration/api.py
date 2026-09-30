@@ -233,8 +233,11 @@ class KubernetesComputeConfig(BaseComputeConfig):
     nodes: int = 1
     node_selector: dict[str, str] = {}
     service_account: str | None = None
-    # A pre-existing PVC, mounted at job.output_path in every container.
-    pvc_name: str | None = None
+    # A pre-existing PVC, mounted at job.output_path in every container. Required: the driver
+    # container's own volumeMounts always references this volume (build_job_manifest), so an
+    # unset pvc_name would leave that reference dangling and the pod rejected outright by the API
+    # server ("volumeMounts[0].name: Not found") -- fail clearly at config-validation time instead.
+    pvc_name: str
     # Memory *request* (Kubernetes quantity string, e.g. "32Gi") per requested GPU on a service
     # container. Without a memory request a pod gets QoS class BestEffort, which the kubelet
     # kills first under node memory pressure -- observed in practice as a GPU sidecar getting

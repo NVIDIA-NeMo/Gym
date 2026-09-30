@@ -224,7 +224,7 @@ def test_otel_enabled_by_default_is_rejected(tmp_path):
     config = SubmitConfig.model_validate(
         {
             "services": services,
-            "compute": {"cluster": {"type": "kubernetes", "namespace": "eng-test"}},
+            "compute": {"cluster": {"type": "kubernetes", "namespace": "eng-test", "pvc_name": "workspace"}},
             "driver": {"container": "gym:latest", "benchmarks": {"bench_a": {}}},
             "job": {"output_path": str(tmp_path / "jobs")},
         }
@@ -439,7 +439,15 @@ def test_head_service_manifest_selects_completion_index_zero():
     compute = SubmitConfig.model_validate(
         {
             "services": _MULTI_NODE_SERVICES,
-            "compute": {"cluster": {"type": "kubernetes", "namespace": "eng-test", "nodes": 2, "gpus_per_node": 4}},
+            "compute": {
+                "cluster": {
+                    "type": "kubernetes",
+                    "namespace": "eng-test",
+                    "nodes": 2,
+                    "gpus_per_node": 4,
+                    "pvc_name": "workspace",
+                }
+            },
             "driver": {"container": "gym:latest", "benchmarks": {"bench_a": {}}},
             "job": {"output_path": "/tmp/jobs"},
             "otel": {"enabled": False},
@@ -467,7 +475,15 @@ def test_head_service_manifest_is_headless_with_not_ready_addresses_published():
     compute = SubmitConfig.model_validate(
         {
             "services": _MULTI_NODE_SERVICES,
-            "compute": {"cluster": {"type": "kubernetes", "namespace": "eng-test", "nodes": 2, "gpus_per_node": 4}},
+            "compute": {
+                "cluster": {
+                    "type": "kubernetes",
+                    "namespace": "eng-test",
+                    "nodes": 2,
+                    "gpus_per_node": 4,
+                    "pvc_name": "workspace",
+                }
+            },
             "driver": {"container": "gym:latest", "benchmarks": {"bench_a": {}}},
             "job": {"output_path": "/tmp/jobs"},
             "otel": {"enabled": False},
