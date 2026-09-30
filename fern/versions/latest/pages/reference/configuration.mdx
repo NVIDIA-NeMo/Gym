@@ -112,8 +112,10 @@ At startup, Gym logs the configured and effective per-worker limits once per ser
 connector limit of `0` keeps aiohttp's existing meaning of unlimited. Gym rejects a positive
 limit that becomes zero after worker division, because that would accidentally turn a bounded
 pool into an unlimited one. The optional intended-concurrency values also apply separately to
-each server or CLI pool. When intended demand is larger than effective capacity, or the connector
-limit can exhaust the file-descriptor budget, Gym logs an actionable warning.
+each server or CLI pool. When intended demand is larger than effective capacity or can exhaust the
+file-descriptor budget, Gym logs an actionable warning. The connector limit and file-descriptor
+soft limit remain in the startup information line, but the connector ceiling alone does not trigger
+a file-descriptor warning because it is not an allocation.
 
 The total aiohttp limit is a scheduling limit, not a strict open-socket cap across multiple
 hosts. Idle-connection reuse and aiohttp's waiter wake-up order can temporarily exceed it, so

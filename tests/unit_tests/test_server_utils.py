@@ -662,12 +662,35 @@ class TestServerUtils:
         assert "configured_per_host=256" in visible_report
         assert "intended per-host concurrency 250 exceeds effective per-host limit 16" in caplog.text
 
-    def test_connection_pool_limit_warns_against_file_descriptor_budget(
+    @mark.parametrize(("total", "workers"), [(100 * 1024, 1), (100 * 1024, 2), (0, 1), (0, 2)])
+    def test_connection_pool_limit_alone_does_not_warn_against_file_descriptor_budget(
+        self,
+        total: int,
+        workers: int,
+        caplog: LogCaptureFixture,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=total,
+        )
+        capacity = connection_pool_capacity(cfg, workers=workers)
+        connection_pool._REPORTED_CAPACITIES.clear()
+        monkeypatch.setattr(connection_pool.resource, "getrlimit", lambda _resource: (65535, 65535))
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: None)
+
+        with caplog.at_level(logging.INFO, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity)
+
+        assert f"effective_total={connection_pool._display_limit(capacity.total)}" in caplog.text
+        assert "file_descriptor_soft_limit=65535" in caplog.text
+        assert not any(record.levelno >= logging.WARNING for record in caplog.records)
+
+    def test_intended_concurrency_warns_with_file_descriptor_prefix(
         self, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
     ) -> None:
         cfg = GlobalAIOHTTPAsyncClientConfig(
-            global_aiohttp_connector_limit=100,
-            global_aiohttp_connector_limit_per_host=10,
+            global_aiohttp_connector_limit=1000,
+            global_aiohttp_intended_concurrency=100,
         )
         capacity = connection_pool_capacity(cfg, workers=1)
         connection_pool._REPORTED_CAPACITIES.clear()
@@ -677,7 +700,11 @@ class TestServerUtils:
         with caplog.at_level(logging.WARNING, logger="nemo_gym.telemetry.connection_pool"):
             report_connection_pool_capacity(cfg, capacity)
 
-        assert "effective total limit 100 can exhaust the file-descriptor soft limit 64" in caplog.text
+        assert (
+            "aiohttp file-descriptor capacity may be exhausted: intended per-worker concurrency 100 can exhaust "
+            "the file-descriptor soft limit 64"
+        ) in caplog.text
+        assert "aiohttp connection pool may queue requests" not in caplog.text
 
     async def test_connection_pool_telemetry_is_not_installed_when_disabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)

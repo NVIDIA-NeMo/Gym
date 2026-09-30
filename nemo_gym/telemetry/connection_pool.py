@@ -151,20 +151,16 @@ def report_connection_pool_capacity(
     else:
         logger.info(capacity_message)
 
-    warnings = []
+    pool_warnings = []
+    file_descriptor_warnings = []
     if intended is not None and total and intended > total:
-        warnings.append(f"intended per-worker concurrency {intended} exceeds effective total limit {total}")
+        pool_warnings.append(f"intended per-worker concurrency {intended} exceeds effective total limit {total}")
     if intended_per_host is not None and enforced_per_host and intended_per_host > enforced_per_host:
-        warnings.append(
+        pool_warnings.append(
             f"intended per-host concurrency {intended_per_host} exceeds effective per-host limit {enforced_per_host}"
         )
-    if file_descriptors != resource.RLIM_INFINITY and (total == 0 or total >= file_descriptors):
-        warnings.append(
-            f"effective total limit {_display_limit(total)} can exhaust the file-descriptor soft limit "
-            f"{file_descriptors} before accounting for non-HTTP descriptors"
-        )
     if intended is not None and file_descriptors != resource.RLIM_INFINITY and intended >= file_descriptors:
-        warnings.append(
+        file_descriptor_warnings.append(
             f"intended per-worker concurrency {intended} can exhaust the file-descriptor soft limit "
             f"{file_descriptors} before accounting for non-HTTP descriptors"
         )
@@ -174,15 +170,21 @@ def report_connection_pool_capacity(
         and ephemeral_ports is not None
         and aggregate_intended_per_host > ephemeral_ports
     ):
-        warnings.append(
+        pool_warnings.append(
             f"aggregate intended per-host concurrency {aggregate_intended_per_host} exceeds the approximate "
             f"per-destination ephemeral-port budget {ephemeral_ports}"
         )
-    if warnings:
+    if pool_warnings:
         logger.warning(
             "aiohttp connection pool may queue requests or exhaust host resources: %s. Adjust connector limits or "
             "concurrency while accounting for file-descriptor, ephemeral-port, and backend connection budgets.",
-            "; ".join(warnings),
+            "; ".join(pool_warnings),
+        )
+    if file_descriptor_warnings:
+        logger.warning(
+            "aiohttp file-descriptor capacity may be exhausted: %s. Reduce intended concurrency or raise the "
+            "file-descriptor soft limit while accounting for non-HTTP descriptors.",
+            "; ".join(file_descriptor_warnings),
         )
 
 
