@@ -169,6 +169,8 @@ def _token_metrics(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
 class ScicodeAgent(SimpleResponsesAPIAgent):
     """Agent that drives the SciCode per-sub-step generation + code-accumulation loop."""
 
+    ray_enabled = False
+
     config: ScicodeAgentConfig
 
     def model_post_init(self, context):
@@ -320,6 +322,9 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         metrics.update(_across_run_stats(tasks))
         metrics.update(_token_metrics(tasks))
         return metrics
+
+    def compute_repeat_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        return self.compute_metrics(tasks)
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         return {

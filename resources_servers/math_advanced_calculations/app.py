@@ -68,6 +68,7 @@ class MultiVerseMathHardVerifyResponse(BaseVerifyResponse):
 
 
 class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: MultiVerseMathHardResourcesServerConfig
 
     _function_map = {

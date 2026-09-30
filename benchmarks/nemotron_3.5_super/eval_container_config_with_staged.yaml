@@ -51,7 +51,6 @@ swebench_pro_opencode_sandboxed_agent:
           jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
           prepare_script: benchmarks/swebench/pro/prepare.py
           num_repeats: 3
-
 swe_rebench_reward_profiling_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
