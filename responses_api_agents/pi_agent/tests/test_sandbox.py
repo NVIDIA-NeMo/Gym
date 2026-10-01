@@ -3,6 +3,10 @@
 
 import asyncio
 import json
+import os
+import shutil
+import signal
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -95,15 +99,19 @@ class Sandbox:
         self.blocked = False
         self.started = asyncio.Event()
         self.exited = asyncio.Event()
-        self.exec = AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr=""))
+        self.exec = AsyncMock(side_effect=self.execute)
         self.stop = AsyncMock()
         self.disconnect = AsyncMock()
-        self.runner = SimpleNamespace(
-            wait_exit=AsyncMock(side_effect=self.wait_exit),
-            send_signal=AsyncMock(side_effect=self.signal),
-            close=AsyncMock(),
-        )
-        self.pty = SimpleNamespace(create=AsyncMock(side_effect=self.create))
+        self.launch = AsyncMock(side_effect=self.run)
+        self.signal = AsyncMock(side_effect=self.stop_runner)
+        self.cleanup_available = True
+
+    async def execute(self, command, **kwargs):
+        if command.startswith("trap '' TERM;"):
+            return await self.launch(command, **kwargs)
+        if "ln -s stop " in command:
+            await self.signal()
+        return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
 
     async def upload(self, source, destination):
         self.files[destination] = Path(source).read_text()
@@ -111,28 +119,35 @@ class Sandbox:
     async def download(self, source, destination):
         Path(destination).write_text(self.files[source])
 
-    async def create(self, **kwargs):
+    def save_result(self):
+        if not self.cleanup_available:
+            return
+        self.files[f"{self.directory}/cleanup.json"] = json.dumps(
+            {k: v for k, v in self.result.items() if k not in ("hostname", "pid")}
+        )
+        self.files[f"{self.directory}/runtime.json"] = json.dumps({k: self.result[k] for k in ("hostname", "pid")})
+        self.files[f"{self.directory}/events.jsonl"] = self.events
+
+    async def run(self, command, **kwargs):
         payload_path = next(path for path in self.files if path.endswith("/input.json"))
         payload = json.loads(self.files[payload_path])
         assert payload["cwd"] == "/app"
         assert kwargs["cwd"] == "/app"
-        assert "sandbox_runner.py" in kwargs["command"]
+        assert "sandbox_runner.py" in command
+        assert "process_supervisor.py" in command
         self.directory = payload["directory"]
         self.started.set()
         if not self.blocked:
             self.exited.set()
-        return self.runner
-
-    async def signal(self, name):
-        assert name == "SIGTERM"
-        self.result["timed_out"] = True
-        self.exited.set()
-
-    async def wait_exit(self):
         await self.exited.wait()
-        self.files[f"{self.directory}/result.json"] = json.dumps(self.result)
-        self.files[f"{self.directory}/events.jsonl"] = self.events
-        return 0
+        self.save_result()
+        return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+
+    async def stop_runner(self):
+        self.directory = next(path.rsplit("/", 1)[0] for path in self.files if path.endswith("/input.json"))
+        self.result["timed_out"] = True
+        self.save_result()
+        self.exited.set()
 
 
 @pytest.fixture
@@ -181,7 +196,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             installer = f"{directory}/install_pi_runtime.sh"
             assert installer in sandbox.files
             assert agent.config.resources_server is None
-            assert not sandbox.pty.create.called
+            assert not sandbox.launch.called
             assert not any(path.startswith("/app/") for path in sandbox.files)
             install_call = sandbox.exec.await_args_list[1]
             assert install_call.args[0] == (f"bash {installer} /tmp/nemo-gym-pi-node-22.19.0-0.80.2 0.80.2")
@@ -238,7 +253,7 @@ async def test_install_failure_preserves_stdout_and_stderr(setup):
     assert "exit status 1" in str(error.value)
     assert "Node cannot load libstdc++.so.6" in str(error.value)
     sandbox.disconnect.assert_awaited_once()
-    sandbox.pty.create.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
     sandbox.stop.assert_not_awaited()
     agent.server_client.post.assert_not_called()
 
@@ -254,7 +269,7 @@ def test_invalid_output_limit_does_not_consume_activation(setup, limit):
         )
         assert response.status_code == 422
         assert next(iter(agent._session_records.values())).state.task is None
-        sandbox.pty.create.assert_not_awaited()
+        sandbox.launch.assert_not_awaited()
         response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
         assert response.status_code == 200
 
@@ -277,7 +292,7 @@ def test_invalid_session_config_output_limit_does_not_consume_activation(setup):
         response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
         assert response.status_code == 422
         assert next(iter(agent._session_records.values())).state.task is None
-        sandbox.pty.create.assert_not_awaited()
+        sandbox.launch.assert_not_awaited()
 
 
 def test_direct_run_without_resources_rejected_before_execution(setup):
@@ -325,7 +340,7 @@ def test_cookie_identity_and_single_activation(setup):
         assert first.json() == retry.json()
         assert client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "changed"}).status_code == 409
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
-    sandbox.pty.create.assert_awaited_once()
+    sandbox.launch.assert_awaited_once()
 
 
 @pytest.mark.parametrize("reason,expected", [("error", "failed"), ("aborted", "failed"), ("length", "incomplete")])
@@ -357,7 +372,7 @@ def test_unsupported_request_is_not_silently_ignored(setup, override):
         result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task", **override})
         assert result.status_code == 422, result.text
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
-    sandbox.pty.create.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
 
 
 def test_rejected_request_does_not_consume_activation(setup):
@@ -366,11 +381,11 @@ def test_rejected_request_does_not_consume_activation(setup):
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         path = "/ng-rollout/pi-smoke-a2/v1/responses"
         assert client.post(path, json={"input": "task", "temperature": 0.2}).status_code == 422
-        sandbox.pty.create.assert_not_awaited()
+        sandbox.launch.assert_not_awaited()
         accepted = client.post(path, json={"input": "task"})
         assert accepted.status_code == 200, accepted.text
         assert client.post(path, json={"input": "changed"}).status_code == 409
-    sandbox.pty.create.assert_awaited_once()
+    sandbox.launch.assert_awaited_once()
 
 
 def test_no_session_keeps_existing_local_path(setup):
@@ -380,7 +395,7 @@ def test_no_session_keeps_existing_local_path(setup):
             with pytest.raises(RuntimeError, match="legacy path reached"):
                 client.post("/v1/responses", json={"input": "task"})
         legacy.assert_awaited_once()
-    sandbox.pty.create.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
 
 
 async def activate(agent, sandbox):
@@ -417,7 +432,7 @@ async def test_close_cancels_active_pi_before_detaching(setup):
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     with pytest.raises(asyncio.CancelledError):
         await task
-    sandbox.runner.send_signal.assert_awaited_once_with("SIGTERM")
+    sandbox.signal.assert_awaited_once()
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
 
@@ -432,7 +447,6 @@ async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
         await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert agent._session_records[session_id].state is not None
     sandbox.disconnect.assert_not_awaited()
-    sandbox.runner.close.assert_not_awaited()
 
 
 async def test_disconnect_failure_retains_session_for_retry(setup):
@@ -445,7 +459,6 @@ async def test_disconnect_failure_retains_session_for_retry(setup):
     assert agent._session_records[session_id].state is not None
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert agent._session_records[session_id].state is None
-    sandbox.runner.close.assert_awaited_once()
 
 
 def test_cleanup_receipt_is_required():
@@ -544,7 +557,8 @@ async def test_unknown_launch_outcome_fails_closed(setup):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": "pi-smoke-a2"}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
-    sandbox.pty.create.side_effect = TimeoutError("lost launch response")
+    sandbox.launch.side_effect = TimeoutError("lost launch response")
+    sandbox.cleanup_available = False
     with pytest.raises(TimeoutError):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     with pytest.raises(RuntimeError, match="launch outcome is unknown"):
@@ -582,7 +596,7 @@ async def test_cancelled_install_never_publishes_session_or_launches_pi(setup):
         await agent.seed_agent_session(request, seed())
     assert not any(record.state is not None for record in agent._session_records.values())
     assert not request.session
-    sandbox.pty.create.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
 
@@ -609,7 +623,7 @@ def test_unsupported_controls_do_not_consume_activation(setup, control):
         response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code", **control})
         assert response.status_code == 422, response.text
         assert next(iter(agent._session_records.values())).state.task is None
-        sandbox.pty.create.assert_not_awaited()
+        sandbox.launch.assert_not_awaited()
         response = client.post(
             "/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code", "model": "test-model"}
         )
@@ -892,7 +906,7 @@ async def test_failed_setup_preserves_handle_until_cleanup_confirmed(setup, clea
             await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
     else:
         assert not any(record.state is not None for record in agent._session_records.values())
-    sandbox.exec.side_effect = None
+    sandbox.exec.side_effect = sandbox.execute
     sandbox.disconnect.side_effect = None
     result = await agent.close_agent_session(
         Request({"type": "http", "session": {}}), AgentCloseSessionRequest(**close_body(session_id))
@@ -933,7 +947,7 @@ async def test_malformed_session_marker_never_runs_host_pi(setup, marker, endpoi
                 await agent.run(request, PiAgentRunRequest(responses_create_params={"input": "task"}))
         host.assert_not_awaited()
     sandbox.exec.assert_not_awaited()
-    sandbox.pty.create.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
 
 
 async def test_session_marker_blocks_legacy_run(setup):
@@ -959,7 +973,7 @@ async def test_cancelled_http_waiter_does_not_cancel_shared_activation(setup):
     response.output.clear()
     replay = await agent.responses(request, body)
     assert replay.output
-    sandbox.pty.create.assert_awaited_once()
+    sandbox.launch.assert_awaited_once()
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
@@ -984,7 +998,7 @@ async def test_local_and_sandbox_reject_unsupported_controls(setup, session, con
             await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task", **control))
         assert error.value.status_code == 422
         run.assert_not_awaited()
-        sandbox.pty.create.assert_not_awaited()
+        sandbox.launch.assert_not_awaited()
 
 
 async def test_local_instructions_match_sandbox_prompt(setup):
@@ -996,3 +1010,116 @@ async def test_local_instructions_match_sandbox_prompt(setup):
     with patch.object(agent, "_run_pi", AsyncMock(return_value=([], {}, "test-model", []))) as run:
         await agent.responses(Request({"type": "http", "session": {}}), body)
     assert run.call_args.args == ("task", "config\n\nrequest\n\ninput")
+
+
+@pytest.fixture
+async def local_session(setup, tmp_path):
+    """Exercise the adapter's actual launch and stop commands against real Linux processes."""
+    agent, sandbox = setup
+    body = seed()
+    body.sandbox_access.workdir = str(tmp_path)
+    await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    state = agent._session_records[body.agent_session_id].state
+    directory = tmp_path / "session"
+    directory.mkdir()
+    state.directory = str(directory)
+    from nemo_gym.sandbox import process_supervisor
+    from responses_api_agents.pi_agent import sandbox_runner
+
+    shutil.copyfile(process_supervisor.__file__, directory / "process_supervisor.py")
+    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
+    sandbox.upload = AsyncMock(side_effect=shutil.copyfile)
+    sandbox.download = AsyncMock(side_effect=shutil.copyfile)
+
+    async def execute(command, **kwargs):
+        process = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            command,
+            cwd=kwargs.get("cwd"),
+            start_new_session=True,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=8)
+            return SimpleNamespace(
+                return_code=process.returncode,
+                error_type=None,
+                stdout=stdout.decode(errors="replace"),
+                stderr=stderr.decode(errors="replace"),
+            )
+        finally:
+            if process.returncode is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                await process.wait()
+
+    sandbox.exec.side_effect = execute
+    return state, execute
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+@pytest.mark.parametrize("failure", ["cancel", "failed-before-spawn"])
+async def test_close_fences_delayed_launch_before_and_after_removing_session(local_session, failure):
+    state, execute = local_session
+    waiting = asyncio.Event()
+    commands = []
+
+    async def queued_exec(command, **kwargs):
+        if command.startswith("trap '' TERM;"):
+            commands.append(command)
+            waiting.set()
+            if failure == "cancel":
+                await asyncio.Event().wait()
+            raise OSError("lost launch response")
+        return await execute(command, **kwargs)
+
+    state.sandbox.exec.side_effect = queued_exec
+    state.task = asyncio.create_task(state.execute({}, timeout=5, close_timeout=2))
+    await asyncio.wait_for(waiting.wait(), 2)
+    if failure == "cancel":
+        state.task.cancel()
+    with pytest.raises(asyncio.CancelledError if failure == "cancel" else OSError):
+        await state.task
+    directory = Path(state.directory)
+    assert state.cleanup["cleanup_confirmed"] is True
+    assert (directory / "launch.claim").readlink() == Path("stop")
+    assert (await execute(commands[0])).return_code == 0
+    assert not (directory / "runner.pid").exists()
+    await state.close(2)
+    assert not directory.exists()
+    assert (await execute(commands[0])).return_code == 0
+    assert not directory.exists()
+    state.sandbox.disconnect.assert_awaited_once()
+    state.sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+async def test_launch_claim_without_receipt_blocks_close(local_session):
+    state, _ = local_session
+    (Path(state.directory) / "launch.claim").symlink_to("launch")
+    state.launch_started = True
+    with pytest.raises(RuntimeError, match="launch outcome is unknown"):
+        await state.close(1)
+    state.sandbox.disconnect.assert_not_awaited()
+    assert state.cleanup is None
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_session):
+    state, _ = local_session
+    payload = {
+        "directory": state.directory,
+        "cwd": state.request.sandbox_access.workdir,
+        "command": [sys.executable, "-c", "import json,sys; print(json.dumps({'prompt':sys.stdin.read()}))"],
+        "env": {},
+        "prompt": "real invocation",
+    }
+    raw = await state.execute(payload, timeout=3, close_timeout=2)
+    _, event = json.loads(raw)
+    assert event == {"prompt": "real invocation"}
+    assert state.result.cleanup_confirmed and state.result.return_code == 0
+    assert state.result.hostname
+    await state.close(2)
+    assert not Path(state.directory).exists()
+    state.sandbox.stop.assert_not_awaited()
