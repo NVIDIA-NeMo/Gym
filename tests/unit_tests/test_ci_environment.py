@@ -839,7 +839,7 @@ case "${1:-}" in
         : > "${venv_dir}/bin/python"
         chmod +x "${venv_dir}/bin/python"
         ;;
-    sync) ;;
+    lock|sync) ;;
     *) printf 'unexpected fake uv command: %s\\n' "$*" >&2; exit 2 ;;
 esac
 """,
@@ -942,3 +942,53 @@ def test_dockerfile_seeds_pre_commit_hook_cache_for_offline_lint() -> None:
     assert seed_cache_start < install_hooks < remove_git_dir
     assert 'chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}"' in dockerfile
     assert 'test -w "${PRE_COMMIT_HOME}"' in dockerfile
+
+
+@pytest.mark.parametrize("container", [False, True])
+@pytest.mark.parametrize("lock_status", [0, 1])
+def test_setup_dev_checks_lock_before_sync(tmp_path: Path, container: bool, lock_status: int) -> None:
+    repo_root = tmp_path / "repo"
+    ci_dir = repo_root / "scripts" / "ci"
+    ci_dir.mkdir(parents=True)
+    shutil.copy2(SETUP_DEV, ci_dir / "setup_dev.sh")
+    shutil.copy2(REPO_ROOT / ".python-version", repo_root / ".python-version")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture = tmp_path / "uv.args"
+    _write_executable(
+        bin_dir / "uv",
+        """#!/usr/bin/env bash
+set -eu
+case "$1" in
+    --version) echo 'uv 0.11.29' ;;
+    cache) echo "${UV_CACHE_DIR}" ;;
+    lock) echo "$*" >> "${GYM_CI_CAPTURE}"; exit "${LOCK_STATUS}" ;;
+    sync) echo "$*" >> "${GYM_CI_CAPTURE}" ;;
+    *) echo "unexpected uv command: $*" >&2; exit 2 ;;
+esac
+""",
+    )
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    _write_executable(venv / "bin" / "python", "#!/usr/bin/env bash\nexit 0\n")
+    (venv / "bin" / "activate").write_text("")
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "GYM_CI_DEV_VENV_DIR": str(venv),
+            "UV_CACHE_DIR": str(tmp_path / "cache"),
+            "GYM_CI_CAPTURE": str(capture),
+            "LOCK_STATUS": str(lock_status),
+            "NEMO_GYM_CONTAINER": "1" if container else "0",
+        }
+    )
+
+    result = subprocess.run(["bash", str(ci_dir / "setup_dev.sh")], capture_output=True, text=True, env=env)
+
+    assert result.returncode == lock_status, result.stderr
+    offline = " --offline" if container else ""
+    expected = [f"lock --check{offline}"]
+    if lock_status == 0:
+        expected.append(f"sync --extra dev{offline}")
+    assert capture.read_text().splitlines() == expected

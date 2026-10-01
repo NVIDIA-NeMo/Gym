@@ -1204,6 +1204,10 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             ) / len(criteria)
         return metrics
 
+    def compute_repeat_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Apply the full-run rubric scoring rules to each repeat's means."""
+        return {name: value for name, value in self.compute_metrics(tasks).items() if name.startswith("mean/")}
+
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Headline metrics: the usual mean/* plus judge-health counters.
 

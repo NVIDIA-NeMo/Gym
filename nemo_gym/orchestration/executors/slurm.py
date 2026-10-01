@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from nemo_gym import __version__
-from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
+from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
 from nemo_gym.orchestration.executors.otel import (
@@ -31,6 +31,7 @@ from nemo_gym.orchestration.executors.otel import (
     render_collector_config,
     resolve_token,
     validate_destination,
+    validate_gym_telemetry,
 )
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
@@ -125,6 +126,9 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
     entries = [("driver", m) for m in config.driver.mounts]
     for name, service in config.services.items():
         entries += [(f"services.{name}", m) for m in service.mounts]
+        if isinstance(service, VllmPDServiceConfig):
+            for tier in ("prefill", "decode"):
+                entries += [(f"services.{name}.{tier}", m) for m in getattr(service, tier).mounts]
     srcs_by_label = [(label, mount.split(":")[0]) for label, mount in entries]
     if not srcs_by_label:
         return
@@ -150,6 +154,8 @@ class SlurmExecutor(BaseExecutor):
     bash inside the sbatch script (no container needed — they just poll HTTP).
     """
 
+    supports_resumable = True
+
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         compute = next(iter(config.compute.values()))
         cluster = next(iter(config.compute))
@@ -158,6 +164,7 @@ class SlurmExecutor(BaseExecutor):
         token = None
         if otel_active(config):
             validate_destination(config)
+            validate_gym_telemetry(config)
             token = resolve_token(config)
         now = utc_now()
         gym_job_id = new_gym_job_id(now)
@@ -238,13 +245,18 @@ class SlurmExecutor(BaseExecutor):
                 print(render_collector_config(config, name, remote_run_dir / name))
 
     def _stage(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path, staging: Path) -> Path:
+        # rsync -a copies these modes to the cluster. The temp dir is created 0700, which would
+        # hide the run from other users; job.sh holds resolved secrets, so it stays owner-only.
+        staging.chmod(0o755)
         for name, benchmark in config.driver.benchmarks.items():
             bench_dir = staging / name
             bench_dir.mkdir()
             (bench_dir / "logs").mkdir()
             (bench_dir / "artifacts").mkdir()
             script = build_sbatch_script(config, name, benchmark, compute, remote_run_dir / name)
-            (bench_dir / "job.sh").write_text(script)
+            job_script = bench_dir / "job.sh"
+            job_script.write_text(script)
+            job_script.chmod(0o600)
             if otel_active(config):
                 (bench_dir / COLLECTOR_DIR).mkdir()
                 (bench_dir / COLLECTOR_DIR / COLLECTOR_CONFIG_NAME).write_text(

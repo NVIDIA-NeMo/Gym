@@ -86,3 +86,11 @@ equivalence_llm_judge_simple_agent:
         jsonl_fpath: resources_servers/equivalence_llm_judge/data/train.jsonl
         huggingface_identifier:
           repo_id: nvidia/Nemotron-RL-knowledge-openQA
+
+equivalence_llm_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: equivalence_llm_judge_simple_agent

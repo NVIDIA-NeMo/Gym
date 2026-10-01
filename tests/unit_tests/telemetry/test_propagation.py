@@ -86,14 +86,12 @@ def traces(monkeypatch):
     config = NemoLensConfig(
         enabled=True,
         service_name="nemo-gym-test",
-        export_strategy="all_ranks",
         span_groups="all",
         # Traces only. Leaving metrics on would stand up a PeriodicExportingMetricReader
         # pointed at the default OTLP endpoint and fill the run with connection errors.
         metrics_enabled=False,
-        _span_group_cls=GymSpanGroup,
     )
-    handle = setup_telemetry(config, rank=0, world_size=1, span_exporter=exporter, _allow_reinit=True)
+    handle = setup_telemetry(config, span_exporter=exporter, _allow_reinit=True)
     set_enabled_span_groups(GymSpanGroup.resolve("all"))
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", handle)
     monkeypatch.setattr(telemetry_setup, "_INITIALISED", True)

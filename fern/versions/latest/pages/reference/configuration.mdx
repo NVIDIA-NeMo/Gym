@@ -30,6 +30,14 @@ On multi-node deployments, the `swe_agents` server embeds these paths in command
 
 Servers that pre-staged setup trees next to the package (the layout before `cache_dir` existed, for example baked container images) keep using those trees **only while `cache_dir` is left at its default** — explicitly configuring `cache_dir` opts out, and removing the pre-staged trees migrates a default-config deployment. Contents accumulate across runs; both directories are safe to delete when no run is active.
 
+### Server Virtual Environments
+
+`gym env start` sets up one uv virtual environment per server and starts the server with that environment's own interpreter (`<venv>/bin/python`), then logs which venv each server runs from. A venv that was copied or moved after it was built still runs its own interpreter, but its `bin/activate` still puts the original location first on `PATH`, so commands a server runs by name (such as `python` or `uv`) are looked up there first. Rebuild a moved venv, or create it with `uv venv --relocatable`, if its servers start such subprocesses.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `uv_lock_timeout_seconds` | `UV_LOCK_TIMEOUT` if already exported, else `1800` | Seconds a server install waits for uv's cache lock. Servers start together and share one `uv_cache_dir`, so the rest wait while one of them does a cold install; uv's own default of 300 can be too short for that. Exported as `UV_LOCK_TIMEOUT` to the Gym process and to every server, test, and venv-setup subprocess it launches. Set it to `null` to leave `UV_LOCK_TIMEOUT` as inherited. |
+
 ---
 
 ## Path Resolution and External Roots
