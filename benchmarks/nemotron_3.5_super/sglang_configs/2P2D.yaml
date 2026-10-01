@@ -179,10 +179,6 @@ roles:
       trust-remote-code: true
       weight-loader-drop-cache-after-load: true
       log-level-http: warning
-      # TODO @bxyu-nvidia: Remove
-      # log-level: debug
-      # log-requests: true
-      # log-requests-level: 3
   decode:
     nodes: 2
     workers: 1
@@ -251,7 +247,3 @@ roles:
       enable-dp-attention: true
       enable-dp-lm-head: true
       log-level-http: warning
-      # TODO @bxyu-nvidia: Remove
-      # log-level: debug
-      # log-requests: true
-      # log-requests-level: 3
