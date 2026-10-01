@@ -1,4 +1,4 @@
-# Nemotron 3.5 Super GA MTP-boosted BF16 — 2P2D.
+# Nemotron 3.5 Super GA MTP-boosted BF16 — 4P4D.
 # Analytical candidate; full-scale startup, accuracy and throughput are unmeasured.
 # P/D counts mean whole four-GPU nodes. Larger D roles are one shared engine.
 # Source checkpoint: nim-mtp-boosted-09212026 (83 registry-hash-verified files).
@@ -20,7 +20,7 @@
 # Serving capacity does not enlarge the external CPU/sandbox resource budget.
 
 schema: 2
-name: nemotron35-ga-gb200-2p2d-theoretical
+name: nemotron35-ga-gb200-4p4d-theoretical
 model:
   path: "$MODEL"
   container: sglang-nemotron35-v0520-validated
@@ -69,7 +69,7 @@ benchmark:
   env:
     GYM_CONFIG: benchmarks/swebench/verified/opencode.yaml
     POLICY_MODEL_NAME: &served_model_name nemotron-3.5-super-ga-mtp-boosted
-    EXPERIMENT_NAME: sglang-2p2d-gym
+    EXPERIMENT_NAME: sglang-4p4d-gym
     EXPORT_TO_CSV: '0'
     EXPORT_CSV_TO_MODEL_DIR: '0'
   command: |
@@ -114,8 +114,8 @@ benchmark:
 
 roles:
   prefill:
-    nodes: 2
-    workers: 2
+    nodes: 4
+    workers: 4
     gpus: 4
     env:
       CUDA_VISIBLE_DEVICES: 0,1,2,3
@@ -179,9 +179,9 @@ roles:
       weight-loader-drop-cache-after-load: true
       log-level-http: warning
   decode:
-    nodes: 2
+    nodes: 4
     workers: 1
-    gpus: 8
+    gpus: 16
     env:
       CUDA_VISIBLE_DEVICES: 0,1,2,3
       UCX_NET_DEVICES: mlx5_0,mlx5_1,mlx5_3,mlx5_4
@@ -219,7 +219,7 @@ roles:
       dtype: bfloat16
       enable-cache-report: true
       enable-metrics: true
-      ep-size: 8
+      ep-size: 16
       kv-cache-dtype: fp8_e4m3
       linear-attn-backend: triton
       mamba-backend: flashinfer
@@ -239,10 +239,10 @@ roles:
       speculative-num-steps: 3
       tokenizer-worker-num: 4
       tool-call-parser: qwen3_coder
-      tp-size: 8
+      tp-size: 16
       trust-remote-code: true
       weight-loader-drop-cache-after-load: true
-      dp-size: 2
+      dp-size: 4
       enable-dp-attention: true
       enable-dp-lm-head: true
       log-level-http: warning
