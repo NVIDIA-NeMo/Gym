@@ -773,27 +773,34 @@ class TestLmLogprobs:
         assert result.reward == pytest.approx(1.0)
 
     def test_summed_mass_beats_the_single_largest_token(self):
-        """Upstream compares total YES mass against total NO mass.
-
-        `NO` is the single most likely token here, so an argmax says NO, but three
-        YES-suffixed variants together outweigh it: 3*exp(-1.5)=0.669 > exp(-1.0)=0.368.
-        """
+        """Summed mass, not argmax: NO is the single likeliest token, but two YES
+        spellings outweigh it (2*exp(-1.5)=0.446 > exp(-1.0)=0.368)."""
         result = self._with_logprobs(
             _make_server(),
             "NO",
-            [("NO", -1.0), ("YES", -1.5), (" YES", -1.5), ("_YES", -1.5)],
+            [("NO", -1.0), ("YES", -1.5), (" YES", -1.5)],
             task_type="step_validation",
             ground_truth={"label": True},
         )
         assert result.status == "ok_logprobs"
         assert result.reward == pytest.approx(1.0)
 
-    def test_one_sided_mass_abstains_positive(self):
-        """Upstream returns None, which post_binary turns into 0.5 -> label True.
+    def test_suffix_tokens_are_not_decision_tokens(self):
+        """Only Y = {YES, NO} counts (paper eq. 1); predict.py's suffix rule would
+        let MONO and PORNO bury the real NO and flip the label."""
+        result = self._with_logprobs(
+            _make_server(),
+            "YES",
+            [("YES", -1.2), ("NO", -1.4), ("MONO", -0.2), ("PORNO", -0.3)],
+            task_type="step_validation",
+            ground_truth={"label": True},
+        )
+        assert result.status == "ok_logprobs"
+        # exp(-1.2)=0.301 > exp(-1.4)=0.247, so YES wins once the suffixes are out.
+        assert result.reward == pytest.approx(1.0)
 
-        float(None) raises inside post_binary, so the conservative fallback runs and
-        0.5 >= 0.5 counts POSITIVE. Abstention is not a negative label upstream.
-        """
+    def test_one_sided_mass_abstains_positive(self):
+        """Upstream: None -> post_binary -> 0.5 -> label True. Abstention is positive."""
         server = _make_server()
         positive = self._with_logprobs(
             server,
@@ -813,11 +820,9 @@ class TestLmLogprobs:
         assert positive.reward == pytest.approx(1.0)
         assert negative.reward == pytest.approx(0.0)
 
-    def test_contrastive_abstains_when_fewer_than_two_indices_are_visible(self):
-        """Upstream requires two distinct indices; with one it returns None and
-        then raises on indexing it. Over an API that is reachable, so it becomes
-        upstream's own -1 'no valid index' sentinel instead of a 500.
-        """
+    def test_a_single_visible_index_still_decides(self):
+        """predict.py's >=2-index guard zeroed every Phi-3-mini contrastive row
+        over a top-k window; the paper's eq. (2) has no such condition."""
         result = self._with_logprobs(
             _make_server(),
             "2",
@@ -826,14 +831,23 @@ class TestLmLogprobs:
             ground_truth={"correct_option_idx": 2},
             options=["a", "b", "c", "d"],
         )
+        assert result.status == "ok_logprobs"
+        assert result.reward == pytest.approx(1.0)
+
+    def test_contrastive_abstains_only_when_no_index_is_visible(self):
+        result = self._with_logprobs(
+            _make_server(),
+            "the",
+            [("the", -0.2), ("an", -1.0)],
+            task_type="contrastive_choice",
+            ground_truth={"correct_option_idx": 2},
+            options=["a", "b", "c", "d"],
+        )
         assert result.status == "lm_abstained"
         assert result.reward == pytest.approx(0.0)
 
     def test_the_sampled_token_is_not_counted_twice(self):
-        """vLLM repeats the sampled token inside top_logprobs; upstream walks each
-        vocabulary entry once. Double counting would let the sampled side win a
-        comparison it should lose.
-        """
+        """vLLM repeats the sampled token inside top_logprobs; it must count once."""
         result = self._with_logprobs(
             _make_server(),
             "YES",

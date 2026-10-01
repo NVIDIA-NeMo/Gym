@@ -278,12 +278,9 @@ def _norm_token(token: str) -> str:
 
 
 def _first_token_mass(logprobs: Any) -> List[Tuple[str, float]]:
-    """``(token, probability)`` at the first generated position, counted once.
+    """``(token, probability)`` at the first generated position.
 
-    Upstream walks each vocabulary entry exactly once. vLLM repeats the sampled
-    token inside ``top_logprobs``, so when alternatives are present they are the
-    whole visible population and the separately reported chosen token must not be
-    added again -- doing so double-counts the largest mass in the comparison.
+    vLLM repeats the sampled token inside ``top_logprobs``; count it once.
     """
     if not isinstance(logprobs, list) or not logprobs:
         return []
@@ -302,28 +299,23 @@ def _first_token_mass(logprobs: Any) -> List[Tuple[str, float]]:
 
 
 def _lm_binary_prob_yes(alternatives: List[Tuple[str, float]]) -> Optional[float]:
-    """Upstream's ``_lm_binary_prob_yes_from_prompt_ids``, over visible tokens.
+    """P(YES) per the paper's appendix F.3.2 eq. (1): softmax over Y = {YES, NO}.
 
-    Upstream sums softmax mass across the entire vocabulary; an OpenAI-compatible
-    API exposes only the top-k at the first position, so these sums are truncated.
-    The matching rule, the epsilon and the both-sides-observed abstention are
-    upstream's unchanged.
+    DEPARTURE from ``predict.py``, which matches any token ENDING in YES/NO over
+    the full vocabulary. That rule is asymmetric (Llama-3.1: 153 tokens count as
+    NO vs 21 as YES) and its tail is invisible through a top-k API. Cost of
+    following the paper instead: <1 point on Llama-3.1-8B.
     """
     m_yes = m_no = 0.0
     for token, probability in alternatives:
         if probability <= 0.0:
             continue
         normalized = _norm_token(token).upper()
-        if not normalized:
-            continue
-        # predict.py's rule, which produced the published numbers. NOTE that the
-        # paper's appendix F.3.2 eq. (1) instead normalizes over the candidate set
-        # {YES, NO} itself; the two agree only when one token maps to each side.
-        # Measured on a full Llama-3.1-8B lm subset, the choice is worth <1 point.
-        if normalized == "YES" or normalized.endswith("YES"):
+        if normalized == "YES":
             m_yes += probability
-        elif normalized == "NO" or normalized.endswith("NO"):
+        elif normalized == "NO":
             m_no += probability
+    # Upstream's guard: both candidates must be observed.
     if m_yes <= 0.0 or m_no <= 0.0:
         return None
     return float((m_yes + _LM_EPS) / (m_yes + m_no + 2.0 * _LM_EPS))
@@ -345,8 +337,10 @@ def _lm_choice_probs(alternatives: List[Tuple[str, float]], num_options: int) ->
         if 0 <= index < num_options:
             mass[index] += probability
             seen.add(index)
-    # Upstream requires at least two distinct indices before it trusts the mass.
-    if len(seen) < 2:
+    # DEPARTURE: predict.py requires >=2 distinct indices. Over a top-k window
+    # that zeroed every Phi-3-mini contrastive row; the paper's eq. (2) has no
+    # such condition, so one visible index is enough to rank.
+    if not seen:
         return None
     mass = [m + _LM_EPS for m in mass]
     total = sum(mass)
@@ -371,9 +365,8 @@ def to_prediction_lm(
     if alternatives and task_type in ("step_validation", "condition_validation"):
         score = _lm_binary_prob_yes(alternatives)
         if score is None:
-            # Upstream hands `score=None` to post_binary, where float(None) raises
-            # and the conservative fallback takes over: 0.5, which thresholds
-            # POSITIVE. Abstention is a positive label upstream, not a negative one.
+            # Upstream: post_binary({"score": None}) -> float(None) raises -> 0.5,
+            # which thresholds POSITIVE.
             return {"score": 0.5, "label": True, "status": "lm_abstained"}
         return {"score": score, "label": bool(score >= _BINARY_THRESHOLD), "status": "ok_logprobs"}
     if alternatives and task_type == "contrastive_choice":
@@ -381,10 +374,8 @@ def to_prediction_lm(
         if probabilities is not None:
             best = int(max(range(len(probabilities)), key=lambda i: probabilities[i]))
             return {"predicted_option_idx": best, "status": "ok_logprobs"}
-        # DEPARTURE, forced: upstream indexes its None result here and raises.
-        # Over an API the top-k often shows fewer than two option indices, so this
-        # is reachable where upstream's full-vocabulary scan made it vanishing.
-        # -1 is upstream's own "no valid index" sentinel.
+        # Upstream would index its None result and raise; -1 is its own
+        # "no valid index" sentinel.
         return {"predicted_option_idx": -1, "status": "lm_abstained"}
 
     text = _norm_token(_THINK_BLOCK_RE.sub(" ", raw or ""))

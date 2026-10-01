@@ -74,12 +74,7 @@ class ChemReasonBenchVerifyResponse(ChemReasonBenchVerifyRequest, BaseVerifyResp
 
 
 def _first_output_logprobs(response: Any) -> Any:
-    """Per-token logprobs of the first output text part, or None.
-
-    Populated only when the row asked for them: `lm` rows carry
-    ``metadata.extra_body`` switching vLLM's chat-level ``logprobs`` on, and the
-    converter carries them back onto the output text.
-    """
+    """Per-token logprobs of the first output text part, or None (lm rows only)."""
     for item in getattr(response, "output", None) or []:
         for part in getattr(item, "content", None) or []:
             logprobs = getattr(part, "logprobs", None)

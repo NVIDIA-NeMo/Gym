@@ -96,20 +96,19 @@ ORDERING_KEY = "predicted_order"
 DUAL_PROTOCOL_TASKS = ("step_validation", "condition_validation", "contrastive_choice")
 EXPECTED_LM_ROWS = sum(EXPECTED_BY_TASK[t] for t in DUAL_PROTOCOL_TASKS)
 
-# Upstream decides an `lm` row from token probabilities, so the row has to ask for them.
-# `logprobs` is not a Responses API field -- that model is `extra="forbid"`, so putting it here
-# rejects every lm row -- and `top_logprobs` alone is inert: vLLM computes
-# `logprobs = top_logprobs if logprobs else None`, so without the chat-level boolean nothing
-# comes back. The supported channel is the model server's `extra_body`, which vllm_model merges
-# per request from `metadata["extra_body"]` and which survives because Gym never sets `logprobs`
-# itself.
-#
-# Upstream sums over the WHOLE vocabulary where an API shows only the top-k, so mass outside the
-# window is lost. 20 is vLLM's default ceiling (`--max-logprobs`); raising it to 1000 moved every
-# lm metric by <=0.5 on both models, so the window is not a material departure.
-LM_RESPONSES_CREATE_PARAMS: Dict[str, Any] = {
-    "metadata": {"extra_body": json.dumps({"logprobs": True, "top_logprobs": 20})}
-}
+# vLLM's default `--max-logprobs` ceiling. Raise both together if a model reports many
+# `lm_abstained` rows (Phi-3-mini needed 1000).
+DEFAULT_LM_TOP_LOGPROBS = 20
+
+
+def lm_responses_create_params(top_logprobs: int = DEFAULT_LM_TOP_LOGPROBS) -> Dict[str, Any]:
+    """What an `lm` row must send to get a token distribution back.
+
+    `logprobs` is not a Responses API field (extra="forbid") and `top_logprobs`
+    alone is inert in vLLM, so both travel via the model server's per-request
+    `metadata["extra_body"]`.
+    """
+    return {"metadata": {"extra_body": json.dumps({"logprobs": True, "top_logprobs": top_logprobs})}}
 
 
 def _dumps(obj: Any) -> str:
@@ -275,7 +274,12 @@ def _fetch_jsonl(url: str) -> List[Dict[str, Any]]:
     return rows
 
 
-def _format_row(prompt_row: Dict[str, Any], answer_row: Dict[str, Any], protocol: str = "gen") -> Dict[str, Any]:
+def _format_row(
+    prompt_row: Dict[str, Any],
+    answer_row: Dict[str, Any],
+    protocol: str = "gen",
+    top_logprobs: int = DEFAULT_LM_TOP_LOGPROBS,
+) -> Dict[str, Any]:
     task_type = prompt_row["task_type"]
     builders = PROMPT_BUILDERS if protocol == "gen" else LM_PROMPT_BUILDERS
     suffix = "" if protocol == "gen" else "::lm"
@@ -301,14 +305,15 @@ def _format_row(prompt_row: Dict[str, Any], answer_row: Dict[str, Any], protocol
     elif task_type == "step_completion":
         # canonicalize_slots resolves reagent names to $n$ through this.
         row["legend"] = dict(prompt_row.get("legend") or {})
-    if protocol == "lm" and LM_RESPONSES_CREATE_PARAMS:
-        row["responses_create_params"] = dict(LM_RESPONSES_CREATE_PARAMS)
+    if protocol == "lm":
+        row["responses_create_params"] = lm_responses_create_params(top_logprobs)
     return row
 
 
 def prepare(
     limit: Optional[int] = None,
     protocol: Optional[str] = None,
+    top_logprobs: int = DEFAULT_LM_TOP_LOGPROBS,
     output_fpath: Path = OUTPUT_FPATH,
 ) -> Path:
     """Fetch both upstream files, join on ``task_id``, and write the Gym JSONL.
@@ -323,6 +328,8 @@ def prepare(
     """
     if limit is not None and limit <= 0:
         raise ValueError(f"limit must be a positive integer, got {limit!r}")
+    if not isinstance(top_logprobs, int) or isinstance(top_logprobs, bool) or top_logprobs < 1:
+        raise ValueError(f"top_logprobs must be a positive integer, got {top_logprobs!r}")
     if protocol is not None and protocol not in ("gen", "lm"):
         raise ValueError(f"protocol must be 'gen' or 'lm', got {protocol!r}")
 
@@ -351,7 +358,7 @@ def prepare(
         rows.append(_format_row(prompt_row, answer_row))
         by_task[task_type] = by_task.get(task_type, 0) + 1
         if task_type in DUAL_PROTOCOL_TASKS:
-            lm_rows.append(_format_row(prompt_row, answer_row, protocol="lm"))
+            lm_rows.append(_format_row(prompt_row, answer_row, protocol="lm", top_logprobs=top_logprobs))
 
     # Count what parsed, not what the server listed: a complete download whose
     # contents are unreadable would otherwise sail through a byte-length check.
