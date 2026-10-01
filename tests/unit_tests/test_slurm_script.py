@@ -2986,3 +2986,13 @@ def test_a_pd_router_beside_a_lone_vllm_takes_no_gpus(tmp_path):
     services = {**_pd_services(node_pool="front"), "scorer": _vllm(8200, "front")}
     pools = {"front": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4}, **_PD_POOLS}
     assert "CUDA_VISIBLE_DEVICES" not in _pd_script(tmp_path, services=services, pools=pools)
+
+
+def test_auto_probes_a_service_it_moves_to_a_second_node_there(tmp_path):
+    _, script = _auto_render(
+        tmp_path,
+        {"policy": _vllm(8000, None, tensor_parallel_size=4), "judge": _vllm(8001, None)},
+        policy="policy",
+    )
+    assert "Waiting for policy at http://localhost:8000" in script
+    assert "Waiting for judge at http://${gym_nodes[1]}:8001" in script
