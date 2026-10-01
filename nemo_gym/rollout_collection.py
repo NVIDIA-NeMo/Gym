@@ -1485,9 +1485,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     @model_validator(mode="after")
     def _validate_dispatch_concurrency(self) -> "RolloutCollectionConfig":
-        if self.dispatch_budget_s is not None and self.num_samples_in_parallel is None:
+        if (
+            self.dispatch_budget_s is not None
+            and self.num_samples_in_parallel is None
+            and self.max_resident_rollout_tasks is None
+        ):
             raise ValueError(
-                "dispatch_budget_s requires a finite positive num_samples_in_parallel; "
+                "dispatch_budget_s requires num_samples_in_parallel or max_resident_rollout_tasks; "
                 "unbounded dispatch can POST the entire queue before the budget is re-checked"
             )
         return self
@@ -3237,7 +3241,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000
-                    tracker.record(time.monotonic() - started)
                     return _CompletedRollout(
                         row=row,
                         result=result,
@@ -3266,6 +3269,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server=server_name,
                         environment_server_type=server_type,
                     )
+                finally:
+                    tracker.record(time.monotonic() - started)
 
         awaitables = map(_post_subroutine, examples)
         if max_resident_tasks is not None:
