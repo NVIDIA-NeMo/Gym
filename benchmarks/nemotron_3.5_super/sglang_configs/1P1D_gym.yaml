@@ -93,10 +93,10 @@ benchmark:
     mkdir -p "$output_dir"
     rollouts_fpath="$output_dir/rollouts.jsonl"
 
-    gym eval prepare --config "$GYM_CONFIG" +use_cached_prepared_benchmarks=true
+    gym eval prepare --config $GYM_CONFIG +use_cached_prepared_benchmarks=true
 
     gym eval run \
-      --config "$GYM_CONFIG" \
+      --config $GYM_CONFIG \
       --model-type vllm_model \
       --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
       --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
