@@ -247,7 +247,7 @@ class SwemerOmlResourcesServer(SimpleResourcesServer):
         result = await sandbox.exec(
             f"cd {wd} && git ls-files -z --stage | while IFS= read -r -d '' e; do "
             "m=${e%% *}; p=${e#*$'\\t'}; case $m in 100644|100755) printf '%s\\0' \"$p\";; esac; done "
-            "| xargs -0 -r -n 500 git hash-object -w -- && git add -u && "
+            "| xargs -0 -r -n 500 git hash-object -w -- || true; git add -u && "
             "(git -c user.email=nemo-gym@nvidia.com -c user.name=nemo-gym commit -q -m "
             "'nemo_gym: restore blobs stripped from the image' || true)",
             timeout_s=900,
