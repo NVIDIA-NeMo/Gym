@@ -19,7 +19,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import aiohttp
 from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall, UnifiedLLM
@@ -33,7 +33,20 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.rollout_observability import ModelCallRef, ObservationGap
-from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, raise_for_status
+
+
+class GymModelClient(Protocol):
+    """Model transport usable in the agent server or a sandbox process."""
+
+    async def post(
+        self,
+        *,
+        server_name: str,
+        url_path: str,
+        json: NeMoGymResponseCreateParamsNonStreaming,
+        cookies: dict[str, str],
+    ) -> aiohttp.ClientResponse: ...
 
 
 class PolicyCallBudgetExceeded(RuntimeError):
@@ -59,6 +72,7 @@ class RolloutLLMState:
     """Gym-owned budget and exact model evidence shared by this rollout's clients."""
 
     max_policy_calls: int
+    fatal_error: Exception | None = None
     used: int = 0
     calls: list[GymModelCall] = field(default_factory=list)
     gaps: list[ObservationGap] = field(default_factory=list)
@@ -210,7 +224,7 @@ class GymResponsesLLM(UnifiedLLM):
     def __init__(
         self,
         *,
-        server_client: ServerClient,
+        server_client: GymModelClient,
         model_server_name: str,
         model_url_path: str,
         state: RolloutLLMState,
@@ -299,26 +313,30 @@ class GymResponsesLLM(UnifiedLLM):
         self._state.calls.append(call)
         if self._on_call is not None:
             self._on_call(call)
-        http_response = await self._server_client.post(
-            server_name=self._model_server_name,
-            url_path=self._model_url_path,
-            json=body,
-            cookies=self._cookies,
-        )
         try:
-            await raise_for_status(http_response)
-        except aiohttp.ClientResponseError as error:
-            # Expose the response body for NOOA context-overflow detection.
-            content = getattr(error, "response_content", b"")
-            if content:
-                if isinstance(content, bytes):
-                    content = content.decode(errors="replace")
-                error.message = f"{error.message}: {content}"
+            http_response = await self._server_client.post(
+                server_name=self._model_server_name,
+                url_path=self._model_url_path,
+                json=body,
+                cookies=self._cookies,
+            )
+            try:
+                await raise_for_status(http_response)
+            except aiohttp.ClientResponseError as error:
+                # Expose the response body for NOOA context-overflow detection.
+                content = getattr(error, "response_content", b"")
+                if content:
+                    if isinstance(content, bytes):
+                        content = content.decode(errors="replace")
+                    error.message = f"{error.message}: {content}"
+                raise
+            raw = await get_response_json(http_response)
+            response = NeMoGymResponse.model_validate(raw)
+            call.response = response
+            self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
+        except Exception as error:
+            self._state.fatal_error = error
             raise
-        raw = await get_response_json(http_response)
-        response = NeMoGymResponse.model_validate(raw)
-        call.response = response
-        self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
 
         function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]
         usage = response.usage.model_dump(mode="json") if response.usage is not None else None
