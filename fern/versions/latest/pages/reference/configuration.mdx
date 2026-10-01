@@ -119,7 +119,7 @@ a file-descriptor warning because it is not an allocation.
 
 The total aiohttp limit is a scheduling limit, not a strict open-socket cap across multiple
 hosts. Idle-connection reuse and aiohttp's waiter wake-up order can exceed the total limit for
-as long as requests to more than one host are in flight. Size pools with file-descriptor,
+as long as requests to more than one host are in flight. When sizing pools, keep file-descriptor,
 ephemeral-port, and downstream connection budgets in mind.
 
 Pool metrics require an active metrics exporter before the shared client is constructed.
