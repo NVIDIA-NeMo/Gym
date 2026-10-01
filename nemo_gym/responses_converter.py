@@ -142,6 +142,25 @@ def _token_information_from_mapping(value: Dict[str, Any]) -> Optional[TokenIDLo
     return TokenIDLogProbMixin.model_validate(value)
 
 
+def _chat_logprobs_to_responses(logprobs: Any) -> Optional[List[Dict[str, Any]]]:
+    """Chat choice logprobs in the shape ``ResponseOutputText.logprobs`` expects.
+
+    Same field names on both sides; the Responses models require ``bytes`` to be
+    iterable where chat allows null.
+    """
+    content = getattr(logprobs, "content", None)
+    if not content:
+        return None
+
+    def _one(entry: Any) -> Dict[str, Any]:
+        out = entry.model_dump()
+        out["bytes"] = out.get("bytes") or []
+        out["top_logprobs"] = [{**alt, "bytes": alt.get("bytes") or []} for alt in (out.get("top_logprobs") or [])]
+        return out
+
+    return [_one(entry) for entry in content]
+
+
 class ResponsesConverter(BaseModel):
     """Converts between OpenAI Responses API and Chat Completions API formats."""
 
@@ -657,9 +676,14 @@ class ResponsesConverter(BaseModel):
     # =======================================================
 
     def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
-        return self.postprocess_assistant_message_dict(choice.message.model_dump(exclude_none=True))
+        return self.postprocess_assistant_message_dict(
+            choice.message.model_dump(exclude_none=True),
+            logprobs=_chat_logprobs_to_responses(choice.logprobs),
+        )
 
-    def postprocess_assistant_message_dict(self, message_dict: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
+    def postprocess_assistant_message_dict(
+        self, message_dict: Dict[str, Any], *, logprobs: Any = None
+    ) -> List[NeMoGymResponseOutputItem]:
         response_output = []
 
         content = message_dict.get("content") or ""
@@ -690,6 +714,7 @@ class ResponsesConverter(BaseModel):
                         type="output_text",
                         text=content,
                         annotations=[],
+                        logprobs=logprobs,
                     )
                 )
             if refusal:

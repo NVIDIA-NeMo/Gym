@@ -1128,6 +1128,46 @@ def test_response_input_rejects_invalid_token_metadata_atomically(token_metadata
 # ===========================================================================
 
 
+def _choice_with_logprobs(content: str = "YES") -> dict:
+    return {
+        "finish_reason": "stop",
+        "index": 0,
+        "message": {"role": "assistant", "content": content},
+        "logprobs": {
+            "content": [
+                {
+                    "token": content,
+                    "logprob": -0.05,
+                    "bytes": None,
+                    "top_logprobs": [
+                        {"token": "YES", "logprob": -0.05, "bytes": None},
+                        {"token": "NO", "logprob": -3.10, "bytes": None},
+                    ],
+                }
+            ]
+        },
+    }
+
+
+def test_postprocess_carries_choice_logprobs_onto_the_output_text(converter: ResponsesConverter):
+    """Chat reports logprobs on the choice, not the message; a message-only
+    conversion drops them."""
+    choice = NeMoGymChoice.model_validate(_choice_with_logprobs())
+    part = converter.postprocess_chat_response(choice)[0].content[0]
+
+    assert part.logprobs is not None
+    entry = part.logprobs[0]
+    alternatives = entry["top_logprobs"] if isinstance(entry, dict) else entry.top_logprobs
+    assert [(a["token"] if isinstance(a, dict) else a.token) for a in alternatives] == ["YES", "NO"]
+
+
+def test_postprocess_without_logprobs_leaves_the_field_unset(converter: ResponsesConverter):
+    choice = NeMoGymChoice.model_validate(
+        {"finish_reason": "stop", "index": 0, "message": {"role": "assistant", "content": "NO"}}
+    )
+    assert converter.postprocess_chat_response(choice)[0].content[0].logprobs is None
+
+
 def test_postprocess_extracts_reasoning_when_enabled(converter: ResponsesConverter):
     output = converter.postprocess_assistant_message_dict(
         {"role": "assistant", "content": "<think>reasoning</think>the answer"}
