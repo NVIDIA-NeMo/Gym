@@ -58,8 +58,10 @@ gym eval run --config "${AGENTIC_VBENCH_DATASET%.jsonl}.yaml" --split benchmark 
   --output /path/outside/checkouts/rollouts.jsonl --concurrency 4 --num-repeats 1
 ```
 
-`AGENTIC_VBENCH_TASKS` optionally selects one family or one exact task ID; the default
-is `all`. Preparation validates the entire pinned inventory even for a subset.
+`AGENTIC_VBENCH_TASKS` selects `all` (the default), or a space-separated list
+of families and exact task IDs. Family directory names such as
+`agentic_vbench_repair` are accepted. Overlapping selections are rejected.
+Preparation validates the entire pinned inventory even for a subset.
 The credential file is needed for Repurpose's native Anthropic/Gemini judges.
 Keep its contents out of configs and source control. Source prompts and task assets
 are not changed. The model receives no automatic initial frames or captions; it

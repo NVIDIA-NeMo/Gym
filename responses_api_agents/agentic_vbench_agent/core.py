@@ -47,15 +47,29 @@ def inventory(root: Path) -> dict[str, dict]:
 
 
 def dataset_rows(tasks: dict[str, dict], selector: str = "all") -> list[dict]:
-    if selector != "all" and selector not in FAMILIES and selector not in tasks:
-        raise ValueError(f"Unknown task/family: {selector}")
+    selected = set(tasks) if selector == "all" else set()
+    if not selector.strip():
+        raise ValueError("Task selection must not be empty")
+    if selector != "all":
+        for item in selector.split():
+            family = item.removeprefix("agentic_vbench_")
+            matches = (
+                {item}
+                if item in tasks
+                else {name for name, task in tasks.items() if family in FAMILIES and task["family"] == family}
+            )
+            if not matches:
+                raise ValueError(f"Unknown task/family: {item}")
+            if selected & matches:
+                raise ValueError(f"Task selection overlaps: {item}")
+            selected.update(matches)
     return [
         {
             "responses_create_params": {"input": [{"role": "user", "content": task["prompt"]}]},
             "verifier_metadata": {k: v for k, v in task.items() if k != "prompt"},
         }
         for task in tasks.values()
-        if selector == "all" or selector in (task["family"], task["task_id"])
+        if task["task_id"] in selected
     ]
 
 
