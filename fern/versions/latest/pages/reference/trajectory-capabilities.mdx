@@ -21,7 +21,36 @@ execution, TE-10, and P1 are outside this suite.
 
 {/* BEGIN GENERATED TE TABLE */}
 
-No gated generation has been published yet. Run the command below to populate the table.
+Gym commit: [`939cace5af1436789ead920d0f0b3e663784ad73`](https://github.com/NVIDIA-NeMo/Gym/commit/939cace5af1436789ead920d0f0b3e663784ad73).
+Suite: `harness-p0-probes/v1`. [Generation report](../../../../assets/trajectory-capabilities/425964eadebb395fea46f594177e2373b4195530934ed44be4ead0d755892c90.json).
+
+Cells show **passing / exercised / required** scenarios. PASS requires every required scenario;
+FAIL includes missing exercise or missing evidence. **Not run** makes no capability claim.
+
+| Harness | TE-1 | TE-2 | TE-3 | TE-4 | TE-5 | TE-6 | TE-7 | TE-8 | TE-9 | P0 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `opencode` | PASS 7/7/7 | PASS 7/7/7 | FAIL 0/6/6 | PASS 7/7/7 | PASS 6/6/6 | PASS 6/6/6 | PASS 7/7/7 | PASS 7/7/7 | FAIL 0/7/7 | FAIL |
+| `pi` | PASS 7/7/7 | PASS 7/7/7 | FAIL 0/6/6 | PASS 7/7/7 | PASS 6/6/6 | PASS 6/6/6 | PASS 7/7/7 | FAIL 4/7/7 | FAIL 0/7/7 | FAIL |
+| `codex` | FAIL 6/6/7 | FAIL 6/6/7 | FAIL 0/5/6 | FAIL 6/6/7 | FAIL 0/5/6 | FAIL 5/5/6 | FAIL 6/6/7 | FAIL 0/6/7 | FAIL 0/6/7 | FAIL |
+| `hermes` | Not run | Not run | Not run | Not run | Not run | Not run | Not run | Not run | Not run | Not run |
+
+P0 requires TE-1–TE-7 and either TE-8 or TE-9 **per scenario**.
+
+### Tested dependencies
+
+- `opencode`: `1.17.11`
+- `pi`: `0.80.2`
+- `codex`: `codex-cli 0.155.0-alpha.9.2`
+
+### Unit-test gates
+
+| Suite | Passed | Skipped |
+| --- | ---: | ---: |
+| `runner` | 49 | 0 |
+| `opencode` | 82 | 0 |
+| `pi` | 34 | 0 |
+| `codex` | 46 | 0 |
+| `checker` | 77 | 0 |
 
 {/* END GENERATED TE TABLE */}
 
@@ -73,8 +102,8 @@ claims, not guarantees for every configuration.
 <Note>
 The statuses below retain the coverage reported in [main at 88d9d453](https://github.com/NVIDIA-NeMo/Gym/blob/88d9d45385f15b1351cdd055fff396186000f84f/fern/versions/latest/pages/reference/trajectory-capabilities.mdx).
 That source does not record a full runtime-validation date or per-row test configuration.
-Contributors changing an agent should update its row with the config, execution path, and validation
-evidence in the same pull request.
+New validation results belong in the generated TE table above; these historical rows are retained
+for comparison.
 </Note>
 
 ### Model Calls and History
