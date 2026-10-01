@@ -284,8 +284,8 @@ def test_failed_call_keeps_intent_without_claiming_worker_custody(monkeypatch, t
     [
         ("chat/completions", {"messages": [{"role": "user", "content": "hi"}], "stream": True}),
         ("chat/completions", {"messages": [{"role": "user", "content": "hi"}], "n": 2}),
-        ("responses", {"input": "hi", "stream": True}),
         ("responses", {"input": "hi", "previous_response_id": "opaque"}),
+        ("responses", {"input": "hi", "stream": True, "previous_response_id": "opaque"}),
     ],
 )
 def test_unsupported_request_does_not_reach_generation(monkeypatch, tmp_path, dialect, body):
@@ -293,6 +293,31 @@ def test_unsupported_request_does_not_reach_generation(monkeypatch, tmp_path, di
     response = harness.client.post(f"/ng-rollout/attempt/training-token-capture/v1/{dialect}", json=body)
     assert response.status_code == 422, response.text
     assert not harness.worker_calls
+
+
+def test_streaming_responses_capture_like_their_non_streaming_twin(monkeypatch, tmp_path):
+    """SSE-only Responses harnesses (the Codex CLI) send ``stream: true``. The dispatch
+    makes exactly one non-streaming worker call through capture and replays the finished
+    response as synthesized SSE, so the ledger records the call like any other."""
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    response = harness.client.post(
+        "/ng-rollout/attempt/training-token-capture/v1/responses",
+        json={"input": HISTORY, "stream": True},
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "response.completed" in response.text
+    # Capture transport fields never reach the served stream.
+    assert NG_CAPTURE_FIELD not in response.text
+    assert NG_COMMIT_COORDS_FIELD not in response.text
+    assert "prompt_token_ids" not in response.text
+    # One admitted worker call, retries off, recorded in the manifest.
+    assert len(harness.worker_calls) == 1
+    admission, retry_requests = harness.worker_calls[0]
+    assert admission is not None
+    assert retry_requests is False
+    manifest = harness.manifest("attempt")
+    assert len(manifest.records) == 1 and not manifest.failures and not manifest.pending_call_ids
 
 
 @pytest.mark.parametrize("failure", ["request", "read"])
