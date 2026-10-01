@@ -11,16 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field
 UserSimAgentRole = Literal["user", "assistant", "judge", "summary", "tool_simulation"]
 
 
-class UserSimSamplingRequest(BaseModel):
-    """Dataset-owned inputs used to select one replayable scenario."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    locale: str = Field("en_US", pattern=r"^[A-Za-z0-9_]+$")
-    seed: int
-    probe_type: str | None = None
-
-
 class UserSimResponseCreateParams(BaseModel):
     """Dependency-light Responses API payload retained for Environment Server dispatch."""
 
@@ -28,10 +18,9 @@ class UserSimResponseCreateParams(BaseModel):
 
 
 class TaskData(BaseModel):
-    """Durable input loaded from one UserSim task row."""
+    """Fully resolved, provenance-pinned input loaded from one prepared task row."""
 
     model_config = ConfigDict(extra="forbid")
 
-    sampling: UserSimSamplingRequest
-    probe_data: dict[str, Any] = Field(default_factory=dict)
+    resolved_row: dict[str, Any]
     responses_create_params: dict[UserSimAgentRole, UserSimResponseCreateParams] = Field(default_factory=dict)
