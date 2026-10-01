@@ -223,6 +223,13 @@ class TestTolerantInterpolationParse:
             "      sandbox_image: ${oc.env:GYM_TEST_LISTING_IMAGE}\n"
             "      model: ${oc.env:GYM_TEST_LISTING_MODEL}\n"
             "      fallback: ${oc.env:GYM_TEST_LISTING_IMAGE,default-image}\n"
+            "environment:\n"
+            "  environment_servers:\n"
+            "    legacy_agent:\n"
+            "      entrypoint: app.py\n"
+            "      agent_server:\n"
+            "        type: responses_api_agents\n"
+            "        name: agent\n"
         )
         config = OmegaConf.create({"config_paths": [str(included)]})
         resolved = _parse_no_environment_tolerating_unset_values(config)

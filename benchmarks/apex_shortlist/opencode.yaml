@@ -17,3 +17,9 @@ apex_shortlist_opencode_agent:
         num_repeats: 16
 math_with_judge_simple_agent: null
 apex_shortlist_math_with_judge_simple_agent: null
+
+apex_shortlist_math_with_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: apex_shortlist_opencode_agent

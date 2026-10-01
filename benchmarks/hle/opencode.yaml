@@ -17,3 +17,9 @@ hle_opencode_agent:
         num_repeats: 1
 equivalence_llm_judge_simple_agent: null
 hle_equivalence_llm_judge_simple_agent: null
+
+hle_equivalence_llm_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: hle_opencode_agent

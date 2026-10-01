@@ -81,6 +81,7 @@ class PiSandboxedAgentVerifyResponse(PiAgentVerifyResponse):
 
 
 class PiSandboxedAgent(PiAgent):
+    ray_enabled = False
     config: PiSandboxedAgentConfig
 
     def model_post_init(self, __context: Any) -> None:
