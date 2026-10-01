@@ -673,6 +673,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "Native OpenCode requires an exact opencode_version")
         if self.config.context_window <= 0 or self.config.timeout <= 0 or self.config.setup_timeout <= 0:
             raise HTTPException(422, "OpenCode context window and execution timeout must be positive")
+        if not 0 < self.config.max_output_tokens <= self.config.context_window:
+            raise HTTPException(
+                422, "Native OpenCode max_output_tokens must be positive and not exceed context_window"
+            )
         unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
         if unsupported:
             raise HTTPException(
@@ -968,7 +972,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                             "limit": {
                                 "context": self.config.context_window,
                                 "input": self.config.context_window,
-                                "output": self.config.context_window,
+                                "output": self.config.max_output_tokens,
                             }
                         }
                     },
@@ -998,7 +1002,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
-                "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "1000000000",
+                "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
             },
             "timeout": self.config.timeout,
             "cleanup_timeout": self.config.session_close_timeout_seconds / 3,

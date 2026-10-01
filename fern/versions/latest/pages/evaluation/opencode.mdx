@@ -63,6 +63,7 @@ opencode_agent:
         name: policy_model
       opencode_version: 1.17.11
       context_window: 40960  # Match the served model.
+      max_output_tokens: 4096  # Independent per-call output budget; leave room for input.
       timeout: 1200
       setup_timeout: 900
 ```
@@ -111,15 +112,19 @@ system/developer text; `instructions` is appended through OpenCode instruction f
 Images, conversation replay, required Resources HTTP/MCP tools, and unsupported
 Responses request controls are rejected before consuming the activation. Native
 `opencode_config` accepts only `permission` and `tools`, so provider overrides cannot
-bypass Gym capture. Set sampling and per-call output limits on the Gym model server;
-context metadata alone does not enforce an output-token limit. The adapter preserves
+bypass Gym capture. Set the native agent's `max_output_tokens` independently of
+`context_window`; it configures both OpenCode's model output limit and runtime cap.
+Sampling and deployment-specific overrides still belong on the Gym model server.
+The historical full-context output profile requires matching vLLM token-limit
+overrides; a generic OpenAI endpoint may reject that cap plus a nonempty prompt.
+Changing this budget can change benchmark results. The adapter preserves
 the reasoning and tool history OpenCode sends through Chat Completions.
 
 ## Runtime and cleanup
 
-The supported native runtime is Linux glibc x86_64 or aarch64 with Bash and Python 3.9+
+The supported native runtime is Linux glibc or musl, x86_64 or aarch64, with Bash and Python 3.8+
 (including SQLite and `fcntl`). Online installation needs GitHub release access and
-tar/gzip. Missing curl and CA certificates are installed only when root and apt-get are
+tar/gzip. Missing curl and CA certificates are installed only when root and apt-get or apk are
 available. Other images must include them. Setup failures report the command, exit
 code, and stderr.
 
@@ -131,6 +136,9 @@ Per-session state lives under `/tmp/nemo-gym-opencode-sessions/<id>`, outside th
 repository. Overlapping workdirs and resolved path aliases are rejected.
 
 A Linux subreaper kills and reaps tool descendants, including detached processes.
+The supervisor uses ordinary sandbox `exec`, not PTY sessions. Its internal deadline
+leaves time for cleanup before the provider timeout. Cancellation requests a stop;
+an atomic launch claim prevents a delayed request from starting after close.
 Session close requires a positive cleanup receipt, removal of adapter files, and
 disconnect before verification proceeds. Unknown launch outcomes and unconfirmed
 cleanup fail closed and retain state for retries. Successful close receipts remain

@@ -11,7 +11,7 @@ import pytest
 
 
 INSTALLER = Path(__file__).parents[1] / "install_opencode_runtime.sh"
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Native OpenCode requires Linux/glibc")
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Native OpenCode requires Linux")
 
 
 @pytest.fixture
@@ -142,3 +142,30 @@ def test_staged_binary_is_checked_without_downloading(sandbox):
     )
     assert result.returncode == 1
     assert "version mismatch" in result.stderr
+
+
+@pytest.mark.skipif(shutil.which("python3.8") is None, reason="Python 3.8 is not installed")
+def test_python38_can_bootstrap_runtime(sandbox: tuple[Path, dict[str, str]]) -> None:
+    root, env = sandbox
+    (root / "bin/python3").unlink()
+    (root / "bin/python3").symlink_to(shutil.which("python3.8"))
+    result = run_installer(root, env)
+    assert result.returncode == 19, result.stderr
+    assert (root / "download.log").exists()
+
+
+def test_musl_bootstraps_with_apk_and_downloads_matching_binary(sandbox: tuple[Path, dict[str, str]]) -> None:
+    root, env = sandbox
+    (root / "bin/getconf").unlink()
+    for name, script in {
+        "getconf": "#!/bin/bash\nexit 1\n",
+        "ldd": "#!/bin/bash\necho 'musl libc (x86_64)' >&2\nexit 1\n",
+        "apk": '#!/bin/bash\necho "$*" >> "$TEST_ROOT/packages.log"\ncp "$TEST_ROOT/curl" "$TEST_ROOT/bin/curl"\n',
+    }.items():
+        (root / "bin" / name).write_text(script)
+        (root / "bin" / name).chmod(0o755)
+    result = run_installer(root, env)
+    assert result.returncode == 19, result.stderr
+    assert (root / "packages.log").read_text().splitlines() == ["add --no-cache curl ca-certificates"]
+    arch = {"x86_64": "x64-baseline", "aarch64": "arm64"}[os.uname().machine]
+    assert f"opencode-linux-{arch}-musl.tar.gz" in (root / "download.log").read_text()

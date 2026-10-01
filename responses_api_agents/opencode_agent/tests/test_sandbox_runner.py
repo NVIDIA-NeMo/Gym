@@ -4,6 +4,7 @@
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -86,6 +87,15 @@ def test_spawn_error_is_not_success(tmp_path):
     summary = result(tmp_path, process)
     assert summary["cleanup_confirmed"] is True
     assert summary["return_code"] != 0
+
+
+def test_stop_marker_prevents_process_launch(tmp_path):
+    (tmp_path / "runner.stop").touch()
+    process = launch(tmp_path, "open('should-not-exist', 'w').close()")
+    summary = result(tmp_path, process)
+    assert summary["cleanup_confirmed"] is True
+    assert summary["return_code"] != 0
+    assert not (tmp_path / "should-not-exist").exists()
 
 
 @pytest.mark.parametrize("interruption", ["signal", "exception"])
@@ -172,3 +182,76 @@ def test_snapshot_keeps_root_output_and_child_usage(tmp_path):
     with sqlite3.connect(tmp_path / "observations.db") as copy:
         assert copy.execute("select count(*) from session").fetchone()[0] == 2
     con.close()
+
+
+@pytest.mark.parametrize(
+    "python",
+    [
+        sys.executable,
+        pytest.param(
+            shutil.which("python3.8"),
+            marks=pytest.mark.skipif(shutil.which("python3.8") is None, reason="Python 3.8 is not installed"),
+            id="python38",
+        ),
+    ],
+)
+def test_snapshot_runs_after_detached_descendants_are_reaped(tmp_path, python):
+    import sqlite3
+
+    database = tmp_path / "data/opencode/opencode.db"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute("pragma journal_mode=wal")
+        connection.executescript("""
+            create table session(id text, parent_id text, time_created integer);
+            create table message(id text, session_id text, data text, time_created integer);
+            create table part(id text, message_id text, session_id text, data text, time_created integer);
+            insert into session values('root', null, 0);
+            insert into message values('m1', 'root', '{"role":"assistant"}', 0);
+            insert into part values('p1', 'm1', 'root', '{"type":"text","text":"saved"}', 0);
+        """)
+    # Assert the ordering at the actual snapshot boundary, not just after run().
+    driver = """
+import json, os, pathlib, runpy, sys
+runner = runpy.run_path(sys.argv[1])
+snapshot = runner["snapshot"]
+def checked_snapshot(directory):
+    pid = int((directory / "child.pid").read_text())
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError("snapshot began before descendant cleanup")
+    snapshot(directory)
+runner["run"].__globals__["snapshot"] = checked_snapshot
+code = (
+    "import json,os,pathlib,subprocess,sys; "
+    "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
+    "pathlib.Path('child.pid').write_text(str(child.pid)); "
+    "print(json.dumps([sys.stdin.read(),os.environ['OPENCODE_TEST_VALUE']]))"
+)
+result = runner["run"]({
+    "directory": sys.argv[2], "cwd": sys.argv[2], "prompt": "task input",
+    "command": [sys.executable, "-c", code], "env": {"OPENCODE_TEST_VALUE": "override"},
+    "timeout": 3, "cleanup_timeout": 2,
+})
+print(json.dumps(result))
+"""
+    completed = subprocess.run(
+        [python, "-I", "-c", driver, sandbox_runner.__file__, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+        check=True,
+    )
+    summary = json.loads(completed.stdout)
+    assert summary["cleanup_confirmed"] is True
+    assert summary["return_code"] == 0
+    assert summary["error"] is None
+    assert json.loads((tmp_path / "stdout.jsonl").read_text()) == ["task input", "override"]
+    export = json.loads((tmp_path / "export.json").read_text())
+    assert export["messages"][0]["parts"][0]["text"] == "saved"
+    with sqlite3.connect(tmp_path / "observations.db") as copy:
+        assert copy.execute("select count(*) from session").fetchone()[0] == 1

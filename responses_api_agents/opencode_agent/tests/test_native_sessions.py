@@ -82,15 +82,25 @@ class Sandbox:
         self.blocked = False
         self.started = asyncio.Event()
         self.exited = asyncio.Event()
-        self.exec = AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None))
+        self.exec = AsyncMock(
+            side_effect=self.run_exec,
+            return_value=SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+        )
         self.stop = AsyncMock()
         self.disconnect = AsyncMock()
-        self.runner = SimpleNamespace(
-            wait_exit=AsyncMock(side_effect=self.wait_exit),
-            send_signal=AsyncMock(side_effect=self.signal),
-            close=AsyncMock(),
-        )
-        self.pty = SimpleNamespace(create=AsyncMock(side_effect=self.create))
+        self.launch = AsyncMock(side_effect=self.create)
+        self.request_stop = AsyncMock(side_effect=self.signal)
+
+    @property
+    def pty(self):
+        raise AssertionError("This provider supports exec only; no PTY API")
+
+    async def run_exec(self, command, **kwargs):
+        if command.startswith("trap '' TERM;"):
+            return await self.launch(command=command, **kwargs)
+        if "runner.stop" in command:
+            await self.request_stop()
+        return self.exec.return_value
 
     async def upload(self, source, destination):
         self.files[destination] = Path(source).read_text()
@@ -108,12 +118,14 @@ class Sandbox:
         self.started.set()
         if not self.blocked:
             self.exited.set()
-        return self.runner
+        await self.wait_exit()
+        return SimpleNamespace(error_type=None, return_code=0, stdout="", stderr="")
 
-    async def signal(self, name):
-        assert name == "SIGTERM"
-        self.result["timed_out"] = True
-        self.exited.set()
+    async def signal(self):
+        if hasattr(self, "directory"):
+            self.result["timed_out"] = True
+            self.exited.set()
+            await asyncio.sleep(0)
 
     async def wait_exit(self):
         await self.exited.wait()
@@ -144,6 +156,7 @@ def setup():
         sandbox_config={},
         timeout=30,
         context_window=32000,
+        max_output_tokens=4096,
         session_close_timeout_seconds=1,
     )
     module = "responses_api_agents.opencode_agent.app"
@@ -195,13 +208,15 @@ def capture_observations(sandbox, tmp_path):
     return database
 
 
-def test_http_native_flow_runs_opencode_in_borrowed_sandbox(setup):
+@pytest.mark.parametrize("output_budget", [4096, 32000])
+def test_http_native_flow_runs_opencode_in_borrowed_sandbox(setup, output_budget):
     agent, sandbox = setup
+    agent.config.max_output_tokens = output_budget
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
         session_id = created.json()["agent_session_id"]
-        assert not sandbox.pty.create.called
+        assert not sandbox.launch.called
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
         assert result.status_code == 200, result.text
         body = result.json()
@@ -218,6 +233,12 @@ def test_http_native_flow_runs_opencode_in_borrowed_sandbox(setup):
         assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
         assert payload["env"]["HOME"].startswith("/tmp/")
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
+            "context": 32000,
+            "input": 32000,
+            "output": output_budget,
+        }
+        assert payload["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == str(output_budget)
         assert (
             config["provider"]["nemo_gym"]["options"]["baseURL"]
             == "http://model.example:9000/ng-rollout/opencode-smoke-a2/v1"
@@ -294,7 +315,7 @@ def test_unsupported_request_is_not_silently_ignored(setup, override):
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task", **override})
         assert result.status_code == 422, result.text
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
-    sandbox.pty.create.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
 
 
 def test_rejected_request_does_not_consume_activation(setup):
@@ -303,11 +324,11 @@ def test_rejected_request_does_not_consume_activation(setup):
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         path = "/ng-rollout/opencode-smoke-a2/v1/responses"
         assert client.post(path, json={"input": "task", "temperature": 0.2}).status_code == 422
-        sandbox.pty.create.assert_not_awaited()
+        sandbox.launch.assert_not_awaited()
         accepted = client.post(path, json={"input": "task"})
         assert accepted.status_code == 200, accepted.text
         assert client.post(path, json={"input": "task"}).status_code == 409
-    sandbox.pty.create.assert_awaited_once()
+    sandbox.launch.assert_awaited_once()
 
 
 async def activate(agent, sandbox):
@@ -328,7 +349,7 @@ async def test_close_cancels_active_opencode_before_detaching(setup, tmp_path):
     closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     with pytest.raises(asyncio.CancelledError):
         await task
-    sandbox.runner.send_signal.assert_awaited_once_with("SIGTERM")
+    sandbox.request_stop.assert_awaited_once()
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
     invocation = next(record for record in closed.agent_observations.records if record.kind == "agent_invocation")
@@ -346,7 +367,7 @@ async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
         await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert session_id in agent._native_sessions
     sandbox.disconnect.assert_not_awaited()
-    sandbox.runner.close.assert_not_awaited()
+    assert not any("rm -rf" in call.args[0] for call in sandbox.exec.await_args_list)
 
 
 async def test_disconnect_failure_retains_session_for_retry(setup):
@@ -359,7 +380,7 @@ async def test_disconnect_failure_retains_session_for_retry(setup):
     assert session_id in agent._native_sessions
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert session_id not in agent._native_sessions
-    sandbox.runner.close.assert_awaited_once()
+    sandbox.launch.assert_awaited_once()
 
 
 def test_cleanup_receipt_is_required():
@@ -503,7 +524,7 @@ async def test_unknown_launch_outcome_fails_closed(setup):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": "opencode-smoke-a2"}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
-    sandbox.pty.create.side_effect = TimeoutError("lost launch response")
+    sandbox.launch.side_effect = TimeoutError("lost launch response")
     result = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     assert result.status == "failed"
     assert "lost launch response" in result.error.message
@@ -542,7 +563,7 @@ async def test_cancelled_install_never_publishes_session_or_launches_opencode(se
         await agent.seed_agent_session(request, seed())
     assert not agent._native_sessions
     assert not request.session
-    sandbox.pty.create.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
 
@@ -670,6 +691,18 @@ def test_invalid_seed_never_connects(setup, option):
     sandbox.exec.assert_not_awaited()
 
 
+@pytest.mark.parametrize("output_budget", [0, -1, 32001])
+def test_invalid_output_budget_rejected_before_connecting(setup, output_budget):
+    agent, sandbox = setup
+    agent.config.max_output_tokens = output_budget
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert response.status_code == 422
+    assert "max_output_tokens" in response.json()["detail"]
+    sandbox.exec.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
+
+
 @pytest.mark.parametrize("kind", ["error", "timeout", "length"])
 def test_partial_output_survives_model_failure_and_timeout(setup, kind, tmp_path):
     agent, sandbox = setup
@@ -771,8 +804,8 @@ async def test_file_cleanup_failure_keeps_connection_and_can_retry(setup):
     request, session_id, task = await activate(agent, sandbox)
     await task
     sandbox.exec.side_effect = [
-        SimpleNamespace(return_code=1, error_type=None),
-        SimpleNamespace(return_code=0, error_type=None),
+        SimpleNamespace(return_code=1, error_type=None, stderr="file cleanup failed"),
+        SimpleNamespace(return_code=0, error_type=None, stderr=""),
     ]
     close = AgentCloseSessionRequest(**close_body(session_id))
     with pytest.raises(RuntimeError, match="session files"):
@@ -872,7 +905,7 @@ async def test_native_markers_block_legacy_run_and_responses(setup, marker):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     assert error.value.status_code == 409
     agent.server_client.post.assert_not_called()
-    sandbox.pty.create.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
 
 
 def test_close_response_cookie_blocks_legacy_run(setup):

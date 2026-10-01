@@ -11,6 +11,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from time import monotonic, sleep
 from typing import TypedDict
@@ -83,21 +84,23 @@ def run(params: RunnerInput) -> RunnerResult:
         stopping = True
 
     signal.signal(signal.SIGTERM, interrupt)
+    stop_file = directory / "runner.stop"
     for key in ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
         if key in params["env"]:
             Path(params["env"][key]).mkdir(parents=True, exist_ok=True)
     (directory / "prompt.txt").write_text(params["prompt"])
-    with (
-        (directory / "stderr.log").open("wb") as stderr,
-        (directory / "stdout.jsonl").open("wb") as stdout,
-        (directory / "prompt.txt").open("rb") as stdin,
-    ):
+    with ExitStack() as stack:
+        stderr = stack.enter_context((directory / "stderr.log").open("wb"))
+        stdout = stack.enter_context((directory / "stdout.jsonl").open("wb"))
+        stdin = stack.enter_context((directory / "prompt.txt").open("rb"))
         try:
             enable_subreaper()
+            if stopping or stop_file.exists():
+                raise RuntimeError("OpenCode closed before process launch")
             process = subprocess.Popen(
                 params["command"],
                 cwd=params["cwd"],
-                env=dict(os.environ) | params["env"],
+                env={**os.environ, **params["env"]},
                 stdin=stdin,
                 stdout=stdout,
                 stderr=stderr,
@@ -105,7 +108,7 @@ def run(params: RunnerInput) -> RunnerResult:
             )
             deadline = monotonic() + params["timeout"]
             while process.poll() is None:
-                if stopping or monotonic() >= deadline:
+                if stopping or stop_file.exists() or monotonic() >= deadline:
                     timed_out = True
                     break
                 sleep(0.05)
