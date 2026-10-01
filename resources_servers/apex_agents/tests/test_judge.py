@@ -14,6 +14,7 @@ from resources_servers.apex_agents.judge import (
     _selection_artifact_xml,
     expected_file_type,
     grade_apex_output,
+    weighted_rubric_score,
 )
 
 
@@ -312,6 +313,85 @@ async def test_apex_grading_fails_rollout_when_any_criterion_fails(monkeypatch, 
     )
 
     assert reward == 0.0
+    assert usage["scoring"]["scoring_method"] == "all_pass"
     values = usage["scoring"]["scoring_method_result_values"]
     assert values["criteria_pass_rate"] == 0.5
     assert values["grade_score_percentage"] == 0.0
+    assert values["all_pass"] == 0.0
+    assert values["weighted_score"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_weighted_average_scoring_gives_weighted_partial_credit(monkeypatch, tmp_path: Path) -> None:
+    answers = iter([True, False, False])
+    client = MagicMock()
+    client.post = AsyncMock(return_value=object())
+
+    async def fake_status(_actual) -> None:
+        return None
+
+    async def fake_json(_actual) -> dict:
+        passed = next(answers)
+        return {"choices": [{"message": {"content": json.dumps({"rationale": "graded", "is_criteria_true": passed})}}]}
+
+    monkeypatch.setattr("resources_servers.apex_agents.judge.raise_for_status", fake_status)
+    monkeypatch.setattr("resources_servers.apex_agents.judge.get_response_json", fake_json)
+
+    reward, _scores, usage = await grade_apex_output(
+        server_client=client,
+        model_server_name="judge-server",
+        task_id="task-1",
+        world_id="world-1",
+        instruction="Do three things",
+        response="Done",
+        rubric=[
+            {"verifier_id": "v1", "criteria": "Heavy thing", "weight": 3},
+            {"verifier_id": "v2", "criteria": "Light thing", "weight": 1},
+            {"verifier_id": "v3", "criteria": "Unscored thing", "weight": 0},
+        ],
+        expected_output="message_in_console",
+        artifact_changes=[],
+        final_root=tmp_path,
+        judge_model="gemini-3-flash",
+        judge_create_params_overrides=None,
+        judge_context_window_size=1_000_000,
+        scoring_method="weighted_average",
+    )
+
+    assert reward == 0.75
+    assert usage["scoring"]["scoring_method"] == "weighted_average"
+    values = usage["scoring"]["scoring_method_result_values"]
+    assert values["all_pass"] == 0.0
+    assert values["weighted_score"] == 0.75
+    assert values["grade_score_percentage"] == 75.0
+
+
+def test_weighted_rubric_score_defaults_missing_weights_and_rejects_negative_ones() -> None:
+    passed, failed = {"score": 1.0}, {"score": 0.0}
+
+    assert weighted_rubric_score([{}, {"weight": None}], [passed, failed]) == 0.5
+    assert weighted_rubric_score([{"weight": 0}, {"weight": "2"}], [failed, passed]) == 1.0
+    assert weighted_rubric_score([{"weight": 0}], [passed]) == 0.0
+    with pytest.raises(ValueError, match="negative weight"):
+        weighted_rubric_score([{"weight": -1}], [passed])
+
+
+@pytest.mark.asyncio
+async def test_unknown_scoring_method_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown APEX scoring method"):
+        await grade_apex_output(
+            server_client=MagicMock(),
+            model_server_name="judge-server",
+            task_id="task-1",
+            world_id="world-1",
+            instruction="Do it",
+            response="Done",
+            rubric=[{"verifier_id": "v1", "criteria": "Thing"}],
+            expected_output="message_in_console",
+            artifact_changes=[],
+            final_root=tmp_path,
+            judge_model="gemini-3-flash",
+            judge_create_params_overrides=None,
+            judge_context_window_size=1_000_000,
+            scoring_method="partial",
+        )

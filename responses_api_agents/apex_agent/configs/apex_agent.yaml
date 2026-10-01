@@ -18,14 +18,10 @@ apex_agent:
         type: responses_api_models
         name: policy_model
       concurrency: ${oc.select:apex_agent_concurrency,4}
-      # Match GDPVal's 3h30m per-task budget while leaving 30 minutes of a
-      # four-hour Slurm allocation for startup and teardown.
       timeout: ${oc.select:apex_agent_timeout,12600}
-      # Existing SIF, OCI reference, or the target for a one-time automatic
-      # build from Archipelago's pinned upstream Dockerfile.
+      # Existing SIF, OCI reference, or the target for a one-time automatic build from Archipelago's pinned upstream Dockerfile.
       image: ${oc.select:apex_agents_image,responses_api_agents/apex_agent/images/archipelago.sif}
-      # Used only when `image` is a local path that does not exist. Existing
-      # SIFs and OCI/registry references skip this build entirely.
+      # Used only when `image` is a local path that does not exist. Existing SIFs and OCI/registry references skip this build entirely.
       image_build:
         enabled: ${oc.select:apex_agents_auto_build,true}
         source_repo: ${oc.select:apex_archipelago_repo,https://github.com/Mercor-Intelligence/archipelago.git}
@@ -40,12 +36,12 @@ apex_agent:
       sandbox_provider: ${oc.select:apex_agent_sandbox_provider,apex_agent_apptainer_sandbox}
       sandbox_spec:
         resources: ${oc.select:apex_agent_sandbox_resources,{}}
-      # Archipelago's public Apex example uses
-      # "Mercor APEX-Agents apex@mercor.com". Keep it overridable, but do not
-      # replace it with a Gym/NVIDIA identity.
       edgar_user_agent: ${oc.select:apex_edgar_user_agent,"Mercor APEX-Agents apex@mercor.com"}
       max_turns: ${oc.select:apex_agent_max_turns,200}
       max_output_tokens: ${oc.select:apex_agent_max_output_tokens,32768}
+      # Policy context window for Stirrup's context summarization, which starts at 70% of it. Unset keeps Stirrup
+      # using max_output_tokens as the window, i.e. summarizing at ~23k tokens with the default 32768.
+      context_window_tokens: ${oc.select:apex_agent_context_window_tokens,null}
       supports_vision: ${oc.select:apex_agent_supports_vision,true}
       temperature: ${oc.select:apex_agent_temperature,1.0}
       top_p: ${oc.select:apex_agent_top_p,1.0}
@@ -54,6 +50,25 @@ apex_agent:
       # Shares the verifier's output root. Incomplete/max-turn runs are saved
       # here without being sent to the grader.
       artifact_output_dir: ${oc.select:apex_artifact_output_dir,results/apex_agents_artifacts}
+      # Mid-rollout checkpoint and resume. Point this at a host directory that
+      # outlives the node (a shared filesystem); a per-rollout subdirectory is
+      # bind-mounted into the sandbox and a rollout killed mid-flight continues
+      # from its last turn boundary when Gym re-dispatches it. Null disables it.
+      resume_checkpoint_dir: ${oc.select:apex_agent_resume_checkpoint_dir,null}
+      resume_checkpoint_mount: ${oc.select:apex_agent_resume_checkpoint_mount,/checkpoint}
+      resume_checkpoint_interval_seconds: ${oc.select:apex_agent_resume_checkpoint_interval_seconds,60}
+      resume_min_remaining_seconds: ${oc.select:apex_agent_resume_min_remaining_seconds,300}
+      # Optional trusted world_id -> SIF manifest for prebuilt world deliveries.
+      # Ordinary Hugging Face APEX rows continue to use the shared image above.
+      prebuilt_world_manifest: ${oc.select:apex_prebuilt_world_manifest,null}
+      # Overall deadline for a prebuilt world's gateway and MCP startup.
+      prebuilt_startup_timeout_seconds: ${oc.select:apex_prebuilt_startup_timeout_seconds,1800}
+      # Relay policy traffic through a unix socket bound into the sandbox:
+      # auto | always | never. "auto" turns it on when
+      # apex_agent_apptainer_extra_start_args contains --net or a --network
+      # option, i.e. the sandbox has its own network namespace, which lets
+      # worlds with fixed service ports run several rollouts per node.
+      policy_egress_relay: ${oc.select:apex_agent_policy_egress_relay,auto}
       datasets:
       - name: example
         type: example

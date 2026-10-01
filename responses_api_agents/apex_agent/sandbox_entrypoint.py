@@ -9,6 +9,8 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,11 +21,13 @@ try:
         MCP_ROOT,
         configure_gateway,
         gateway_config,
+        load_resume_checkpoint,
         overlay_task_files,
         populate_world,
         run_stirrup_rollout,
         wait_for_gateway,
         write_snapshot,
+        zip_manifest,
     )
 except ImportError:  # Imported as a Gym package during host-side tests.
     from responses_api_agents.apex_agent.stirrup_runtime import (
@@ -31,11 +35,13 @@ except ImportError:  # Imported as a Gym package during host-side tests.
         MCP_ROOT,
         configure_gateway,
         gateway_config,
+        load_resume_checkpoint,
         overlay_task_files,
         populate_world,
         run_stirrup_rollout,
         wait_for_gateway,
         write_snapshot,
+        zip_manifest,
     )
 
 
@@ -97,6 +103,7 @@ async def _discover_gateway_url(
 
 
 async def main() -> None:
+    segment_started_at = time.monotonic()
     config = json.loads((ROOT / "runner_config.json").read_text(encoding="utf-8"))
     OUTPUT.mkdir(parents=True, exist_ok=True)
     scratch = ROOT / "scratch"
@@ -105,10 +112,20 @@ async def main() -> None:
     if config.get("edgar_user_agent"):
         os.environ["EDGAR_USER_AGENT"] = config["edgar_user_agent"]
 
-    populate_world(ROOT / "world.zip", scratch)
-    task_files_zip = ROOT / "task_files.zip"
-    if task_files_zip.is_file():
-        overlay_task_files(task_files_zip, scratch)
+    # Mid-rollout resume: the host bind-mounts a per-rollout directory and says
+    # whether a checkpoint in it may be continued. The checkpoint's world
+    # snapshot already contains the task files, so the overlay is skipped.
+    resume_dir = Path(config["resume_checkpoint_dir"]) if config.get("resume_checkpoint_dir") else None
+    checkpoint = (
+        load_resume_checkpoint(resume_dir) if resume_dir is not None and config.get("resume_allowed") else None
+    )
+    if checkpoint is not None:
+        populate_world(checkpoint.world_zip, scratch)
+    else:
+        populate_world(ROOT / "world.zip", scratch)
+        task_files_zip = ROOT / "task_files.zip"
+        if task_files_zip.is_file():
+            overlay_task_files(task_files_zip, scratch)
     gateway_log_path = OUTPUT / "gateway.log"
     gateway_log = gateway_log_path.open("wb")
     gateway = await asyncio.create_subprocess_exec(
@@ -128,11 +145,21 @@ async def main() -> None:
         await configure_gateway(
             gateway_config(config.get("foundry_services") or [], config.get("edgar_user_agent")), gateway_url
         )
-        initial_manifest = write_snapshot(OUTPUT / "initial.zip")
+        # The grader diffs the final state against the pre-agent world, so a
+        # resumed segment carries the first segment's initial snapshot forward.
+        if checkpoint is not None:
+            shutil.copy2(checkpoint.initial_zip, OUTPUT / "initial.zip")
+            initial_manifest = zip_manifest(OUTPUT / "initial.zip")
+        else:
+            initial_manifest = write_snapshot(OUTPUT / "initial.zip")
         result: dict[str, Any] = await run_stirrup_rollout(
             config,
             gateway_url,
             checkpoint_path=PARTIAL_RESULT_PATH,
+            resume_checkpoint=checkpoint,
+            resume_checkpoint_dir=resume_dir,
+            initial_snapshot_path=OUTPUT / "initial.zip",
+            segment_started_at=segment_started_at,
         )
         final_manifest = write_snapshot(OUTPUT / "final.zip")
         result.update(

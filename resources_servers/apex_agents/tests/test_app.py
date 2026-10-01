@@ -92,6 +92,7 @@ async def test_verify_scores_artifacts_without_returning_snapshot(monkeypatch) -
         assert kwargs["server_client"] is not None
         assert kwargs["model_server_name"] == "judge"
         assert kwargs["judge_context_window_size"] == 1_000_000
+        assert kwargs["scoring_method"] == "all_pass"
         return 1.0, {"v1": {"score": 1.0}}, {"ok": True, "grading_run_id": "run-1"}
 
     monkeypatch.setattr("resources_servers.apex_agents.app.grade_apex_output", fake_judge)
@@ -102,6 +103,20 @@ async def test_verify_scores_artifacts_without_returning_snapshot(monkeypatch) -
     assert result.judge_response == {"ok": True, "grading_run_id": "run-1"}
     assert "artifact_snapshot_b64" not in result.model_dump()
     assert "initial_artifact_snapshot_b64" not in result.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_verify_passes_the_row_scoring_method_to_the_grader(monkeypatch) -> None:
+    async def fake_judge(**kwargs):
+        assert kwargs["scoring_method"] == "weighted_average"
+        return 0.75, {"v1": {"score": 1.0}}, {"ok": True, "grading_run_id": "run-1"}
+
+    monkeypatch.setattr("resources_servers.apex_agents.app.grade_apex_output", fake_judge)
+    body = _body()
+    body.verifier_metadata["scoring"] = "weighted_average"
+    result = await _server().verify(body)
+
+    assert result.reward == 0.75
 
 
 @pytest.mark.asyncio

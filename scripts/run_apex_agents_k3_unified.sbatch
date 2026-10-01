@@ -66,6 +66,9 @@ export GYM_HEAD_PORT=${GYM_HEAD_PORT:-20000}
 export USER_NAME=${USER_NAME:-${USER:-$(whoami)}}
 export RUN_DIR=${RUN_DIR:-${APEX_GYM_DIR}/results/apex_k3_unified/manual}
 export OUTPUT_JSONL=${OUTPUT_JSONL:-${RUN_DIR}/rollouts.jsonl}
+# Mid-rollout checkpoints live with the run so a rollout cut by a walltime
+# rotation continues in the next one. Set to an empty string to disable.
+export APEX_RESUME_CHECKPOINT_DIR=${APEX_RESUME_CHECKPOINT_DIR-${RUN_DIR}/resume_checkpoints}
 export SHARD_ROOT=${SHARD_ROOT:-${RUN_DIR}/shards}
 export SHARD_INPUT_DIR=${SHARD_INPUT_DIR:-${SHARD_ROOT}/inputs}
 export SHARD_OUTPUT_DIR=${SHARD_OUTPUT_DIR:-${SHARD_ROOT}/outputs}
@@ -168,6 +171,7 @@ validate_local() {
         "++apex_agents_image=${APEX_IMAGE}" \
         "++apex_agents_auto_build=false" \
         "++apex_world_cache_dir=${WORLD_CACHE_DIR}" \
+        "++apex_agent_resume_checkpoint_dir=${APEX_RESUME_CHECKPOINT_DIR:-null}" \
         "++policy_model.responses_api_models.vllm_model.base_url=${urls}" \
         "++policy_model.responses_api_models.vllm_model.model=${MODEL_NAME}" \
         >/dev/null
@@ -247,6 +251,7 @@ run_gym_worker() {
         "++apex_agents_auto_build=false"
         "++apex_world_cache_dir=${WORLD_CACHE_DIR}"
         "++apex_artifact_output_dir=${APEX_ARTIFACT_DIR}"
+        "++apex_agent_resume_checkpoint_dir=${APEX_RESUME_CHECKPOINT_DIR:-null}"
         "++skip_venv_if_present=true"
         "++apex_agents_benchmark_agent.responses_api_agents.apex_agent.datasets=${dataset_omega}"
         "++policy_model.responses_api_models.vllm_model.base_url=${policy_urls_omega}"
@@ -617,7 +622,7 @@ run_main() {
     local container_env="APEX_GYM_DIR,PROFILE,DATASET,GYM_CONFIG,GYM_BIN,APEX_IMAGE,WORLD_CACHE_DIR"
     container_env+=",SHARED_RUNTIME_DIR,RUN_DIR,OUTPUT_JSONL,CONCURRENCY,NUM_REPEATS,LIMIT,MAX_OUTPUT_TOKENS"
     container_env+=",SHARD_ROOT,SHARD_INPUT_DIR,SHARD_OUTPUT_DIR,EFFECTIVE_DATASET,SHARD_COUNT"
-    container_env+=",APEX_AGENT_TIMEOUT,NEMO_GYM_MAX_ROLLOUT_ATTEMPTS,MAX_ROTATIONS,ROTATION"
+    container_env+=",APEX_AGENT_TIMEOUT,NEMO_GYM_MAX_ROLLOUT_ATTEMPTS,MAX_ROTATIONS,ROTATION,APEX_RESUME_CHECKPOINT_DIR"
     container_env+=",SERVER_WAIT_SECONDS,USER_NAME,N_REPLICAS,GYM_HEAD_PORT"
     container_env+=",SHARD_INDEX,WORKER_CONCURRENCY,POLICY_URL,INPUT_JSONL,SHARD_OUTPUT_JSONL,APEX_ARTIFACT_DIR"
     container_env+=",NEMO_GYM_REASONING_FIELD"

@@ -1,3 +1,5 @@
 apex_agents_benchmark.jsonl
+*_2026*.jsonl
+*_2026*_images.json
 world_cache/
 task_files_cache/
