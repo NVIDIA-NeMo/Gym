@@ -1325,13 +1325,17 @@ def _last_call_record(root_calls: list[str], child_calls: tuple[str, ...] | list
 
 @pytest.mark.parametrize("reverse_capture", [False, True])
 @pytest.mark.parametrize("final_failed", [False, True])
-def test_last_failed_uses_root_timing_not_capture_or_reference_order(tmp_path, reverse_capture, final_failed):
+@pytest.mark.parametrize("first_completed_at", [2, 3.5, 5, None, 0])
+def test_last_failed_uses_root_start_not_completion_capture_or_reference_order(
+    tmp_path, reverse_capture, final_failed, first_completed_at
+):
     record = _last_call_record(["last", "first"], ["child"])
     calls = [
         _timed_call("first", 1, failed=not final_failed),
         _timed_call("last", 3, failed=final_failed),
         _timed_call("child", 5, failed=not final_failed),
     ]
+    calls[0]["completed_at"] = first_completed_at
     if reverse_capture:
         calls.reverse()
     [digest] = run_health_checks(_write_fixture(tmp_path, [(record, calls)]), workers=1).rollouts
@@ -1353,9 +1357,7 @@ def test_last_failed_uses_root_timing_not_capture_or_reference_order(tmp_path, r
         "incomplete_status",
         "missing_reference",
         "missing_time",
-        "overlap",
         "tie",
-        "invalid_interval",
         "nonfinite_time",
         "capture_gap",
         "ownership_gap",
@@ -1374,13 +1376,9 @@ def test_last_failed_requires_finished_root_and_unambiguous_final_call(tmp_path,
         trajectory["invocations"][0]["model_calls"] = [{"model_call_id": "missing"}]
     elif reason == "missing_time":
         calls[0].pop("started_at")
-    elif reason == "overlap":
-        calls[0]["completed_at"] = 4
     elif reason == "tie":
         calls[0]["started_at"] = 3
         calls[0]["completed_at"] = 4
-    elif reason == "invalid_interval":
-        calls[0]["completed_at"] = 0
     elif reason == "nonfinite_time":
         calls[0]["started_at"] = float("inf")
     elif reason == "capture_gap":

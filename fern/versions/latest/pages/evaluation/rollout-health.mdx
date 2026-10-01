@@ -153,16 +153,20 @@ evaluate; the gap does not suppress evidence of hollow turns. `model_call_last_f
 ### Final Top-Level Model Call
 
 `model_call_last_failed` checks only invocations with no `parent_invocation_id` and an explicit terminal status
-(`completed` or `failed`). It binds their own turn and invocation references; a later subagent or auxiliary call cannot
-hide a top-level failure. Earlier failed calls remain in error statistics but do not trigger this check.
+(`completed` or `failed`). It binds their own turn and invocation references; a later call outside the root invocation
+cannot hide a top-level failure. Earlier failed calls remain in error statistics but do not trigger this check.
 
-For multiple calls, every owned call needs valid `started_at` and `completed_at` timestamps. The final call must start
-after every other call started and at or after every other call completed. Capture append order and reference order
-are not evidence of which request was last. A single exactly bound call needs no ordering comparison.
+"Last" means the call with the latest request start observed by the model server (`started_at`). For multiple calls,
+every owned call needs a finite start timestamp and exactly one call must have the latest start. Calls may overlap:
+an earlier request finishing later does not change which call is last. Completion timestamps, capture append order,
+and reference order do not affect the selection. A single exactly bound call needs no ordering comparison.
+
+Model-server start order can differ from harness dispatch order for concurrent requests. Background or cleanup
+requests owned by the same root invocation participate in this ordering too.
 
 Missing root ownership, unfinished or unknown invocation status, incomplete capture, unresolved or conflicting
-references, missing timestamps, and overlapping final calls make the check unobserved. When multiple top-level
-invocations exist, each is checked independently: a known final failure still produces a finding even if another root
+references, missing or nonfinite start timestamps, and a tie for the latest start make the check unobserved. When multiple
+top-level invocations exist, each is checked independently: a known final failure still produces a finding even if another root
 is unobserved. A failed subagent alone does not trigger this check.
 
 This check establishes that the last model call failed, not that the task answer was wrong. Other health checks still

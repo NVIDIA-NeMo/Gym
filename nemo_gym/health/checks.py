@@ -596,10 +596,10 @@ def _trajectory_capture_mismatch(
 def _last_root_model_calls(
     trajectory: dict[str, Any], calls: list[dict[str, Any]]
 ) -> tuple[list[tuple[str, dict[str, Any]]], bool]:
-    """Find final calls of finished top-level invocations; return uncertainty separately.
+    """Find each finished root's latest request start observed by the model server.
 
-    Capture append order and reference order are not causal order. Multiple calls require a
-    uniquely last, non-overlapping request interval. Missing evidence never certifies recovery.
+    Completion, capture append, and reference order do not determine which call is last.
+    Return uncertainty separately when ownership, capture, or start times are insufficient.
     """
     invocations = trajectory.get("invocations") or []
     roots = [invocation for invocation in invocations if invocation.get("parent_invocation_id") is None]
@@ -636,21 +636,11 @@ def _last_root_model_calls(
         if len(owned) == 1:
             last_calls.append((invocation_id, owned[0]))
             continue
-        if any(
-            not all(
-                type(call.get(key)) in (int, float) and isfinite(call[key]) for key in ("started_at", "completed_at")
-            )
-            or call["completed_at"] < call["started_at"]
-            for call in owned
-        ):
+        if any(type(call.get("started_at")) not in (int, float) or not isfinite(call["started_at"]) for call in owned):
             unobserved = True
             continue
         last = max(owned, key=lambda call: call["started_at"])
-        if any(
-            call is not last
-            and (call["started_at"] >= last["started_at"] or call["completed_at"] > last["started_at"])
-            for call in owned
-        ):
+        if sum(call["started_at"] == last["started_at"] for call in owned) != 1:
             unobserved = True
             continue
         last_calls.append((invocation_id, last))
