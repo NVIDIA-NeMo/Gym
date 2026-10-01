@@ -26,6 +26,7 @@ LOGGER = logging.getLogger(__name__)
 EpisodeRequestT = TypeVar("EpisodeRequestT", bound=BaseEpisodeRequest[Any])
 EpisodeResponseT = TypeVar("EpisodeResponseT", bound=BaseEpisodeResponse[Any])
 CleanupCallback = Callable[[], Awaitable[None]]
+ResponseFinalizer = Callable[[BaseEpisodeResponse[Any]], None]
 
 
 class BaseEnvironmentServerConfig(BaseRunServerInstanceConfig):
@@ -94,6 +95,16 @@ class CleanupContext:
     episode_id: EpisodeId
     cleanup_timeout_seconds: float
     _cleanups: list[_CleanupEntry] = field(default_factory=list)
+    _response_finalizers: list[ResponseFinalizer] = field(default_factory=list)
+
+    def register_response_finalizer(self, callback: ResponseFinalizer) -> None:
+        """Attach evidence available only after cleanup, including on episode failure."""
+        self._response_finalizers.append(callback)
+
+    def finalize_response(self, response: BaseEpisodeResponse[Any]) -> None:
+        """Apply registered evidence updates after all participant cleanup has run."""
+        for callback in self._response_finalizers:
+            callback(response)
 
     def register_cleanup(self, name: str, callback: CleanupCallback) -> CleanupHandle:
         entry = _CleanupEntry(name=name, callback=callback)
@@ -217,6 +228,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
 
         if cancelled is not None:
             raise cancelled
+        cleanup.finalize_response(response)
         response = self.response_model.model_validate(response)
         self.validate_response_identity(request, response)
         return response

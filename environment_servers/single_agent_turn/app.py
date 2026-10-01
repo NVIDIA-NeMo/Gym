@@ -34,6 +34,7 @@ from nemo_gym.config_types import (
     AggregateMetricsRequest,
     ResourcesServerRef,
 )
+from nemo_gym.episode_types import BaseEpisodeResponse
 from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
@@ -173,8 +174,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         # Cleanup callbacks return None.
         # Capture agent-owned observations and the final Resources Server cookie jar for the episode result.
         agent_close_response: AgentCloseSessionResponse | None = None
+        agent_response = None
+        close_error: str | None = None
 
-        async def close_agent() -> None:
+        async def collect_agent_close() -> None:
             nonlocal agent_close_response, resources_cookies
             close_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
@@ -186,13 +189,39 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 cookies=agent_cookies,
             )
             await raise_for_status(close_http_response)
-            agent_close_response = AgentCloseSessionResponse.model_validate(
-                await get_response_json(close_http_response)
-            )
-            if agent_close_response.agent_session_id != agent_session_id:
+            receipt = AgentCloseSessionResponse.model_validate(await get_response_json(close_http_response))
+            if receipt.agent_session_id != agent_session_id:
                 raise ValueError("Agent close returned a different agent_session_id")
+            agent_close_response = receipt
             if agent_close_response.resources_cookies is not None:
                 resources_cookies = agent_close_response.resources_cookies
+
+        async def close_agent() -> None:
+            nonlocal close_error
+            try:
+                await collect_agent_close()
+            except BaseException as error:
+                close_error = f"{type(error).__name__}: {error}"[:2000]
+                raise
+            close_error = None
+
+        def attach_agent_evidence(response: BaseEpisodeResponse[Any]) -> None:
+            assert isinstance(response, SingleAgentTurnResponse)
+            target = response.failure if response.failure is not None else response.result
+            if target is None:
+                return
+            if agent_close_response is not None:
+                target.ng_agent_observations = agent_close_response.agent_observations
+                target.ng_trajectory = agent_close_response.agent_trajectory
+            if response.failure is not None:
+                response.failure.partial_response = response.failure.partial_response or agent_response
+                if agent_close_response is not None:
+                    response.failure.partial_response = (
+                        response.failure.partial_response or agent_close_response.partial_response
+                    )
+                response.failure.cleanup_error = close_error
+
+        cleanup.register_response_finalizer(attach_agent_evidence)
 
         # Register cleanup before seed so cancellation can close a remotely created session even if its response is lost.
         agent_cleanup = cleanup.register_cleanup("agent session", close_agent)
@@ -223,7 +252,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
-        agent_response = None
         try:
             agent_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
@@ -286,13 +314,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return SingleAgentTurnResponse(
             episode_id=request.episode_id,
             task_id=request.task.task_id,
-            result=verification.model_copy(
-                update={
-                    "ng_agent_observations": agent_close_response.agent_observations
-                    if agent_close_response is not None
-                    else None
-                }
-            ),
+            result=verification,
         )
 
     def _agent_responses_path(self, request: SingleAgentTurnRequest) -> str:
