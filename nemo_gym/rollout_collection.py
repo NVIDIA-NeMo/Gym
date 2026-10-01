@@ -1127,6 +1127,17 @@ class DispatchLatencyTracker:
         if seconds > 0:
             bisect.insort(self._durations, seconds)
 
+    def record_failure(self, seconds: float) -> None:
+        """Record a failed attempt only when it ran at least as long as the median so far.
+
+        A task that timed out or died late shows how long tasks can run, so it can raise the
+        drain margin. One that failed at once says nothing about duration and would drag the
+        p75 toward zero, so it is ignored, as is any failure before a real completion exists.
+        """
+        median = self.quantile(0.5)
+        if median is not None and seconds >= median:
+            self.record(seconds)
+
     def record_drained(self) -> None:
         self._drained += 1
 
@@ -1161,12 +1172,12 @@ class DispatchLatencyTracker:
         else:
             total = sum(self._durations)
             lines = [
-                f"Per-task latency over {len(self._durations)} completed rollout(s): "
+                f"Per-task latency over {len(self._durations)} finished attempt(s): "
                 f"median {self.quantile(0.5) / 60:.1f} min, "
                 f"p90 {self.quantile(0.9) / 60:.1f} min, "
                 f"p99 {self.quantile(0.99) / 60:.1f} min, "
                 f"max {max(self._durations) / 60:.1f} min",
-                f"Task-time delivered: {total / 3600:.1f} task-hours",
+                f"Task-time observed: {total / 3600:.1f} task-hours",
             ]
         if self._drained:
             lines.append(
@@ -3233,6 +3244,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started = time.monotonic()
                 started_at = time.time()
                 res = None
+                succeeded = False
                 try:
                     request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
@@ -3241,6 +3253,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000
+                    succeeded = True
                     return _CompletedRollout(
                         row=row,
                         result=result,
@@ -3270,7 +3283,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                     )
                 finally:
-                    tracker.record(time.monotonic() - started)
+                    # Failed and timed-out tasks inform the adaptive margin too, but only by
+                    # raising it: see ``DispatchLatencyTracker.record_failure``.
+                    elapsed = time.monotonic() - started
+                    if succeeded:
+                        tracker.record(elapsed)
+                    else:
+                        tracker.record_failure(elapsed)
 
         awaitables = map(_post_subroutine, examples)
         if max_resident_tasks is not None:
