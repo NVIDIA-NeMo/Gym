@@ -741,7 +741,8 @@ def plan_gpus(config: "SubmitConfig") -> dict[str, dict[str, str]]:
 
     A pool is planned only when a vLLM service on it shares it with another service that wants
     its own GPUs (a vLLM or a ray service). Each vLLM takes the lowest free indices in declaration
-    order; a ray service there gets the rest. Every other service keeps seeing every GPU.
+    order; a ray service there gets the rest. Every other service keeps seeing every GPU. A
+    prefill/decode tier owns its nodes, so a pool holding one is never planned.
     """
     compute = next(iter(config.compute.values()))
     pools = {name: pool for name, pool in compute.node_pools.items() if pool.nodes}
@@ -758,7 +759,7 @@ def plan_gpus(config: "SubmitConfig") -> dict[str, dict[str, str]]:
             continue
         on_pool = {
             name: service
-            for name, service in config.services.items()
+            for name, service in config.deployed_services.items()
             if single_node
             or (
                 pool_name in (*service.node_pools, driver_pool)
@@ -766,7 +767,13 @@ def plan_gpus(config: "SubmitConfig") -> dict[str, dict[str, str]]:
                 else service.node_pool == pool_name
             )
         }
-        claimants = {n: s for n, s in on_pool.items() if _takes_own_gpus(s)}
+        if any(isinstance(s, VllmPDTierConfig) for s in on_pool.values()):
+            continue
+        claimants = {
+            n: s
+            for n, s in on_pool.items()
+            if isinstance(s, (VllmServiceConfig, RayServiceConfig)) and _takes_own_gpus(s)
+        }
         vllms = {n: s for n, s in claimants.items() if isinstance(s, VllmServiceConfig)}
         if not vllms or len(claimants) < 2:
             continue
@@ -828,6 +835,17 @@ def _resolve_auto_pool(config: SubmitConfig, compute: SlurmComputeConfig, pool_n
         raise ValueError(
             f"Node pool '{pool_name}' has nodes: auto but no gpus_per_node, so Gym cannot size it. "
             "Set gpus_per_node, or give the pool an explicit node count."
+        )
+    pd_users = [
+        name
+        for name, service in config.services.items()
+        if isinstance(service, VllmPDServiceConfig)
+        and pool_name in (service.node_pool, service.prefill.node_pool, service.decode.node_pool)
+    ]
+    if pd_users:
+        raise ValueError(
+            f"Node pool '{pool_name}' has nodes: auto, but vllm_pd service {', '.join(map(repr, pd_users))} "
+            "uses it. A prefill/decode pool needs an explicit node count."
         )
     sole_pool = len(compute.node_pools) == 1
     members = {

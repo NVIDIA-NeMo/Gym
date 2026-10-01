@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import nemo_gym.orchestration.executors.slurm_script as slurm_script_module
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
 from nemo_gym.orchestration.executors.script_templates import (
     render_driver_entrypoint,
@@ -2953,3 +2954,35 @@ def test_auto_puts_services_with_clashing_manual_gpus_on_different_nodes(tmp_pat
     )
     assert config.services["a"].node_pool == "gpu-0"
     assert config.services["b"].node_pool == "gpu-1"
+
+
+# ---------------------------------------------------------------------------
+# GPU packing and nodes: auto beside vllm_pd
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("server_per_node", [False, True])
+def test_a_pd_config_renders_the_same_with_and_without_gpu_packing(tmp_path, monkeypatch, server_per_node):
+    # A tier owns its nodes: nothing beside it is packed, whatever else shares the pool.
+    services = _pd_services(server_per_node=server_per_node)
+    if server_per_node:
+        for tier in ("prefill", "decode"):
+            services["policy"][tier]["number_of_instances"] = 1
+    services["judge"] = _vllm(8100, "decode")
+    services["ray"] = {"type": "ray", "container": "img", "node_pools": ["prefill"]}
+    packed = _pd_script(tmp_path, services=services)
+    monkeypatch.setattr(slurm_script_module, "plan_gpus", lambda config: {})
+    assert _pd_script(tmp_path, services=services) == packed
+    assert "CUDA_VISIBLE_DEVICES" not in packed
+
+
+def test_auto_refuses_a_pool_a_pd_tier_uses(tmp_path):
+    pools = {**_PD_POOLS, "decode": {**_PD_POOLS["decode"], "nodes": "auto"}}
+    with pytest.raises(ValueError, match="vllm_pd service 'policy' uses it"):
+        _pd_config(tmp_path, pools=pools)
+
+
+def test_a_pd_router_beside_a_lone_vllm_takes_no_gpus(tmp_path):
+    services = {**_pd_services(node_pool="front"), "scorer": _vllm(8200, "front")}
+    pools = {"front": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4}, **_PD_POOLS}
+    assert "CUDA_VISIBLE_DEVICES" not in _pd_script(tmp_path, services=services, pools=pools)
