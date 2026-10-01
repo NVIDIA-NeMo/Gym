@@ -178,6 +178,34 @@ validate_local() {
     log "Validation passed: paths, ${POLICY_LABEL} profile, world cache, and node-local Gym config are valid."
 }
 
+# BEGIN worker startup retry
+# `gym eval run` starts its servers on random localhost ports. A port clash ("address already in use") makes it exit
+# within seconds, before any rollout runs, and the shard then stays unrun until the next rotation. Retry only such
+# early exits; `--resume` makes a rerun safe. A failure after WORKER_STARTUP_WINDOW_SECONDS is returned unchanged.
+run_eval_with_startup_retry() {
+    local attempts="${WORKER_START_ATTEMPTS:-3}"
+    local window="${WORKER_STARTUP_WINDOW_SECONDS:-300}"
+    local delay="${WORKER_START_RETRY_DELAY_SECONDS:-5}"
+    local attempt=1 rc started elapsed
+    while true; do
+        started=${SECONDS}
+        setsid "$@" &
+        eval_pid=$!
+        rc=0
+        wait "${eval_pid}" || rc=$?
+        elapsed=$((SECONDS - started))
+        if (( rc != 0 && elapsed < window && attempt < attempts )); then
+            log "Worker ${SHARD_INDEX:-?}: gym eval exited rc=${rc} ${elapsed}s after start (startup failure); retrying $((attempt + 1))/${attempts}"
+            kill -TERM -- "-${eval_pid}" 2>/dev/null || true
+            attempt=$((attempt + 1))
+            sleep "${delay}"
+            continue
+        fi
+        return "${rc}"
+    done
+}
+# END worker startup retry
+
 run_gym_worker() {
     load_profile
     validate_common
@@ -273,17 +301,13 @@ run_gym_worker() {
     log "Worker ${SHARD_INDEX}: node=$(hostname), concurrency=${WORKER_CONCURRENCY}, policy=${POLICY_URL}"
     log "Worker ${SHARD_INDEX}: input=${INPUT_JSONL}, output=${SHARD_OUTPUT_JSONL}, tmp=${local_root}"
     log "Worker ${SHARD_INDEX}: timeout=${APEX_AGENT_TIMEOUT}s, max attempts=${NEMO_GYM_MAX_ROLLOUT_ATTEMPTS}"
-    setsid "${GYM_BIN}" eval run \
-        "${common_args[@]}" \
-        "${eval_args[@]}" &
-    local eval_pid=$!
-
+    eval_pid=""
     terminate_eval() {
-        kill -TERM -- "-${eval_pid}" 2>/dev/null || kill -TERM "${eval_pid}" 2>/dev/null || true
+        [[ -z "${eval_pid}" ]] || kill -TERM -- "-${eval_pid}" 2>/dev/null || kill -TERM "${eval_pid}" 2>/dev/null || true
     }
-    trap 'terminate_eval; wait "${eval_pid}" 2>/dev/null || true; exit 143' TERM INT
+    trap 'terminate_eval; [[ -z "${eval_pid}" ]] || wait "${eval_pid}" 2>/dev/null || true; exit 143' TERM INT
     local eval_rc=0
-    wait "${eval_pid}" || eval_rc=$?
+    run_eval_with_startup_retry "${GYM_BIN}" eval run "${common_args[@]}" "${eval_args[@]}" || eval_rc=$?
 
     retry_preparation=$(python3 "${APEX_GYM_DIR}/scripts/prepare_apex_retry_rows.py" \
         --output "${SHARD_OUTPUT_JSONL}")
