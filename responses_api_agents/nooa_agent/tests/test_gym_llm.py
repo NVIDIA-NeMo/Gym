@@ -335,3 +335,14 @@ def test_rejects_synchronous_policy_calls() -> None:
 
     with pytest.raises(RuntimeError, match="async"):
         llm.call([])
+
+
+@pytest.mark.asyncio
+async def test_transport_error_stays_fatal_after_a_later_success() -> None:
+    llm, client, state = make_llm(model_response())
+    failure = ConnectionError("model disconnected")
+    client.post.side_effect = [failure, FakeHTTPResponse(model_response())]
+    with pytest.raises(ConnectionError, match="disconnected"):
+        await llm.acall([{"role": "user", "content": "task"}])
+    await llm.acall([{"role": "user", "content": "retry"}])
+    assert state.fatal_error is failure
