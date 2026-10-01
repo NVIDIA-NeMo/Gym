@@ -560,3 +560,66 @@ async def test_interrupted_activation_closes_agent_before_resources(
         "/close_session",
     ]
     assert not client.responses
+
+
+@pytest.mark.parametrize("stage", ["success", "agent", "verification", "deadline"])
+async def test_close_evidence_survives_episode_completion(stage: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    environment, client = _environment_server()
+    receipt = {
+        "agent_session_id": "agent-session",
+        "agent_observations": {"source": "test", "records": [{"kind": "sandbox", "role": "agent"}]},
+        "agent_trajectory": {"task_id": "task", "rollout_id": "rollout-a2"},
+        "partial_response": _agent_response().model_dump(mode="json"),
+        "resources_cookies": {"session": "final-cookie"},
+    }
+    responses = client.responses
+    responses[3] = _Response(receipt)
+    if stage == "agent":
+        client.responses = [*responses[:2], ClientConnectionError("activation failed"), responses[3], responses[5]]
+    elif stage == "verification":
+        client.responses = [*responses[:4], ClientConnectionError("verification failed"), responses[5]]
+    elif stage == "deadline":
+        environment.config.default_episode_timeout_seconds = 0.01
+        client.responses = [*responses[:2], responses[3], responses[5]]
+        original_post = _Client.post
+
+        async def post(self, server_name, url_path, **kwargs):
+            if url_path.endswith("/v1/responses"):
+                await asyncio.Event().wait()
+            return await original_post(self, server_name, url_path, **kwargs)
+
+        monkeypatch.setattr(_Client, "post", post)
+
+    result = await environment.run_request(_request())
+
+    evidence = result.result if stage == "success" else result.failure
+    assert evidence.ng_agent_observations.model_dump(exclude_unset=True) == receipt["agent_observations"]
+    assert evidence.ng_trajectory.model_dump(exclude_unset=True) == receipt["agent_trajectory"]
+    if stage != "success":
+        assert evidence.partial_response == _agent_response()
+        assert evidence.cleanup_error is None
+    if stage in {"agent", "deadline"}:
+        assert not any(path == "/verify" for _, path, _ in client.calls)
+    assert client.calls[-1][2]["cookies"] == {"session": "final-cookie"}
+    assert not client.responses
+
+
+async def test_failed_close_preserves_original_failure_without_fabricating_evidence() -> None:
+    environment, client = _environment_server()
+    responses = client.responses
+    client.responses = [
+        *responses[:2],
+        ClientConnectionError("original activation failure"),
+        ValueError("runner still active"),
+        responses[5],
+    ]
+
+    result = await environment.run_request(_request())
+
+    assert result.failure.message == "original activation failure"
+    assert result.failure.cleanup_error == "ValueError: runner still active"
+    assert result.failure.ng_agent_observations is None
+    assert result.failure.ng_trajectory is None
+    assert result.failure.partial_response is None
+    assert not any(path == "/verify" for _, path, _ in client.calls)
+    assert not client.responses

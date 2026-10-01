@@ -45,7 +45,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -110,6 +110,8 @@ class AgentCloseSessionResponse(BaseModel):
 
     agent_session_id: str
     agent_observations: AgentObservationBundle | None = None
+    agent_trajectory: TrajectoryRecord | None = None
+    partial_response: NeMoGymResponse | None = None
     resources_cookies: dict[str, str] | None = None
 
 
