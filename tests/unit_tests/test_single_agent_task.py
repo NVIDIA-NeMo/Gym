@@ -200,3 +200,59 @@ def test_collation_routes_declared_taskset_without_rewriting_shared_source(tmp_p
     assert request.task.task_input.task_data["run_script"] == "verifier\nscript\n"
     assert loaded[-1]["task_source"] == "flat"
     assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("task_index", [100, 200])
+@pytest.mark.parametrize("explicit_rollout_id", [False, True])
+def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, explicit_rollout_id):
+    row = {
+        "responses_create_params": {"input": "same prompt across shards"},
+        "_ng_task_index": task_index,
+        "_ng_attempt_index": 2,
+        "_ng_rollout_index": 0,
+    }
+    if explicit_rollout_id:
+        row["_ng_rollout_id"] = f"shard-{task_index}"
+    source = tmp_path / "source.jsonl"
+    source.write_text(json.dumps(row) + "\n")
+    output = tmp_path / "collated"
+    TrainDataProcessor().run(
+        OmegaConf.create(
+            {
+                "resources": {
+                    "resources_servers": {
+                        "test": {
+                            "entrypoint": "app.py",
+                            "domain": "coding",
+                            "datasets": [
+                                {
+                                    "name": "tasks",
+                                    "type": "example",
+                                    "jsonl_fpath": str(source),
+                                    "taskset": "tasks",
+                                }
+                            ],
+                        }
+                    }
+                },
+                "mode": "example_validation",
+                "output_dirpath": str(output),
+                "task_data_validation": "off",
+            }
+        )
+    )
+    prepared = json.loads((output / "example.jsonl").read_text())
+    for key, value in row.items():
+        if key.startswith("_ng_"):
+            assert prepared[key] == value
+            assert key not in prepared["task_input"]["task_data"]
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(output / "example.jsonl"),
+        output_jsonl_fpath="unused",
+        environment_server_routes={"tasks": "environment"},
+    )
+    (loaded,) = RolloutCollectionHelper()._preprocess_rows_from_config(config)
+    assert loaded["_ng_task_index"] == task_index
+    request = SingleAgentTurnRequest.model_validate(_native_episode_request_body(loaded))
+    assert request.episode_id.rollout_id == (f"shard-{task_index}" if explicit_rollout_id else f"{task_index}-0")
+    assert request.episode_id.attempt == 2

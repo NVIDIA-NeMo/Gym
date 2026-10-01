@@ -452,6 +452,12 @@ The source JSONL stays unchanged and can still be shared with flat-row recipes.
 Omit `taskset` to keep the current flat-row format. This option accepts flat input
 only; already materialized input should be passed directly with `--input`.
 
+For these tasksets, benchmark discovery and `gym eval prepare` use the routed
+Environment Server's `agent_server` and `resources_server` bindings; the agent
+does not need its own `resources_server` binding. A dataset-level `agent` pin, if
+present, must match the routed agent. Collation preserves existing collector
+task indices, rollout IDs, and retry attempts outside `task_input`.
+
 ## Next Steps
 
 - Build a seed/verify environment in [Single-Step Environment](/environment-tutorials/single-step-environment).
