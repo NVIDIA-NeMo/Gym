@@ -870,7 +870,7 @@ class TestNativeTasksetBenchmark:
         "change, message",
         [
             ({"environment_server_routes": {}}, "No Environment Server route"),
-            ({"environment_server_routes": {"swe:test": "agent"}}, "Environment Server"),
+            ({"environment_server_routes": {"swe:test": "agent"}}, "must name an Environment Server"),
             (
                 {"environment": {"environment_servers": {"single_agent_turn": {"agent_server": {"name": "missing"}}}}},
                 "agent_server",
@@ -891,6 +891,18 @@ class TestNativeTasksetBenchmark:
 
         with pytest.raises(ConfigError, match="pins agent"):
             resolve_dataset_agent(config, "resources", pin="other", taskset="swe:test")
+
+    def test_manifest_rejects_datasets_routed_to_different_agents(self, config):
+        from nemo_gym.environment.validation import EnvironmentValidationError, _resolve_dataset_owner_agent
+
+        datasets = config.resources.resources_servers.impl.datasets
+        datasets.append(dict(datasets[0], name="other", taskset="swe:other"))
+        config.other_agent = config.agent
+        config.other_environment = config.environment
+        config.other_environment.environment_servers.single_agent_turn.agent_server.name = "other_agent"
+        config.environment_server_routes["swe:other"] = "other_environment"
+        with pytest.raises(EnvironmentValidationError, match="route to different agents"):
+            _resolve_dataset_owner_agent(config, "resources")
 
     def test_route_must_match_declaring_resources(self, config):
         from nemo_gym.config_types import ConfigError

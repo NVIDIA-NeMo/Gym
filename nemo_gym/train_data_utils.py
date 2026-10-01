@@ -883,6 +883,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         row[TASK_SOURCE_KEY_NAME] = c.name
                         if row_index % d.num_repeats == 0:
                             source_task_index += 1
+                        # Validate flat rows before conversion, which would hide misplaced fields.
+                        # Count each source row once, using its original JSONL line index.
+                        if validator is not None and row_index % d.num_repeats == 0:
+                            validator.validate_row(row_index // d.num_repeats, row)
                         if d.taskset is not None:
                             # Keep collector identity outside task_data so shards and retries
                             # retain their capture keys after materialization.
@@ -900,10 +904,6 @@ This could be due to a change in how metrics are calculated, leading to outdated
                                 row, taskset=d.taskset, task_index=source_task_index
                             ).model_dump(mode="json", exclude_unset=True)
                             row.update(identity)
-                        # num_repeats duplicates each line consecutively; validate only the first
-                        # copy so reports count each source row once, with its jsonl line index.
-                        if validator is not None and row_index % d.num_repeats == 0:
-                            validator.validate_row(row_index // d.num_repeats, row)
                         target.write(f"{json.dumps(row)}\n")
 
                 if validator is not None and (not validator.report.clean or validator.report.unknown_keys):

@@ -110,7 +110,7 @@ def _row():
     }
 
 
-def test_legacy_adapter_uses_same_converter():
+def test_legacy_adapter_preserves_task_identity_and_data():
     row = _row()
     row.update(task_source="resources", agent_ref={"name": "agent"})
     adapter = SingleAgentTurnLegacyEnvironmentServer(
@@ -126,7 +126,13 @@ def test_legacy_adapter_uses_same_converter():
         server_client=MagicMock(spec=ServerClient),
     )
     request = adapter._native_request(row)
-    assert request.task == materialize_single_agent_task(row, taskset="resources")
+    assert (request.task.task_id.taskset, request.task.task_id.task_id) == ("resources", "problem-1")
+    assert request.task.task_input.task_data == {
+        "problem_id": "problem-1",
+        "instance_id": "instance-1",
+        "run_script": "verifier\nscript\n",
+        "verifier_metadata": {"answer": "expected"},
+    }
     assert request.episode_id.attempt == 1
 
 
@@ -256,3 +262,65 @@ def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, expl
     request = SingleAgentTurnRequest.model_validate(_native_episode_request_body(loaded))
     assert request.episode_id.rollout_id == (f"shard-{task_index}" if explicit_rollout_id else f"{task_index}-0")
     assert request.episode_id.attempt == 2
+
+
+def _resources_server(name, datasets, implementation="test"):
+    return {
+        name: {
+            "resources_servers": {implementation: {"entrypoint": "app.py", "domain": "coding", "datasets": datasets}}
+        }
+    }
+
+
+def test_prompt_config_is_applied_before_materialization(tmp_path):
+    source = tmp_path / "source.jsonl"
+    source.write_text(json.dumps({"instance_id": "i1", "question": "What is 2+2?"}) + "\n")
+    prompt = tmp_path / "prompt.yaml"
+    prompt.write_text("system: Be brief.\nuser: 'Q: {question}'\n")
+    dataset = {
+        "name": "bench",
+        "type": "benchmark",
+        "jsonl_fpath": str(source),
+        "prepare_script": "prepare.py",
+        "prompt_config": str(prompt),
+        "taskset": "bench",
+    }
+    configs = GlobalConfigDictParser().filter_for_server_instance_configs(
+        OmegaConf.create(_resources_server("rs", [dataset]))
+    )
+    (path,) = TrainDataProcessor()._collate_samples_single_type("benchmark", configs, task_data_validation="off")
+    row = json.loads(path.read_text())
+    assert row["task_id"] == {"taskset": "bench", "task_id": "i1"}
+    assert row["task_input"]["responses_create_params"]["input"] == [
+        {"role": "system", "content": "Be brief."},
+        {"role": "user", "content": "Q: What is 2+2?"},
+    ]
+
+
+def test_flat_and_taskset_declarations_share_metrics_sidecar(tmp_path):
+    source = tmp_path / "source.jsonl"
+    source.write_text(json.dumps({"responses_create_params": {"input": "x"}}) + "\n")
+    dataset = {"name": "d", "type": "example", "jsonl_fpath": str(source)}
+    configs = GlobalConfigDictParser().filter_for_server_instance_configs(
+        OmegaConf.create(
+            {**_resources_server("flat", [dataset]), **_resources_server("native", [dict(dataset, taskset="t")])}
+        )
+    )
+    TrainDataProcessor().validate_samples_and_aggregate_metrics(configs, overwrite_metrics_conflicts=False)
+    assert "taskset" not in json.loads((tmp_path / "source_metrics.json").read_text())
+    assert not (tmp_path / "source_metrics_conflict.json").exists()
+
+
+@pytest.mark.parametrize("taskset", [None, "code"])
+def test_collation_rejects_misplaced_fields_before_materialization(tmp_path, taskset):
+    source = tmp_path / "source.jsonl"
+    source.write_text(
+        json.dumps({"responses_create_params": {"input": "code"}, "unit_tests": {"inputs": ["1"], "outputs": ["1"]}})
+        + "\n"
+    )
+    dataset = {"name": "code", "type": "example", "jsonl_fpath": str(source), "taskset": taskset, "num_repeats": 2}
+    configs = GlobalConfigDictParser().filter_for_server_instance_configs(
+        OmegaConf.create(_resources_server("resources", [dataset], implementation="code_gen"))
+    )
+    with pytest.raises(ValueError, match=r"wire reads from verifier_metadata.*unit_tests \(1 rows\)"):
+        TrainDataProcessor()._collate_samples_single_type("example", configs, task_data_validation="error")
