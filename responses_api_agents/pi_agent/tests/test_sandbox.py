@@ -157,7 +157,7 @@ def setup():
     )
     module = "responses_api_agents.pi_agent.app"
     with (
-        patch(f"{module}.ensure_pi", side_effect=AssertionError("native sessions must not install host Pi")),
+        patch(f"{module}.ensure_pi", side_effect=AssertionError("sandbox sessions must not install host Pi")),
         patch(f"{module}.resolve_provider_config"),
         patch(f"{module}.get_global_config_dict", return_value={}),
         patch(f"{module}.create_provider"),
@@ -171,7 +171,7 @@ def close_body(session_id):
     return {"agent_session_id": session_id, "episode_id": seed().episode_id.model_dump()}
 
 
-def test_http_native_flow_runs_pi_in_borrowed_sandbox(setup):
+def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
     agent, sandbox = setup
     with patch.object(agent, "_run_pi", AsyncMock(side_effect=AssertionError("host Pi must not run"))):
         with TestClient(agent.setup_webserver()) as client:
@@ -264,7 +264,7 @@ def test_invalid_output_limit_does_not_consume_activation(setup, limit):
         assert response.status_code == 200
 
 
-def test_native_output_limit_uses_config_default(setup):
+def test_session_output_limit_uses_config_default(setup):
     agent, sandbox = setup
     agent.config.max_output_tokens = 4096
     with TestClient(agent.setup_webserver()) as client:
@@ -274,7 +274,7 @@ def test_native_output_limit_uses_config_default(setup):
         assert models["providers"]["nemo"]["models"][0]["maxTokens"] == 4096
 
 
-def test_invalid_native_config_output_limit_does_not_consume_activation(setup):
+def test_invalid_session_config_output_limit_does_not_consume_activation(setup):
     agent, sandbox = setup
     agent.config.max_output_tokens = 0
     with TestClient(agent.setup_webserver()) as client:
@@ -395,7 +395,7 @@ async def activate(agent, sandbox):
     return request, seeded.agent_session_id, task
 
 
-async def test_native_runtime_guards_reach_the_pi_invocation(setup):
+async def test_sandbox_runtime_guards_reach_the_pi_invocation(setup):
     agent, sandbox = setup
     agent.config.sandbox_bash_timeout_seconds = 123
     agent.config.timeout = 10800
@@ -709,7 +709,7 @@ def test_unsupported_controls_do_not_consume_activation(setup, control):
         assert response.json()["status"] == "completed"
 
 
-def native_event_response(agent, sandbox, recorded_events):
+def sandbox_event_response(agent, sandbox, recorded_events):
     sandbox.events = "\n".join(json.dumps([i, event]) for i, event in enumerate(recorded_events))
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
@@ -742,7 +742,7 @@ def test_retry_uses_terminal_assistant_outcome(setup, final_stop, expected):
         "stopReason": final_stop,
         "errorMessage": "retry exhausted" if final_stop == "error" else None,
     }
-    response, observations = native_event_response(
+    response, observations = sandbox_event_response(
         agent,
         sandbox,
         [
@@ -774,7 +774,7 @@ def test_multiturn_message_ids_are_unique_and_tool_ids_preserved(setup):
     agent, sandbox = setup
     recorded = [json.loads(line)[1] for line in events().splitlines()]
     recorded[0]["message"]["content"].insert(1, {"type": "text", "text": "Inspecting"})
-    response, _ = native_event_response(agent, sandbox, recorded)
+    response, _ = sandbox_event_response(agent, sandbox, recorded)
     output = response["output"]
     messages = [item for item in output if item["type"] == "message"]
     assert [item["content"][0]["text"] for item in messages] == ["Inspecting", "Fixed"]
@@ -794,7 +794,7 @@ def test_optional_usage_details_preserve_unknown_contributors(setup, cache_read,
         final_usage.pop("cacheRead")
     else:
         final_usage["cacheRead"] = cache_read
-    response, observations = native_event_response(agent, sandbox, recorded)
+    response, observations = sandbox_event_response(agent, sandbox, recorded)
     assert response["usage"]["input_tokens_details"]["cached_tokens"] == expected
     gaps = {gap["code"] for gap in observations["gaps"]}
     assert ("cached_token_usage_unavailable" in gaps) is (expected is None)
@@ -812,13 +812,13 @@ def test_defaulted_cache_zero_remains_unknown(setup):
         message = event.get("message", {})
         if message.get("role") == "assistant":
             message["usage"]["cacheRead"] = 0
-    response, _ = native_event_response(agent, sandbox, recorded)
+    response, _ = sandbox_event_response(agent, sandbox, recorded)
     assert response["usage"]["input_tokens_details"]["cached_tokens"] is None
 
 
 @pytest.mark.parametrize("benchmark", ["swebench_pro", "independent"])
-async def test_native_configs_collect_through_environment_run(setup, monkeypatch, benchmark):
-    """One native Pi config works with SWE-bench and an unrelated Resources contract."""
+async def test_default_config_collects_through_environment_run(setup, monkeypatch, benchmark):
+    """One Pi config works with SWE-bench and an unrelated Resources contract."""
     from environment_servers.single_agent_turn.app import (
         SingleAgentTurnEnvironmentServer,
         SingleAgentTurnEnvironmentServerConfig,
@@ -832,13 +832,13 @@ async def test_native_configs_collect_through_environment_run(setup, monkeypatch
     root = Path(__file__).parents[3]
     parser = GlobalConfigDictParser()
     config_paths = [
-        root / "responses_api_agents/pi_agent/configs/pi_native.yaml",
+        root / "responses_api_agents/pi_agent/configs/pi_agent.yaml",
         root / "environment_servers/single_agent_turn/configs/single_agent_turn.yaml",
     ]
     if benchmark == "swebench_pro":
         config_paths.append(root / "resources_servers/swebench_pro/configs/swebench_pro.yaml")
         resources_name = "swebench_pro_resources_server"
-        taskset = "swebench_pro:smoke"
+        taskset = "swebench_pro"
         task_data = {"instance_id": "instance"}
     else:
         resources_name = "workspace_resources"
@@ -1120,11 +1120,11 @@ def test_session_lifetime_is_positive_and_finite(setup, lifetime):
 
 @pytest.mark.parametrize("marker", [None, "", [], {}, 0])
 @pytest.mark.parametrize("endpoint", ["seed", "responses", "close", "run"])
-async def test_malformed_native_marker_never_runs_host_pi(setup, marker, endpoint):
+async def test_malformed_session_marker_never_runs_host_pi(setup, marker, endpoint):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {"nemo_gym_pi_sandbox_session": marker}})
     with patch.object(agent, "_create_episode", AsyncMock()) as host:
-        with pytest.raises(HTTPException, match="Invalid native Pi session marker"):
+        with pytest.raises(HTTPException, match="Invalid Pi session marker"):
             if endpoint == "seed":
                 await agent.seed_agent_session(request, seed())
             elif endpoint == "responses":
@@ -1140,7 +1140,7 @@ async def test_malformed_native_marker_never_runs_host_pi(setup, marker, endpoin
     sandbox.pty.create.assert_not_awaited()
 
 
-async def test_native_marker_blocks_legacy_run(setup):
+async def test_session_marker_blocks_legacy_run(setup):
     agent, _ = setup
     request = Request({"type": "http", "session": {"nemo_gym_pi_sandbox_session": "expired-session"}})
     with pytest.raises(HTTPException, match="EnvironmentServer /run"):

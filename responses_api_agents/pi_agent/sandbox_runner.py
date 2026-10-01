@@ -16,7 +16,7 @@ from time import monotonic, sleep, time
 def enable_subreaper() -> None:
     """Adopt detached tool processes so they cannot outlive a successful close."""
     if sys.platform != "linux":
-        raise RuntimeError("Native Pi sessions require a Linux sandbox")
+        raise RuntimeError("Pi sessions require a Linux sandbox")
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
         raise OSError(ctypes.get_errno(), "Cannot establish Pi child-subreaper boundary")
