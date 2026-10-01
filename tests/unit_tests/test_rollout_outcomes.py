@@ -75,7 +75,7 @@ def test_protocol_diagnostics_remain_outside_the_serialized_failure_record() -> 
     )
     payload = json.loads(record.model_dump_json())
     assert payload["failure"] == {
-        "message": "Judge unavailable",
+        "failure_reason": "Judge unavailable",
         "terminal": False,
         "failure_kind": "judge_failed",
         "stage": "verification",
@@ -105,7 +105,56 @@ def test_public_response_schema_keeps_the_explicit_failure_fields() -> None:
     schema = RolloutFailure.model_json_schema(mode="serialization")
     failure = schema["$defs"]["EpisodeFailure"]
     assert failure["additionalProperties"] is False
-    assert failure["required"] == ["message", "terminal"]
-    assert failure["properties"]["message"]["maxLength"] == 2000
-    assert failure["properties"]["stage"]["anyOf"][0]["enum"] == ["seed", "agent", "verification", "cleanup"]
+    assert failure["required"] == ["failure_reason", "terminal"]
+    assert failure["properties"]["failure_reason"]["maxLength"] == 2000
+    assert "message" not in failure["properties"]
+    assert failure["properties"]["stage"]["anyOf"][0]["enum"] == [
+        "admission",
+        "seed",
+        "agent",
+        "verification",
+        "cleanup",
+    ]
     assert "failure_kind" in failure["properties"]
+
+
+@pytest.mark.parametrize("schema_version", [None, 1, 2])
+def test_saved_failure_record_versions(schema_version: int | None) -> None:
+    payload = {
+        "episode_id": {"rollout_id": "task-7"},
+        "run_id": "eval-1",
+        "source": "collector",
+        "delivery": "not_sent",
+        "failure": {"message": "Input could not be sent", "terminal": True},
+    }
+    if schema_version is not None:
+        payload["schema_version"] = schema_version
+    if schema_version == 2:
+        with pytest.raises(ValidationError, match="schema_version"):
+            RolloutFailure.model_validate(payload)
+    else:
+        record = RolloutFailure.model_validate(payload)
+        saved = json.loads(record.model_dump_json())
+        assert saved["schema_version"] == 1
+        assert saved["failure"]["failure_reason"] == "Input could not be sent"
+        assert RolloutFailure.model_validate_json(record.model_dump_json()) == record
+        with pytest.raises(ValidationError, match="Extra inputs"):
+            RolloutFailure.model_validate(saved | {"future_transport_field": "unknown"})
+
+
+@pytest.mark.parametrize("http_status", [None, 100, 599, 99, 600])
+def test_saved_failure_http_status_bounds(http_status: int | None) -> None:
+    payload = {
+        "episode_id": {"rollout_id": "task-7"},
+        "run_id": "eval-1",
+        "source": "collector",
+        "delivery": "possibly_delivered",
+        "failure": {"message": "No reply", "terminal": False},
+        "http_status": http_status,
+    }
+    if http_status is not None and not 100 <= http_status <= 599:
+        with pytest.raises(ValidationError, match="http_status"):
+            RolloutFailure.model_validate(payload)
+    else:
+        record = RolloutFailure.model_validate(payload)
+        assert RolloutFailure.model_validate_json(record.model_dump_json()).http_status == http_status

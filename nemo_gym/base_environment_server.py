@@ -169,8 +169,9 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 return self.failure_response(
                     request,
                     EpisodeFailure(
-                        message="Episode admission timed out",
+                        failure_reason="Episode admission timed out",
                         terminal=False,
+                        stage="admission",
                     ),
                 )
             acquired = True

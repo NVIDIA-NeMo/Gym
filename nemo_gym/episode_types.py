@@ -7,6 +7,7 @@ import re
 from typing import Generic, TypeVar
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -57,17 +58,24 @@ class TaskId(BaseModel):
 class EpisodeFailure(BaseModel):
     """Describe a failure using the same fields on the wire and in saved records.
 
-    Kind and stage are optional so existing message/terminal producers remain
-    valid. The kind identifies what happened; it does not determine terminality.
+    Read either ``failure_reason`` or the legacy ``message`` name; always write
+    ``failure_reason``. Existing message/terminal producers remain valid, but
+    readers of new replies must accept the canonical name. Kind and stage are
+    optional. The kind identifies what happened; it does not determine terminality.
     A collector observing a lost reply may not know the episode's stage.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    message: str = Field(max_length=2000)
+    failure_reason: str = Field(max_length=2000, validation_alias=AliasChoices("failure_reason", "message"))
     terminal: bool = Field(description="Whether rollout collection must not attempt this episode again.")
     failure_kind: str | None = None
     stage: FailureStage | None = None
+
+    @property
+    def message(self) -> str:
+        """Return the failure reason for callers using the legacy attribute name."""
+        return self.failure_reason
 
     @field_validator("failure_kind")
     @classmethod
@@ -77,7 +85,7 @@ class EpisodeFailure(BaseModel):
     # A return annotation would replace the public JSON Schema with that type.
     @model_serializer(mode="wrap")
     def _serialize_failure(self, handler: SerializerFunctionWrapHandler):
-        # Keep message/terminal-only replies readable by existing strict clients.
+        # Omit metadata when the producer cannot classify the failure.
         # Protocol subclasses still serialize their own diagnostic fields.
         result = handler(self)
         for key in ("failure_kind", "stage"):

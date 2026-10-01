@@ -42,9 +42,11 @@ from typing import Literal
 logger = logging.getLogger(__name__)
 
 
-# Where an episode failed, independently of its kind and retry policy. An
-# observer that cannot establish the execution stage leaves it unspecified.
-FailureStage = Literal["seed", "agent", "verification", "cleanup"]
+# Where an episode failed, independently of its kind and retry policy.
+# Admission precedes seed. Collector-observed transport failures leave the stage
+# unset: delivery evidence and failure_kind describe the observation without
+# claiming to know where execution stopped inside the Environment Server.
+FailureStage = Literal["admission", "seed", "agent", "verification", "cleanup"]
 
 
 # ``<domain>_<condition>``. The domain says which layer observed the failure, so a reader

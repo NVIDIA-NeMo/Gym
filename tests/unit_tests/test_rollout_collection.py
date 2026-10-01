@@ -7131,11 +7131,12 @@ class TestEnvironmentServerRouting:
             "task_id": {"taskset": "swe_pro", "task_id": task},
         }
 
-    def test_episode_failure_reply_becomes_a_sidecar_row(self) -> None:
+    @pytest.mark.parametrize("reason_field", ["message", "failure_reason"])
+    def test_episode_failure_reply_becomes_a_sidecar_row(self, reason_field: str) -> None:
         reply = self._native_identity("a") | {
             "result": None,
             "failure": {
-                "message": "agent unavailable",
+                reason_field: "agent unavailable",
                 "terminal": False,
                 "stage": "agent",
                 "partial_response": {"id": "partial"},

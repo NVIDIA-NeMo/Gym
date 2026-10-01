@@ -23,14 +23,22 @@ class RolloutFailure(BaseModel):
     fields. Protocol-specific diagnostics, partial responses, and training data
     belong outside this record. No reward is inferred from a failure. Persistence,
     conversion from legacy markers, and retry budgets belong to the caller.
+
+    ``schema_version`` identifies the entire saved record, including nested
+    contracts. Missing versions are treated as version 1 for pre-version records.
+    Changes that older readers cannot parse (including added fields) require a
+    version bump. Readers reject unsupported versions and unknown fields; callers
+    must report an incompatible record or explicitly migrate it, never silently
+    drop fields or reinterpret it as a completed rollout.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    schema_version: Literal[1] = 1
     episode_id: EpisodeId
     run_id: str = Field(min_length=1)
     source: Literal["environment", "collector"]
     delivery: Literal["not_sent", "possibly_delivered", "delivered"]
     failure: EpisodeFailure
-    http_status: int | None = None
+    http_status: int | None = Field(default=None, ge=100, le=599)
     exception_type: str | None = Field(default=None, max_length=2000)

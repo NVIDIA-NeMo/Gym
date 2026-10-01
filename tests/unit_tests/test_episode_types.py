@@ -66,19 +66,24 @@ def test_task_id_contains_only_logical_identity() -> None:
         TaskId(taskset="swebench_pro:test", task_id="instance-1", revision="v1")
 
 
-def test_existing_failure_payload_remains_readable_by_strict_clients() -> None:
-    class ExistingFailure(BaseModel):
-        model_config = {"extra": "forbid"}
-        message: str
-        terminal: bool
-
-    original = ExistingFailure(message="Lost resources session", terminal=False)
-    current = EpisodeFailure.model_validate_json(original.model_dump_json())
+@pytest.mark.parametrize("reason_field", ["message", "failure_reason"])
+def test_failure_reads_both_reason_names_and_writes_the_canonical_name(reason_field: str) -> None:
+    current = EpisodeFailure.model_validate({reason_field: "Lost resources session", "terminal": False})
+    assert current.failure_reason == current.message == "Lost resources session"
     assert current.failure_kind is None and current.stage is None
-    assert ExistingFailure.model_validate_json(current.model_dump_json()) == original
+    expected = {"failure_reason": "Lost resources session", "terminal": False}
+    assert current.model_dump() == expected
+    assert current.model_dump(by_alias=True) == expected
+    assert EpisodeFailure.model_validate_json(current.model_dump_json()) == current
 
 
-@pytest.mark.parametrize("stage", ["seed", "agent", "verification", "cleanup"])
+@pytest.mark.parametrize("reason_field", ["message", "failure_reason"])
+def test_failure_reason_length_limit_applies_to_both_names(reason_field: str) -> None:
+    with pytest.raises(ValidationError, match="2000"):
+        EpisodeFailure.model_validate({reason_field: "x" * 2001, "terminal": True})
+
+
+@pytest.mark.parametrize("stage", ["admission", "seed", "agent", "verification", "cleanup"])
 def test_single_agent_protocol_inherits_shared_failure_metadata(stage: str) -> None:
     from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure
 

@@ -342,8 +342,22 @@ def test_failure_metadata_survives_the_environment_http_boundary(classified: boo
     server = FailureEnvironmentServer(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
     response = TestClient(server.setup_webserver()).post("/run", json=_request().model_dump(mode="json"))
     assert response.status_code == 200
-    expected = {"message": "Judge unavailable", "terminal": False}
+    expected = {"failure_reason": "Judge unavailable", "terminal": False}
     if classified:
         expected.update(failure_kind="judge_failed", stage="verification")
     assert response.json()["failure"] == expected
     assert response.json()["result"] is None
+
+
+def test_admission_timeout_reports_its_stage_before_running_the_episode() -> None:
+    server = _environment_server(max_concurrent_episodes=1, queue_timeout_seconds=0.01)
+
+    async def run() -> _Response:
+        async with server._admission:
+            return await server.run_request(_request())
+
+    response = asyncio.run(run())
+    assert response.result is None
+    assert response.failure.failure_reason == "Episode admission timed out"
+    assert response.failure.stage == "admission"
+    assert response.failure.terminal is False
