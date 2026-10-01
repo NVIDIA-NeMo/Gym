@@ -97,7 +97,6 @@ benchmark:
 
     gym eval run \
       --config $GYM_CONFIG \
-      --model-type vllm_model \
       --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
       --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
       "+wandb_project=${NEMO_GYM_USER}-gym-eval" \
@@ -117,11 +116,7 @@ benchmark:
       ++global_aiohttp_connector_limit_per_host=16384 \
       ++port_range_low=63000 \
       ++port_range_high=64000 \
-      "++num_samples_in_parallel=$NUM_SAMPLES_IN_PARALLEL" \
-      ++model_endpoint_readiness_timeout_seconds=1200 \
-      ++policy_model.responses_api_models.vllm_model.sampling_overrides.max_tokens=null \
-      ++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0 \
-      ++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95
+      ++model_endpoint_readiness_timeout_seconds=1200
 
 roles:
   prefill:
