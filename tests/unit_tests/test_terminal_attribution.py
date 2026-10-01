@@ -17,10 +17,12 @@
 The ``/run`` result's ``response`` is the object the verifier scored.
 Attribution joins it to exactly one captured call.
 The builder then delivers the root-to-terminal chain that earned the reward.
-Unattributed rollouts keep the strict single-chain policy bit-for-bit.
+Unattributed rollouts without a declared terminal response ID keep the strict
+single-chain policy. An unconfirmed declaration masks the rollout instead.
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -461,14 +463,24 @@ def test_finalize_honors_a_declared_terminal_response_id(tmp_path):
 
 
 @pytest.mark.parametrize("with_aux", [False, True])
-def test_finalize_masks_when_the_declared_response_id_was_not_captured(tmp_path, with_aux):
+@pytest.mark.parametrize(
+    ("declared_response_id", "reason"),
+    [
+        ("resp_unknown", "declared_terminal_not_captured"),
+        ("resp_1", "witness_disagreement"),
+    ],
+    ids=["uncaptured-id", "conflicting-id"],
+)
+def test_finalize_masks_when_the_declared_response_id_is_unconfirmed(
+    tmp_path: Path, with_aux: bool, declared_response_id: str, reason: str
+) -> None:
     result = {
         "_ng_rollout_id": "t0-r0",
         "response": _response(
             [_assistant_item("step one"), _assistant_item("final answer")],
             response_id="resp_2",
         ),
-        TERMINAL_RESPONSE_ID_KEY: "resp_unknown",
+        TERMINAL_RESPONSE_ID_KEY: declared_response_id,
         "reward": 1.0,
     }
     built = _delivery_case(tmp_path, result, with_aux=with_aux)
@@ -479,7 +491,7 @@ def test_finalize_masks_when_the_declared_response_id_was_not_captured(tmp_path,
     assert result["reward"] == 1.0
     attribution = result[TOKEN_CAPTURE_KEY]["terminal_attribution"]
     assert attribution["method"] == "none"
-    assert "declared_terminal_not_captured" in attribution["reason"]
+    assert reason in attribution["reason"]
 
 
 def test_finalize_without_witnesses_keeps_the_strict_policy(tmp_path):
