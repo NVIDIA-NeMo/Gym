@@ -214,6 +214,7 @@ def test_verify_response_preserves_conversion_diagnostics() -> None:
                 "status": "completed",
             },
             "reward": 1.0,
+            "reward_components": {"reward": 1.0},
             "atif_conversion": {"lossless": False, "warnings": ["documented limitation"]},
         }
     )
@@ -252,3 +253,79 @@ async def test_run_job_rejects_failed_steps_and_invalidates_resume(tmp_path, mon
     else:
         assert Path(await HarborAgent.run_job(config.model_dump(mode="json"), "task")) == trial_dir
         assert result_path.exists()
+
+
+@pytest.mark.parametrize("multi_step", [False, True])
+def test_success_preserves_structured_rewards_and_step_boundaries(
+    tmp_path: Path, multi_step: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from harbor.models.trial.paths import TrialPaths
+    from harbor.models.trial.result import TrialResult
+
+    from nemo_gym.reward_profile import compute_aggregate_metrics
+    from responses_api_agents.harbor_agent_general.app import HarborAgentConfig, HarborRunRequest
+    from responses_api_agents.harbor_agent_general.tests.test_prepare import make_task
+
+    task = make_task(tmp_path, "task", multi_step=multi_step)
+    trial_dir = tmp_path / "trial"
+    trial_dir.mkdir()
+    paths = TrialPaths(trial_dir)
+    steps = ["first", "second"] if multi_step else [None]
+    for index, name in enumerate(steps):
+        agent_dir = paths.step_agent_dir(name) if name else paths.agent_dir
+        agent_dir.mkdir(parents=True)
+        trajectory = _trajectory(message=f"answer {index}")
+        (agent_dir / "trajectory.json").write_text(trajectory.model_dump_json())
+    # Trial-level scores deliberately differ from the final step's scores.
+    trial = TrialResult.model_validate(
+        {
+            "task_name": "task",
+            "trial_name": "trial",
+            "trial_uri": str(trial_dir),
+            "task_id": {"path": str(task)},
+            "task_checksum": "test-checksum",
+            "config": {"task": {"path": str(task)}},
+            "agent_info": {"name": "opencode", "version": "test"},
+            "verifier_result": {"rewards": {"correctness": 0.5, "format": 1.0}},
+            "step_results": [
+                {"step_name": name, "verifier_result": {"rewards": {"correctness": index, "format": 1.0}}}
+                for index, name in enumerate(steps)
+            ]
+            if multi_step
+            else None,
+        }
+    )
+    paths.result_path.write_text(trial.model_dump_json())
+    config = HarborAgentConfig(
+        name="harbor_agent_general",
+        host="127.0.0.1",
+        port=8080,
+        entrypoint="app.py",
+        harbor_jobs_dir=tmp_path / "jobs",
+        harbor_reward_key="correctness",
+        harbor_agent={"name": "opencode", "model_name": "test-model"},
+    )
+    monkeypatch.setattr("responses_api_agents.harbor_agent_general.app.get_global_config_dict", lambda: {})
+    agent = HarborAgent.model_construct(config=config)
+    body = HarborRunRequest.model_validate(
+        {"task_name": "task", "responses_create_params": {"input": []}, "_ng_task_index": 0, "_ng_rollout_index": 0}
+    )
+    result = agent.success_response(body, trial_dir).model_dump(mode="json")
+    assert result["reward"] == 0.5
+    assert result["reward_components"] == {"correctness": 0.5, "format": 1.0}
+    assert result["harbor_reward/correctness"] == 0.5
+    assert result["response"]["output"][0]["content"][0]["text"] == f"answer {len(steps) - 1}"
+    assert result["responses_create_params"]["input"][0]["content"] == ("Solve second" if multi_step else "Solve task")
+    assert len(result["harbor_steps"]) == len(steps)
+    if multi_step:
+        assert result["harbor_steps"][0]["output"][0]["content"][0]["text"] == "answer 0"
+        assert result["harbor_steps"][1]["rewards"]["correctness"] == 1
+        assert not result["atif_conversion"]["lossless"]
+        assert any("Multi-step" in warning for warning in result["atif_conversion"]["warnings"])
+    metrics = compute_aggregate_metrics([result])
+    assert metrics.agent_metrics["mean/harbor_reward/correctness"] == 0.5
+    config.harbor_reward_key = "missing"
+    with pytest.raises(ValueError, match="Set harbor_reward_key explicitly"):
+        agent.success_response(body, trial_dir)
+    failed = agent.failure_response(body, RuntimeError("failure"))
+    assert failed.reward_components == {}

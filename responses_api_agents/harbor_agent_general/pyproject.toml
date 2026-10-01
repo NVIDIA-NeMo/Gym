@@ -4,7 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
-    "harbor>=0.22",
+    "harbor>=0.23",
 ]
 
 [build-system]
