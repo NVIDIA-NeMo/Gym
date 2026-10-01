@@ -140,7 +140,6 @@ class TestGlobalConfig:
                 initial_global_config_dict=DictConfig(
                     {
                         USE_ABSOLUTE_IP: True,
-                        "model_call_capture_assistant_message_header": "X-Custom-Reply-Id",
                         "worker": {"resources_servers": {"example": {"entrypoint": "app.py", "domain": "other"}}},
                     }
                 ),
@@ -150,7 +149,6 @@ class TestGlobalConfig:
             )
         )
 
-        assert config.model_call_capture_assistant_message_header == "X-Custom-Reply-Id"
         assert config.worker.resources_servers.example.port == -1
         assert config.worker.resources_servers.example.host == "127.0.0.1"
         probe.assert_not_called()
