@@ -15,11 +15,13 @@
 import copy
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from nemo_gym._checkpoint import ResourceSnapshot
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -28,6 +30,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.rollout_correlation import current_attempt_index, current_logical_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.indirect_prompt_injection.ecommerce_tools import TOOL_HANDLERS as ECOMMERCE_HANDLERS
 from resources_servers.indirect_prompt_injection.education_tools import TOOL_HANDLERS as EDUCATION_HANDLERS
@@ -59,6 +62,13 @@ logger = logging.getLogger(__name__)
 
 class IPIResourcesServerConfig(BaseResourcesServerConfig):
     pass
+
+
+class IPICheckpointState(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+    schema_version: Literal[1]
+    environment: Dict[str, JsonValue]
 
 
 class InjectionSpec(BaseModel):
@@ -110,6 +120,7 @@ class IPIVerifyResponse(BaseVerifyResponse):
 class IPIResourcesServer(SimpleResourcesServer):
     config: IPIResourcesServerConfig
     session_id_to_env: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    execution_to_session: Dict[tuple[str, int], str] = Field(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -117,13 +128,25 @@ class IPIResourcesServer(SimpleResourcesServer):
         return app
 
     async def seed_session(self, request: Request, body: IPISeedSessionRequest) -> BaseSeedSessionResponse:
+        identity = self._current_identity()
         session_id = request.session[SESSION_ID_KEY]
+        if identity is not None and identity in self.execution_to_session:
+            session_id = self.execution_to_session[identity]
+        elif session_id in self.session_id_to_env and (
+            identity is not None or session_id in self.execution_to_session.values()
+        ):
+            # Reusing another execution's cookie must not overwrite its environment.
+            session_id = str(uuid4())
+        # Cookie-only callers and execution-aware callers must resolve the same state.
+        request.session[SESSION_ID_KEY] = session_id
         self.session_id_to_env[session_id] = copy.deepcopy(body.environment)
+        if identity is not None:
+            self.execution_to_session[identity] = session_id
         logger.debug("seed_session: sid=%s", session_id)
         return BaseSeedSessionResponse()
 
     async def route_tool_call(self, tool_name: str, body: ToolCallRequest, request: Request) -> ToolCallResponse:
-        session_id = request.session[SESSION_ID_KEY]
+        session_id = self._session_id(request)
         if session_id not in self.session_id_to_env:
             raise HTTPException(
                 status_code=400,
@@ -145,7 +168,14 @@ class IPIResourcesServer(SimpleResourcesServer):
             return ToolCallResponse(output=f"Error executing tool '{tool_name}' ({type(e).__name__}): {e}")
 
     async def verify(self, request: Request, body: IPIVerifyRequest) -> IPIVerifyResponse:
-        session_id = request.session[SESSION_ID_KEY]
+        identity = self._current_identity()
+        session_id = self._session_id(request)
+        if (
+            identity is None
+            and self._checkpoint_participant is not None
+            and session_id in self.execution_to_session.values()
+        ):
+            raise HTTPException(status_code=409, detail="Checkpoint-managed verification requires execution identity.")
         try:
             injection_followed, matched_tool, matched_args = check_injection_followed(
                 body.response.output, body.injection.model_dump()
@@ -184,6 +214,59 @@ class IPIResourcesServer(SimpleResourcesServer):
                 verification_type=body.injection.verification_type,
             )
         finally:
+            self.session_id_to_env.pop(session_id, None)
+            if identity is not None:
+                self.execution_to_session.pop(identity, None)
+                if self._checkpoint_participant is not None:
+                    self.checkpoint_participant().mark_terminal_after_request(*identity)
+            else:
+                self.execution_to_session = {
+                    key: value for key, value in self.execution_to_session.items() if value != session_id
+                }
+
+    @staticmethod
+    def _current_identity() -> tuple[str, int] | None:
+        rollout_id = current_logical_rollout_id()
+        attempt_index = current_attempt_index()
+        if rollout_id is None or attempt_index is None:
+            return None
+        return rollout_id, attempt_index
+
+    def _session_id(self, request: Request) -> str:
+        identity = self._current_identity()
+        if identity is not None:
+            session_id = self.execution_to_session.get(identity)
+            if session_id is None:
+                raise HTTPException(status_code=409, detail="execution has no successful seed binding")
+            return session_id
+        return request.session[SESSION_ID_KEY]
+
+    def checkpoint_state_enabled(self) -> bool:
+        return True
+
+    async def export_checkpoint_state(self, rollout_id: str, attempt_index: int) -> dict[str, Any]:
+        session_id = self.execution_to_session[(rollout_id, attempt_index)]
+        state = IPICheckpointState(schema_version=1, environment=self.session_id_to_env[session_id])
+        return state.model_dump()
+
+    async def restore_checkpoint_states(self, snapshots: list[ResourceSnapshot]) -> None:
+        # Restore runs in a fresh process; activate state only after the entire batch validates.
+        environments = {}
+        index = {}
+        for snapshot in snapshots:
+            identity = (snapshot.rollout_id, snapshot.attempt_index)
+            if identity in index:
+                raise ValueError(f"Duplicate IPI checkpoint execution: {identity}")
+            state = IPICheckpointState.model_validate(snapshot.state)
+            session_id = f"checkpoint:{snapshot.rollout_id}:a{snapshot.attempt_index}"
+            environments[session_id] = state.environment
+            index[identity] = session_id
+        self.session_id_to_env = environments
+        self.execution_to_session = index
+
+    async def retire_checkpoint_state(self, rollout_id: str, attempt_index: int) -> None:
+        session_id = self.execution_to_session.pop((rollout_id, attempt_index), None)
+        if session_id is not None:
             self.session_id_to_env.pop(session_id, None)
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
