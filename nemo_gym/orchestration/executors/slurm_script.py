@@ -552,11 +552,16 @@ def _pool_of(compute: SlurmComputeConfig, node: int) -> str | None:
     return None
 
 
-def _with_gpus(env: dict[str, str], gpus: str | None) -> dict[str, str] | None:
-    """The service's env plus its planned CUDA_VISIBLE_DEVICES, if plan_gpus gave it one."""
-    if gpus is not None:
-        env = {**env, "CUDA_VISIBLE_DEVICES": gpus}
-    return env or None
+def _with_gpus(env: dict[str, str], pre_command: str, gpus: str | None) -> tuple[dict[str, str] | None, str]:
+    """The step's env and pre_command, exporting the CUDA_VISIBLE_DEVICES plan_gpus gave it.
+
+    Exported inside the step: Slurm resets CUDA_VISIBLE_DEVICES to the step's GPUs, so an
+    `env K=V srun` value never reaches the task.
+    """
+    if gpus is None:
+        return env or None, pre_command
+    env = {k: v for k, v in env.items() if k != "CUDA_VISIBLE_DEVICES"}
+    return env or None, f"export CUDA_VISIBLE_DEVICES={shlex.quote(gpus)}\n{pre_command}".rstrip()
 
 
 def _render_ray_service(
@@ -575,6 +580,7 @@ def _render_ray_service(
     head_node = _driver_node(config, compute)
     head_pool = _pool_of(compute, head_node)
     address_var = ray_head_address_var(name)
+    head_env, head_pre = _with_gpus(service.env, service.pre_command, gpu_plan.get(head_pool, {}).get(name))
     steps = [
         _render_service_command(
             name,
@@ -582,27 +588,30 @@ def _render_ray_service(
             _build_ray_command(
                 service, pool=head_pool if head_pool in service.node_pools else None, address_var=address_var
             ),
-            _with_gpus(service.env, gpu_plan.get(head_pool, {}).get(name)),
+            head_env,
             service.mounts or None,
             nodes=_srun_nodes(service, compute, total_nodes),
             ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
-            pre_command=service.pre_command,
+            pre_command=head_pre,
             nodelist=_service_nodelist(service, driver_node, total_nodes),
         )
     ]
     # A worker only joins a running head, and the head may still be installing.
     wait_for_head = f'until ray status --address "${address_var}" >/dev/null 2>&1; do sleep 5; done'
     for pool, (_, count) in _ray_worker_ranges(service, compute, head_node).items():
+        worker_env, worker_pre = _with_gpus(
+            service.env, f"{service.pre_command.rstrip()}\n{wait_for_head}".lstrip(), gpu_plan.get(pool, {}).get(name)
+        )
         steps.append(
             _render_service_command(
                 f"{name}_{pool}_workers",
                 service.container,
                 _build_ray_command(service, pool=pool, address_var=address_var, worker=True),
-                _with_gpus(service.env, gpu_plan.get(pool, {}).get(name)),
+                worker_env,
                 service.mounts or None,
                 nodes=count,
                 ntasks=count,
-                pre_command=f"{service.pre_command.rstrip()}\n{wait_for_head}".lstrip(),
+                pre_command=worker_pre,
                 nodelist=ray_workers_var(name, pool),
             )
         )
@@ -921,6 +930,10 @@ def build_sbatch_script(
     gpu_plan = plan_gpus(config)
     # A vLLM service sits on one pool, so its name is unique across the plan.
     vllm_gpus = {name: gpus for planned in gpu_plan.values() for name, gpus in planned.items()}
+    env_and_pre = {
+        name: _with_gpus(s.env, _service_pre_command(s), vllm_gpus.get(name))
+        for name, s in config.deployed_services.items()
+    }
     service_commands = "\n\n".join(
         (
             [_render_collector_service(config, remote_bench_dir, is_multi_node=is_multi_node, driver_node=driver_node)]
@@ -937,7 +950,7 @@ def build_sbatch_script(
                     gpus_per_node_values,
                     offsets,
                 ),
-                _with_gpus(service.env, vllm_gpus.get(name)),
+                env_and_pre[name][0],
                 service.mounts or None,
                 # Only services that actually span multiple nodes need --nodes/--ntasks - not every
                 # service in a multi-node job (e.g. a plain Ray head service runs on a single node
@@ -945,7 +958,7 @@ def build_sbatch_script(
                 # them, so the node list and the step size agree.
                 nodes=_srun_nodes(service, compute, total_nodes),
                 ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
-                pre_command=_service_pre_command(service),
+                pre_command=env_and_pre[name][1],
                 nodelist=_service_nodelist(service, driver_node, total_nodes),
             )
             for name, service in config.deployed_services.items()
