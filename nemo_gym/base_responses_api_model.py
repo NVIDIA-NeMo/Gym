@@ -37,7 +37,7 @@ import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, AsyncIterator, Iterable, Mapping, Optional
 from uuid import uuid4
 
 import orjson
@@ -99,6 +99,24 @@ logger = logging.getLogger(__name__)
 
 # Stateless; shared by every model server's default /v1/messages handler.
 _ANTHROPIC_CONVERTER = AnthropicConverter()
+
+# Buffer-then-replay leaves a streaming chat connection silent while the backend generates. A network
+# path between a sandboxed client and this server can drop a connection idle for a few minutes without
+# telling either side (TB2.1 OpenCode runs lost about a third of replies that took 350 s or more), and a
+# client with no request timeout then waits forever. A buffered call still running after the grace
+# period commits the stream and sends SSE comment lines, which SSE parsers ignore, until it finishes.
+_SSE_KEEPALIVE_GRACE_S = 60.0
+_SSE_KEEPALIVE_INTERVAL_S = 30.0
+_SSE_KEEPALIVE_COMMENT = b": keep-alive\n\n"
+
+
+def _chat_sse_error(exc: BaseException) -> bytes:
+    """OpenAI-style in-stream ``error`` event for a chat call that failed after its stream was committed."""
+    status, body = _exception_http_details(exc)
+    message = body.decode("utf-8", errors="replace") if body else (str(exc) or type(exc).__name__)
+    code = status or 500
+    error = {"message": message, "type": "server_error" if code >= 500 else "invalid_request_error", "code": code}
+    return b"data: " + orjson.dumps({"error": error}) + b"\n\n"
 
 
 def _request_messages(body: Any) -> list[dict]:
@@ -301,7 +319,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         ``nemo_gym.chat_streaming``), validated identically, delegated to the same
         ``chat_completions()``, and the complete response is buffered and re-emitted as a
         synthesized ``chat.completion.chunk`` SSE stream. This is buffer-then-replay, not
-        token-by-token streaming.
+        token-by-token streaming. A call that takes longer than ``_SSE_KEEPALIVE_GRACE_S``
+        commits the stream early and sends SSE comment lines until the response is ready; a
+        faster call is served exactly as before, including eager HTTP errors.
 
         Only a genuine boolean ``stream: true`` takes the streaming path; any other value
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
@@ -316,12 +336,59 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
-        completion = await self._invoke_chat_completions(request, params)
+        call = asyncio.ensure_future(self._invoke_chat_completions(request, params))
+        try:
+            done, _ = await asyncio.wait({call}, timeout=_SSE_KEEPALIVE_GRACE_S)
+        except BaseException:
+            call.cancel()
+            raise
+        if not done:
+            return StreamingResponse(
+                self._keepalive_chat_sse(call, include_usage=include_usage), media_type="text/event-stream"
+            )
+        completion = call.result()
         completion_json = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
         return await self._stream_served_response(
             completion_json,
             synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
         )
+
+    async def _keepalive_chat_sse(
+        self, call: "asyncio.Future[NeMoGymChatCompletion]", *, include_usage: bool
+    ) -> AsyncIterator[bytes]:
+        """Stream SSE comments while a buffered chat call runs, then the same replay as the fast path.
+
+        The stream is already committed, so a failure of the call is reported as an in-stream ``error``
+        event rather than an HTTP status. If the client goes away, the call is cancelled.
+        """
+        try:
+            yield _SSE_KEEPALIVE_COMMENT
+            while True:
+                done, _ = await asyncio.wait({call}, timeout=_SSE_KEEPALIVE_INTERVAL_S)
+                if done:
+                    break
+                yield _SSE_KEEPALIVE_COMMENT
+            try:
+                completion = call.result()
+            except Exception as exc:
+                logger.warning("Chat completion failed after its SSE stream was committed.", exc_info=True)
+                yield _chat_sse_error(exc)
+                return
+            completion_json = (
+                completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
+            )
+            events = [
+                event.encode("utf-8") if isinstance(event, str) else event
+                for event in synthesize_chat_completion_sse(completion_json, include_usage=include_usage)
+            ]
+            context = current_capture_context()
+            if context is not None and context.external_staging:
+                await self._finalize_served_response(completion_json)
+            for event in events:
+                yield event
+        finally:
+            if not call.done():
+                call.cancel()
 
     async def _invoke_chat_completions(
         self, request: Request, params: NeMoGymChatCompletionCreateParamsNonStreaming
