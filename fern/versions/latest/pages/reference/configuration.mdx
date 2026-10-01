@@ -118,8 +118,9 @@ soft limit remain in the startup information line, but the connector ceiling alo
 a file-descriptor warning because it is not an allocation.
 
 The total aiohttp limit is a scheduling limit, not a strict open-socket cap across multiple
-hosts. Idle-connection reuse and aiohttp's waiter wake-up order can temporarily exceed it, so
-size pools with file-descriptor, ephemeral-port, and downstream connection budgets in mind.
+hosts. Idle-connection reuse and aiohttp's waiter wake-up order can exceed the total limit for
+as long as requests to more than one host are in flight. Size pools with file-descriptor,
+ephemeral-port, and downstream connection budgets in mind.
 
 When OpenTelemetry metrics export is enabled, Gym records one histogram sample per queued
 aiohttp connection acquisition. This metric is independent of the `http_client` tracing span group:
