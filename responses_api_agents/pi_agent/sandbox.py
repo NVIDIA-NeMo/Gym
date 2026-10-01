@@ -4,18 +4,19 @@
 
 import asyncio
 import json
+import logging
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.providers.base import SandboxPtySession
+from nemo_gym.sandbox import AsyncSandbox, process_supervisor
 
 
 class PiSandboxResult(BaseModel):
@@ -38,14 +39,12 @@ class PiSandboxSession(AgentSessionState):
     directory: str
     runtime: str
     task: asyncio.Task[NeMoGymResponse] | None = None
-    runner: SandboxPtySession | None = None
-    exit_task: asyncio.Task[int] | None = None
     result: PiSandboxResult | None = None
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     closing: bool = False
     launch_started: bool = False
-    runner_closed: bool = False
+    cleanup: dict[str, JsonValue] | None = None
     closed: bool = False
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
@@ -63,22 +62,37 @@ class PiSandboxSession(AgentSessionState):
             return path.read_text(errors="replace")
 
     async def stop_runner(self, timeout: float) -> None:
-        """Wait for the supervisor's cleanup receipt; retain handles on any failure."""
-        if not self.launch_started:
+        """Fence a delayed launch or require the shared supervisor's cleanup receipt."""
+        if not self.launch_started or self.cleanup is not None:
             return
-        if self.runner is None or self.exit_task is None:
-            raise RuntimeError("Pi launch outcome is unknown; cannot authorize verification")
-        if not self.exit_task.done():
-            await self.runner.send_signal("SIGTERM")
-        await asyncio.wait_for(asyncio.shield(self.exit_task), timeout=timeout)
-        if self.result is None:
-            self.result = PiSandboxResult.model_validate_json(await self.read_text("result.json"))
-        if not self.result.cleanup_confirmed:
-            raise RuntimeError(f"Pi sandbox cleanup was not confirmed: {self.result.error}")
-        if not self.runner_closed:
-            await self.runner.close()
-            self.runner_closed = True
-        # Keep the successful receipt for retries if file cleanup/disconnect fails.
+        receipt_path = f"{self.directory}/cleanup.json"
+        try:
+            receipt = json.loads(await self.read_text("cleanup.json"))
+        except Exception:
+            receipt = {}
+        if receipt.get("cleanup_confirmed") is not True:
+            pid_path = quote(f"{self.directory}/runner.pid")
+            stop_path = quote(f"{self.directory}/runner.stop")
+            claim_path = quote(f"{self.directory}/launch.claim")
+            temporary = quote(f"{receipt_path}.{uuid4().hex}.tmp")
+            stopped = quote(json.dumps({"cleanup_confirmed": True, "error": None}))
+            script = (
+                f"touch {stop_path} || exit 1; "
+                f"ln -s stop {claim_path} 2>/dev/null || true; "
+                f'if [ "$(readlink {claim_path})" = stop ]; then '
+                f"printf '%s' {stopped} > {temporary} && mv {temporary} {quote(receipt_path)}; exit $?; fi; "
+                f'if [ -s {pid_path} ]; then kill -TERM "$(cat {pid_path})" 2>/dev/null || true; fi; '
+                f"for _ in $(seq 1 {max(1, int(timeout))}); do "
+                f"[ -f {quote(receipt_path)} ] && exit 0; sleep 1; done; exit 1"
+            )
+            await self.sandbox.exec(script, cwd=self.request.sandbox_access.workdir, timeout_s=timeout + 5)
+            try:
+                receipt = json.loads(await self.read_text("cleanup.json"))
+            except Exception as error:
+                raise RuntimeError("Pi launch outcome is unknown; cannot confirm termination") from error
+            if receipt.get("cleanup_confirmed") is not True:
+                raise RuntimeError(f"Pi sandbox cleanup was not confirmed: {receipt.get('error')}")
+        self.cleanup = receipt
 
     async def close(self, timeout: float) -> None:
         """Stop only Pi-owned work and detach; never call sandbox.stop()."""
@@ -98,7 +112,13 @@ class PiSandboxSession(AgentSessionState):
                     raise
                 # A response error does not establish cleanup; stop_runner below must.
         await self.stop_runner(timeout)
-        result = await self.sandbox.exec(f"rm -rf -- {quote(self.directory)}", timeout_s=timeout)
+        retired = f"{self.directory}.closed"
+        # Keep the claim intact until its parent path is retired, fencing delayed execs.
+        result = await self.sandbox.exec(
+            f"if [ -d {quote(self.directory)} ]; then "
+            f"mv {quote(self.directory)} {quote(retired)} || exit 1; fi; rm -rf -- {quote(retired)}",
+            timeout_s=timeout,
+        )
         if result.return_code != 0:
             raise RuntimeError("Could not remove Pi session files")
         await self.sandbox.disconnect()
@@ -107,17 +127,38 @@ class PiSandboxSession(AgentSessionState):
     async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> str:
         """Start the supervisor and Pi inside the borrowed task sandbox."""
         await self.upload_json("input.json", payload)
-        self.launch_started = True
-        self.runner = await self.sandbox.pty.create(
-            command=f"exec python3 -I {quote(self.directory + '/sandbox_runner.py')} {quote(self.directory + '/input.json')}",
-            cwd=self.request.sandbox_access.workdir,
-            pty=False,
+        cleanup_timeout = close_timeout / 3
+        command = (
+            f"trap '' TERM; ln -s launch {quote(self.directory + '/launch.claim')} 2>/dev/null || exit 0; "
+            f"echo $$ > {quote(self.directory + '/runner.pid')} && "
+            f"exec python3 -I {quote(self.directory + '/process_supervisor.py')} "
+            f"--timeout {timeout} --cleanup-timeout {cleanup_timeout} "
+            f"--stop-file {quote(self.directory + '/runner.stop')} "
+            f"--receipt {quote(self.directory + '/cleanup.json')} -- "
+            f"python3 -I {quote(self.directory + '/sandbox_runner.py')} {quote(self.directory + '/input.json')} "
+            f">{quote(self.directory + '/runner.log')} 2>&1"
         )
-        self.exit_task = asyncio.create_task(self.runner.wait_exit())
+        self.launch_started = True
         try:
-            # The supervisor owns the execution timeout; this bounds missing receipts/provider failures too.
-            await asyncio.wait_for(asyncio.shield(self.exit_task), timeout=timeout + close_timeout * 3)
-            self.result = PiSandboxResult.model_validate_json(await self.read_text("result.json"))
-            return await self.read_text("events.jsonl")
-        finally:
+            launched = await self.sandbox.exec(
+                command,
+                cwd=self.request.sandbox_access.workdir,
+                timeout_s=process_supervisor.exec_timeout(timeout=timeout, cleanup_timeout=cleanup_timeout),
+            )
+            if launched.error_type == "timeout":
+                raise TimeoutError("Pi sandbox supervisor did not finish within its execution deadline")
+        except BaseException:
+            try:
+                await self.stop_runner(close_timeout)
+            except Exception:
+                logging.getLogger(__name__).exception("Pi cleanup remains unconfirmed; session close must retry")
+            raise
+        else:
             await self.stop_runner(close_timeout)
+        try:
+            runtime = json.loads(await self.read_text("runtime.json"))
+            self.result = PiSandboxResult.model_validate({**self.cleanup, **runtime})
+            return await self.read_text("events.jsonl")
+        except Exception as error:
+            logs = await self.sandbox.exec(f"cat {quote(self.directory + '/runner.log')}", timeout_s=30)
+            raise RuntimeError(f"Pi sandbox runner returned no valid result: {logs.stdout or ''}") from error

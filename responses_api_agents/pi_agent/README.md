@@ -31,7 +31,7 @@ bash, tar/gzip, and SHA-256 utilities. Missing bootstrap packages are installed 
 or apk when running as root; otherwise preinstall them in the image. Older Alpine images
 also need patchelf so Pi's Node can use a private, checksum-verified C++ library without
 replacing the task's system library. The pinned Node version has no arm64 musl build.
-The provider must implement PTY process sessions, including exit acknowledgement and signalling.
+The provider must support sandbox exec and file upload/download.
 Installation needs network access to nodejs.org and npm; musl also uses unofficial-builds.nodejs.org
 and, for the older C++ runtime fallback, dl-cdn.alpinelinux.org.
 
