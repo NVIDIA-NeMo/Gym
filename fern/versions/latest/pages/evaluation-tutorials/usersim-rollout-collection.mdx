@@ -41,7 +41,7 @@ architecture section later on explains it for readers who want to customize mode
 
 <Info>
 The UserSim integration is under active development. It currently installs UserSim revision
-`b3381ae021baac2a6fb314b5f08a55845243017d` from GitHub over SSH. The installation host needs access to
+`8fd3ff4798af4037e164364f6c59ad14b4eabdc0` from GitHub over SSH. The installation host needs access to
 [NVIDIA-NeMo/UserSim](https://github.com/NVIDIA-NeMo/UserSim).
 </Info>
 
@@ -144,8 +144,9 @@ gym eval run \
 
 `gym eval run` starts the required Environment, Resources, Agent, and Model Servers for this command. Increase
 the limit only after the smoke rollout completes. UserSim's materialized row owns outer-turn configuration.
-A tool probe can make several model calls inside one Assistant activation before returning its final
-user-visible reply.
+For a tool probe, each Assistant Agent call performs one model activation and returns any function calls to the
+Environment-owned UserSim runtime. UserSim executes those calls and requests another Assistant activation when
+the probe's native loop requires one.
 The three reasoning-parser flags describe what each upstream endpoint returns, not the endpoint's role. Set a
 flag to `true` only when that endpoint returns reasoning fields that require parsing.
 
@@ -159,32 +160,29 @@ The Environment Server routes typed activation requests for two participant role
 - The **User Agent** produces the simulated user's messages.
 - The **Assistant Agent** produces the system-under-test responses and receives probe-specific tool access.
 
-The Environment Server reconstructs UserSim's `ConversationRuntime` from the prepared row. That runtime owns
-the outer episode lifecycle and requests each User, Assistant, Judge, or Summary activation. The Environment
-routes participant activations through the matching Agent Server and support activations directly to the
-support Model Server.
+The Environment Server reconstructs one `ProbeEpisodeRuntime` from the prepared row. That native runtime owns
+the conversation lifecycle, probe state, tool validation and execution, semantic call indices, and completed
+evidence. It requests each User, Assistant, Judge, or Summary activation. The Environment routes participant
+activations through the matching Agent Server and support activations directly to the support Model Server.
 
-Resources independently reconstructs a `ProbeToolSession` from the same immutable row. For `tool_calling`,
-`safety_agentic`, and `financial_services`, it owns the probe's tool schemas, effects, mutable state, semantic
-turn/call indices, and completed evidence. The Environment delegates one complete Assistant turn to the
-Assistant Agent. The Agent then autonomously executes every model → named Resources tool endpoint → model
-step and returns the complete turn transcript with hidden Resources evidence. The Environment submits that
-`CompletedAssistantTurn` to `ConversationRuntime`; it does not orchestrate the inner model/tool steps.
-Resources returns simulated payloads as opaque text, so plain-text mocks are not JSON-wrapped or retried.
-There are no UserSim-specific turn lifecycle endpoints: tool calls use the normal `POST /{tool_name}`
-Resources flow. The contextual metadata needed for native indices and evidence travels out of band from the
-model-visible tool payload. This completed-turn tool protocol currently uses the configured `direct_http`
-transport.
+For `tool_calling`, `safety_agentic`, and `financial_services`, the Assistant Agent returns function calls
+without executing them. The Environment submits that response to `ProbeEpisodeRuntime`; UserSim executes the
+accepted calls, appends the native tool messages, and decides whether another Assistant activation is needed.
+UserSim's internal `api_response_model` calls route through the Environment's `tool_simulation_model`.
 
-The **Judge** and **Summary** support aliases are model calls rather than Agents. Native non-tool conversations
-can invoke them for semantic checks and optional context processing; Resources-owned verification, probe
-scoring, and tool-result synthesis also use `support_model`. This tutorial requires explicit policy and support
+The Resources Server does not reconstruct a second probe runtime and exposes no probe tool or UserSim-specific
+`/runtime` endpoints. It validates the immutable prepared row at seed time and verifies the authoritative
+native result after the Environment completes the episode.
+
+The **Judge** and **Summary** support aliases are model calls rather than Agents. Native conversations can
+invoke them for semantic checks and optional context processing. Environment-owned tool-result synthesis and
+Resources-owned verification also use `support_model`. This tutorial requires explicit policy and support
 endpoint settings. They may contain the same values only when that upstream model supports both conversational
 reasoning and strict structured output; the Gym aliases remain distinct.
 
-Persisted Environment-owned invocations use the semantic `user`, `assistant`, `judge`, and `summary` roles as
-applicable. The Resources Server separately owns the episode-scoped `ProbeToolSession`, tool-result synthesis,
-and final verification. Its `probe_scorer_model` also references `support_model`.
+Persisted Environment-owned invocations use the semantic `user`, `assistant`, `judge`, `summary`, and
+`tool_simulation` roles as applicable. The Resources Server owns final verification only. Its
+`probe_scorer_model` also references `support_model`.
 
 Prepared task rows can provide optional per-role request defaults through `responses_create_params`. The
 Environment Server supplies the current conversation as each activation's Responses API `input`; the task
@@ -214,9 +212,10 @@ jq '{
 The scalar reward is UserSim's `assistant_quality`: the mean of normalized
 helpfulness, accuracy, and coherence scores from its trajectory evaluator.
 `reward_components` also contains every applicable normalized quality axis.
-Resources calls UserSim's hosted `TrajectoryEvaluatorRuntime` once, so the
-full native `assistant_eval` cell contains both applicable probe-scorer output
-and quality-axis judge reasoning. That cell is retained under
+Resources calls UserSim's `TrajectoryEvaluatorGenerator.agenerate()` once with
+the explicit scorer selected for the prepared probe, so the full native
+`assistant_eval` cell contains both applicable probe-scorer output and
+quality-axis judge reasoning. That cell is retained under
 `verification.verifier_data`. A conversation must complete with both
 participants, and any probe-specific scorer must pass, before its quality
 score becomes the Gym reward.
@@ -239,17 +238,17 @@ jq '.invocations[] | {
 }' results/usersim/rollouts.jsonl
 ```
 
-`role` is one of `user`, `assistant`, `judge`, or `summary`. Internal UserSim model aliases and an
-agent-versus-model executor label are intentionally not exposed. The `request` and `response` fields preserve
-the exact Responses API exchange for each Environment-owned activation.
+`role` is one of `user`, `assistant`, `judge`, `summary`, or `tool_simulation`. Internal UserSim model aliases
+and an agent-versus-model executor label are intentionally not exposed. The `request` and `response` fields
+preserve the exact Responses API exchange for each Environment-owned activation.
 
 <Note>
 The final rollout is an episode response, not one flattened Assistant transcript. The invocation ledger records
-Environment-owned activations. Resources-owned tool-result synthesis and probe-specific verification calls
-remain in probe or verification evidence rather than appearing as Environment Agent activations.
+Environment-owned activations. Native tool calls and results remain in `usersim_result`; probe-specific
+verification calls remain in verification evidence.
 </Note>
 
-The raw model-call capture shows Agent-internal policy steps that can outnumber Environment invocations:
+The raw model-call capture provides provider-level payloads, token usage, and latency for the hosted calls:
 
 ```bash
 find "${capture_dir}" -type f -maxdepth 3 -print
@@ -284,5 +283,5 @@ gym eval run \
 ```
 
 The `tool_calling`, `safety_agentic`, and `financial_services` probes expose episode-scoped simulated tools to
-the Assistant Agent. The Resources Server verifies their tool evidence and dispatches the probe's native
-UserSim scorer when one applies.
+the Environment-owned native UserSim runtime. The Resources Server verifies the runtime's tool evidence and
+dispatches the probe's native UserSim scorer when one applies.
