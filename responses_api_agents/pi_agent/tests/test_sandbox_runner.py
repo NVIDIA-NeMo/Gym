@@ -4,6 +4,7 @@
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -18,12 +19,12 @@ from responses_api_agents.pi_agent import sandbox_runner
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc are required")
 
 
-def launch(tmp_path, code, timeout=3):
+def launch(tmp_path, code, timeout=3, python=sys.executable, env=None):
     request = {
         "directory": str(tmp_path),
-        "command": [sys.executable, "-c", code],
+        "command": [python, "-c", code],
         "cwd": str(tmp_path),
-        "env": {},
+        "env": env or {},
         "timeout": timeout,
         "cleanup_timeout": 2,
         "prompt": "task input",
@@ -31,7 +32,7 @@ def launch(tmp_path, code, timeout=3):
     path = tmp_path / "input.json"
     path.write_text(json.dumps(request))
     process = subprocess.Popen(
-        [sys.executable, "-I", str(Path(sandbox_runner.__file__)), str(path)],
+        [python, "-I", str(Path(sandbox_runner.__file__)), str(path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -57,6 +58,27 @@ def test_capture_and_stdin(tmp_path):
     recorded_at, event = json.loads((tmp_path / "events.jsonl").read_text())
     assert recorded_at > 0
     assert event["prompt"] == "task input"
+
+
+@pytest.mark.skipif(shutil.which("python3.8") is None, reason="Python 3.8 is not installed")
+def test_python38_preserves_environment_and_reaps_detached_child(tmp_path, monkeypatch):
+    monkeypatch.setenv("PI_TEST_INHERITED", "inherited")
+    monkeypatch.setenv("PI_TEST_OVERRIDE", "old")
+    code = (
+        "import json,os,pathlib,subprocess,sys; "
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
+        "pathlib.Path('child.pid').write_text(str(p.pid)); "
+        "print(json.dumps({'inherited':os.environ['PI_TEST_INHERITED'],"
+        "'override':os.environ['PI_TEST_OVERRIDE'],'prompt':sys.stdin.read()}))"
+    )
+    process = launch(tmp_path, code, python=shutil.which("python3.8"), env={"PI_TEST_OVERRIDE": "new"})
+    summary = result(tmp_path, process)
+    assert summary["return_code"] == 0, summary
+    assert summary["cleanup_confirmed"] is True
+    _, event = json.loads((tmp_path / "events.jsonl").read_text())
+    assert event == {"inherited": "inherited", "override": "new", "prompt": "task input"}
+    with pytest.raises(ProcessLookupError):
+        os.kill(int((tmp_path / "child.pid").read_text()), 0)
 
 
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel"])

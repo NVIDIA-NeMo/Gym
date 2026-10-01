@@ -68,6 +68,8 @@ configuration is unchanged.
 - `pi_version`: npm version to pin on install (null means latest on the local path; native sessions require an exact version)
 - `resources_server`: required only for the agent's existing `/run` endpoint, not for native sessions or direct `/v1/responses`
 - `sandbox_install_timeout_seconds`: native runtime installation timeout (default 600)
+- `sandbox_bash_timeout_seconds`: maximum runtime of each native bash tool call (default 900);
+  shorter tool-requested deadlines are preserved
 - `session_close_timeout_seconds`: native process cleanup timeout (default 60)
 
 See `configs/pi_agent.yaml`.
@@ -110,8 +112,10 @@ detail, not a separate endpoint or a setup step users must run.
 
 ### Configure and run
 
-Select `pi_agent` in your environment/run configuration and compose it with your
-benchmark's Resources server, a sandbox provider, and a Gym model server:
+Import [configs/pi_native.yaml](configs/pi_native.yaml) in your environment/run configuration
+and compose its `pi_agent` with your benchmark's Resources server, a sandbox provider, and a Gym
+model server. The [SWE-bench Pro recipe](../../benchmarks/swebench/pro/pi_native.yaml) is one example;
+the agent config contains no benchmark or dataset selection.
 
 - On Pi, set `num_workers: 1`, an exact `pi_version` (for example `0.80.2`),
   `model_server` pointing to the Gym model server, and `model` to its served model ID.
@@ -124,15 +128,21 @@ Benchmark selection and evaluation settings belong in that environment/run confi
 not a Pi-specific benchmark preset. Pi's own `resources_server` setting is needed only for
 its existing `/run`; omit it for native sessions. Native seed rejects `pi_version: latest`.
 
-Supported task images are Linux x86_64/aarch64 glibc with Python 3.9+, bash, tar/xz,
-and SHA-256 utilities. The installer reuses curl, or installs it with CA certificates on
-root Debian/Ubuntu images; other images must provide curl. The provider must implement PTY
-process sessions, including exit acknowledgement and signalling. Installation needs network
-access to nodejs.org and npm.
-Musl/Alpine images are not supported.
+Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with Python 3.8+,
+bash, tar/gzip, and SHA-256 utilities. Missing bootstrap packages are installed with apt-get
+or apk when running as root; otherwise preinstall them in the image. Older Alpine images
+also need patchelf so Pi's Node can use a private, checksum-verified C++ library without
+replacing the task's system library. The pinned Node version has no arm64 musl build.
+The provider must implement PTY process sessions, including exit acknowledgement and signalling.
+Installation needs network access to nodejs.org and npm; musl also uses unofficial-builds.nodejs.org
+and, for the older C++ runtime fallback, dl-cdn.alpinelinux.org.
 
 The Node runtime, Pi package, and isolated HOME are outside the task repository. Pi's
 Node is addressed by absolute path; it does not replace the task's Python or Node on PATH.
+Native sessions bound each bash command and advise the agent to search repository/local
+dependency directories rather than shared mounts. This returns control after a stalled tool;
+the separate `timeout` still bounds the whole agent episode. Installer errors include both
+stdout and stderr so provider status messages do not hide the actual failure.
 Project extensions, skills, prompt templates, and themes are disabled; repository context
 files may still be read by Pi.
 

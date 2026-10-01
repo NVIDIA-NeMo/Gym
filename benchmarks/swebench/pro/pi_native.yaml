@@ -3,6 +3,7 @@
 
 config_paths:
   - resources_servers/swebench_pro/configs/swebench_pro.yaml
+  - responses_api_agents/pi_agent/configs/pi_native.yaml
   - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
 
 environment_routing_mode: taskset
@@ -16,18 +17,7 @@ swebench_pro_pi_resources_server:
       allowed_agents: [pi_agent]
 
 swebench_pro_pi_agent:
-  responses_api_agents:
-    pi_agent:
-      entrypoint: app.py
-      num_workers: 1
-      resources_server: null
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      model: ???
-      pi_version: 0.80.2
-      timeout: 900
-      session_lifetime_seconds: 21600
+  _inherit_from: pi_agent
 
 swebench_pro_pi:
   _inherit_from: single_agent_turn

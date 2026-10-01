@@ -210,6 +210,9 @@ def test_http_native_flow_runs_pi_in_borrowed_sandbox(setup):
             extension = f"{sandbox.directory}/output-limit.mjs"
             assert sandbox.files[extension] == Path(__file__).parents[1].joinpath("output-limit.mjs").read_text()
             assert payload["command"][payload["command"].index("--extension") + 1] == extension
+            assert f"{sandbox.directory}/runtime-guards.mjs" in payload["command"]
+            assert f"{sandbox.directory}/runtime-guards.mjs" in sandbox.files
+            assert payload["env"]["NEMO_GYM_PI_BASH_TIMEOUT"] == "900"
             models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
             assert models["providers"]["nemo"]["models"][0]["maxTokens"] == 123
             assert models["providers"]["nemo"]["baseUrl"] == "http://model.example:9000/ng-rollout/pi-smoke-a2/v1"
@@ -222,6 +225,23 @@ def test_http_native_flow_runs_pi_in_borrowed_sandbox(setup):
     assert not agent._sandbox_sessions
     assert agent._local_setup_task is None
     sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+    agent.server_client.post.assert_not_called()
+
+
+async def test_install_failure_preserves_stdout_and_stderr(setup):
+    agent, sandbox = setup
+    sandbox.exec.side_effect = [
+        SimpleNamespace(return_code=0, stdout="", stderr=""),
+        SimpleNamespace(return_code=1, stdout="Node cannot load libstdc++.so.6", stderr="exit status 1"),
+        SimpleNamespace(return_code=0, stdout="", stderr=""),
+    ]
+    with pytest.raises(RuntimeError) as error:
+        await agent._initialize_agent_session_state("failed-install", seed())
+    assert "exit status 1" in str(error.value)
+    assert "Node cannot load libstdc++.so.6" in str(error.value)
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.pty.create.assert_not_awaited()
     sandbox.stop.assert_not_awaited()
     agent.server_client.post.assert_not_called()
 
@@ -373,6 +393,25 @@ async def activate(agent, sandbox):
     task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
     await asyncio.wait_for(sandbox.started.wait(), 2)
     return request, seeded.agent_session_id, task
+
+
+async def test_native_runtime_guards_reach_the_pi_invocation(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_bash_timeout_seconds = 123
+    agent.config.timeout = 10800
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert response.status == "completed"
+    payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+    assert payload["env"]["NEMO_GYM_PI_BASH_TIMEOUT"] == "123"
+    assert f"{sandbox.directory}/runtime-guards.mjs" in payload["command"]
+    assert "tool_call" in sandbox.files[f"{sandbox.directory}/runtime-guards.mjs"]
+    settings = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/settings.json"])
+    assert settings["httpIdleTimeoutMs"] == 10800000
+    assert settings["retry"]["provider"]["timeoutMs"] == 10800000
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
 
 
 async def test_close_cancels_active_pi_before_detaching(setup):
@@ -611,7 +650,7 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [
         SimpleNamespace(return_code=0),
-        SimpleNamespace(return_code=1, stderr="npm failed"),
+        SimpleNamespace(return_code=1, stderr="npm failed", stdout=""),
         SimpleNamespace(return_code=0),
     ]
     request = Request({"type": "http", "session": {}})
@@ -777,8 +816,9 @@ def test_defaulted_cache_zero_remains_unknown(setup):
     assert response["usage"]["input_tokens_details"]["cached_tokens"] is None
 
 
-async def test_native_recipe_collects_through_environment_run(setup, monkeypatch):
-    """Exercise the checked-in recipe through collector, real environment, and real Pi lifecycle."""
+@pytest.mark.parametrize("benchmark", ["swebench_pro", "independent"])
+async def test_native_recipe_collects_through_environment_run(setup, monkeypatch, benchmark):
+    """One native Pi config works with SWE-bench and an unrelated Resources contract."""
     from environment_servers.single_agent_turn.app import (
         SingleAgentTurnEnvironmentServer,
         SingleAgentTurnEnvironmentServerConfig,
@@ -789,13 +829,30 @@ async def test_native_recipe_collects_through_environment_run(setup, monkeypatch
     from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 
     agent, sandbox = setup
-    recipe_path = Path(__file__).parents[3] / "benchmarks/swebench/pro/pi_native.yaml"
+    root = Path(__file__).parents[3]
     parser = GlobalConfigDictParser()
-    _, configs = parser.load_extra_config_paths([str(recipe_path)])
+    if benchmark == "swebench_pro":
+        config_paths = [root / "benchmarks/swebench/pro/pi_native.yaml"]
+        taskset = "swebench_pro:smoke"
+        task_data = {"instance_id": "instance"}
+    else:
+        config_paths = [
+            root / "responses_api_agents/pi_agent/configs/pi_native.yaml",
+            root / "environment_servers/single_agent_turn/configs/single_agent_turn.yaml",
+        ]
+        taskset = "workspace_fixture"
+        task_data = {"expected_output": "done"}
+    _, configs = parser.load_extra_config_paths([str(path) for path in config_paths])
     config = OmegaConf.merge(*configs)
+    if benchmark == "independent":
+        config.environment_routing_mode = "taskset"
+        config.environment_server_routes = {taskset: "single_agent_turn"}
+        environment_config = config.single_agent_turn.environment_servers.single_agent_turn
+        environment_config.resources_server.name = "workspace_resources"
+        environment_config.agent_server.name = "pi_agent"
     parser._recursively_swap_keys(config)
     assert config.environment_routing_mode == "taskset"
-    environment_name = config.environment_server_routes["swebench_pro:smoke"]
+    environment_name = config.environment_server_routes[taskset]
     environment_config = config[environment_name].environment_servers.single_agent_turn
     agent_name = environment_config.agent_server.name
     resources_name = environment_config.resources_server.name
@@ -841,7 +898,7 @@ async def test_native_recipe_collects_through_environment_run(setup, monkeypatch
             return Response(result.model_dump(mode="json"))
         if server_name == resources_name:
             if url_path == "/seed_session":
-                assert body["task_data"] == {"instance_id": "instance"}
+                assert body["task_data"] == task_data
                 return Response(
                     {
                         "resources_session_id": body["resources_session_id"],
@@ -853,7 +910,8 @@ async def test_native_recipe_collects_through_environment_run(setup, monkeypatch
             if url_path == "/verify":
                 assert not agent._sandbox_sessions
                 assert sandbox.disconnect.await_count == 1
-                assert body["instance_id"] == "instance"
+                for key, value in task_data.items():
+                    assert body[key] == value
                 assert body["responses_create_params"]["input"] == "Fix it"
                 assert body["response"]["usage"]["total_tokens"] == 22
                 assert "verification_input" not in body
@@ -879,8 +937,8 @@ async def test_native_recipe_collects_through_environment_run(setup, monkeypatch
     monkeypatch.setattr(ServerClient, "_resolve_base_url", lambda self, name: f"http://{name}:8000")
     monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda self, head=None: transport)
     materialized = {
-        "task_id": {"taskset": "swebench_pro:smoke", "task_id": "instance"},
-        "task_input": {"responses_create_params": {"input": "Fix it"}, "task_data": {"instance_id": "instance"}},
+        "task_id": {"taskset": taskset, "task_id": "instance"},
+        "task_input": {"responses_create_params": {"input": "Fix it"}, "task_data": task_data},
     }
     collection_config = RolloutCollectionConfig(
         input_jsonl_fpath="input.jsonl",
