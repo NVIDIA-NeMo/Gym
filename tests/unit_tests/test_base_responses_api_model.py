@@ -21,7 +21,7 @@ import pytest
 from fastapi import Body, FastAPI, Response
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
@@ -134,6 +134,7 @@ def _install_capture(app, tmp_path, *, model_server_name: str = "srv") -> None:
         app,
         _capture_config(tmp_path),
         model_server_name=model_server_name,
+        assistant_message_header=b"x-assistant-message-id",
     )
 
 
@@ -357,7 +358,9 @@ def test_capture_assistant_message_header_round_trip(tmp_path, headers, expected
 
     request_headers = [(b"x-session-id", b"opencode-session"), *headers]
     asyncio.run(
-        _CaptureMiddleware(app, store=store, model_server_name="srv")(
+        _CaptureMiddleware(
+            app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+        )(
             {
                 "type": "http",
                 "path": "/ng-rollout/header-round-trip/v1/responses",
@@ -414,7 +417,9 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
                 assert exchanges[0]["client_assistant_message_id"] == "assistant-stream"
 
     asyncio.run(
-        _CaptureMiddleware(app, store=store, model_server_name="srv")(
+        _CaptureMiddleware(
+            app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+        )(
             {
                 "type": "http",
                 "path": "/ng-rollout/fast-rollout/v1/messages",
@@ -459,7 +464,9 @@ def test_capture_retains_partial_stream_when_downstream_raises(tmp_path):
 
     with pytest.raises(RuntimeError, match="stream failed"):
         asyncio.run(
-            _CaptureMiddleware(app, store=store, model_server_name="srv")(
+            _CaptureMiddleware(
+                app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+            )(
                 {
                     "type": "http",
                     "path": "/ng-rollout/partial/v1/responses",
@@ -613,7 +620,9 @@ def test_cancelled_call_is_captured_then_reraised(tmp_path):
             pass
 
         task = asyncio.create_task(
-            _CaptureMiddleware(app, store=store, model_server_name="srv")(
+            _CaptureMiddleware(
+                app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+            )(
                 {
                     "type": "http",
                     "path": "/ng-rollout/r-cancel/v1/responses",
@@ -1941,13 +1950,8 @@ def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path
     assert not token_store.is_incomplete("hole-2")
 
 
-@pytest.mark.parametrize("header", ["", "bad header", "bad:header", "bad\r\nheader", "réply-id"])
-def test_assistant_message_header_config_rejects_invalid_http_names(header):
-    with pytest.raises(ValidationError):
-        ModelCallCaptureConfig(model_call_capture_assistant_message_header=header)
-
-
-def test_capture_uses_configured_assistant_header_only(tmp_path):
+@pytest.mark.parametrize("header", [b"X-Custom-Reply-Id", None])
+def test_capture_uses_supplied_assistant_header_or_none(tmp_path, header):
     app = FastAPI()
 
     @app.post("/v1/responses")
@@ -1957,9 +1961,8 @@ def test_capture_uses_configured_assistant_header_only(tmp_path):
     config = ModelCallCaptureConfig(
         observability_enabled=True,
         model_call_capture_dir=tmp_path,
-        model_call_capture_assistant_message_header="X-Custom-Reply-Id",
     )
-    install_model_call_capture(app, config, model_server_name="policy")
+    install_model_call_capture(app, config, model_server_name="policy", assistant_message_header=header)
     with TestClient(app) as client:
         response = client.post(
             "/ng-rollout/configured-header/v1/responses",
@@ -1974,6 +1977,6 @@ def test_capture_uses_configured_assistant_header_only(tmp_path):
         )
         assert response.status_code == 200
     [captured] = read_model_call_records(CaptureStore(tmp_path), "configured-header")
-    assert captured.client_assistant_message_id == "persisted-reply"
+    assert captured.client_assistant_message_id == ("persisted-reply" if header else None)
     [absent] = read_model_call_records(CaptureStore(tmp_path), "no-configured-header")
     assert absent.client_assistant_message_id is None

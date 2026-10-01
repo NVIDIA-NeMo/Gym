@@ -323,35 +323,46 @@ def test_message_join_failure_preserves_invocation_ownership(tmp_path, parse, mo
 
 
 @pytest.mark.parametrize("agent", ["opencode_agent", "opencode_sandboxed_agent"])
-def test_recipe_captures_shipped_binary_header_and_links_message(tmp_path, parse, agent):
-    from pathlib import Path
-
-    import yaml
-    from fastapi import FastAPI
+def test_harness_property_reaches_model_capture_and_links_message(tmp_path, parse, agent):
     from fastapi.testclient import TestClient
+    from omegaconf import OmegaConf
 
-    from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, install_model_call_capture
+    from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
+    from nemo_gym.server_utils import ServerClient
 
-    recipe = Path(__file__).resolve().parents[3] / "responses_api_agents" / agent / "configs" / f"{agent}.yaml"
-    config = ModelCallCaptureConfig.model_validate(
-        {
-            **yaml.safe_load(recipe.read_text()),
-            "observability_enabled": True,
-            "model_call_capture_dir": tmp_path / "capture",
-        }
+    class Model(SimpleResponsesAPIModel):
+        async def chat_completions(self, body):
+            return {"choices": []}
+
+        async def responses(self, body):
+            return {"output": []}
+
+    client = ServerClient(
+        head_server_config={"host": "localhost", "port": 0},
+        global_config_dict=OmegaConf.create(
+            {
+                "observability_enabled": True,
+                "model_call_capture_dir": str(tmp_path / "capture"),
+                "agent": {
+                    "responses_api_agents": {
+                        agent: {
+                            "model_server": {"type": "responses_api_models", "name": "policy"},
+                        }
+                    }
+                },
+            }
+        ),
     )
-    app = FastAPI()
-
-    @app.post("/v1/chat/completions")
-    async def respond():
-        return {"choices": []}
-
-    install_model_call_capture(app, config, model_server_name="policy")
+    model = Model(
+        config=BaseResponsesAPIModelConfig(host="localhost", port=0, name="policy", entrypoint="app.py"),
+        server_client=client,
+    )
+    app = model.setup_webserver()
     with TestClient(app) as client:
         assert (
             client.post(
                 "/ng-rollout/0-0/v1/chat/completions",
-                json={},
+                json={"model": "policy", "messages": []},
                 headers={"X-Session-Id": "root", "X-OpenCode-Assistant-Message-Id": "m0"},
             ).status_code
             == 200

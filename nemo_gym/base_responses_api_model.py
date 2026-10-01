@@ -238,6 +238,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             app,
             capture_config,
             model_server_name=self.config.name,
+            assistant_message_header=self.server_client.assistant_message_header(self.config.name),
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
             non_generating_requests=self.non_generating_model_routes
@@ -463,11 +464,6 @@ class ModelCallCaptureConfig(BaseModel):
 
     observability_enabled: bool = False
     model_call_capture_dir: Optional[Path] = None
-    model_call_capture_assistant_message_header: str = Field(
-        default="x-assistant-message-id",
-        pattern=r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
-        description="Request header carrying the client's persisted assistant-message ID (case-insensitive).",
-    )
 
     @model_validator(mode="after")
     def validate_capture_dir(self) -> "ModelCallCaptureConfig":
@@ -1373,13 +1369,15 @@ class _CaptureMiddleware:
         delta_records: bool = False,
         external_staging: bool = False,
         token_capture_enabled: bool = False,
-        assistant_message_header: str = "x-assistant-message-id",
+        assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
     ) -> None:
         self._app = app
         self._store = store
         self._model_server_name = model_server_name
-        self._assistant_message_header = assistant_message_header.lower().encode("ascii")
+        self._assistant_message_header: bytes | None = (
+            assistant_message_header.lower() if assistant_message_header else None
+        )
         # This store records training tokens for correlated training-capture calls.
         self._token_store = token_store
         # Built from token_id_capture.sink, once, in this process.
@@ -1494,8 +1492,10 @@ class _CaptureMiddleware:
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
-        client_assistant_message_id = _unique_request_header(
-            scope.get("headers") or [], self._assistant_message_header
+        client_assistant_message_id = (
+            _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
+            if self._assistant_message_header is not None
+            else None
         )
 
         # Give the model server a token sink keyed to this call.
@@ -1710,6 +1710,7 @@ def install_model_call_capture(
     config: ModelCallCaptureConfig,
     *,
     model_server_name: str | None = None,
+    assistant_message_header: bytes | None = None,
     global_config_dict: Any = None,
     num_workers: int | None = None,
     non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -1794,7 +1795,7 @@ def install_model_call_capture(
     app.add_middleware(
         _CaptureMiddleware,
         store=make_capture_store(config),
-        assistant_message_header=config.model_call_capture_assistant_message_header,
+        assistant_message_header=assistant_message_header,
         model_server_name=model_server_name,
         token_store=token_store,
         configured_sink=configured_sink,
