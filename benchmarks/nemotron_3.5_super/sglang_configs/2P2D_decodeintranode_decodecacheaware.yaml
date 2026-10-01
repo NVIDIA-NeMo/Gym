@@ -50,7 +50,7 @@ frontend:
     log-level: info
     dp-aware: false
     prefill-policy: cache_aware
-    decode-policy: round_robin
+    decode-policy: cache_aware
     balance-abs-threshold: 64
 # Keep the Gym checkout and its results visible outside the evaluation container.
 # SRT already mounts its job log directory at /logs and the checkpoint at /model.
