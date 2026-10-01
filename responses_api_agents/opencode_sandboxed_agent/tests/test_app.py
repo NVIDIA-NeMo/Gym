@@ -483,6 +483,7 @@ class TestOpenCodeSandboxedAgent:
             ("opencode.db", "execution"),
         ],
     )
+    @mark.parametrize("collect_observations", [True, False])
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,
@@ -490,6 +491,7 @@ class TestOpenCodeSandboxedAgent:
         monkeypatch: MonkeyPatch,
         database_name: str,
         lookup_failure: str | None,
+        collect_observations: bool,
     ) -> None:
         class Response:
             ok = True
@@ -555,6 +557,30 @@ class TestOpenCodeSandboxedAgent:
             connection.execute(
                 "insert into part values (?, 'm1', 'root', ?, 2)", (part_id, json.dumps({"type": kind}))
             )
+        for session_id, parent_id, tokens in [
+            ("child", "root", 10),
+            ("grandchild", "child", 20),
+            ("other", None, 999),
+        ]:
+            connection.execute("insert into session values (?, ?, 1)", (session_id, parent_id))
+            connection.execute(
+                "insert into message values (?, ?, ?, 2)",
+                (
+                    session_id + "-message",
+                    session_id,
+                    json.dumps(
+                        {
+                            "role": "assistant",
+                            "tokens": {
+                                "input": tokens,
+                                "output": tokens,
+                                "reasoning": tokens,
+                                "cache": {"read": 0, "write": 0},
+                            },
+                        }
+                    ),
+                ),
+            )
         connection.commit()
         assert db_path.with_name(f"{db_path.name}-wal").stat().st_size > 0
         main_only_path = tmp_path / "main-only.db"
@@ -564,7 +590,7 @@ class TestOpenCodeSandboxedAgent:
 
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {
-            "observability_enabled": True,
+            "observability_enabled": collect_observations,
             "token_id_capture": {"enabled": False, "all_agents": False},
         }
         server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
@@ -578,7 +604,7 @@ class TestOpenCodeSandboxedAgent:
                 SimpleNamespace(
                     stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
                 ),
-                SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout='[{"id": "root"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
                 SimpleNamespace(
                     stdout="" if lookup_failure == "empty" else f"{db_path}\n",
@@ -592,7 +618,7 @@ class TestOpenCodeSandboxedAgent:
         snapshot_path = tmp_path / "snapshot.db"
 
         def local_quote(value: str) -> str:
-            if value.endswith("/opencode/nemo-gym-observations.db"):
+            if value.endswith("/opencode/nemo-gym-observations.db") or value.startswith("/tmp/nemo-gym-observations-"):
                 value = str(snapshot_path)
             return shlex.quote(value)
 
@@ -602,7 +628,9 @@ class TestOpenCodeSandboxedAgent:
             if remote_path == "/tmp/opencode_export.json":
                 local_path.write_text(json.dumps(opencode_export_test_data))
             else:
-                assert remote_path.endswith("/opencode/nemo-gym-observations.db")
+                assert remote_path.endswith("/opencode/nemo-gym-observations.db") or remote_path.startswith(
+                    "/tmp/nemo-gym-observations-"
+                )
                 subprocess.run(shlex.split(sandbox.exec.await_args_list[-1].kwargs["command"]), check=True)
                 local_path.write_bytes(snapshot_path.read_bytes())
 
@@ -650,6 +678,18 @@ class TestOpenCodeSandboxedAgent:
         finally:
             connection.close()
 
+        parent_usage = NeMoGymResponseUsage.sum_from_list(server._opencode_export_to_usages(opencode_export_test_data))
+        usage = result.response.usage
+        assert usage.input_tokens == parent_usage.input_tokens + (0 if lookup_failure else 30)
+        assert usage.output_tokens == parent_usage.output_tokens + (0 if lookup_failure else 60)
+        assert usage.output_tokens_details.reasoning_tokens == parent_usage.output_tokens_details.reasoning_tokens + (
+            0 if lookup_failure else 30
+        )
+        if not collect_observations:
+            assert result.ng_agent_observations is None
+            assert getattr(result, "ng_trajectory", None) is None
+            assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+            return
         assert result.ng_agent_observations is not None
         lookup = sandbox.exec.await_args_list[3].kwargs
         assert lookup["command"].endswith("opencode db path")
@@ -667,7 +707,9 @@ class TestOpenCodeSandboxedAgent:
         assert turn.answer[0]["call_id"] == "call-1"
         assert not turn.model_calls
         [invocation] = [
-            record for record in result.ng_agent_observations.records if isinstance(record, AgentInvocation)
+            record
+            for record in result.ng_agent_observations.records
+            if isinstance(record, AgentInvocation) and record.invocation_id == "root"
         ]
         assert invocation.invocation_id == "root"
         assert invocation.status == "completed"
@@ -695,10 +737,7 @@ class TestOpenCodeSandboxedAgent:
         assert remote_data_home.startswith("/tmp/nemo-gym-opencode-")
         assert f"XDG_DATA_HOME={remote_data_home}" in sandbox.exec.await_args_list[0].kwargs["command"]
         assert export_env["XDG_DATA_HOME"] == remote_data_home
-        assert (
-            "opencode export session-id > /tmp/opencode_export.json"
-            in sandbox.exec.await_args_list[2].kwargs["command"]
-        )
+        assert "opencode export root > /tmp/opencode_export.json" in sandbox.exec.await_args_list[2].kwargs["command"]
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
