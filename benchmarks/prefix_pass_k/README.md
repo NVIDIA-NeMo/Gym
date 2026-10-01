@@ -126,8 +126,10 @@ Each rollout also reports:
   rate means the replay environment is off.
 - `exec_errors`: commands the sandbox failed to run at all (e.g. a connection
   reset). Not program output, and not retryable -- the command may already
-  have run -- so a rollout with `exec_errors > 0` did not replay faithfully and
-  should be re-run rather than scored.
+  have run -- so the first one aborts the attempt, and the sample comes back
+  with `mask_sample: true`, `reward: 0` and a `failure_kind`
+  (`transport_peer_drop` for a reset): excluded from pass@k, not scored as a
+  failure. Re-run masked samples to fill the row back up to K.
 - `unparsed_forwards`, `truncated_forwards`, `context_overflow`, `submitted`.
 
 ## Fidelity to the reference harness

@@ -40,7 +40,7 @@ from traceback import format_exc
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
-from aiohttp import ClientResponseError
+from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
@@ -51,6 +51,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import AGENT_RUN_ERROR, TRANSPORT_PEER_DROP
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -347,6 +348,19 @@ class PrefixPassKVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+class SandboxExecError(Exception):
+    """The sandbox failed to run a command at all (e.g. a connection reset).
+
+    Not program output, and not retryable -- the command may already have run --
+    so the attempt can no longer replay the trajectory faithfully: it is aborted
+    and its sample masked rather than scored.
+    """
+
+    def __init__(self, failure_kind: str, reason: str) -> None:
+        super().__init__(reason)
+        self.failure_kind = failure_kind
+
+
 class PrefixPassKAgent(SimpleResponsesAPIAgent):
     config: PrefixPassKAgentConfig
 
@@ -354,8 +368,6 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = {}
         self._session_id_to_stats: Dict[str, Dict[str, Any]] = {}
-        # Commands the sandbox failed to run at all, per sandbox (see `_run`).
-        self._exec_errors: Dict[int, int] = {}
 
     async def _connect_sandbox(self, seed_session_result: Dict[str, Any]) -> AsyncSandbox:
         provider = create_provider(
@@ -404,14 +416,14 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
             result = await sandbox.exec(self._wrap(command), timeout_s=self.config.step_timeout)
         except TimeoutError:
             return -1, "", timeout_info
-        except Exception:
-            # An infrastructure failure (e.g. a connection reset), not program
-            # output. It cannot be retried -- the command may already have run --
-            # so it is counted: a rollout with exec_errors > 0 did not replay the
-            # trajectory faithfully and should be re-run, not scored.
+        except Exception as exc:
+            # An infrastructure failure, not program output: answering it as a
+            # failed command would let the attempt go on and be scored.
             print("prefix_pass_k: exec failed", format_exc(), file=sys.stderr)
-            self._exec_errors[id(sandbox)] = self._exec_errors.get(id(sandbox), 0) + 1
-            return 1, "The command failed to execute.", None
+            kind = (
+                TRANSPORT_PEER_DROP if isinstance(exc, (ConnectionError, ClientConnectionError)) else AGENT_RUN_ERROR
+            )
+            raise SandboxExecError(kind, f"sandbox exec failed: {type(exc).__name__}: {exc}"[:500]) from exc
         # stdout is the command's merged output. stderr is the SANDBOX's status
         # text -- "exit status 1", "signal: killed" -- never program output: the
         # harness would not show it, and appending it put "exit status 1" under
@@ -680,74 +692,82 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
             # row's prefix, the rollout replays without the model -- e.g. to
             # re-grade it under a different verifier.
             "candidate_turns": [],
+            # Commands the sandbox failed to run at all; the first one aborts the attempt.
+            "exec_errors": 0,
         }
 
-        await self._replay_prefix(sandbox, messages, spec.get("prefix") or [], stats)
+        try:
+            await self._replay_prefix(sandbox, messages, spec.get("prefix") or [], stats)
 
-        if self.config.replay_through_target:
-            # Gold check: play the captured decisive turn instead of generating.
-            stats["submitted"] = await self._replay_step(sandbox, messages, spec.get("target") or {})
-        elif self.config.wire == "function_calling":
-            for _ in range(self.config.max_forwards):
-                message, finish_reason = await self._generate_chat(request, messages, body)
-                stats["forwards"] += 1
-                stats["candidate_turns"].append(
-                    {"context_overflow": True}
-                    if message is None
-                    else {
-                        "content": message.get("content"),
-                        "tool_calls": message.get("tool_calls"),
-                        "finish_reason": finish_reason,
-                    }
-                )
-                if message is None:
-                    # The transcript no longer fits the model's context, and a
-                    # retry cannot shrink it: the rollout ends on the prefix's
-                    # state. The reference got there by failing every forward
-                    # until the budget ran out -- five broad120 trials overflow
-                    # at handover, and all five scored 0/32 there.
-                    stats["context_overflow"] = True
-                    break
-                tool_calls = message.get("tool_calls")
-                commands = tool_call_commands(tool_calls)
-                if not commands:
-                    # Resample from the SAME transcript: the reference bridge
-                    # answers an unparseable generation with a 502 and mini
-                    # retries the identical request, so the failure costs its
-                    # forward and the model never sees it.
-                    stats["unparsed_forwards"] += 1
-                    stats["truncated_forwards"] += finish_reason == "length"
-                    continue
-                messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
-                for call_id, command in commands:
-                    observation, submitted = await self._exec(sandbox, command)
-                    messages.append({"role": "tool", "tool_call_id": call_id, "content": observation})
+            if self.config.replay_through_target:
+                # Gold check: play the captured decisive turn instead of generating.
+                stats["submitted"] = await self._replay_step(sandbox, messages, spec.get("target") or {})
+            elif self.config.wire == "function_calling":
+                for _ in range(self.config.max_forwards):
+                    message, finish_reason = await self._generate_chat(request, messages, body)
+                    stats["forwards"] += 1
+                    stats["candidate_turns"].append(
+                        {"context_overflow": True}
+                        if message is None
+                        else {
+                            "content": message.get("content"),
+                            "tool_calls": message.get("tool_calls"),
+                            "finish_reason": finish_reason,
+                        }
+                    )
+                    if message is None:
+                        # The transcript no longer fits the model's context, and a
+                        # retry cannot shrink it: the rollout ends on the prefix's
+                        # state. The reference got there by failing every forward
+                        # until the budget ran out -- five broad120 trials overflow
+                        # at handover, and all five scored 0/32 there.
+                        stats["context_overflow"] = True
+                        break
+                    tool_calls = message.get("tool_calls")
+                    commands = tool_call_commands(tool_calls)
+                    if not commands:
+                        # Resample from the SAME transcript: the reference bridge
+                        # answers an unparseable generation with a 502 and mini
+                        # retries the identical request, so the failure costs its
+                        # forward and the model never sees it.
+                        stats["unparsed_forwards"] += 1
+                        stats["truncated_forwards"] += finish_reason == "length"
+                        continue
+                    messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+                    for call_id, command in commands:
+                        observation, submitted = await self._exec(sandbox, command)
+                        messages.append({"role": "tool", "tool_call_id": call_id, "content": observation})
+                        if submitted:
+                            # The harness stops the turn at the submission; later
+                            # calls in it never run.
+                            stats["submitted"] = True
+                            break
+                    if stats["submitted"]:
+                        break
+            else:
+                for _ in range(self.config.max_forwards):
+                    text, _usage = await self._generate(request, messages, body)
+                    stats["forwards"] += 1
+                    stats["candidate_turns"].append({"content": text})
+                    messages.append({"role": "assistant", "content": text})
+                    action = parse_action(text)
+                    if action is None:
+                        stats["unparsed_forwards"] += 1
+                        n_actions = len(ACTION_FENCE.findall(text or ""))
+                        messages.append({"role": "user", "content": format_error_observation(n_actions)})
+                        continue
+                    observation, submitted = await self._exec(sandbox, action)
+                    messages.append({"role": "user", "content": observation})
                     if submitted:
-                        # The harness stops the turn at the submission; later
-                        # calls in it never run.
                         stats["submitted"] = True
                         break
-                if stats["submitted"]:
-                    break
-        else:
-            for _ in range(self.config.max_forwards):
-                text, _usage = await self._generate(request, messages, body)
-                stats["forwards"] += 1
-                stats["candidate_turns"].append({"content": text})
-                messages.append({"role": "assistant", "content": text})
-                action = parse_action(text)
-                if action is None:
-                    stats["unparsed_forwards"] += 1
-                    n_actions = len(ACTION_FENCE.findall(text or ""))
-                    messages.append({"role": "user", "content": format_error_observation(n_actions)})
-                    continue
-                observation, submitted = await self._exec(sandbox, action)
-                messages.append({"role": "user", "content": observation})
-                if submitted:
-                    stats["submitted"] = True
-                    break
+        except SandboxExecError as exc:
+            # Stop at the first command the sandbox could not run: nothing after it
+            # replays the trajectory faithfully, so `run` masks the sample.
+            stats["exec_errors"] = 1
+            stats["failure_kind"] = exc.failure_kind
+            stats["failure_reason"] = str(exc)
 
-        stats["exec_errors"] = self._exec_errors.pop(id(sandbox), 0)
         self._session_id_to_stats[session_key] = stats
         if self.config.debug:
             print(f"prefix_pass_k: {stats}", file=sys.stderr)
@@ -813,26 +833,36 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
             request.state._ng_prefix_pass_k_row = None
 
         stats = self._session_id_to_stats.setdefault(session_key, {})
-        if self.config.record_git_state:
-            stats.update(await self._git_state(sandbox, initial_head))
-        # The full change set, before any grading-side git steps: re-grading the
-        # rollout later, under a different collector, needs neither model nor sandbox.
-        stats["worktree_patch"] = await self._worktree_patch(sandbox, initial_head)
-        if self.config.commit_worktree:
-            await self._commit_worktree(sandbox)
-        if self.config.uncommit_worktree:
-            # After record_git_state, so the diagnostic still shows what the model did.
-            await self._uncommit_worktree(sandbox, initial_head)
+        aborted = stats.get("exec_errors", 0) > 0
+        if not aborted:
+            # Skipped on an aborted attempt: its sandbox just failed to run a command.
+            if self.config.record_git_state:
+                stats.update(await self._git_state(sandbox, initial_head))
+            # The full change set, before any grading-side git steps: re-grading the
+            # rollout later, under a different collector, needs neither model nor sandbox.
+            stats["worktree_patch"] = await self._worktree_patch(sandbox, initial_head)
+            if self.config.commit_worktree:
+                await self._commit_worktree(sandbox)
+            if self.config.uncommit_worktree:
+                # After record_git_state, so the diagnostic still shows what the model did.
+                await self._uncommit_worktree(sandbox, initial_head)
 
         verify_request = PrefixPassKVerifyRequest.model_validate(body.model_dump() | {"response": response})
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-        verify_json = await get_response_json(verify_response)
+        try:
+            # Called on an aborted attempt too, so the resources server releases its sandboxes.
+            verify_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=verify_request.model_dump(),
+                cookies=cookies,
+            )
+            await raise_for_status(verify_response)
+            verify_json = await get_response_json(verify_response)
+        except Exception:
+            if not aborted:
+                raise
+            print("prefix_pass_k: verify failed on an aborted attempt", format_exc(), file=sys.stderr)
+            verify_json = verify_request.model_dump()
 
         try:
             await sandbox.stop()
@@ -841,6 +871,10 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
         self._session_id_to_sandbox.pop(session_key, None)
 
         stats = self._session_id_to_stats.pop(session_key, {})
+        if aborted:
+            # The infrastructure failed, not the candidate: whatever the verifier saw is
+            # not a measurement of it, so the sample is masked out of pass@k.
+            verify_json = verify_json | {"reward": 0.0, "mask_sample": True}
         return PrefixPassKVerifyResponse.model_validate(verify_json | stats)
 
 

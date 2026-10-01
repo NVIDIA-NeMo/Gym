@@ -207,7 +207,6 @@ def _bare_agent(**config):
     object.__setattr__(agent, "config", SimpleNamespace(**(defaults | config)))
     object.__setattr__(agent, "_session_id_to_sandbox", {})
     object.__setattr__(agent, "_session_id_to_stats", {})
-    object.__setattr__(agent, "_exec_errors", {})
     return agent
 
 
@@ -601,16 +600,157 @@ class TestContextOverflowWording:
         )
 
 
-class TestExecErrors:
-    def test_infrastructure_failures_are_counted_not_hidden(self):
-        # A connection reset is not program output; the rollout must be
-        # identifiable as unfaithful so it can be re-run rather than scored.
-        class Resetting:
-            async def exec(self, command, timeout_s=None):
-                raise ConnectionResetError(104, "Connection reset by peer")
+class Resetting:
+    """A sandbox whose connection resets after `ok` successful commands."""
 
-        agent = _bare_agent()
-        sandbox = Resetting()
-        assert asyncio.run(agent._run(sandbox, "ls")) == (1, "The command failed to execute.", None)
-        asyncio.run(agent._run(sandbox, "pwd"))
-        assert agent._exec_errors[id(sandbox)] == 2
+    def __init__(self, ok=0):
+        self.ok = ok
+        self.commands = []
+
+    async def exec(self, command, timeout_s=None):
+        self.commands.append(command)
+        if len(self.commands) > self.ok:
+            raise ConnectionResetError(104, "Connection reset by peer")
+        return _result(stdout="fine\n")
+
+
+class TestExecErrors:
+    def test_a_reset_is_raised_not_answered_as_a_failed_command(self):
+        with pytest.raises(AGENT.SandboxExecError) as caught:
+            asyncio.run(_bare_agent()._run(Resetting(), "ls"))
+        assert caught.value.failure_kind == "transport_peer_drop"
+        assert "ConnectionResetError" in str(caught.value)
+
+    def test_other_exec_failures_are_agent_run_errors(self):
+        class Broken:
+            async def exec(self, command, timeout_s=None):
+                raise RuntimeError("provider returned garbage")
+
+        with pytest.raises(AGENT.SandboxExecError) as caught:
+            asyncio.run(_bare_agent()._run(Broken(), "ls"))
+        assert caught.value.failure_kind == "agent_run_error"
+
+    def test_the_first_failure_ends_the_attempt(self):
+        # The prefix's second command fails to run: nothing after it may run, and
+        # the candidate is never asked for a turn.
+        agent = _bare_agent(wire="backticks")
+        sandbox = Resetting(ok=1)
+        agent._session_id_to_sandbox["s"] = sandbox
+
+        async def must_not_generate(*args, **kwargs):
+            raise AssertionError("the candidate ran after the sandbox failed")
+
+        object.__setattr__(agent, "_generate", must_not_generate)
+        prefix = [{"turn": i, "action": f"echo {i}", "content": f"cmd {i}"} for i in (1, 2, 3)]
+        request = SimpleNamespace(
+            session={AGENT.SESSION_ID_KEY: "s"},
+            state=SimpleNamespace(_ng_prefix_pass_k_row={"prefix_pass_k": {"target_turn": 4, "prefix": prefix}}),
+        )
+        body = SimpleNamespace(
+            input=[{"role": "user", "content": "task"}],
+            model=None,
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=True,
+        )
+        asyncio.run(agent.responses(request, body))
+
+        stats = agent._session_id_to_stats["s"]
+        assert len(sandbox.commands) == 2
+        assert (stats["exec_errors"], stats["forwards"], stats["failure_kind"]) == (1, 0, "transport_peer_drop")
+
+
+class TestAbortedAttemptIsMasked:
+    """The review's case: a reset must not reach pass@k as an ordinary 0 (or a lucky 1)."""
+
+    def _run(self, monkeypatch, verify):
+        agent = _bare_agent(
+            resources_server=SimpleNamespace(name="rs"),
+            record_git_state=True,
+            commit_worktree=False,
+            uncommit_worktree=False,
+            offline=False,
+        )
+        sandbox = SimpleNamespace(stop=None, commands=[])
+
+        async def stop():
+            sandbox.commands.append("stop")
+
+        sandbox.stop = stop
+
+        async def connect(seed):
+            return sandbox
+
+        async def must_not_touch_git(*args, **kwargs):
+            raise AssertionError("git step ran on the failed sandbox")
+
+        async def head(sb):
+            return "abc"
+
+        async def aborted_responses(request, params):
+            agent._session_id_to_stats["s"] = {
+                "exec_errors": 1,
+                "failure_kind": "transport_peer_drop",
+                "failure_reason": "sandbox exec failed: ConnectionResetError",
+            }
+            return AGENT.NeMoGymResponse(
+                id="r",
+                created_at=0,
+                model="m",
+                object="response",
+                output=[],
+                tool_choice="auto",
+                tools=[],
+                parallel_tool_calls=True,
+            )
+
+        class Reply:
+            cookies = {}
+
+            async def json(self):
+                return {"sandbox_handle": "sb"}
+
+        async def post(server_name, url_path, json, cookies):
+            if url_path == "/verify":
+                return verify(json)
+            return Reply()
+
+        object.__setattr__(agent, "server_client", SimpleNamespace(post=post))
+        object.__setattr__(agent, "_connect_sandbox", connect)
+        object.__setattr__(agent, "_head", head)
+        object.__setattr__(agent, "_git_state", must_not_touch_git)
+        object.__setattr__(agent, "_worktree_patch", must_not_touch_git)
+        object.__setattr__(agent, "responses", aborted_responses)
+
+        async def ok(response):
+            return None
+
+        async def as_json(response):
+            return response
+
+        monkeypatch.setattr(AGENT, "raise_for_status", ok)
+        monkeypatch.setattr(AGENT, "get_response_json", as_json)
+        body = AGENT.PrefixPassKRunRequest.model_validate(
+            {"responses_create_params": {"input": [{"role": "user", "content": "task"}]}}
+        )
+        request = SimpleNamespace(cookies={}, session={AGENT.SESSION_ID_KEY: "s"}, state=SimpleNamespace())
+        result = asyncio.run(agent.run(request, body))
+        return result, sandbox
+
+    def test_a_verified_zero_is_masked(self, monkeypatch):
+        result, sandbox = self._run(monkeypatch, lambda req: req | {"reward": 0.0})
+        assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, "transport_peer_drop")
+        assert result.exec_errors == 1
+        assert sandbox.commands == ["stop"]
+
+    def test_a_lucky_pass_is_masked_too(self, monkeypatch):
+        result, _ = self._run(monkeypatch, lambda req: req | {"reward": 1.0})
+        assert (result.reward, result.mask_sample) == (0.0, True)
+
+    def test_a_verifier_that_fails_on_the_broken_sandbox_still_yields_a_masked_sample(self, monkeypatch):
+        def fails(req):
+            raise RuntimeError("could not extract the patch")
+
+        result, sandbox = self._run(monkeypatch, fails)
+        assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, "transport_peer_drop")
+        assert sandbox.commands == ["stop"]

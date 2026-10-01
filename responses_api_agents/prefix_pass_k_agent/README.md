@@ -43,7 +43,7 @@ A pass@K of 0 is more often a broken replay than a weak model.
 ## Per-rollout diagnostics
 
 Every rollout row also carries `forwards`, `unparsed_forwards`, `truncated_forwards` (unparsed forwards cut off at
-`max_tokens`), `context_overflow`, `exec_errors` (sandbox infrastructure failures, so affected rollouts can be re-run),
+`max_tokens`), `context_overflow`, `exec_errors` (a command the sandbox failed to run at all; it aborts the attempt and masks the sample),
 `submitted`, and `prefix_observations_compared` / `prefix_observations_identical` (replay fidelity against the captured
 observations).
 
