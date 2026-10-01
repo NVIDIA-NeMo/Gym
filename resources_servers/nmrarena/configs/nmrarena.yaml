@@ -39,3 +39,11 @@ nmrarena_simple_agent:
         type: validation
         jsonl_fpath: resources_servers/nmrarena/data/nmrarena_105.jsonl
         license: TBD
+
+nmrarena_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: nmrarena_simple_agent

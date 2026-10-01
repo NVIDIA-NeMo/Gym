@@ -23,3 +23,10 @@ nmrarena_benchmark_agent:
         # third-party database whose rights are not determined; see
         # resources_servers/nmrarena/README.md "Licensing". Downloaded at run time.
         license: TBD
+
+nmrarena_benchmark_environment_server:
+  _inherit_from: nmrarena_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: nmrarena_benchmark_agent
