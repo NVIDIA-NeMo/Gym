@@ -17,7 +17,7 @@ for each registered probe. Every Gym task carries that row unchanged:
     "conversation_language": "English",
     "trajectory_id": "native-trajectory-id",
     "usersim_config": {},
-    "usersim_provenance": "{\"code_sha\":\"8fd3ff4798af4037e164364f6c59ad14b4eabdc0\",\"bank_version\":{}}"
+    "usersim_provenance": "{\"code_sha\":\"a5f676bf6dc5a73914c8a0860f97c10dd2c214ee\",\"bank_version\":{}}"
   },
   "responses_create_params": {}
 }

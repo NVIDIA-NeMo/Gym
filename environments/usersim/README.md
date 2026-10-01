@@ -19,9 +19,9 @@ in a Gym task envelope without changing its content. UserSim owns persona,
 probe, theme, toolset, locale, configuration, trajectory identity, and
 provenance selection.
 
-Preparation and runtime pin revision
-`8fd3ff4798af4037e164364f6c59ad14b4eabdc0` over Git+SSH from
-`github.com/NVIDIA-NeMo/UserSim`. The host therefore needs GitHub SSH access.
+Preparation and runtime install the public UserSim repository over HTTPS,
+pinned to main revision
+`a5f676bf6dc5a73914c8a0860f97c10dd2c214ee` for reproducible provenance.
 New rows store `usersim_provenance` as JSON text, including when
 `bank_version` is empty, so the rows remain Arrow- and Parquet-safe.
 
