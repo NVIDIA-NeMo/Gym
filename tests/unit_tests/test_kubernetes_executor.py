@@ -417,3 +417,82 @@ def test_kubectl_timeout_is_recorded_as_that_benchmarks_error(tmp_path, monkeypa
     benchmark = record.benchmarks[0]
     assert benchmark.job_id is None
     assert "timed out" in benchmark.error
+
+
+def test_benchmark_command_is_forwarded_to_the_driver(tmp_path):
+    # A `command` benchmark replaces `gym eval run` with its own harness -- unlike the Slurm
+    # executor, this was silently dropped, so the benchmark always ran `gym eval run` instead.
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    config = SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"cluster": {"type": "kubernetes", "namespace": "eng-test", "pvc_name": "workspace"}},
+            "driver": {
+                "container": "gym:latest",
+                "benchmarks": {"bench_a": {"command": "./run_my_harness.sh"}},
+            },
+            "job": {"output_path": str(tmp_path / "jobs")},
+            "otel": {"enabled": False},
+        }
+    )
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    driver_script = job["spec"]["template"]["spec"]["containers"][0]["command"][2]
+    assert "./run_my_harness.sh" in driver_script
+    assert "GYM_CMD" not in driver_script
+
+
+def test_benchmark_command_gets_policy_and_bench_dir_env_vars(tmp_path):
+    # driver.policy_model injects policy_base_url/model_name/api_key into benchmark.run *after*
+    # construction (see SubmitConfig._resolve_and_validate_placements), so this works even for a
+    # `command` benchmark -- it just reaches the policy via env vars instead of CLI args.
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "kubernetes", "namespace": "eng-test", "pvc_name": "workspace"}},
+            "driver": {
+                "container": "gym:latest",
+                "policy_model": "vllm_model",
+                "benchmarks": {"bench_a": {"command": "./run_my_harness.sh"}},
+            },
+            "job": {"output_path": str(tmp_path / "jobs")},
+            "otel": {"enabled": False},
+        }
+    )
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"]
+    run_dir = tmp_path / "run"
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        run_dir,
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    env = {e["name"]: e["value"] for e in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["NEMO_GYM_BENCH_DIR"] == str(run_dir)
+    assert env["NEMO_GYM_POLICY_BASE_URL"] == "http://localhost:8000/v1"
+    assert env["NEMO_GYM_POLICY_MODEL_NAME"] == "org/model"
+    assert env["NEMO_GYM_POLICY_API_KEY"] == "dummy"

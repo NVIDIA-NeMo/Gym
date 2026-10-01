@@ -198,6 +198,21 @@ def _sidecar_containers(config: SubmitConfig, compute: KubernetesComputeConfig) 
     return containers
 
 
+def _command_env(benchmark: BenchmarkRunConfig, run_dir: str) -> dict[str, str]:
+    """Env a `command` benchmark gets in place of `gym eval run` arguments -- mirrors
+    slurm_script.py's _command_env, kept local to avoid coupling the two executor modules."""
+    env = {"NEMO_GYM_BENCH_DIR": run_dir}
+    for key, name in (
+        ("policy_base_url", "NEMO_GYM_POLICY_BASE_URL"),
+        ("policy_model_name", "NEMO_GYM_POLICY_MODEL_NAME"),
+        ("policy_api_key", "NEMO_GYM_POLICY_API_KEY"),
+    ):
+        value = benchmark.run.get(key)
+        if value is not None:
+            env[name] = str(value)
+    return env
+
+
 def _driver_command(
     config: SubmitConfig,
     benchmark_name: str,
@@ -210,12 +225,19 @@ def _driver_command(
     if benchmark.prepare:
         prepare_cmd = "gym eval prepare " + " ".join(flatten_run_args(benchmark.prepare))
 
-    output_path = f"+output_jsonl_fpath={run_dir}/{ARTIFACTS_DIRNAME}/rollouts.jsonl"
-    policy_type = config.driver.policy_model_type
-    extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
-    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
+    if benchmark.command is None:
+        output_path = f"+output_jsonl_fpath={run_dir}/{ARTIFACTS_DIRNAME}/rollouts.jsonl"
+        policy_type = config.driver.policy_model_type
+        extra_flags = (
+            [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
+        )
+        gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
+    else:
+        # A command replaces `gym eval run`, so it reaches the policy/output path via env vars
+        # instead (see _command_env) -- build_job_manifest merges those into the driver's env.
+        gym_cmd = ""
     entrypoint = render_driver_entrypoint(
-        repo=gi.repo if gi else None, ref=gi.ref if gi else None, prepare_cmd=prepare_cmd
+        repo=gi.repo if gi else None, ref=gi.ref if gi else None, prepare_cmd=prepare_cmd, command=benchmark.command
     )
 
     script_lines = [
@@ -225,7 +247,7 @@ def _driver_command(
         gym_cmd,
         entrypoint,
     ]
-    return ["bash", "-c", "\n".join(script_lines)]
+    return ["bash", "-c", "\n".join(line for line in script_lines if line)]
 
 
 def _manifest_write_commands(resolved_config: str, manifest: str, run_dir: str) -> list[str]:
@@ -262,6 +284,10 @@ def build_job_manifest(
         {"name": OUTPUT_VOLUME_NAME, "persistentVolumeClaim": {"claimName": compute.pvc_name}},
     ]
 
+    driver_env = dict(config.driver.env)
+    if benchmark.command is not None:
+        driver_env |= _command_env(benchmark, run_dir_str)
+
     driver_container: dict[str, Any] = {
         "name": "driver",
         "image": config.driver.container,
@@ -269,8 +295,8 @@ def build_job_manifest(
         "volumeMounts": [_output_volume_mount(config.job.output_path)],
         "resources": {"requests": {"memory": DRIVER_MEMORY_REQUEST}},
     }
-    if config.driver.env:
-        driver_container["env"] = _env_list(config.driver.env)
+    if driver_env:
+        driver_container["env"] = _env_list(driver_env)
 
     pod_spec: dict[str, Any] = {
         "restartPolicy": "Never",
