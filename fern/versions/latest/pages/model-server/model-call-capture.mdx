@@ -60,6 +60,33 @@ The rollout record is the usual starting point for analysis. Use its `ng_model_c
 for normalized calls and aggregate metrics; use the matching file in `CaptureStore` when you need the
 original request and response payloads.
 
+## Correlate captured calls with assistant messages
+
+A harness can send its persisted conversation ID in `x-session-id` and its persisted assistant-message
+ID in `x-assistant-message-id`. Capture stores them as `client_session_id` and
+`client_assistant_message_id`. Retries share the assistant-message ID while each HTTP attempt keeps
+its own Gym `model_call_id`. These client declarations are correlation evidence, not authentication.
+
+If a harness uses a different message header, set the run-wide capture option at model-server startup:
+
+```yaml
+model_call_capture_assistant_message_header: x-custom-reply-id
+```
+
+Header names are case-insensitive. Empty or conflicting repeated values provide no assistant-message
+evidence. Gym reads only the configured header and forwards the original request headers unchanged.
+The OpenCode agent recipes select `x-opencode-assistant-message-id`, matching the existing patched
+binaries; no rebuild is needed. Custom configurations that do not include an OpenCode agent recipe
+must set this option explicitly to capture that header. Builds that do not emit it remain usable,
+with no exact assistant-message attribution.
+
+Adapters declare `TrajectoryTurn.source_message_id` (or compaction `source_message_ids`),
+`source_model_ref`, and the owning invocation ID matching the captured conversation ID. The shared
+joiner uses these fields for any harness; `AgentObservationBundle.source` is only provenance, not a
+dispatch key for this join. It requires unique message/model-server matches and exact invocation
+ownership, preserves separate retry attempts, and never guesses from text or timing. Unresolved
+claims produce `assistant_message_call_*` gaps; source-specific artifact parsing stays in the adapter.
+
 ## What capture contains
 
 ### Buffered SSE with external token staging

@@ -1,3 +1,6 @@
+# Capture the durable assistant ID emitted by correlation-enabled OpenCode builds.
+model_call_capture_assistant_message_header: x-opencode-assistant-message-id
+
 opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:

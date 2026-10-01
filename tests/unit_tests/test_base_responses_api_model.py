@@ -21,7 +21,7 @@ import pytest
 from fastapi import Body, FastAPI, Response
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
@@ -350,22 +350,22 @@ def test_unique_request_header_requires_one_value(headers, expected):
     "headers,expected",
     [
         ([], None),
-        ([(b"X-OpenCode-Assistant-Message-Id", b"assistant-1")], "assistant-1"),
+        ([(b"X-Assistant-Message-Id", b"assistant-1")], "assistant-1"),
         (
             [
-                (b"x-opencode-assistant-message-id", b"assistant-1"),
-                (b"X-OpenCode-Assistant-Message-Id", b"assistant-1"),
+                (b"x-assistant-message-id", b"assistant-1"),
+                (b"X-Assistant-Message-Id", b"assistant-1"),
             ],
             "assistant-1",
         ),
         (
             [
-                (b"x-opencode-assistant-message-id", b"assistant-1"),
-                (b"X-OpenCode-Assistant-Message-Id", b"assistant-2"),
+                (b"x-assistant-message-id", b"assistant-1"),
+                (b"X-Assistant-Message-Id", b"assistant-2"),
             ],
             None,
         ),
-        ([(b"x-opencode-assistant-message-id", b"")], None),
+        ([(b"x-assistant-message-id", b"")], None),
     ],
 )
 def test_capture_assistant_message_header_round_trip(tmp_path, headers, expected):
@@ -454,7 +454,7 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
                 "raw_path": b"/ng-rollout/fast-rollout/v1/messages",
                 "headers": [
                     (b"x-session-id", b"opencode-session"),
-                    (b"x-opencode-assistant-message-id", b"assistant-stream"),
+                    (b"x-assistant-message-id", b"assistant-stream"),
                 ],
             },
             receive,
@@ -497,7 +497,7 @@ def test_capture_retains_partial_stream_when_downstream_raises(tmp_path):
                     "type": "http",
                     "path": "/ng-rollout/partial/v1/responses",
                     "raw_path": b"/ng-rollout/partial/v1/responses",
-                    "headers": [(b"x-opencode-assistant-message-id", b"assistant-partial")],
+                    "headers": [(b"x-assistant-message-id", b"assistant-partial")],
                 },
                 receive,
                 send,
@@ -541,7 +541,7 @@ def test_http_200_stream_error_is_not_recorded_as_success(tmp_path):
     response = TestClient(app).post(
         "/ng-rollout/r-error/v1/messages",
         json={"messages": []},
-        headers={"X-OpenCode-Assistant-Message-Id": "assistant-stream-error"},
+        headers={"X-Assistant-Message-Id": "assistant-stream-error"},
     )
 
     assert response.status_code == 200
@@ -569,7 +569,7 @@ def test_failed_call_is_captured_with_error_category(tmp_path):
     r = client.post(
         "/ng-rollout/r-err/v1/responses",
         json={"input": "x"},
-        headers={"X-OpenCode-Assistant-Message-Id": "assistant-http-error"},
+        headers={"X-Assistant-Message-Id": "assistant-http-error"},
     )
     assert r.status_code == 500  # response unchanged
 
@@ -602,7 +602,7 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
     r = client.post(
         "/ng-rollout/r-raise/v1/responses",
         json={"input": "x"},
-        headers={"X-OpenCode-Assistant-Message-Id": "assistant-exception"},
+        headers={"X-Assistant-Message-Id": "assistant-exception"},
     )
     assert r.status_code == 500  # error propagated, response unchanged
 
@@ -651,7 +651,7 @@ def test_cancelled_call_is_captured_then_reraised(tmp_path):
                     "type": "http",
                     "path": "/ng-rollout/r-cancel/v1/responses",
                     "raw_path": b"/ng-rollout/r-cancel/v1/responses",
-                    "headers": [(b"x-opencode-assistant-message-id", b"assistant-cancel")],
+                    "headers": [(b"x-assistant-message-id", b"assistant-cancel")],
                 },
                 receive,
                 send,
@@ -1973,3 +1973,41 @@ def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path
 
     assert forwarded == ["/v1/chat/completions"]
     assert not token_store.is_incomplete("hole-2")
+
+
+@pytest.mark.parametrize("header", ["", "bad header", "bad:header", "bad\r\nheader", "réply-id"])
+def test_assistant_message_header_config_rejects_invalid_http_names(header):
+    with pytest.raises(ValidationError):
+        ModelCallCaptureConfig(model_call_capture_assistant_message_header=header)
+
+
+def test_capture_uses_configured_assistant_header_only(tmp_path):
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def respond():
+        return {"output": []}
+
+    config = ModelCallCaptureConfig(
+        observability_enabled=True,
+        model_call_capture_dir=tmp_path,
+        model_call_capture_assistant_message_header="X-Custom-Reply-Id",
+    )
+    install_model_call_capture(app, config, model_server_name="policy")
+    with TestClient(app) as client:
+        response = client.post(
+            "/ng-rollout/configured-header/v1/responses",
+            json={"input": "hello"},
+            headers={"x-custom-reply-id": "persisted-reply", "x-assistant-message-id": "other-reply"},
+        )
+        assert response.status_code == 200
+        response = client.post(
+            "/ng-rollout/no-configured-header/v1/responses",
+            json={"input": "hello"},
+            headers={"x-assistant-message-id": "other-reply"},
+        )
+        assert response.status_code == 200
+    [captured] = read_model_call_records(CaptureStore(tmp_path), "configured-header")
+    assert captured.client_assistant_message_id == "persisted-reply"
+    [absent] = read_model_call_records(CaptureStore(tmp_path), "no-configured-header")
+    assert absent.client_assistant_message_id is None

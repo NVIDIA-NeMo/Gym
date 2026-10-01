@@ -65,7 +65,13 @@ from nemo_gym.responses_streaming import (
     validate_streaming_responses_params,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
+from nemo_gym.rollout_observability import (
+    AgentObservationBundle,
+    ObservationGap,
+    TrajectoryRecord,
+    join_assistant_message_calls,
+    join_model_call_observations,
+)
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -548,6 +554,11 @@ class ModelCallCaptureConfig(BaseModel):
 
     observability_enabled: bool = False
     model_call_capture_dir: Optional[Path] = None
+    model_call_capture_assistant_message_header: str = Field(
+        default="x-assistant-message-id",
+        pattern=r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+        description="Request header carrying the client's persisted assistant-message ID (case-insensitive).",
+    )
 
     @model_validator(mode="after")
     def validate_capture_dir(self) -> "ModelCallCaptureConfig":
@@ -1006,7 +1017,6 @@ _OBSERVED_PATHS = {
 # A client may declare its persisted session ID for exact correlation with an AgentInvocation.
 # It is correlation evidence, not authentication; absence is fail-safe.
 _CLIENT_SESSION_HEADER = b"x-session-id"
-_CLIENT_ASSISTANT_MESSAGE_HEADER = b"x-opencode-assistant-message-id"
 
 _TERMINAL_SSE_LINES: dict[str, dict[bytes, str]] = {
     "responses": {
@@ -1454,11 +1464,13 @@ class _CaptureMiddleware:
         delta_records: bool = False,
         external_staging: bool = False,
         token_capture_enabled: bool = False,
+        assistant_message_header: str = "x-assistant-message-id",
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
     ) -> None:
         self._app = app
         self._store = store
         self._model_server_name = model_server_name
+        self._assistant_message_header = assistant_message_header.lower().encode("ascii")
         # This store records training tokens for correlated training-capture calls.
         self._token_store = token_store
         # Built from token_id_capture.sink, once, in this process.
@@ -1574,7 +1586,7 @@ class _CaptureMiddleware:
         model_call_id = uuid4().hex
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
         client_assistant_message_id = _unique_request_header(
-            scope.get("headers") or [], _CLIENT_ASSISTANT_MESSAGE_HEADER
+            scope.get("headers") or [], self._assistant_message_header
         )
 
         # Give the model server a token sink keyed to this call.
@@ -1873,6 +1885,7 @@ def install_model_call_capture(
     app.add_middleware(
         _CaptureMiddleware,
         store=make_capture_store(config),
+        assistant_message_header=config.model_call_capture_assistant_message_header,
         model_server_name=model_server_name,
         token_store=token_store,
         configured_sink=configured_sink,
@@ -1986,26 +1999,23 @@ def merge_model_call_capture_into_record(
                     )
                     bundle.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
             bundle = join_model_call_observations(bundle, calls)
-            if bundle.source == "opencode":
+            if any(call.client_assistant_message_id for call in calls):
                 try:
-                    from nemo_gym.rollout_observability import TrajectoryRecord
-                    from responses_api_agents.opencode_agent.observability import associate_opencode_message_calls
-
                     raw_trajectory = record.get("ng_trajectory")
                     trajectory = (
                         TrajectoryRecord.model_validate(raw_trajectory) if raw_trajectory is not None else None
                     )
                     if trajectory is not None and trajectory.rollout_id != rollout_id:
-                        bundle.gaps.append(ObservationGap(code="opencode_message_call_rollout_mismatch"))
+                        bundle.gaps.append(ObservationGap(code="assistant_message_call_rollout_mismatch"))
                     else:
-                        bundle, trajectory = associate_opencode_message_calls(bundle, trajectory, calls)
+                        bundle, trajectory = join_assistant_message_calls(bundle, trajectory, calls)
                         if trajectory is not None:
                             record["ng_trajectory"] = trajectory.model_dump(mode="json")
                 except Exception:
                     logger.warning(
-                        "Could not associate OpenCode message calls for rollout %s.", rollout_id, exc_info=True
+                        "Could not associate assistant message calls for rollout %s.", rollout_id, exc_info=True
                     )
-                    bundle.gaps.append(ObservationGap(code="opencode_message_call_join_failed"))
+                    bundle.gaps.append(ObservationGap(code="assistant_message_call_join_failed"))
             record["ng_agent_observations"] = bundle.model_dump(mode="json")
         except Exception:
             logger.warning("Could not join agent observations for rollout %s.", rollout_id, exc_info=True)
