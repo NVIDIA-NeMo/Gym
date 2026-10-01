@@ -1433,25 +1433,71 @@ class TestServerUtils:
         assert "[upstream_request_failed]" in captured
         assert "ValueError: actionable inner failure" in captured
 
-    def _mock_global_client(self, monkeypatch: MonkeyPatch, connection_errors: int) -> MagicMock:
-        """Global-client stand-in whose request() raises ClientOSError `connection_errors` times, then succeeds."""
+    def _mock_global_client(self, monkeypatch: MonkeyPatch, error: Exception, failures: int | None) -> MagicMock:
+        """Global-client stand-in whose request() raises `error` `failures` times, then succeeds (never if None)."""
         client = MagicMock()
-        client.request = AsyncMock(side_effect=[ClientOSError()] * connection_errors + [client.success_response])
+        if failures is None:
+            client.request = AsyncMock(side_effect=error)
+        else:
+            client.request = AsyncMock(side_effect=[error] * failures + [client.success_response])
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
-        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        # Allow more sleeps than any test needs, then raise, so a retry loop that never stops fails fast.
+        allowed_sleeps = nemo_gym.server_utils.MAX_NUM_TRIES + 6
+        monkeypatch.setattr(
+            nemo_gym.server_utils.asyncio,
+            "sleep",
+            AsyncMock(side_effect=[None] * allowed_sleeps + [AssertionError("retry loop did not stop")]),
+        )
         return client
 
     async def test_request_bounded_connection_retries_surface_dead_endpoint(self, monkeypatch: MonkeyPatch) -> None:
-        client = self._mock_global_client(monkeypatch, connection_errors=10)
+        client = self._mock_global_client(monkeypatch, ClientOSError(), failures=10)
         with raises(ClientOSError):
             await nemo_gym.server_utils.request("POST", "http://dead-host:1/v1", _max_connection_retries=3)
         assert client.request.await_count == 3
 
     async def test_request_connection_retries_unbounded_by_default(self, monkeypatch: MonkeyPatch) -> None:
-        client = self._mock_global_client(monkeypatch, connection_errors=4)
+        client = self._mock_global_client(monkeypatch, ClientOSError(), failures=4)
         response = await nemo_gym.server_utils.request("POST", "http://flaky-host:1/v1")
         assert response is client.success_response
         assert client.request.await_count == 5
+
+    async def test_request_retry_cap_bounds_internal_callers(self, monkeypatch: MonkeyPatch) -> None:
+        client = self._mock_global_client(monkeypatch, RuntimeError("boom"), failures=None)
+        # Above MAX_NUM_TRIES, so the test can tell the cap apart from MAX_NUM_TRIES.
+        cap = nemo_gym.server_utils.MAX_NUM_TRIES + 2
+
+        with raises(RuntimeError, match="boom"):
+            await nemo_gym.server_utils.request(
+                "POST", "http://head:1/v1", _internal=True, _max_connection_retries=cap
+            )
+
+        assert client.request.await_count == cap
+        assert nemo_gym.server_utils.asyncio.sleep.await_count == cap - 1
+
+    async def test_request_internal_callers_without_a_cap_retry_past_max_num_tries(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
+    ) -> None:
+        failures = nemo_gym.server_utils.MAX_NUM_TRIES + 2
+        client = self._mock_global_client(monkeypatch, RuntimeError("boom"), failures=failures)
+
+        response = await nemo_gym.server_utils.request("POST", "http://head:1/v1", _internal=True)
+
+        assert response is client.success_response
+        assert client.request.await_count == failures + 1
+        assert capsys.readouterr().out == ""
+
+    async def test_request_external_callers_stop_at_max_num_tries(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
+    ) -> None:
+        client = self._mock_global_client(monkeypatch, RuntimeError("boom"), failures=None)
+
+        with raises(RuntimeError, match="boom"):
+            await nemo_gym.server_utils.request("POST", "http://model:1/v1")
+
+        assert client.request.await_count == nemo_gym.server_utils.MAX_NUM_TRIES
+        out = capsys.readouterr().out
+        assert out.count("Hit an exception while making a request") == nemo_gym.server_utils.MAX_NUM_TRIES
 
 
 _SPOOFED_HOST = "203.0.113.99"
