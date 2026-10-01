@@ -64,7 +64,7 @@ HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT = "gym.http.connection_pool.queue
 HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT = "gym.http.connection_pool.connect_total"
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_ATTEMPT_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.attempt_outcome"
-HTTP_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.server.name"
+HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
 
 #: Milliseconds. Provisioning a remote sandbox takes tens of seconds and a long command can run
 #: for minutes; the SDK's default boundaries end at 10 s and would put most of both in +Inf.
@@ -237,7 +237,7 @@ def record_http_connection_pool_queue_duration(
         {
             HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE: queue_constraint,
             HTTP_CONNECTION_POOL_ATTEMPT_OUTCOME_ATTRIBUTE: attempt_outcome,
-            HTTP_SERVER_NAME_ATTRIBUTE: server_name,
+            HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE: server_name,
         },
         boundaries=HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS,
     )
@@ -253,7 +253,8 @@ def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[st
         from opentelemetry.metrics import Observation
 
         return [
-            Observation(count, {HTTP_SERVER_NAME_ATTRIBUTE: server_name}) for server_name, count in snapshot().items()
+            Observation(count, {HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE: server_name})
+            for server_name, count in snapshot().items()
         ]
 
     try:

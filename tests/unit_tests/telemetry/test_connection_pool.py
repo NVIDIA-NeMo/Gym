@@ -21,7 +21,7 @@ QUEUE_DURATION = gym_metrics.HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT
 CONNECT_TOTAL = gym_metrics.HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT
 CONSTRAINT = gym_metrics.HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE
 OUTCOME = gym_metrics.HTTP_CONNECTION_POOL_ATTEMPT_OUTCOME_ATTRIBUTE
-SERVER = gym_metrics.HTTP_SERVER_NAME_ATTRIBUTE
+SERVER = gym_metrics.HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE
 
 
 @pytest.fixture
@@ -221,10 +221,14 @@ async def test_server_client_labels_samples_with_the_destination_server(collecte
     (point,) = _points(collected_metrics)
     assert point.count == 1
     assert point.sum > 0
-    assert point.attributes == {SERVER: "my_judge", CONSTRAINT: "total", OUTCOME: "ok"}
+    assert point.attributes == {
+        "nemo.gym.http.destination.server.name": "my_judge",
+        CONSTRAINT: "total",
+        OUTCOME: "ok",
+    }
     (connect_point,) = collected_metrics()[CONNECT_TOTAL]
     assert connect_point.value == 2
-    assert connect_point.attributes == {SERVER: "my_judge"}
+    assert connect_point.attributes == {"nemo.gym.http.destination.server.name": "my_judge"}
 
 
 @pytest.mark.parametrize("metrics_enabled", [False, True])
@@ -251,7 +255,7 @@ async def test_lazy_client_labels_first_and_subsequent_attempts(
             if metrics_enabled:
                 (point,) = points
                 assert point.value == count
-                assert point.attributes == {SERVER: server_name or "external"}
+                assert point.attributes == {"nemo.gym.http.destination.server.name": server_name or "external"}
             else:
                 assert points == []
                 assert type(server_utils._GLOBAL_AIOHTTP_CLIENT.connector) is TCPConnector

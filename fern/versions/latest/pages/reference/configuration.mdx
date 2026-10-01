@@ -130,7 +130,11 @@ aiohttp connection acquisition. This metric is independent of the `http_client` 
 | `gym.http.connection_pool.connect_total` | Observable counter of all connection acquisitions; use it as the denominator for the queued fraction |
 | `nemo.gym.http.connection_pool.queue_constraint` | Binding limit: `total`, `per_host`, or `unknown` |
 | `nemo.gym.http.connection_pool.attempt_outcome` | Queue outcome: `ok`, or `abandoned` when the wait ends before a slot is available, including timeout and cancellation |
-| `nemo.gym.http.server.name` | Configured destination server name, or `external` for direct external calls |
+| `nemo.gym.http.destination.server.name` | Configured destination server name for `ServerClient` calls, `remote_agent_service` for the remote agent's external service, or `external` for unlabeled direct calls |
+
+The destination attribute identifies the configured or fixed request destination, including
+across redirects. The resource attribute `nemo.gym.server.name` identifies the Gym process
+recording the metric; they are not the same.
 
 When metrics export is active, Gym uses `QueueTimedTCPConnector` to count connection attempts and
 measure queue waits. Otherwise, Gym uses aiohttp’s `TCPConnector` directly without collecting these metrics.

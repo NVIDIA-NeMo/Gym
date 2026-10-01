@@ -97,6 +97,11 @@ Divide the number of `gym.http.connection_pool.queue_duration_ms` histogram samp
 `gym.http.connection_pool.connect_total` over the same interval and destination to calculate the
 fraction of connection attempts that queued.
 
+Both instruments use `nemo.gym.http.destination.server.name` for the request destination:
+the configured server name for `ServerClient` calls, `remote_agent_service` for calls to the
+remote agent's external service, or `external` for unlabeled direct calls. This differs from
+the resource attribute `nemo.gym.server.name`, which identifies the Gym process recording the metric.
+
 ### A Note on `gym.server.request_duration_ms`
 
 `nemo-lens` declares a `gym.server.request_duration_ms` histogram. NeMo Gym does not use
