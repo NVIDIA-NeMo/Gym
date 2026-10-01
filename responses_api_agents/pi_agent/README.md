@@ -14,6 +14,8 @@ The benchmark owns task data, preparation, verification, and task sandbox settin
 The harness owns its runtime and model/tool loop. The Environment Server binds the two
 and closes the agent before verification.
 
+For Terminal-Bench 2.1, see the [single-task run commands](../../benchmarks/terminal_bench_2_1/README.md#pi-in-a-task-sandbox).
+
 Run from the Gym repository root with Gym and the benchmark's preparation dependencies
 installed. For SWE-bench Pro, save this composition as `run.yaml`:
 
