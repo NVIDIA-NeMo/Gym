@@ -104,8 +104,10 @@ def test_image_tool_markup_validation_rejects_nested_or_extra_tags() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("capture_enabled", [False, True])
 async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
     tmp_path: Path,
+    capture_enabled: bool,
 ) -> None:
     image_path = tmp_path / "source.png"
     Image.new("RGB", (256, 192), color=(120, 80, 40)).save(image_path)
@@ -138,6 +140,7 @@ async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
         "</function></tool_call>"
     )
     final_text = "The answer is car."
+    model_path = "/ng-rollout/r0/training-token-capture/v1/responses" if capture_enabled else "/v1/responses"
 
     server_client_post = AsyncMock()
 
@@ -145,7 +148,7 @@ async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
         if url_path == "/seed_session":
             assert server_name == "string_match"
             return _FakeClientResponse({})
-        if server_name == "policy_model" and url_path == "/v1/responses":
+        if server_name == "policy_model" and url_path == model_path:
             call_index = server_client_post.await_count
             if call_index == 2:
                 request = kwargs["json"]
@@ -182,10 +185,12 @@ async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
     server_client_post.side_effect = _post_side_effect
     server_client = MagicMock(spec=ServerClient)
     server_client.post = server_client_post
+    server_client.global_config_dict = {"token_id_capture": {"enabled": capture_enabled, "all_agents": True}}
 
     agent = ImageToolsAgent(config=config, server_client=server_client)
     body = ImageToolsAgentRunRequest.model_validate(
         {
+            "_ng_rollout_id": "r0",
             "image_tools_base_agent_ref": {
                 "type": "responses_api_agents",
                 "name": "string_match_simple_agent",
