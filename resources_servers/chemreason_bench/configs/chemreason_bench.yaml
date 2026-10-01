@@ -23,3 +23,11 @@ chemreason_bench_simple_agent:
         # Pre-materialized with benchmarks/prompts/eval/chemreason_bench/paper.yaml.
         jsonl_fpath: resources_servers/chemreason_bench/data/example.jsonl
         license: Creative Commons Attribution 4.0 International
+
+chemreason_bench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: chemreason_bench_simple_agent
