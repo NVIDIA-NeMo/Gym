@@ -241,6 +241,7 @@ class TerminusJudgeVerifyResponse(BaseVerifyResponse):
 
 
 class TerminusJudgeResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: TerminusJudgeResourcesServerConfig
 
     def __init__(self, *args, **kwargs):
