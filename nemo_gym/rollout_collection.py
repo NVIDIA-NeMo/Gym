@@ -2881,6 +2881,7 @@ class RolloutCollectionHelper(BaseModel):
                 aggregate_results,
                 aggregate_rows,
                 output_fpath,
+                raise_on_error=False,  # Write batch status before reporting aggregation failures below.
             )
 
         if batch_tracker is not None:
@@ -2940,6 +2941,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         results: List[Dict],
         rows: List[Dict],
         output_fpath: Path,
+        *,
+        raise_on_error: bool = True,
     ) -> Optional[Path]:
         """Call /aggregate_metrics on the environment server each rollout ran through.
 
@@ -2950,7 +2953,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         entry per environment server (same shape as the old _agent_metrics.json, plus the server
         name). Returns the file path.
         Failed requests retain an entry with empty metric collections and ``aggregation_error``.
-        Collection and aggregation entrypoints raise after saving partial metrics and batch status.
+        By default, re-raise the first original exception after saving partial metrics, preserving
+        its type and traceback for direct callers such as custom evaluation drivers. Collection and
+        aggregation entrypoints pass ``raise_on_error=False`` to write batch status first, then call
+        ``_raise_for_aggregation_errors`` for a summary error.
         """
         if not results:
             return None
@@ -2991,8 +2997,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # `agent_ref` keep today's shape. Servers that front the same agent (a native server and its
         # legacy_agent twin) are each labelled by their own name, whatever order their rows arrive in.
         labels = label_runs(server_agents)
+        first_error: Optional[Exception] = None
 
         async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
+            nonlocal first_error
             # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.
             stripped = []
             for r in agent_result_list:
@@ -3031,6 +3039,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 await raise_for_status(agg_response)
                 agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
             except Exception as exc:
+                if first_error is None:
+                    first_error = exc
                 logger.exception(
                     "Aggregate-metrics request failed for agent '%s'; writing a repairable error entry.",
                     agent_name,
@@ -3097,6 +3107,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # Write single file with all agents
         metrics_fpath = aggregate_metrics_path_for(output_fpath)
         metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
+
+        if raise_on_error and first_error is not None:
+            raise first_error
 
         return metrics_fpath
 
@@ -3733,7 +3746,9 @@ class RolloutAggregationHelper(BaseModel):
         # AGENT_REF_KEY_NAME; result rows carry both from the run that produced them.
         helper = RolloutCollectionHelper()
         scored = results + counted
-        aggregate_metrics_fpath = await helper._call_aggregate_metrics(scored, scored, output_fpath)
+        aggregate_metrics_fpath = await helper._call_aggregate_metrics(
+            scored, scored, output_fpath, raise_on_error=False
+        )
         if batch_tracker is not None:
             batch_tracker.write_status(
                 batch_completed_rows,

@@ -2542,7 +2542,7 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 return None
 
         config = RolloutCollectionConfig(
@@ -2593,7 +2593,7 @@ class TestRolloutCollection:
                 assert examples == []
                 return []
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 return None
 
         config = RolloutCollectionConfig(
@@ -2647,7 +2647,7 @@ class TestRolloutCollection:
                 )
                 return [future]
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 return None
 
         config = RolloutCollectionConfig(
@@ -3840,7 +3840,7 @@ class TestRolloutCollection:
                 )
                 return [future]
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 aggregated["results"] = results
                 aggregated["rows"] = rows
                 return None
@@ -3907,7 +3907,7 @@ class TestRolloutCollection:
 
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 """Compute aggregate metrics locally (no server needed)."""
                 stripped = [{k: v for k, v in r.items() if k not in ("responses_create_params",)} for r in results]
                 agg = compute_aggregate_metrics(stripped)
@@ -4057,7 +4057,7 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 stripped = [{k: v for k, v in r.items() if k not in ("responses_create_params",)} for r in results]
                 agg = compute_aggregate_metrics(stripped)
                 metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -4136,7 +4136,7 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 stripped = [{k: v for k, v in r.items() if k not in ("responses_create_params",)} for r in results]
                 agg = compute_aggregate_metrics(stripped)
                 metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -4263,7 +4263,7 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
                 metrics_fpath.write_bytes(orjson.dumps([]))
                 return metrics_fpath
@@ -4657,7 +4657,7 @@ class TestRolloutCollection:
 
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 return None
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
@@ -4745,7 +4745,7 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 captured["results"] = results
                 captured["rows"] = rows
                 metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -4806,7 +4806,7 @@ class TestRolloutCollection:
                 future.set_result(_CompletedRollout(row=example, result={"case": "new"}, rollout_latency_ms=None))
                 return [future]
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 captured["results"] = results
                 captured["rows"] = rows
                 return None
@@ -5124,16 +5124,26 @@ class TestRolloutCollection:
         # Verify both agents were called
         assert mock_server_client.post.call_count == 2
 
+    @pytest.mark.parametrize("raise_on_error", [None, True, False], ids=["default", "raise", "defer"])
+    @pytest.mark.parametrize("include_successful_agent", [False, True], ids=["single-agent", "mixed-agents"])
     async def test_call_aggregate_metrics_isolates_one_agent_failure(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
+        raise_on_error: bool | None,
+        include_successful_agent: bool,
     ) -> None:
+        """Direct callers receive the original exception after all metrics are saved; deferral returns normally."""
+        original_error = http_error(500)
+        failed_agent_called = asyncio.Event()
+
         async def post(server_name: str, url_path: str, json: AggregateMetricsRequest) -> FakeResponse:
             assert url_path == "/aggregate_metrics"
             if server_name == "agent_b_environment_server":
-                return FakeResponse(500)
+                failed_agent_called.set()
+                raise original_error
+            await failed_agent_called.wait()
             return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("agent_a", "agent_b"))
@@ -5146,15 +5156,28 @@ class TestRolloutCollection:
             {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0},
         ]
 
-        metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics(
-            results, rows, tmp_path / "output.jsonl"
-        )
+        if not include_successful_agent:
+            rows, results = rows[1:], results[1:]
+
+        metrics_fpath = tmp_path / "output_aggregate_metrics.json"
+        kwargs = {} if raise_on_error is None else {"raise_on_error": raise_on_error}
+        expected_error = pytest.raises(ClientResponseError) if raise_on_error is not False else nullcontext()
+        with expected_error as exc_info:
+            returned = await RolloutCollectionHelper()._call_aggregate_metrics(
+                results, rows, tmp_path / "output.jsonl", **kwargs
+            )
+            assert returned == metrics_fpath
+        if raise_on_error is not False:
+            assert exc_info.value is original_error
+            assert exc_info.traceback[-1].name == "post"
 
         written = orjson.loads(metrics_fpath.read_bytes())
-        assert [entry[AGENT_REF_KEY_NAME]["name"] for entry in written] == ["agent_a", "agent_b"]
-        assert written[0]["key_metrics"]["mean/reward"] == 1.0
-        assert AGGREGATION_ERROR_KEY not in written[0]
-        assert written[1] == {
+        expected_agents = ["agent_a", "agent_b"] if include_successful_agent else ["agent_b"]
+        assert [entry[AGENT_REF_KEY_NAME]["name"] for entry in written] == expected_agents
+        if include_successful_agent:
+            assert written[0]["key_metrics"]["mean/reward"] == 1.0
+            assert AGGREGATION_ERROR_KEY not in written[0]
+        assert written[-1] == {
             AGENT_REF_KEY_NAME: {"name": "agent_b"},
             NG_ENVIRONMENT_SERVER_KEY: "agent_b_environment_server",
             "agent_metrics": {},
@@ -5169,21 +5192,53 @@ class TestRolloutCollection:
         }
         assert "Aggregate-metrics request failed for agent 'agent_b'" in caplog.text
 
+    @pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
     async def test_call_aggregate_metrics_records_unexpected_agent_errors(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error_type: type[Exception]
     ) -> None:
-        install_fake_server_client(
-            monkeypatch, AsyncMock(side_effect=RuntimeError("aggregator bug")), agent_names=("agent_a",)
-        )
+        """Non-HTTP failures retain their exception identity and saved diagnostics too."""
+        original_error = error_type("aggregator bug")
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=original_error), agent_names=("agent_a",))
         rows = [{AGENT_REF_KEY_NAME: {"name": "agent_a"}}]
 
-        metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics(
-            [{"reward": 1.0}], rows, tmp_path / "output.jsonl"
-        )
+        with pytest.raises(error_type, match="aggregator bug") as exc_info:
+            await RolloutCollectionHelper()._call_aggregate_metrics([{"reward": 1.0}], rows, tmp_path / "output.jsonl")
+        assert exc_info.value is original_error
 
+        metrics_fpath = tmp_path / "output_aggregate_metrics.json"
         written = orjson.loads(metrics_fpath.read_bytes())
-        assert written[0][AGGREGATION_ERROR_KEY]["type"] == "RuntimeError"
+        assert written[0][AGGREGATION_ERROR_KEY]["type"] == error_type.__name__
         assert written[0][AGGREGATION_ERROR_KEY]["message"] == "aggregator bug"
+
+    async def test_call_aggregate_metrics_raises_first_error_after_recording_all_failures(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Later failures do not replace the original exception or disappear from saved metrics."""
+        first_error = http_error(500)
+        second_error = ValueError("invalid metrics")
+        first_agent_called = asyncio.Event()
+
+        async def post(server_name: str, **kwargs) -> FakeResponse:
+            if server_name == "agent_a_environment_server":
+                first_agent_called.set()
+                raise first_error
+            await first_agent_called.wait()
+            raise second_error
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("agent_a", "agent_b"))
+        rows = [{AGENT_REF_KEY_NAME: {"name": agent}} for agent in ("agent_a", "agent_b")]
+
+        with pytest.raises(ClientResponseError) as exc_info:
+            await RolloutCollectionHelper()._call_aggregate_metrics(
+                [{"reward": 1.0}, {"reward": 0.0}], rows, tmp_path / "output.jsonl"
+            )
+        assert exc_info.value is first_error
+
+        written = orjson.loads((tmp_path / "output_aggregate_metrics.json").read_bytes())
+        assert [entry[AGENT_REF_KEY_NAME]["name"] for entry in written] == ["agent_a", "agent_b"]
+        assert [entry[AGGREGATION_ERROR_KEY]["type"] for entry in written] == ["ClientResponseError", "ValueError"]
+        assert written[0][AGGREGATION_ERROR_KEY]["http_status"] == 500
+        assert written[1][AGGREGATION_ERROR_KEY]["message"] == "invalid metrics"
 
     async def test_call_aggregate_metrics_builds_the_agent_server_map_once(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -6131,7 +6186,7 @@ class TestDisableAggregationAndCallerTaskIndex:
                     futures.append(fut)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 raise AssertionError("aggregator must not run when disable_aggregation=True")
 
         await Helper().run_from_config(config)
@@ -6216,7 +6271,7 @@ class TestRolloutAggregationHelper:
 
         captured: dict[str, list] = {}
 
-        async def fake_call(self, results, rows, output_fpath):
+        async def fake_call(self, results, rows, output_fpath, *, raise_on_error: bool = True):
             captured["results"] = results
             captured["rows"] = rows
             captured["output_fpath"] = output_fpath
@@ -6268,7 +6323,7 @@ class TestRolloutAggregationHelper:
         shard.write_text(json.dumps(record) + "\n")
         output_fpath = tmp_path / "rollouts.jsonl"
 
-        async def _noop(self, results, rows, output_fpath):
+        async def _noop(self, results, rows, output_fpath, *, raise_on_error: bool = True):
             m = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
             m.write_text("[]")
             return m
@@ -6361,7 +6416,7 @@ class TestRolloutAggregationHelper:
         )
         output_fpath = tmp_path / "rollouts.jsonl"
 
-        async def fake_call(self, results, rows, output_fpath):
+        async def fake_call(self, results, rows, output_fpath, *, raise_on_error: bool = True):
             metrics_path = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
             metrics_path.write_text("[]")
             return metrics_path

@@ -887,7 +887,7 @@ class TestCollectorRoundTrip:
                 )
                 return server_client
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 return None
 
         input_fpath = tmp_path / "input.jsonl"
