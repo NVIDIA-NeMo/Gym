@@ -22,3 +22,10 @@ assaybench_assaybench_simple_agent:
         prompt_config: benchmarks/prompts/eval/assaybench/paper.yaml
         # The paper's open-weight protocol (proprietary APIs were run once).
         num_repeats: 5
+
+assaybench_assaybench_environment_server:
+  _inherit_from: assaybench_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: assaybench_assaybench_simple_agent
