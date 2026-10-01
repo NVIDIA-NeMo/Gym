@@ -121,23 +121,24 @@ the first `{` to the last `}`, which on a two-object reply fails to parse at all
 departure can only help a model that self-corrects; it is not silent, and the status field
 distinguishes a parse failure from a scored answer.
 
-### Known gap: `lm` labels
+### `lm` labels
 
-Upstream derives the `lm` label from token probabilities, never generating. Two details
-matter and are not yet matched: it sums probability mass over **every vocabulary token**
-whose normalised form ends in `YES` or `NO` (not a top-k argmax), and it abstains when one
-side has no mass at all. This server currently takes the highest-probability decision token
-among whatever alternatives it is given, reporting status `ok_logprobs` when it can — a
-closer approximation than text parsing, but still not upstream's rule. Neither applies
-today, because the values do not arrive at all:
-`nemo_gym/responses_converter.py` constructs the output text without populating its `logprobs`
-field, so chat-level logprobs are dropped on the way back into the Responses shape. Until that
-changes, `lm` labels come from parsing the generated text, which agrees with upstream whenever
-the reply opens with a decision token. Note that `lm` rows must not request `top_logprobs`
-either: vLLM emits logprobs only when the chat-level `logprobs` flag is set, and with
-`top_logprobs` set but `logprobs` unset the completion comes back empty, truncated at
-`max_output_tokens` -- a full run scored 0.00 on all three `lm` tasks that way. Measured on a full Llama-3.1-8B run, 1,103 of 3,342
-`lm` replies came back JSON-shaped and 20 were ambiguous or carried no decision token.
+Upstream decides an `lm` row from token probabilities, never from text. Each `lm` row
+therefore asks for them: `logprobs` is not a Responses API field and `top_logprobs` alone is
+inert in vLLM, so both travel on the row's `metadata.extra_body`, and
+`nemo_gym/responses_converter.py` carries the choice-level logprobs back onto the output text.
+The decision follows the paper's appendix F.3.2: eq. (1), a softmax over `{YES, NO}` with
+label `P(YES) >= 0.5`, and eq. (2), an argmax over the option indices. A row with no visible
+candidate takes upstream's own fallbacks (0.5, which counts positive; index -1) and is reported
+as `lm_abstained`.
+
+Two deliberate departures from `predict.py`, the code that produced the published numbers. It
+matches any token *ending* in YES/NO over the full vocabulary -- 153 Llama-3.1 tokens count as
+NO against 21 as YES -- a tail no top-k API can see; following the paper's rule instead costs
+<1 point on Llama-3.1-8B. And it requires two visible option indices, which over a top-k window
+zeroed every Phi-3-mini contrastive row; one is enough here. The window defaults to vLLM's
+ceiling of 20 (`+prepare_script_args.top_logprobs`); a model reporting many `lm_abstained`
+rows needs it and vLLM's `--max-logprobs` raised together (Phi-3-mini: 1000).
 
 ## Harness validation
 
@@ -170,43 +171,60 @@ of a weak model's headline is reachable without answering anything.
 
 ## Reproduction
 
-Full runs through this port: all 10,648 prepared rows (7,306 `gen` + 3,342 `lm`), temperature 0,
-one pass per instance, vLLM serving the policy locally. `paper` columns are the per-task rows
-from the paper's appendix; `ours` and the published Primary-Overall both average the two
-protocols on the three discriminative tasks, so they are directly comparable.
+Full runs: all 10,648 rows (7,306 `gen` + 3,342 `lm`), temperature 0, one pass, vLLM serving
+the policy locally. `paper` columns are the per-task rows of the paper's Table 2; the three
+discriminative tasks average the two protocols, so Primary-Overall is directly comparable.
+Upstream publishes neither a spread nor a run count, so no significance test is constructible;
+run-to-run drift at temperature 0 was measured at up to 0.35 on a task.
 
-**Qwen2.5-7B-Instruct** — Primary-Overall **53.73** vs published 53.94 (-0.21).
-27 of 10,648 replies carried no JSON, 2 no decision token.
+**The published numbers carry a tokenization bug.** `predict.py` renders the chat template to
+text, which already contains the BOS token, then calls `tokenizer(text)` with the default
+`add_special_tokens=True`, so any model whose tokenizer has `add_bos_token=true` was scored
+from a double-BOS prompt, on both protocols. This port sends a single BOS by default. The
+paper's condition is reproducible without a code change:
+`++policy_model.responses_api_models.vllm_model.extra_body.add_special_tokens=true`.
+Qwen2.5 (no BOS token) and Phi-3-mini (`add_bos_token=false`) are unaffected either way.
 
-| task | ours gen | ours lm | ours | paper gen | paper lm |
-|---|---|---|---|---|---|
-| ordering | 78.43 | — | 78.43 | 78.74 | — |
-| contrastive_choice | 63.42 | 64.53 | 63.97 | 63.42 | 65.65 |
-| step_validation | 74.68 | 68.76 | 71.72 | 75.10 | 69.35 |
-| condition_validation | 80.72 | 85.19 | 82.95 | 80.85 | 85.06 |
-| step_completion | 7.23 | — | 7.23 | 7.25 | — |
-| rationalization | 18.09 | — | 18.09 | 17.96 | — |
+**Qwen2.5-7B-Instruct** — Primary-Overall **53.82** vs published 53.94.
 
-**Llama-3.1-8B-Instruct** — Primary-Overall **51.68** vs published 49.45 (+2.23).
-8 of 10,648 replies carried no decision token.
+| task | gen | lm | paper gen | paper lm |
+|---|---|---|---|---|
+| ordering | 78.70 | — | 78.74 | — |
+| contrastive_choice | 63.51 | 65.00 | 63.42 | 65.65 |
+| step_validation | 75.04 | 68.90 | 75.10 | 69.35 |
+| condition_validation | 80.59 | 85.08 | 80.85 | 85.06 |
+| step_completion | 7.10 | — | 7.25 | — |
+| rationalization | 18.05 | — | 17.96 | — |
 
-| task | ours gen | ours lm | ours | paper gen | paper lm |
-|---|---|---|---|---|---|
-| ordering | 75.31 | — | 75.31 | 73.14 | — |
-| contrastive_choice | 62.12 | 63.79 | 62.95 | 62.58 | 61.37 |
-| step_validation | 73.28 | 50.07 | 61.67 | 70.90 | 45.45 |
-| condition_validation | 81.31 | 69.09 | 75.20 | 80.80 | 61.79 |
-| step_completion | 12.21 | — | 12.21 | 9.23 | — |
-| rationalization | 22.71 | — | 22.71 | 22.87 | — |
+**Llama-3.1-8B-Instruct** — Primary-Overall **50.43** (single BOS, default) and **49.35**
+with the paper's double BOS reproduced, vs published 49.45.
 
-Upstream publishes neither a spread nor a run count, so no significance test is constructible
-against these figures. They are reported side by side; neither pairing is a claim of a match.
+| task | gen | lm | double-BOS gen | double-BOS lm | paper gen | paper lm |
+|---|---|---|---|---|---|---|
+| ordering | 75.22 | — | 73.15 | — | 73.14 | — |
+| contrastive_choice | 62.40 | 63.88 | 62.40 | 61.00 | 62.58 | 61.37 |
+| step_validation | 73.58 | 41.75 | 70.86 | 44.38 | 70.90 | 45.45 |
+| condition_validation | 81.25 | 62.02 | 80.88 | 61.44 | 80.80 | 61.79 |
+| step_completion | 12.20 | — | 9.48 | — | 9.23 | — |
+| rationalization | 22.71 | — | 22.99 | — | 22.87 | — |
 
-Qwen lands within 0.5 of the published row on all six tasks. Llama's +2.23 is concentrated in
-the two `lm` columns, where this port reads 50.07 and 69.09 against 45.45 and 61.79 — the
-largest per-task gaps in either table, and the tasks most exposed to the labelling difference
-described under [Known gap: `lm` labels](#known-gap-lm-labels). Read that gap as the leading
-explanation for Llama's delta rather than as a model-quality difference.
+**Phi-3-mini-4k-instruct** — Primary-Overall **43.55** vs published 43.51. The paper's
+"Phi-3-mini 7B" is this 3.8B checkpoint; the 128k variant is a different fine-tune and scores
+differently (ordering 74.6, `lm` validation 47.9 / 70.9). Run with `CTX=4096`, `MAX_OUT=1024`
+and a 1000-token logprob window.
+
+| task | gen | lm | paper gen | paper lm |
+|---|---|---|---|---|
+| ordering | 79.76 | — | 79.83 | — |
+| contrastive_choice | 59.80 | 50.60 | 59.24 | 51.07 |
+| step_validation | 72.04 | 17.93 | 72.46 | 16.98 |
+| condition_validation | 83.39 | 20.14 | 83.33 | 20.39 |
+| step_completion | 5.27 | — | 5.30 | — |
+| rationalization | 24.33 | — | 24.19 | — |
+
+Under each model's own condition every cell is within ~1 point of the published row, and
+Phi-3's collapsed `lm` validation scores reproduce too: they are a property of that model, not
+of the harness.
 
 ## Quickstart
 
