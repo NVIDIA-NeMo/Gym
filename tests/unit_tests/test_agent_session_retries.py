@@ -13,6 +13,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
@@ -95,6 +96,31 @@ async def test_close_retries_preserve_observations_after_many_other_closes(agent
     wrong = _close(seed).model_copy(update={"episode_id": _seed(1).episode_id})
     with pytest.raises(HTTPException, match="episode_id"):
         await agent.close_agent_session(SimpleNamespace(session={}), wrong)
+
+
+async def test_seed_state_is_not_visible_before_setup_finishes(agent):
+    seed = _seed()
+    entered, release = asyncio.Event(), asyncio.Event()
+    state = AgentSessionState(request=seed)
+
+    async def initialize(body):
+        # Also protect existing adapters that still retain state directly during setup.
+        agent._session_records[body.agent_session_id].state = state
+        entered.set()
+        await release.wait()
+        return state
+
+    agent._seed_agent_session_state.side_effect = initialize
+    task = asyncio.create_task(agent.seed_agent_session(SimpleNamespace(session={}), seed))
+    await entered.wait()
+    try:
+        with pytest.raises(HTTPException) as error:
+            agent._require_agent_session(seed.agent_session_id)
+        assert error.value.status_code == 409
+    finally:
+        release.set()
+        await task
+    assert agent._require_agent_session(seed.agent_session_id) is state
 
 
 async def test_failed_close_retains_state_and_can_retry(agent):
@@ -189,16 +215,17 @@ async def test_malformed_cookie_never_selects_host_path(agent, marker):
     agent._seed_agent_session_state.assert_not_awaited()
 
 
-async def test_failed_seed_retains_partial_state_only_for_cleanup(agent):
+@pytest.mark.parametrize("error", [RuntimeError("partial setup"), asyncio.CancelledError("partial setup")])
+async def test_failed_seed_retains_partial_state_only_for_cleanup(agent, error):
     seed = _seed()
 
     async def initialize(body):
-        agent._session_records[body.agent_session_id].state = AgentSessionState(request=body)
-        raise RuntimeError("partial setup could not be cleaned up")
+        raise AgentSessionSetupError(AgentSessionState(request=body), error=error)
 
     agent._seed_agent_session_state.side_effect = initialize
-    with pytest.raises(RuntimeError, match="partial setup"):
+    with pytest.raises(type(error), match="partial setup") as raised:
         await agent.seed_agent_session(SimpleNamespace(session={}), seed)
+    assert raised.value is error
     with pytest.raises(HTTPException, match="closing"):
         agent._require_agent_session(seed.agent_session_id)
     with pytest.raises(HTTPException, match="closing"):

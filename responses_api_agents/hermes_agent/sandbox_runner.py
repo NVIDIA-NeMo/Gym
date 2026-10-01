@@ -8,6 +8,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import signal
 import sys
 import traceback
 from pathlib import Path
@@ -67,7 +68,7 @@ def _connect_mcp_servers(required: list[str]) -> None:
         raise RuntimeError("Required MCP servers did not connect: " + ", ".join(missing))
 
 
-def _run(payload: dict[str, Any], session_dir: Path) -> dict[str, Any]:
+def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None = None) -> dict[str, Any]:
     from run_agent import AIAgent
 
     hermes_home = session_dir / "hermes-home"
@@ -110,6 +111,31 @@ def _run(payload: dict[str, Any], session_dir: Path) -> dict[str, Any]:
     agent._build_api_kwargs = build_api_kwargs
     result = None
     error = None
+    timed_out = False
+    runtime = {"hostname": os.uname().nodename, "pid": os.getpid(), "python": sys.executable}
+
+    def progress() -> dict[str, Any]:
+        return {
+            "completed": False,
+            "interrupted": True,
+            "stop_reason": "wall_time",
+            "messages": getattr(agent, "_session_messages", [])
+            or [*payload["history"], {"role": "user", "content": payload["user_message"]}],
+        }
+
+    def interrupt(*_: object) -> None:
+        nonlocal timed_out
+        timed_out = True
+        # Save first: a blocked tool or API call may not unwind before the hard cleanup.
+        if output_path is not None:
+            partial = progress()
+            _write_atomic(
+                output_path,
+                {"result": partial, "observations": observer.finish(partial, None), "runtime": runtime},
+            )
+        agent.interrupt("sandbox timeout")
+
+    previous_handler = signal.signal(signal.SIGTERM, interrupt)
     try:
         result = agent.run_conversation(
             payload["user_message"],
@@ -118,24 +144,27 @@ def _run(payload: dict[str, Any], session_dir: Path) -> dict[str, Any]:
             task_id=payload["agent_session_id"],
         )
     except BaseException as exception:
-        error = exception
-        setattr(exception, "_sandbox_observations", observer.finish(result, error))
-        raise
+        if timed_out:
+            result = progress()
+        else:
+            error = exception
+            setattr(exception, "_sandbox_observations", observer.finish(result, error))
+            raise
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
+    if timed_out and not result.get("failed"):
+        result = {**result, "completed": False, "interrupted": True, "stop_reason": "wall_time"}
     return {
         "observations": observer.finish(result, error),
         "result": result,
-        "runtime": {
-            "hostname": os.uname().nodename,
-            "pid": os.getpid(),
-            "python": sys.executable,
-        },
+        "runtime": runtime,
     }
 
 
 def _run_worker(input_path: Path, output_path: Path) -> int:
     exchange_dir = input_path.parent
     try:
-        output = _run(json.loads(input_path.read_text()), exchange_dir)
+        output = _run(json.loads(input_path.read_text()), exchange_dir, output_path=output_path)
     except BaseException as error:
         output = {
             "error": str(error),

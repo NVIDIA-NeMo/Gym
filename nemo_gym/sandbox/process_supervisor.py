@@ -68,6 +68,7 @@ def _supervise(
 ) -> CleanupReceipt:
     """Enforce a worker deadline, then acknowledge cleanup after all descendants exit."""
     process = None
+    subreaping = False
     stopping = False
     receipt: CleanupReceipt = {"cleanup_confirmed": False, "return_code": None, "error": None, "timed_out": False}
 
@@ -84,8 +85,13 @@ def _supervise(
             return receipt  # The finally block confirms that no worker was launched.
         if sys.platform != "linux":
             raise RuntimeError("Sandbox process supervision requires Linux")
+        # Survive provider process-group cancellation to reap the worker and write its receipt.
+        # Exec launchers may already make us group leader; setsid would fail in that case.
+        if os.getpgrp() != os.getpid():
+            os.setsid()
         if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
             raise OSError(ctypes.get_errno(), "Cannot supervise sandbox tool processes")
+        subreaping = True
         process = subprocess.Popen(command, start_new_session=True)
         deadline = time.monotonic() + timeout
         while process.poll() is None and not stopping and time.monotonic() < deadline:
@@ -109,6 +115,8 @@ def _supervise(
                 except ProcessLookupError:
                     pass
                 receipt["return_code"] = process.wait(timeout=cleanup_timeout)
+            if subreaping:
+                # Popen can fail after creating a child, before returning its handle.
                 _drain_children(cleanup_timeout)
             receipt["cleanup_confirmed"] = True
         except Exception as exc:

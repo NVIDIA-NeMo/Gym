@@ -14,11 +14,11 @@
 # limitations under the License.
 
 import asyncio
-import json
 import logging
 import os
 import signal
 import sys
+from json import loads
 from pathlib import Path
 from shlex import join
 
@@ -67,7 +67,7 @@ async def test_supervisor_deadline_finishes_before_provider_hard_timeout(tmp_pat
         )
         assert result.error_type is None, result.stderr
         assert result.return_code == 0
-        receipt = json.loads(receipt_path.read_text())
+        receipt = loads(receipt_path.read_text())
         assert receipt["cleanup_confirmed"] is True
         assert receipt["timed_out"] is True
         assert receipt["return_code"] == -signal.SIGKILL

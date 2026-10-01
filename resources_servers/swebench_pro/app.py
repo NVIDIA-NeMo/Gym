@@ -581,10 +581,12 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 file=sys.stderr,
             )
 
+        evaluation_completed = result.completed and reason is None and extraction_error is None
         response_data = body.model_dump() | {
             "image_provenance": await asyncio.to_thread(self._image_info, body),
             "reward": float(result.resolved),
-            "evaluation_completed": result.completed and reason is None,
+            "evaluation_completed": evaluation_completed,
+            "mask_sample": not evaluation_completed,
             "eval_timed_out": result.timed_out,
             "resolved": result.resolved,
             "patch_applied": result.patch_applied,

@@ -150,6 +150,15 @@ class AgentSessionState:
     request: AgentSeedSessionRequest
 
 
+class AgentSessionSetupError(Exception):
+    """Retain incomplete setup for close while propagating the original setup error."""
+
+    def __init__(self, state: AgentSessionState, *, error: BaseException) -> None:
+        super().__init__(str(error))
+        self.state: AgentSessionState = state
+        self.error: BaseException = error
+
+
 @dataclass
 class _AgentSessionRecord:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -205,7 +214,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     def _require_agent_session(self, agent_session_id: str) -> AgentSessionState:
         record = self._session_records.get(agent_session_id)
-        if record is None or record.state is None or record.closing:
+        if record is None or record.state is None or record.closing or record.lock.locked():
             raise HTTPException(409, "Unknown or closing agent_session_id")
         return record.state
 
@@ -273,6 +282,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 record.episode_id = body.episode_id
                 try:
                     record.state = await self._seed_agent_session_state(body.model_copy(deep=True))
+                except AgentSessionSetupError as error:
+                    record.state = error.state
+                    record.closing = True
+                    raise error.error from None
                 except BaseException:
                     # An adapter may retain a partially initialized handle when cleanup fails.
                     # It must remain closable, but never eligible for execution or reseeding.
@@ -323,8 +336,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         """Validate grants and initialize harness state.
 
-        Store partial state in the caller's session record before fallible setup that needs
-        cleanup. Clear it only after successful cleanup; a retained handle remains closable.
+        If setup fails and cleanup cannot finish, raise AgentSessionSetupError with the
+        partial state and original error. The base retains it for close, never activation.
         """
         raise NotImplementedError("This agent does not implement episode sessions")
 

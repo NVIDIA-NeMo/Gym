@@ -40,6 +40,7 @@ from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
@@ -186,14 +187,6 @@ _SANDBOX_OBSERVER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_observer.py"
 _SANDBOX_MODEL_KWARGS = f"{_SANDBOX_RUNTIME_DIR}/model_kwargs.py"
 
 
-class SessionPhase(Enum):
-    """Track activation eligibility, not whether the invocation task is still running."""
-
-    READY = auto()
-    ACTIVATED = auto()
-    CLOSING = auto()  # Failed closes remain retryable, but cannot reactivate.
-
-
 class RunnerCleanup(Enum):
     """Track remote process cleanup independently of session files and connections."""
 
@@ -211,7 +204,6 @@ class HermesAgentSessionState(AgentSessionState):
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
-    phase: SessionPhase = SessionPhase.READY
     runner_cleanup: RunnerCleanup = RunnerCleanup.IDLE
 
 
@@ -279,9 +271,9 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     terminal_timeout: int = 180
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
-    sandbox_install_timeout_seconds: float = 900.0
+    sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     sandbox_runner_timeout_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
-    session_close_timeout_seconds: float = 30.0
+    session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
     compression_threshold: float = 0.85
@@ -344,7 +336,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, HermesAgentSessionState):
             raise TypeError("Expected Hermes agent session state")
-        state.phase = SessionPhase.CLOSING
         observations = await self._cleanup_sandbox_session(state)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id, agent_observations=observations
@@ -433,10 +424,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
         agent_session_id: str,
         body: AgentSeedSessionRequest,
     ) -> HermesAgentSessionState:
-        if any(
-            access.required and not isinstance(access, MCPToolAccess) for access in self.effective_tool_accesses(body)
-        ):
-            raise HTTPException(422, "Native Hermes supports only MCP tools among required Resources grants")
         owns_sandbox = body.sandbox_access is None
         if owns_sandbox:
             if self.config.sandbox_provider is None:
@@ -472,7 +459,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             session_dir=session_dir,
             owns_sandbox=owns_sandbox,
         )
-        self._session_records[agent_session_id].state = state
         try:
             prepare = await sandbox.exec(
                 f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(session_dir)}",
@@ -487,14 +473,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
             await sandbox.upload(Path(__file__).with_name("model_kwargs.py"), _SANDBOX_MODEL_KWARGS)
             await sandbox.upload(Path(process_supervisor.__file__), _SANDBOX_SUPERVISOR)
-        except BaseException:
-            state.phase = SessionPhase.CLOSING
+        except BaseException as error:
             try:
                 await self._cleanup_sandbox_session(state)
             except BaseException:
                 LOG.exception("Could not clean failed Hermes setup %s; retaining session for close", agent_session_id)
-            else:
-                self._session_records[agent_session_id].state = None
+                raise AgentSessionSetupError(state, error=error) from error
             raise
         return state
 
@@ -554,6 +538,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 f'if [ "$(readlink {claim_path})" = stop ]; then '
                 f"printf '%s' {stopped_receipt} > {temporary_receipt} && "
                 f"mv {temporary_receipt} {quote(receipt_path)}; exit $?; fi; "
+                f"[ -f {quote(receipt_path)} ] && exit 0; "
                 f'if [ -s {pid_path} ]; then kill -TERM "$(cat {pid_path})" 2>/dev/null || true; fi; '
                 f"for _ in $(seq 1 {max(1, int(self.config.session_close_timeout_seconds))}); do "
                 f"[ -f {quote(receipt_path)} ] && exit 0; sleep 1; done; exit 1"
@@ -573,6 +558,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
         self,
         state: HermesAgentSessionState,
     ) -> AgentObservationBundle:
+        if not state.owns_sandbox:
+            # Cancelling provider exec may kill its process group. Confirm remote cleanup first.
+            # A queued activation has not attempted launch and can be cancelled immediately.
+            await self._terminate_sandbox_runner(state)
         if state.task is not None and not state.task.done() and not state.task.cancelling():
             state.task.cancel()
         if state.owns_sandbox:
@@ -591,7 +580,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     raise
                 # A borrowed sandbox still needs proof of cleanup after an activation error.
         if not state.owns_sandbox:
-            await self._terminate_sandbox_runner(state)
             # Retire the path atomically before deleting its launch fence. Otherwise a delayed
             # exec could claim the directory between rm unlinking launch.claim and removing the directory.
             retired_dir = f"{state.session_dir}.closed"
@@ -780,18 +768,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
         )
         state.runner_cleanup = RunnerCleanup.UNCONFIRMED
         try:
-            launched = await state.sandbox.exec(
+            await state.sandbox.exec(
                 command,
                 cwd=state.workdir,
                 timeout_s=process_supervisor.exec_timeout(
                     timeout=self.config.sandbox_runner_timeout_seconds, cleanup_timeout=cleanup_timeout
                 ),
             )
-            if launched.error_type == "timeout":
-                raise TimeoutError(
-                    f"Hermes sandbox runner exceeded sandbox_runner_timeout_seconds="
-                    f"{self.config.sandbox_runner_timeout_seconds:g}"
-                )
         except BaseException:
             try:
                 await self._terminate_sandbox_runner(state)
@@ -955,6 +938,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         }
         if isinstance(result.get("api_calls"), int):
             metadata["turns"] = str(result["api_calls"])
+        if result.get("stop_reason"):
+            metadata["stop_reason"] = str(result["stop_reason"])
         if harness_error:
             metadata["hermes_error"] = str(harness_error)[:2000]
 
@@ -1103,10 +1088,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             state = self._require_agent_session(agent_session_id)
             if state.request.episode_id.capture_key != rollout_id:
                 raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
-            if state.phase is SessionPhase.READY:
+            if state.task is None:
                 # No await until the task and its immutable request binding are installed.
                 state.activation_request = body.model_copy(deep=True)
-                state.phase = SessionPhase.ACTIVATED
 
                 async def activate() -> NeMoGymResponse:
                     async with self.sem:
@@ -1119,7 +1103,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                         return episode.response
 
                 state.task = asyncio.create_task(activate())
-            elif state.phase is not SessionPhase.ACTIVATED or body != state.activation_request:
+            elif body != state.activation_request:
                 raise HTTPException(409, "Hermes sandbox sessions support one activation; retry the same request")
             assert state.task is not None
             # A disconnected HTTP waiter must not cancel the shared activation. Session close
@@ -1172,7 +1156,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "Use the native session responses and close routes")
+            raise HTTPException(409, "Use the agent session responses and close routes")
         async with self.sem:
             cookies = request.cookies
 
