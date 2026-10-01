@@ -20,6 +20,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
 from nemo_gym.orchestration.executors.script_templates import (
@@ -2683,7 +2684,7 @@ def test_an_unreadable_manual_value_is_kept_and_shares(tmp_path):
         },
         _ONE_NODE,
     )
-    assert "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}" in _step(script, "judge")
+    assert _gpus(_step(script, "judge")) == '"$GYM_CUDA_VISIBLE_DEVICES"'
     assert "CUDA_VISIBLE_DEVICES" not in _step(script, "policy")
 
 
@@ -2773,10 +2774,32 @@ def test_planned_gpus_are_exported_inside_the_step_not_passed_through_srun(tmp_p
     assert _gpus(_step(script, "policy")) == "2,3"
 
 
-def test_a_lone_services_manual_value_is_rendered_as_before(tmp_path):
+def test_a_lone_services_manual_value_is_exported_inside_the_step(tmp_path):
+    # Left in the srun env, Slurm silently replaced it with every GPU of the step.
     script = _render(tmp_path, {"policy": _vllm(8000, None, env={"CUDA_VISIBLE_DEVICES": "lit:0"})}, _ONE_NODE)
-    assert _step(script, "policy").startswith("env CUDA_VISIBLE_DEVICES=0 srun")
-    assert "export CUDA_VISIBLE_DEVICES" not in script
+    assert "CUDA_VISIBLE_DEVICES" not in _step(script, "policy").split("srun", 1)[0]
+    assert _gpus(_step(script, "policy")) == "0"
+
+
+def test_a_runtime_manual_value_exports_the_batch_shells_value(tmp_path):
+    script = _render(
+        tmp_path, {"policy": _vllm(8000, None, env={"CUDA_VISIBLE_DEVICES": "runtime:MY_GPUS"})}, _ONE_NODE
+    )
+    step = _step(script, "policy")
+    assert step.startswith("env GYM_CUDA_VISIBLE_DEVICES=${MY_GPUS} srun")
+    assert _gpus(step) == '"$GYM_CUDA_VISIBLE_DEVICES"'
+
+
+def test_the_multi_instance_example_renders(tmp_path, monkeypatch):
+    raw = yaml.safe_load((Path(__file__).parents[2] / "examples" / "slurm_vllm_multi_instance.yaml").read_text())
+    raw["job"]["output_path"] = str(tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "x")
+    config = SubmitConfig.model_validate(raw)
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gpqa", config.driver.benchmarks["gpqa"], compute, tmp_path / "gpqa")
+    assert "CUDA_VISIBLE_DEVICES" not in script
+    assert "--data-parallel-size 4" in _step(script, "vllm_model")
+    assert subprocess.run(["bash", "-n"], input=script, text=True).returncode == 0
 
 
 # ---------------------------------------------------------------------------
