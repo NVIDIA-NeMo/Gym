@@ -41,7 +41,11 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
+    ATTEMPT_INDEX_KEY_NAME,
     HF_TOKEN_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
     get_global_config_dict,
@@ -880,9 +884,22 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         if row_index % d.num_repeats == 0:
                             source_task_index += 1
                         if d.taskset is not None:
+                            # Keep collector identity outside task_data so shards and retries
+                            # retain their capture keys after materialization.
+                            identity = {
+                                key: row[key]
+                                for key in (
+                                    TASK_INDEX_KEY_NAME,
+                                    ROLLOUT_INDEX_KEY_NAME,
+                                    ROLLOUT_ID_KEY_NAME,
+                                    ATTEMPT_INDEX_KEY_NAME,
+                                )
+                                if key in row
+                            }
                             row = materialize_single_agent_task(
                                 row, taskset=d.taskset, task_index=source_task_index
                             ).model_dump(mode="json", exclude_unset=True)
+                            row.update(identity)
                         # num_repeats duplicates each line consecutively; validate only the first
                         # copy so reports count each source row once, with its jsonl line index.
                         if validator is not None and row_index % d.num_repeats == 0:
