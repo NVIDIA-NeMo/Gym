@@ -36,7 +36,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Optional
@@ -55,8 +55,11 @@ from nemo_gym._checkpoint.errors import (
     StaleCheckpointError,
     UnauthorizedError,
 )
-from nemo_gym._checkpoint.store import read_participant_state, write_participant_state
+from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
+from nemo_gym._checkpoint.telemetry import OperationSpan, checkpoint_span
+from nemo_gym._checkpoint.telemetry import operation as checkpoint_operation
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.telemetry.gym_metrics import record_checkpoint_event, record_checkpoint_volume
 
 
 LOGGER = logging.getLogger(__name__)
@@ -352,6 +355,9 @@ class ParticipantController:
                     self.phase.value,
                     self.instance_name,
                 )
+                record_checkpoint_event(
+                    "lease_expired", participant_kind=self.participant.kind, phase=self.phase.value
+                )
                 await self._reopen(retire_id=checkpoint_id)
             return
 
@@ -364,6 +370,12 @@ class ParticipantController:
     # -- phases ---------------------------------------------------------------------------------
 
     async def prepare(self, request: CheckpointRequest) -> dict[str, Any]:
+        with self._operation("prepare", request.checkpoint_id) as span:
+            result = await self._prepare(request)
+            span.set(phase=result["phase"], blockers=len(result["report"]["blockers"]))
+            return result
+
+    async def _prepare(self, request: CheckpointRequest) -> dict[str, Any]:
         async with self._lock:
             recorded = self._results.get((request.checkpoint_id, "prepare"))
             if recorded is not None:
@@ -382,7 +394,8 @@ class ParticipantController:
                 self._renew(request)
 
         try:
-            report = await self._wait_ready(request)
+            with checkpoint_span("gym.checkpoint.wait_ready"):
+                report = await self._wait_ready(request)
         except BaseException:
             async with self._lock:
                 if self.checkpoint_id == request.checkpoint_id and self.phase == CheckpointPhase.PREPARING:
@@ -396,6 +409,8 @@ class ParticipantController:
             report = self.participant.readiness()
             if report.ready:
                 self.phase = CheckpointPhase.PREPARED
+            elif time.time() >= request.deadline_ts:
+                record_checkpoint_event("prepare_not_ready", participant_kind=self.participant.kind)
             result = {"phase": self.phase.value, "report": report.model_dump()}
             if report.ready:
                 self._results[(request.checkpoint_id, "prepare")] = result
@@ -416,6 +431,11 @@ class ParticipantController:
         refused: stopping an episode waits for its final cleanup, whose calls wait for resume. A controller with
         a straggler resumes first. The attempts are refused while they stop; afterwards nothing remains of them.
         """
+        with self._operation("retire", request.checkpoint_id) as span:
+            span.set(episodes=len(request.episode_ids))
+            return await self._retire(request)
+
+    async def _retire(self, request: RetireRequest) -> dict[str, Any]:
         async with self._lock:
             if self.phase not in (CheckpointPhase.IDLE, CheckpointPhase.RESTORED):
                 raise InvalidPhaseError(f"cannot retire in phase {self.phase.value}; resume first")
@@ -442,6 +462,12 @@ class ParticipantController:
                 await self.participant.retire(episode_id)
 
     async def commit(self, request: CommitRequest) -> dict[str, Any]:
+        with self._operation("commit", request.checkpoint_id) as span:
+            result = await self._commit(request)
+            span.set(records=result["manifest"]["record_count"])
+            return result
+
+    async def _commit(self, request: CommitRequest) -> dict[str, Any]:
         async with self._lock:
             recorded = self._results.get((request.checkpoint_id, "commit"))
             if recorded is not None:
@@ -453,7 +479,9 @@ class ParticipantController:
             report = self.participant.readiness()
             if not report.ready:
                 raise InvalidPhaseError(f"participant is no longer ready to commit: blockers={report.blockers}")
-            records = await _within(request, self.participant.export(request.episode_ids))
+            with checkpoint_span("gym.checkpoint.export") as span:
+                records = await _within(request, self.participant.export(request.episode_ids))
+                span.set(records=len(records))
             write = asyncio.to_thread(
                 write_participant_state,
                 Path(request.checkpoint_dir),
@@ -463,7 +491,13 @@ class ParticipantController:
                 records=[record.to_json_record() for record in records],
             )
             # A write that outlives the deadline fails this call; a retry returns the same manifest.
-            manifest = await _within(request, write)
+            with checkpoint_span("gym.checkpoint.write") as span:
+                manifest = await _within(request, write)
+                size = _records_size(Path(request.checkpoint_dir), self.participant.kind, self.instance_name)
+                span.set(records=manifest["record_count"], bytes=size)
+            record_checkpoint_volume(
+                operation="commit", kind=self.participant.kind, records=manifest["record_count"], size_bytes=size
+            )
             await self._release_unscoped(request.episode_ids)
             self.phase = CheckpointPhase.COMMITTED
             result = {
@@ -476,6 +510,12 @@ class ParticipantController:
             return result
 
     async def restore(self, request: RestoreRequest) -> dict[str, Any]:
+        with self._operation("restore", request.checkpoint_id) as span:
+            result = await self._restore(request)
+            span.set(records=len(result["restored"]))
+            return result
+
+    async def _restore(self, request: RestoreRequest) -> dict[str, Any]:
         async with self._lock:
             recorded = self._results.get((request.checkpoint_id, "restore"))
             if recorded is not None:
@@ -487,13 +527,21 @@ class ParticipantController:
                 kind=self.participant.kind,
                 instance=self.instance_name,
             )
-            manifest, raw_records = await _within(request, read)
-            scope = set(request.episode_ids)
-            records = [self.participant.record_model.model_validate(record) for record in raw_records]
-            records = [record for record in records if record.episode_id in scope]
+            with checkpoint_span("gym.checkpoint.read") as span:
+                manifest, raw_records = await _within(request, read)
+                scope = set(request.episode_ids)
+                records = [self.participant.record_model.model_validate(record) for record in raw_records]
+                records = [record for record in records if record.episode_id in scope]
+                size = _records_size(Path(request.checkpoint_dir), self.participant.kind, self.instance_name)
+                span.set(records=len(records), bytes=size)
+            record_checkpoint_volume(
+                operation="restore", kind=self.participant.kind, records=len(records), size_bytes=size
+            )
             await self.participant.close_admission(request)
             try:
-                await _within(request, self.participant.install(records))
+                with checkpoint_span("gym.checkpoint.install") as span:
+                    span.set(records=len(records))
+                    await _within(request, self.participant.install(records))
             except BaseException:
                 await self.participant.open_admission()
                 raise
@@ -509,6 +557,10 @@ class ParticipantController:
             return result
 
     async def resume(self, request: CheckpointRequest) -> dict[str, Any]:
+        with self._operation("resume", request.checkpoint_id):
+            return await self._resume(request)
+
+    async def _resume(self, request: CheckpointRequest) -> dict[str, Any]:
         async with self._lock:
             if request.checkpoint_id in self._retired_ids:
                 return {"phase": CheckpointPhase.IDLE.value, "idempotent": True}
@@ -525,6 +577,11 @@ class ParticipantController:
         self._retired_ids[checkpoint_id] = None
         while len(self._retired_ids) > _RETIRED_IDS_KEPT:
             self._retired_ids.popitem(last=False)
+
+    def _operation(self, name: str, checkpoint_id: str) -> AbstractContextManager[OperationSpan]:
+        return checkpoint_operation(
+            name, kind=self.participant.kind, instance=self.instance_name, checkpoint_id=checkpoint_id
+        )
 
     async def _reopen(self, *, retire_id: Optional[str] = None) -> None:
         await self.participant.open_admission()
@@ -631,3 +688,11 @@ def install_control_error_handler(app: FastAPI) -> None:
         return error.response()
 
     app.add_exception_handler(ControlError, handle)
+
+
+def _records_size(checkpoint_dir: Path, kind: str, instance: str) -> int:
+    path = participant_dir(checkpoint_dir, kind=kind, instance=instance) / "records.jsonl"
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
