@@ -15,6 +15,8 @@ and compose its `pi_agent` with your benchmark's Resources Server, a sandbox pro
 Model Server. The agent config contains no benchmark or dataset selection. Use the existing
 component names directly; the run configuration supplies the Environment Server references.
 
+For Terminal-Bench 2.1, see the [single-task run commands](../../benchmarks/terminal_bench_2_1/README.md#pi-in-a-task-sandbox).
+
 - On Pi, set `num_workers: 1`, an exact `pi_version` (for example `0.80.2`),
   `model_server` pointing to the Gym Model Server, and `model` to its served model ID.
 - On [single-agent Environment Server](../../environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml),

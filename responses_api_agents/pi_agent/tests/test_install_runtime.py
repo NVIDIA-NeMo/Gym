@@ -19,7 +19,7 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     """Run the real installer with an isolated PATH and no access to the host package manager."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for name in ("bash", "uname", "getconf", "mkdir", "cp"):
+    for name in ("bash", "uname", "getconf", "mkdir", "cp", "ln"):
         executable = shutil.which(name)
         if executable is None:
             pytest.skip(f"Installer test requires {name}")
@@ -31,7 +31,8 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
 echo "$*" >> "$TEST_ROOT/packages.log"
 if [ "$1" = install ]; then
   [ "${TEST_INSTALL_FAIL:-0}" = 0 ] || exit 100
-  cp "$TEST_ROOT/curl" "$TEST_ROOT/bin/curl"
+  case " $* " in *" python3 "*) ln -s "$TEST_PYTHON" "$TEST_ROOT/bin/python3" ;; esac
+  case " $* " in *" curl "*) cp "$TEST_ROOT/curl" "$TEST_ROOT/bin/curl" ;; esac
 fi
 """,
     }
@@ -42,7 +43,7 @@ fi
     curl = tmp_path / "curl"
     curl.write_text('#!/bin/bash\necho "$*" > "$TEST_ROOT/download.log"\nexit 19\n')
     curl.chmod(0o755)
-    return tmp_path, os.environ | {"PATH": str(bindir), "TEST_ROOT": str(tmp_path)}
+    return tmp_path, os.environ | {"PATH": str(bindir), "TEST_ROOT": str(tmp_path), "TEST_PYTHON": sys.executable}
 
 
 def run_installer(root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -82,6 +83,29 @@ def test_missing_curl_is_installed_before_downloading_node(sandbox: tuple[Path, 
     ]
     assert "https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-" in (root / "download.log").read_text()
     assert not (root / "runtime/ready").exists()
+
+
+def test_missing_python_is_bootstrapped_before_runtime_checks(sandbox: tuple[Path, dict[str, str]]) -> None:
+    root, env = sandbox
+    (root / "bin/python3").unlink()
+    result = run_installer(root, env)
+    assert result.returncode == 19, result.stderr
+    assert (root / "packages.log").read_text().splitlines() == [
+        "update",
+        "install -y --no-install-recommends python3",
+        "update",
+        "install -y --no-install-recommends curl ca-certificates",
+    ]
+    assert (root / "download.log").exists()
+
+
+def test_missing_python_without_root_explains_remedy(sandbox: tuple[Path, dict[str, str]]) -> None:
+    root, env = sandbox
+    (root / "bin/python3").unlink()
+    result = run_installer(root, env | {"TEST_UID": "1000"})
+    assert result.returncode == 1
+    assert "Pi requires python3: preinstall these packages" in result.stderr
+    assert not (root / "download.log").exists()
 
 
 def test_existing_curl_does_not_install_packages(sandbox: tuple[Path, dict[str, str]]) -> None:

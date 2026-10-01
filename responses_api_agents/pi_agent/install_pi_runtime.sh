@@ -27,6 +27,9 @@ install_packages() {
 }
 
 test "$(uname -s)" = Linux
+if ! command -v python3 >/dev/null 2>&1; then
+  install_packages python3
+fi
 python3 -c 'import sys; assert sys.version_info >= (3, 8), "Pi requires Python >=3.8"'
 case "$(uname -m)" in
   x86_64) arch=x64 ;;
