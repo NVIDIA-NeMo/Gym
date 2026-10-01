@@ -12,10 +12,8 @@ Two metrics fall out of the same K rollouts:
 | pass@K | `1 if n_pass >= 1` | whether any of K samples resolves it: the prefix-conditioned potential |
 | **diversity bonus** | `pass@K - mean reward` | mass of mixed-outcome states |
 
-pass@K is a proxy, not a measured quantity of training: it asks whether the
-model can reach a fix from this state at all, which is suggestive of the room
-sampling-based RL has to work with, but that link is not established here. The
-diversity bonus isolates states the model *sometimes* solves -- the states
+pass@K is a proxy: it asks whether the model can reach a fix from this state at
+all. The diversity bonus isolates states the model *sometimes* solves -- the states
 whose outcome varies across samples. A state that always passes or always
 fails has none.
 
