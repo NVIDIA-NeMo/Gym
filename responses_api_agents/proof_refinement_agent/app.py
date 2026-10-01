@@ -25,13 +25,19 @@ The resources server is stateless - it always provides error feedback on failure
 The agent controls the retry loop and turn counting.
 """
 
+import asyncio
+import json
 import logging
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from fastapi import Request, Response
-from pydantic import ConfigDict
+from pydantic import ConfigDict, JsonValue
 
+from nemo_gym._checkpoint.agent import LegacyRun, RestoredAgentSession, require_rollout
+from nemo_gym._checkpoint.errors import AdmissionClosedError
+from nemo_gym._checkpoint.steps import StepMode, seed_verify_mode
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -43,15 +49,21 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import raise_for_status
+from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 LOG = logging.getLogger(__name__)
+
+# Legacy /run episodes are checkpointed under their logical rollout ID so a replacement attempt finds them.
+_LEGACY_SESSION_PREFIX = "run:"
+# Pause between policy calls the policy model refused while it is closed for a checkpoint.
+_PARKED_RETRY_SECONDS = 0.1
 
 
 @dataclass
@@ -98,8 +110,19 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
     """Agent that implements multi-turn proof refinement with error feedback."""
 
     ray_enabled = False
+    # A /run keeps its whole episode in its checkpoint boundaries, so the session hooks have nothing to do.
+    checkpoint_sessions_supported = True
 
     config: ProofRefinementAgentConfig
+
+    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+        return {session_key: {} for session_key in session_keys}
+
+    async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
+        pass
+
+    async def retire_agent_session(self, session_key: str) -> None:
+        pass
 
     async def responses(
         self,
@@ -123,6 +146,9 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
             json=body,
             cookies=request.cookies,
         )
+        if await _is_checkpoint_parked(model_response):
+            # Pass the refusal through to /run, which waits at its boundary and calls again after resume.
+            raise AdmissionClosedError("policy model admission is closed for a checkpoint")
         await raise_for_status(model_response)
         model_response_json = await model_response.json()
 
@@ -146,51 +172,112 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
         5. Repeat until success or max turns exhausted
         6. Return final verify response with all attempts recorded
         """
-        cookies = request.cookies
-        all_attempts: List[Dict[str, Any]] = []
+        participant = self.checkpoint_participant
+        if participant is None:
+            return await self._run(request, body, legacy_run=None)
+        episode_id = EpisodeId.from_capture_key(require_rollout(self.rollout_id_from_run(body)))
+        async with participant.legacy_run(
+            f"{_LEGACY_SESSION_PREFIX}{episode_id.rollout_id}", episode_id
+        ) as legacy_run:
+            return await self._run(request, body, legacy_run=legacy_run)
+
+    async def _run(
+        self, request: Request, body: ProofRefinementRunRequest, *, legacy_run: LegacyRun | None
+    ) -> ProofRefinementVerifyResponse:
+        # Steps: seed, then generate and verify once per turn, then return. With checkpointing, a boundary
+        # before each step names the next step and everything it needs, so a replacement attempt resumes
+        # at that step without repeating completed generations or verifications.
+        continuation = (legacy_run.continuation if legacy_run is not None else None) or {}
+        stage = continuation.get("next", "seed")
+        cookies: Any = continuation.get("cookies", request.cookies)
+        # Whether the resources server's /verify may be replayed, as its seed reply reported.
+        verify_mode: StepMode = continuation.get("verify_mode", "wait")
+        turn_index: int = continuation.get("turn_index", 0)
+        # None until the first correction: the first turn sends the task's own request.
+        current_input: Optional[Dict[str, Any]] = continuation.get("current_input")
+        all_attempts: List[Dict[str, Any]] = list(continuation.get("all_attempts", []))
+        model_response_json: Optional[Dict[str, Any]] = continuation.get("response")
+        verify_result: Optional[Dict[str, Any]] = continuation.get("result")
+
+        async def boundary(next_step: str, **extra: Any) -> None:
+            if legacy_run is not None:
+                await legacy_run.boundary(
+                    {
+                        "next": next_step,
+                        "cookies": _cookie_values(cookies),
+                        "verify_mode": verify_mode,
+                        "turn_index": turn_index,
+                        "current_input": current_input,
+                        # A copy: the loop keeps appending after a replay step the checkpoint did not wait for.
+                        "all_attempts": list(all_attempts),
+                        **extra,
+                    }
+                )
+
+        def step(mode: StepMode) -> AbstractAsyncContextManager[None]:
+            return legacy_run.step(mode) if legacy_run is not None else nullcontext()
 
         # 1. Seed the session
-        seed_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_response)
-        cookies = seed_response.cookies
+        if stage == "seed":
+            await boundary("seed")
+            # A seed creates a new session for a new cookie, so running it again after a crash is safe.
+            async with step("replay"):
+                seed_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/seed_session",
+                    json=body.model_dump(),
+                    cookies=cookies,
+                )
+                await raise_for_status(seed_response)
+            cookies = _cookie_values(seed_response.cookies)
+            verify_mode = seed_verify_mode(seed_response.headers)
+            stage = "generate"
 
         # Start the verify-correction loop
-        current_input = body.responses_create_params
-        turn_index = 0
+        while stage != "return":
+            if stage == "generate":
+                LOG.info("Turn %d: Generating proof attempt", turn_index)
 
-        while True:
-            LOG.info("Turn %d: Generating proof attempt", turn_index)
-
-            # 2. Generate proof attempt
-            gen_response = await self.server_client.post(
-                server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
-                json=current_input,
-                cookies=cookies,
-            )
-            await raise_for_status(gen_response)
-            cookies = gen_response.cookies
-            model_response_json = await gen_response.json()
+                # 2. Generate proof attempt
+                while True:
+                    await boundary("generate")
+                    # The policy model holds an undelivered response during a checkpoint, and a crash
+                    # regenerates it from the boundary above.
+                    async with step("replay"):
+                        gen_response = await self.server_client.post(
+                            server_name=self.config.name,
+                            url_path=self.url_path_for_run("/v1/responses", body),
+                            json=current_input if current_input is not None else body.responses_create_params,
+                            cookies=cookies,
+                        )
+                        parked = await _is_checkpoint_parked(gen_response)
+                        if not parked:
+                            await raise_for_status(gen_response)
+                            model_response_json = await get_response_json(gen_response)
+                    if not parked:
+                        break
+                    # The policy model closed admission for a checkpoint. Back off, then return to the
+                    # boundary, which parks there once this agent's admission closes too.
+                    await asyncio.sleep(_PARKED_RETRY_SECONDS)
+                cookies = _cookie_values(gen_response.cookies)
+                stage = "verify"
 
             # 3. Verify the proof
+            await boundary("verify", response=model_response_json)
             verify_request_data = body.model_dump()
             verify_request_data["response"] = model_response_json
             verify_request_data["turn_index"] = turn_index
 
-            verify_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=verify_request_data,
-                cookies=cookies,
-            )
-            await raise_for_status(verify_response)
-            cookies = verify_response.cookies
-            verify_result = await verify_response.json()
+            async with step(verify_mode):
+                verify_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=verify_request_data,
+                    cookies=cookies,
+                )
+                await raise_for_status(verify_response)
+                verify_result = await get_response_json(verify_response)
+            cookies = _cookie_values(verify_response.cookies)
 
             # Record this attempt with full details
             generation_text = ""
@@ -202,15 +289,14 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
                                 generation_text = content.get("text", "")
                                 break
 
-            # Convert current_input to dict if it's a Pydantic model
-            if hasattr(current_input, "model_dump"):
-                input_dict = current_input.model_dump()
-            else:
-                input_dict = current_input
-
             attempt_record = {
                 "turn_index": turn_index,
-                "input": input_dict,  # Full input/prompt sent to model
+                # Full input/prompt sent to model
+                "input": (
+                    current_input
+                    if current_input is not None
+                    else body.responses_create_params.model_dump(mode="json")
+                ),
                 "response": model_response_json,  # Full model response with reasoning
                 "generation": generation_text,  # Extracted generation text for convenience
                 "proof_status": verify_result.get("proof_status", "unknown"),
@@ -231,39 +317,41 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
             # 4. Check if we should continue
             needs_correction = verify_result.get("needs_correction", False)
             turns_remaining = self.config.max_correction_turns - turn_index
+            correction_prompt = verify_result.get("correction_prompt")
 
             if not needs_correction:
                 # Success! (or failure with no correction available)
                 LOG.info("Turn %d: Proof verification complete (reward=%s)", turn_index, verify_result.get("reward"))
-                break
-
-            if turns_remaining <= 0:
+                stage = "return"
+            elif turns_remaining <= 0:
                 # No more turns allowed
                 LOG.info("Turn %d: Max correction turns exhausted", turn_index)
-                break
-
-            # 5. Prepare for next turn using correction_prompt
-            correction_prompt = verify_result.get("correction_prompt")
-            if not correction_prompt:
+                stage = "return"
+            elif not correction_prompt:
                 LOG.warning("Turn %d: needs_correction=True but no correction_prompt provided", turn_index)
-                break
+                stage = "return"
+            else:
+                # 5. Prepare for next turn using correction_prompt
+                LOG.info("Turn %d: Preparing correction turn with error feedback", turn_index)
 
-            LOG.info("Turn %d: Preparing correction turn with error feedback", turn_index)
+                # Create new input with the correction prompt (Nemotron single-turn style)
+                params = body.responses_create_params
+                current_input = {
+                    "input": [{"role": "user", "content": correction_prompt}],
+                    "model": getattr(params, "model", None),
+                }
+                # Preserve any other params like temperature, max_tokens
+                for key in ["temperature", "max_tokens", "top_p"]:
+                    value = getattr(params, key, None)
+                    if value is not None:
+                        current_input[key] = value
 
-            # Create new input with the correction prompt (Nemotron single-turn style)
-            # Access Pydantic model attributes properly
-            params = body.responses_create_params
-            current_input = {
-                "input": [{"role": "user", "content": correction_prompt}],
-                "model": getattr(params, "model", None),
-            }
-            # Preserve any other params like temperature, max_tokens
-            for key in ["temperature", "max_tokens", "top_p"]:
-                value = getattr(params, key, None)
-                if value is not None:
-                    current_input[key] = value
+                turn_index += 1
+                stage = "generate"
 
-            turn_index += 1
+            if stage == "return":
+                # Record the result so a restore never runs a verification twice.
+                await boundary("return", result=verify_result)
 
         # Build final response
         final_response = ProofRefinementVerifyResponse.model_validate(verify_result)
@@ -273,6 +361,23 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
             final_response.all_attempts = all_attempts
 
         return final_response
+
+
+def _cookie_values(cookies: Any) -> Dict[str, str]:
+    """Flatten a plain dict or an aiohttp cookie jar of morsels into name-to-value pairs."""
+    return {str(name): str(getattr(value, "value", value)) for name, value in (cookies or {}).items()}
+
+
+async def _is_checkpoint_parked(response: Any) -> bool:
+    """Whether a checkpoint refused this call with 409 ``checkpoint_parked``; it may be retried after resume."""
+    if response.status != 409:
+        return False
+    try:
+        payload = json.loads(await response.read())
+    except ValueError:
+        return False
+    error = payload.get("error") if isinstance(payload, dict) else None
+    return isinstance(error, dict) and error.get("code") == AdmissionClosedError.code
 
 
 if __name__ == "__main__":
