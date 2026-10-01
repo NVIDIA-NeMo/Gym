@@ -14,7 +14,7 @@ from nemo_gym.episode_types import (
     EpisodeFailure,
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 
 
 class SingleAgentTurnTaskInput(BaseModel):
@@ -37,6 +37,7 @@ class SingleAgentTurnResult(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
     ng_agent_observations: AgentObservationBundle | None = None
+    ng_trajectory: TrajectoryRecord | None = None
 
 
 class SingleAgentTurnFailure(EpisodeFailure):
@@ -44,6 +45,9 @@ class SingleAgentTurnFailure(EpisodeFailure):
 
     stage: Literal["seed", "agent", "verification", "cleanup"] | None = None
     partial_response: NeMoGymResponse | None = None
+    ng_agent_observations: AgentObservationBundle | None = None
+    ng_trajectory: TrajectoryRecord | None = None
+    cleanup_error: str | None = None
 
 
 class SingleAgentTurnRequest(BaseEpisodeRequest[SingleAgentTurnTaskInput]):
