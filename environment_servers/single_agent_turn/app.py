@@ -245,7 +245,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             ) from error
 
         # Verification needs this close response: it carries the Agent's observations and final Resources cookies.
-        # A repeated close cannot return them, so a transient failure retries the whole episode instead.
+        # Session-capable agents replay this receipt when ServerClient retries a lost reply.
         try:
             await agent_cleanup.close()
         except Exception as error:

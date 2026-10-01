@@ -8,14 +8,20 @@ You can use an existing agent in NeMo Gym, integrate an external one, or build y
 
 [`SimpleAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) is a native NeMo Gym agent that handles general-purpose multi-step tool calling with configurable max steps, and works with any Resources server out of the box. NeMo Gym also includes agents that integrate external tools: for example, [`MiniSWEAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) wraps an external coding harness running in Docker containers and converts its output back into the NeMo Gym format, and [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) runs the Claude Code CLI. Because every Gym model server speaks Anthropic Messages, you can point Claude Code at any backend — see [Anthropic Messages](/model-server/anthropic-messages).
 
-`hermes_agent` uses the same request rules for host and sandbox execution. It appends
-`system_prompt` from config, request `instructions`, and the first input system message
-in that order to Hermes' native system prompt. User tasks remain user messages.
-Request `temperature` overrides config, including `0.0`; request `model` must match the
-configured model. Unsupported non-default controls return HTTP 422, including `top_p`,
-`store`, `service_tier`, and request metadata. `max_output_tokens` also returns 422:
-Hermes does not enforce a total response token budget. Config `max_tokens` limits each
-model call. Host callers that previously relied on ignored fields must remove them.
+## Agent session hooks
+
+For Environment Server execution, implement these `SimpleResponsesAPIAgent` hooks:
+
+- `_seed_agent_session_state(body)`: validate grants, initialize the harness, and return
+  an `AgentSessionState`. If setup fails and cleanup cannot finish, raise
+  `AgentSessionSetupError(state, error=original_error)` so close can retry cleanup.
+- `_close_agent_session_state(state)`: stop the harness and its tools, then return an
+  `AgentCloseSessionResponse` with observations. Raise if cleanup is not confirmed.
+
+The base handles seed retries and close receipts. In `responses()`, use
+`_require_agent_session()` to reject incomplete or closing sessions before execution.
+A borrowed task sandbox remains owned by the Resources Server: disconnect from it after
+stopping the harness; do not destroy it. Verification starts only after agent close succeeds.
 
 ## Tools in Agent vs. Resources Server
 

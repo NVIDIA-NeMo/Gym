@@ -80,16 +80,28 @@ hermes_agent:
 | `model` | `null` | served model id; defaults to `model_server.name` for backward compatibility |
 | `max_turns` | `30` | maps to `AIAgent.max_iterations` |
 | `concurrency` | `32` | max simultaneous `run()` calls |
-| `temperature` | `1.0` | sampling temperature passed to `AIAgent` |
+| `temperature` | `null` | sampling temperature passed to `AIAgent`; request `temperature` overrides it, including `0.0` |
 | `terminal_backend` | `local` | sets `TERMINAL_ENV` (process-global); `local`, `docker`, `daytona`, `modal`, `ssh` |
 | `terminal_timeout` | `60` | sets `TERMINAL_TIMEOUT` (process-global); per-command wall-clock seconds |
 | `sandbox_provider` | `null` | named provider used to create an agent-owned sandbox when Resources does not supply `sandbox_access` |
 | `sandbox_config` | `{}` | `SandboxSpec` fields used with `sandbox_provider`; ignored when Resources supplies a sandbox |
 | `sandbox_runner_timeout_seconds` | `21600` | bounds one sandbox activation; the episode deadline still applies |
-| `system_prompt` | `null` | passed as `system_message` to `run_conversation`; falls back to any system item in `body.input` |
+| `system_prompt` | `null` | joined with request `instructions` and the first input system message, in that order; appended to Hermes' built-in prompt |
 | `session_close_retry_window_seconds` | `300` | session close receipt retention from successful cleanup; retries do not extend expiry |
 
 The model-server url is resolved at request time and passed to `AIAgent(base_url=..., api_key="gym")`. <!-- pragma: allowlist secret -->
+
+Host and sandbox execution use the same request rules. User tasks remain user messages.
+Request `model` must match the configured model. Unsupported non-default controls return
+HTTP 422, including `top_p` (even `1.0`), `store`, `service_tier`, and request metadata.
+`max_output_tokens` also returns 422: Hermes does not enforce a total response token budget.
+Config `max_tokens` limits each model call. Only text input is supported; `developer` messages
+are rejected.
+
+Compatibility: the host path previously let config `system_prompt` replace the dataset's
+system message and ignored request `temperature`. It now combines the prompts and honors
+the request temperature, just like sandbox execution. These changes can affect scores.
+Remove unsupported fields that older versions silently ignored.
 
 For SWE-bench Pro, use [`hermes.yaml`](../../benchmarks/swebench/pro/hermes.yaml).
 See [Evaluate SWE-bench Pro with Hermes](../../fern/versions/latest/pages/evaluation-tutorials/hermes-swe-bench-pro.mdx)

@@ -3,11 +3,15 @@
 
 import asyncio
 import json
+import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import openai
@@ -18,6 +22,7 @@ from tools.mcp_tool import shutdown_mcp_servers
 
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
 from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.sandbox import process_supervisor
 from nemo_gym.server_utils import ServerClient
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherResourcesServer,
@@ -335,3 +340,90 @@ def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globa
     # Delegated children are AIAgents Hermes constructs itself; the Model Server rejects streaming.
     child = AIAgent(base_url=model_server.base_url, api_key="gym", model="m", quiet_mode=True)
     assert child.use_streaming is False
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
+@pytest.mark.parametrize("cooperative", [True, False])
+def test_worker_deadline_checkpoints_partial_work_before_hard_cleanup(tmp_path, cooperative):
+    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from responses_api_agents.hermes_agent import sandbox_runner
+
+    input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
+    input_path.write_text(json.dumps(_payload("http://unused/v1")))
+    # Run the real worker/observer under the real supervisor, with a deterministic slow harness.
+    driver = """
+import os, pathlib, sys, time, types
+sys.path.insert(0, sys.argv[1])
+class Agent:
+    def __init__(self, **kwargs):
+        self._session_messages = []
+        self.stopping = False
+    def _build_api_kwargs(self, messages):
+        return {}
+    def interrupt(self, message):
+        pathlib.Path('interrupted').write_text(message)
+        self.stopping = True
+    def run_conversation(self, *args, **kwargs):
+        self._session_messages = [
+            {'role': 'user', 'content': 'fix bug'},
+            {'role': 'assistant', 'content': 'Partial work', 'prompt_token_ids': [1], 'generation_token_ids': [2]},
+        ]
+        pathlib.Path('model.patch').write_bytes(b'partial patch\\n')
+        while not self.stopping or sys.argv[4] == 'False':
+            time.sleep(0.01)
+        return {'completed': False, 'messages': self._session_messages}
+module = types.ModuleType('run_agent')
+module.AIAgent = Agent
+sys.modules['run_agent'] = module
+import sandbox_runner
+raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])))
+"""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            process_supervisor.__file__,
+            "--timeout",
+            "2",
+            "--cleanup-timeout",
+            "0.5",
+            "--receipt",
+            str(tmp_path / "cleanup.json"),
+            "--",
+            sys.executable,
+            "-I",
+            "-c",
+            driver,
+            str(Path(sandbox_runner.__file__).parent),
+            str(input_path),
+            str(output_path),
+            str(cooperative),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+    receipt = json.loads((tmp_path / "cleanup.json").read_text())
+    assert receipt["timed_out"] is True
+    assert receipt["cleanup_confirmed"] is True
+    output = json.loads(output_path.read_text())
+    assert (tmp_path / "interrupted").read_text() == "sandbox timeout"
+    assert (tmp_path / "model.patch").read_bytes() == b"partial patch\n"
+    response = HermesAgent._response_from_result(
+        None,
+        body=NeMoGymResponseCreateParamsNonStreaming(input="fix bug"),
+        result=output["result"],
+        model_name="model",
+        n_input=1,
+    )
+    assert response.status == "incomplete"
+    assert response.error is None
+    assert response.metadata["stop_reason"] == "wall_time"
+    assert response.output[0].content[0].text == "Partial work"
+    assert response.output[0].generation_token_ids == [2]
+    assert output["observations"]["invocations"][0]["status"] == "incomplete"
+    with pytest.raises(ProcessLookupError):
+        os.kill(output["runtime"]["pid"], 0)

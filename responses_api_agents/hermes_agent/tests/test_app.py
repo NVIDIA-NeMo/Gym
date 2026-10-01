@@ -480,13 +480,16 @@ class TestSanity:
         # Verifiers see Gym's MCP naming, not Hermes'.
         assert [item.name for item in response.output if item.type == "function_call"] == ["mcp__weather__get_weather"]
 
-    async def test_runner_timeout_stops_the_runner(self, monkeypatch) -> None:
+    async def test_provider_timeout_without_output_confirms_cleanup_and_fails(self, monkeypatch) -> None:
         class _Sandbox:
             def __init__(self) -> None:
                 self.commands: list[str] = []
 
             async def upload(self, *_args) -> None:
                 pass
+
+            async def download(self, *_args) -> None:
+                raise FileNotFoundError("worker did not checkpoint")
 
             # Mirrors AsyncSandbox.exec so an unsupported argument fails here too.
             async def exec(
@@ -500,7 +503,7 @@ class TestSanity:
         sandbox = _Sandbox()
         hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
 
-        with pytest.raises(TimeoutError, match="sandbox_runner_timeout_seconds"):
+        with pytest.raises(RuntimeError, match="runner exited without output"):
             await hermes.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
 
         stop = [command for command in sandbox.commands if "runner.stop" in command and "kill -TERM" in command]

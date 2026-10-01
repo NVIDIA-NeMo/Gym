@@ -117,6 +117,7 @@ def test_golden_patch_verify_and_cleanup(monkeypatch: MonkeyPatch) -> None:
     assert response.status_code == 200
     assert response.json()["reward"] == 1.0
     assert response.json()["evaluation_completed"] is True
+    assert response.json()["mask_sample"] is False
     assert response.json()["model_patch"] == "gold patch"
     assert response.json()["resolved"] is True
     assert verify.await_args.kwargs["inputs"].prefetch_go_modules is True
@@ -156,6 +157,7 @@ def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch, tests: lis
     assert response.json()["reward"] == 0.0
     assert response.json()["test_output"] == "test run output"
     assert response.json()["evaluation_completed"] is completed
+    assert response.json()["mask_sample"] is (not completed)
     assert bool(response.json()["error"]) is not completed
     verify.assert_awaited_once()
 
@@ -168,8 +170,45 @@ def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["evaluation_completed"] is False
+    assert response.json()["mask_sample"] is True
     assert response.json()["reward"] == 0.0
     assert "sandbox unavailable" in response.json()["error"]
+
+
+@pytest.mark.parametrize(
+    "test_output,extraction_failed,masked",
+    [
+        ("compilation failed: undefined symbol", False, False),
+        ("npm ERR! EAI_AGAIN registry.npmjs.org", False, True),
+        ("test run completed", True, True),
+    ],
+)
+def test_verify_masks_infrastructure_errors_not_model_compile_failures(
+    monkeypatch: MonkeyPatch, test_output: str, extraction_failed: bool, masked: bool
+) -> None:
+    server = make_server(golden=False, inconclusive_verification_retries=0)
+    extract = AsyncMock(return_value="agent patch")
+    if extraction_failed:
+        extract.side_effect = RuntimeError("patch download failed")
+    monkeypatch.setattr(server, "_extract_model_patch", extract)
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.run_verification",
+        AsyncMock(
+            return_value=VerificationResult(
+                completed=True,
+                resolved=False,
+                patch_applied=True,
+                test_results={"tests": []},
+                test_output=test_output,
+            )
+        ),
+    )
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+    assert response.status_code == 200
+    assert response.json()["reward"] == 0.0
+    assert response.json()["mask_sample"] is masked
+    assert response.json()["evaluation_completed"] is (not masked)
 
 
 def test_schema_rejects_missing_evaluator_asset() -> None:
@@ -505,9 +544,7 @@ def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
         assert response.status_code == 200
         result = response.json()
         assert result["reward"] == float(resolved)
-        # The shared response now includes a default mask, but SWE Pro still
-        # reports verification completion separately rather than deriving it.
-        assert result["mask_sample"] is False
+        assert result["mask_sample"] is (not completed)
         assert result["evaluation_completed"] is completed
         assert result["resolved"] is resolved
         assert result["model_patch"] == "agent patch"
