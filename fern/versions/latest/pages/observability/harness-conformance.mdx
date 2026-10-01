@@ -9,7 +9,7 @@ position: 3
 Check the evidence retained by a harness/benchmark pair after collecting an evaluation:
 
 ```bash
-python scripts/check_harness_conformance.py \
+python scripts/inspect_harness_conformance.py \
     --bundle results/my-harness/rollouts.jsonl \
     --output results/my-harness/evidence
 ```
@@ -72,7 +72,7 @@ Identical inputs and checker versions reuse the same report directory.
 Use the same task and capture settings when comparing harnesses:
 
 ```bash
-python scripts/check_harness_conformance.py matrix \
+python scripts/inspect_harness_conformance.py matrix \
     --harness opencode=results/opencode/rollouts.jsonl \
     --harness pi=results/pi/rollouts.jsonl \
     --harness codex=results/codex/rollouts.jsonl \

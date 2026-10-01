@@ -88,6 +88,7 @@ def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path,
         assert response.json()["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
     assert probe.finished and not probe.violations
     assert all(t["executed"] and t["result_seen"] for t in probe.tool_calls)
+    assert all(t["outputs"] == [t["token"]] for t in probe.tool_calls)
     captures = [
         build_model_call_record(row, call_index=i).model_dump()
         for i, row in json_rows(tmp_path / "capture/0-0.capture.jsonl")
@@ -186,7 +187,18 @@ def retained_episode(tmp_path):
         "finished": True,
         "violations": [],
         "verifications": [{"reward": 0.0, "answer_seen": True}],
-        "tool_calls": [{"executed": True, "result_seen": True}] * 2,
+        "tool_calls": [
+            {
+                "id": f"tool-{number}",
+                "name": "read_value",
+                "arguments": {"key": "example"},
+                "exit_code": 0,
+                "outputs": ["value"],
+                "executed": True,
+                "result_seen": True,
+            }
+            for number in (1, 2)
+        ],
         "attempts": [
             {"request": c["request"], "response": c["response"], "status_code": c["status_code"]} for c in calls
         ],
@@ -216,6 +228,89 @@ def test_execution_failure_cannot_pass_even_with_artifacts(retained_episode):
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 1, "timed_out": True})
     assert result["verdict"] == "not_fulfilled" and not result["exercised"]
     assert "episode exceeded its timeout" in result["issues"]
+
+
+@pytest.mark.parametrize(
+    "mutation", ["missing", "duplicate", "extra", "arguments", "name", "output", "status", "owner"]
+)
+def test_tool_witness_rejects_lost_or_changed_evidence(retained_episode, mutation):
+    directory, _ = retained_episode
+    bundle = directory / "rollouts.jsonl"
+    record = json.loads(bundle.read_text())
+    trajectory = record["ng_trajectory"]
+    tools = trajectory["tool_calls"]
+    invocations = [trajectory["invocations"][0], record["ng_agent_observations"]["records"][0]]
+    if mutation == "missing":
+        tools.pop()
+        record["ng_agent_observations"]["records"].pop()
+        for invocation in invocations:
+            invocation["conversation"] = [i for i in invocation["conversation"] if i.get("call_id") != "tool-2"]
+    elif mutation in {"duplicate", "extra"}:
+        tool = copy.deepcopy(tools[0])
+        if mutation == "extra":
+            tool["tool_call_id"] = "unwitnessed-tool"
+        tools.append(tool)
+    elif mutation in {"arguments", "name"}:
+        for invocation in invocations:
+            invocation["conversation"][1][mutation] = '{"key":"changed"}' if mutation == "arguments" else "other_tool"
+        if mutation == "name":
+            tools[0]["tool_name"] = "other_tool"
+    elif mutation == "output":
+        tools[0]["output"] = "changed"
+        for invocation in invocations:
+            invocation["conversation"][2]["output"] = "changed"
+    elif mutation == "status":
+        tools[0]["status"] = "failed"
+    else:
+        tools[0]["invocation_id"] = "other-invocation"
+    bundle.write_text(json.dumps(record) + "\n")
+    result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    assert result["verdict"] == "not_fulfilled" and not result["exercised"]
+    assert any("retained tool" in issue for issue in result["issues"])
+    assert not any("retained model attempts differ" in issue for issue in result["issues"])
+    if mutation in {"missing", "arguments", "name", "output", "status"}:
+        # These artifacts remain internally consistent; the independent witness
+        # must expose the lost/changed evidence even when TE-5 alone passes.
+        assert result["evidence"]["TE-5"]["artifact_verdict"] == "fulfilled"
+
+
+@pytest.mark.parametrize("surface", ["trajectory", "observations"])
+def test_tool_witness_supports_retained_surface_fallbacks(retained_episode, surface):
+    directory, _ = retained_episode
+    bundle = directory / "rollouts.jsonl"
+    record = json.loads(bundle.read_text())
+    if surface == "trajectory":
+        del record["ng_agent_observations"]
+    else:
+        del record["ng_trajectory"]["tool_calls"]
+        del record["ng_trajectory"]["invocations"]
+    bundle.write_text(json.dumps(record) + "\n")
+    result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    assert result["verdict"] == "fulfilled", result["issues"]
+
+
+@pytest.mark.parametrize("failed", [True, False])
+def test_tool_witness_requires_prescribed_failure_status(retained_episode, failed):
+    directory, witness = retained_episode
+    witness["tool_calls"][0]["exit_code"] = 7
+    (directory / "witness.json").write_text(json.dumps(witness))
+    bundle = directory / "rollouts.jsonl"
+    record = json.loads(bundle.read_text())
+    if failed:
+        record["ng_trajectory"]["tool_calls"][0]["status"] = "failed"
+    bundle.write_text(json.dumps(record) + "\n")
+    result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    assert result["exercised"] == failed
+    assert ("retained tool status differs from the independent tool witness" in result["issues"]) != failed
+
+
+def test_missing_output_witness_cannot_qualify_artifacts(retained_episode):
+    directory, witness = retained_episode
+    del witness["tool_calls"][0]["outputs"]
+    (directory / "witness.json").write_text(json.dumps(witness))
+    result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    assert not result["exercised"]
+    assert "retained tool output differs from the independent tool witness" in result["issues"]
 
 
 def test_missing_runtime_is_recorded_and_no_stale_output_reused(tmp_path, monkeypatch):

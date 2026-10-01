@@ -3,7 +3,7 @@
 Check P0 evidence from a collected evaluation:
 
 ```bash
-python scripts/check_harness_conformance.py \
+python scripts/inspect_harness_conformance.py \
     --bundle results/my-harness/rollouts.jsonl \
     --output results/my-harness/evidence
 ```
@@ -11,6 +11,34 @@ python scripts/check_harness_conformance.py \
 Use `matrix --harness NAME=PATH` to compare multiple harnesses. The checker uses
 TE-1–TE-9 and the `gym-p0/v1` profile. Reports are `evidence_summary.json`,
 `evidence_results.jsonl`, and `evidence_report.md`.
+
+For example, this excerpt from `evidence_report.md` shows retained model-call
+evidence passing while one tool record is missing its name:
+
+```markdown
+Profile: `gym-p0/v1`. Gate: **not_fulfilled**. Records: 1.
+
+| Evidence | Artifact verdict | Passing / applicable records |
+|---|---|---|
+| TE-1: model_call_status | fulfilled | 1/1 |
+| TE-5: tool_record | not_fulfilled | 0/1 |
+```
+
+One corresponding entry in that rollout's `findings` array in
+`evidence_results.jsonl` identifies the missing field:
+
+```json
+{
+  "evidence": "TE-5",
+  "assertion": "identity.required",
+  "location": "rollouts.jsonl:1/ng_trajectory/tool_calls/0/tool_name",
+  "reason": "nonempty value is required"
+}
+```
+
+These verdicts describe evidence conformance, not task success. A rollout with
+zero reward can have fully conforming evidence; a successful task can have
+incomplete evidence.
 
 Evidence objects must validate Gym's shared models at these paths:
 
@@ -36,11 +64,8 @@ and terminal status; TE-1 requires model/server identity and a supported dialect
 TE-2 requires nonnegative counts consistent with retained provider usage. Reports
 hash the path/model registry and shared model sources as well as the checker.
 
-Unit tests use hand-authored contracts in `tests/unit_tests/harness_capabilities/synthetic.py`;
-they validate the checker independently of harness implementations. To measure
-actual harnesses and regenerate the commit-pinned documentation table, use
-`python -m scripts.harness_conformance.table --commit <full-sha> --output <new-directory>`.
-See the [runner guide](../../scripts/harness_conformance/README.md) for prerequisites and test gates.
+For live harness checks and regenerating the capability table, see the
+[runner guide](../../scripts/harness_conformance/README.md).
 
 See [Harness Conformance](../../fern/versions/latest/pages/observability/harness-conformance.mdx)
 for contracts, applicability, matrix usage, producer onboarding, and limitations.

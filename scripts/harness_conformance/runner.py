@@ -96,6 +96,63 @@ def run_process(command: list[str], *, directory: Path, timeout: float) -> dict:
     return {"returncode": proc.returncode, "timed_out": timed_out}
 
 
+def _tool_witness_issues(record: dict, witnessed: list[dict]) -> list[str]:
+    """Join independently witnessed tools to retained executions and conversation items."""
+    trajectory = record.get("ng_trajectory") or {}
+    observations = (record.get("ng_agent_observations") or {}).get("records", [])
+    # Match the inspector's supported trajectory/observation fallbacks.
+    tools = trajectory.get("tool_calls") or [r for r in observations if r.get("kind") == "tool_call"]
+    invocations = [r for r in observations if r.get("kind") == "agent_invocation"] or trajectory.get("invocations", [])
+    expected_ids = Counter(t["id"] for t in witnessed)
+    if any(count != 1 for count in expected_ids.values()) or expected_ids != Counter(t["tool_call_id"] for t in tools):
+        return ["retained tool identities differ from the independent tool witness"]
+
+    issues = []
+    by_id = {t["tool_call_id"]: t for t in tools}
+    for expected in witnessed:
+        tool = by_id[expected["id"]]
+        items = [
+            item
+            for invocation in invocations
+            if invocation.get("invocation_id") == tool.get("invocation_id")
+            for item in invocation.get("conversation", [])
+            if item.get("call_id") == expected["id"]
+        ]
+        requests = [i for i in items if i.get("type") == "function_call"]
+        results = [i for i in items if i.get("type") == "function_call_output"]
+        if len(requests) != 1 or len(results) != 1:
+            issues.append("retained tool request/result does not join uniquely to the witnessed execution")
+            continue
+        request = requests[0]
+        try:
+            arguments = json.loads(request["arguments"])
+        except (KeyError, TypeError, ValueError):
+            arguments = None
+        name = request.get("name")
+        if request.get("namespace"):
+            name = f"{request['namespace']}__{name}"
+        if (
+            name != expected["name"]
+            or arguments != expected["arguments"]
+            or tool.get("tool_name") != request.get("name")
+        ):
+            issues.append("retained tool name or arguments differ from the independent tool witness")
+        # Each probe command terminates with its prescribed code. A nonzero exit
+        # must remain a failed execution even when its stdout was retained.
+        status = "failed" if expected["exit_code"] else "completed"
+        if tool.get("status") != status:
+            issues.append("retained tool status differs from the independent tool witness")
+        output = results[0].get("output")
+        outputs = expected.get("outputs", [])
+        if (
+            not outputs
+            or any(observed != output for observed in outputs)
+            or (tool.get("output") is not None and tool["output"] != output)
+        ):
+            issues.append("retained tool output differs from the independent tool witness")
+    return issues
+
+
 def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dict:
     """Require witnessed exercise and a real rollout before counting a TE as passing."""
     issues = []
@@ -145,6 +202,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         observed = Counter(_fingerprint(c.get("request"), c.get("status_code"), c.get("response")) for c in calls)
         if expected != observed:
             issues.append("retained model attempts differ from the independent endpoint witness")
+        issues.extend(_tool_witness_issues(record, tools))
         if record.get("reward") != scenario.expected_reward:
             issues.append("rollout reward differs from the verifier witness")
         destination, summary = inspect_bundle(bundle, output=directory / "evidence", capture_dir=directory / "capture")

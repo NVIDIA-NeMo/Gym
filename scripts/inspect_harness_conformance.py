@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Check retained harness capability evidence in rollout artifacts."""
+"""Inspect retained harness capability evidence in rollout artifacts."""
 
 import sys
 

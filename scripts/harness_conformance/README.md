@@ -104,7 +104,7 @@ rejected, so previous rollouts cannot accidentally qualify a new run.
 - `<harness>/<scenario>/runtime.json`: executable version or Hermes source hash,
   plus the Gym adapter source hash.
 - `<harness>/<scenario>/rollouts.jsonl` and `capture/`: ordinary Gym outputs,
-  directly consumable by `scripts/check_harness_conformance.py`.
+  directly consumable by `scripts/inspect_harness_conformance.py`.
 - `<harness>/<scenario>/witness.json`: independent endpoint attempts, actual tool
   execution markers, returned tool results, and verifier outcomes.
 - `<harness>/<scenario>/scenario_result.json` and `evidence/`: execution gaps,
@@ -114,7 +114,11 @@ rejected, so previous rollouts cannot accidentally qualify a new run.
 
 A scenario counts as passing only when its independent observations agree with
 the retained rollout and the relevant evidence checks pass. Attempt comparison
-preserves multiplicity, so dropping one of two identical retries fails. The
+preserves multiplicity, so dropping one of two identical retries fails. Tool
+comparison joins each witnessed call ID to exactly one execution and its
+invocation's request/result, checking the name, arguments, prescribed exit
+status, and complete model-visible output. Partial logging loss or altered
+tool evidence fails even when the retained artifacts are internally consistent. The
 artifact reports keep their original retained-artifact scope; the runner's
 separate report adds the scenario coverage.
 

@@ -77,6 +77,7 @@ class Probe:
                         "marker": str(marker),
                         "exit_code": code,
                         "result_seen": False,
+                        "outputs": [],
                     }
                 )
                 return name, args, namespaces
@@ -103,6 +104,10 @@ class Probe:
             call["result_seen"] = call["result_seen"] or any(
                 call["token"] in json.dumps(item.get("content", item.get("output"))) for item in results
             )
+            for item in results:
+                output = item.get("content", item.get("output"))
+                if output is not None and output not in call["outputs"]:
+                    call["outputs"].append(output)
             marker = Path(call["marker"])
             call["executed"] = marker.is_file() and marker.read_text() == call["token"]
 

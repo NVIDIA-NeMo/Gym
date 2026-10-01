@@ -15,7 +15,7 @@ from nemo_gym.harness_capabilities.reader import hydrate_record
 from tests.unit_tests.harness_capabilities.synthetic import evidence_record
 
 
-SCRIPT = Path(__file__).resolve().parents[3] / "scripts/check_harness_conformance.py"
+SCRIPT = Path(__file__).resolve().parents[3] / "scripts/inspect_harness_conformance.py"
 
 
 @pytest.fixture
