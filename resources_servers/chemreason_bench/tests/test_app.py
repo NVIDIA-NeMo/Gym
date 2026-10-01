@@ -879,3 +879,69 @@ class TestLmIndexRecovery:
     )
     def test_index_is_read_only_from_a_bare_integer(self, reply, expected):
         assert to_prediction_lm("contrastive_choice", reply)["predicted_option_idx"] == expected
+
+
+class TestProseQuoteBeforeObject:
+    """A quote in prose must not swallow a valid trailing object.
+
+    The scanner enters string mode only at depth > 0, so an unmatched prose
+    quote ahead of the first `{` leaves the real object findable.
+    """
+
+    def test_unmatched_prose_quote_does_not_hide_the_object(self):
+        result = _verify(
+            _make_server(),
+            'Step "1 goes first. {"predicted_order": ["1","2","0"]}',
+            task_id="ordering_001_1",
+            task_type="ordering",
+            ground_truth=GOLD["ordering"],
+        )
+        assert result.status == "ok"
+        assert result.reward == pytest.approx(1.0)
+
+    def test_a_quote_inside_the_object_still_masks_braces(self):
+        # The guard must not disable string mode: a brace inside a JSON string
+        # is not structure, so the rightmost *valid* object still wins.
+        result = _verify(
+            _make_server(),
+            '{"note": "not an object: {"} {"predicted_order": ["1","2","0"]}',
+            task_id="ordering_001_1",
+            task_type="ordering",
+            ground_truth=GOLD["ordering"],
+        )
+        assert result.reward == pytest.approx(1.0)
+
+
+class TestNumericConversionLimits:
+    """Oversized numbers are malformed answers, not failed rollouts.
+
+    float() raises OverflowError -- not ValueError -- on a several-hundred-digit
+    JSON integer; unhandled it escapes verify() and aborts the run.
+    """
+
+    def test_an_oversized_score_falls_back_to_the_default(self):
+        # The object parses; only the value overflows, so this is the
+        # missing-score path, not a parse failure. Asserted differentially
+        # against a reply that simply omits the score.
+        server = _make_server()
+        fields = dict(
+            task_id="step_validation_001_1",
+            task_type="step_validation",
+            ground_truth=GOLD["step_validation"],
+        )
+        oversized = _verify(server, '{"score": %s}' % ("9" * 400), **fields)
+        omitted = _verify(server, '{"other": 1}', **fields)
+        assert oversized.harness_failure is False
+        assert oversized.status == omitted.status
+        assert oversized.reward == pytest.approx(omitted.reward)
+
+    def test_an_oversized_amount_value_is_scored_not_raised(self):
+        result = _verify(
+            _make_server(),
+            '{"action":"WASH","slots":{"reagent":"$7$","amount_value":%s}}' % ("9" * 400),
+            task_id="step_completion_001_1",
+            task_type="step_completion",
+            ground_truth=GOLD["step_completion"],
+        )
+        assert result.harness_failure is False
+        assert result.reward is not None

@@ -290,7 +290,9 @@ def canonicalize_slots(slots: Optional[Dict[str, Any]], legend: Optional[Dict[st
         if numeric_key in out:
             try:
                 out[numeric_key] = float(out[numeric_key])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError, not ValueError, is what a several-hundred-digit
+                # JSON integer raises; unhandled it escapes verify() as a 500.
                 out.pop(numeric_key, None)
 
     temperature_token = duration_token = None
