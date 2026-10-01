@@ -42,10 +42,8 @@ from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypo
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnFailure,
     SingleAgentTurnRequest,
-    SingleAgentTurnResourcesVerifyRequest,
     SingleAgentTurnResponse,
     SingleAgentTurnResult,
-    SingleAgentTurnVerificationInput,
 )
 from nemo_gym.tool_access import (
     DirectHTTPToolAccess,
@@ -261,14 +259,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=SingleAgentTurnResourcesVerifyRequest(
-                    episode_id=request.episode_id,
-                    task_id=request.task.task_id,
-                    verification_input=SingleAgentTurnVerificationInput(
-                        responses_create_params=task_input.responses_create_params,
-                        response=agent_response,
+                # The Resources Server's own flat verify body, as an Agent's /run sends it; the session
+                # cookie identifies the episode.
+                json=task_input.task_data
+                | {
+                    "responses_create_params": task_input.responses_create_params.model_dump(
+                        mode="json", exclude_unset=True
                     ),
-                ),
+                    "response": agent_response.model_dump(mode="json"),
+                },
                 cookies=resources_cookies,
             )
             await raise_for_status(verify_http_response)

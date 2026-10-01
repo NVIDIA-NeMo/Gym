@@ -137,7 +137,7 @@ class KubernetesExecutor(BaseExecutor):
         )
         # The manifest/config write already happened in each Job's own apply (kubernetes_script.py),
         # so write_manifest is a no-op here; only persist()'s local index write matters.
-        self.persist(record, config, lambda _path, _content: None)
+        self.persist(record, config, lambda _path, _content, *, private=False: None)
         return record
 
     def _build_manifests(

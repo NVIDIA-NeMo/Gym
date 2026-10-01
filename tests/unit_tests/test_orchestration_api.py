@@ -431,3 +431,44 @@ def test_kubernetes_pvc_name_is_required():
     # time with a clear message instead.
     with pytest.raises(ValidationError, match="pvc_name"):
         SubmitConfig.model_validate(_config(compute={"cluster": {"type": "kubernetes", "namespace": "eng-test"}}))
+
+
+# ---------------------------------------------------------------------------
+# resumable / ResumeConfig
+# ---------------------------------------------------------------------------
+
+
+def test_resumable_defaults_to_false():
+    config = SubmitConfig.model_validate(_config())
+    benchmark = config.driver.benchmarks["gsm8k"]
+    assert benchmark.resumable is False
+    assert benchmark.resume_config is None
+
+
+def test_resumable_true_uses_resume_config_defaults():
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"resumable": True}}}
+    config = SubmitConfig.model_validate(_config(driver=driver))
+    resume = config.driver.benchmarks["gsm8k"].resume_config
+    assert resume.max_retries == 3
+    assert resume.max_walltime is None
+
+
+def test_resumable_object_overrides_defaults():
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"resumable": {"max_retries": 7, "max_walltime": "48:00:00"}}}}
+    config = SubmitConfig.model_validate(_config(driver=driver))
+    resume = config.driver.benchmarks["gsm8k"].resume_config
+    assert resume.max_retries == 7
+    assert resume.max_walltime == "48:00:00"
+
+
+@pytest.mark.parametrize("resumable", [True, {"max_retries": 5}])
+def test_resumable_is_rejected_on_command_benchmarks(resumable):
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"command": "bash run.sh", "resumable": resumable}}}
+    with pytest.raises(ValidationError, match="both `command` and `resumable`"):
+        SubmitConfig.model_validate(_config(driver=driver))
+
+
+def test_command_benchmark_without_resumable_is_accepted():
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"command": "bash run.sh", "resumable": False}}}
+    config = SubmitConfig.model_validate(_config(driver=driver))
+    assert config.driver.benchmarks["gsm8k"].resume_config is None

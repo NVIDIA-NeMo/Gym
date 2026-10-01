@@ -263,6 +263,14 @@ if [[ -n "${NEMO_GYM_PREFETCH_CONFIGS:-}" ]]; then
     gym env prefetch "+config_paths=[${NEMO_GYM_PREFETCH_CONFIGS}]"
 fi
 
+# ray's bundled Java worker jar ships an outdated httpcore5 with a known CVE
+# (GHSA-hf6x-8p5f-cgmf). Gym never uses Ray's Java cross-language worker, and
+# removing the jar doesn't affect ray.init(), remote tasks, actors, or
+# ray.serve (verified locally). Scoped to installed venvs (site-packages)
+# only, not uv's raw cache: deleting a file uv's cache expects to still be
+# there could break hardlinking a fresh venv for a server not prefetched here.
+find /opt -path "*/site-packages/ray/jars/ray_dist.jar" -delete
+
 # Keep ownership changes for generated caches and server venvs in the layer
 # that creates them so later layers do not duplicate their contents.
 chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache
