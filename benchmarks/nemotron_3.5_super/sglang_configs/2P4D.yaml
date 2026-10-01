@@ -69,7 +69,7 @@ benchmark:
   env:
     GYM_CONFIG: benchmarks/swebench/verified/opencode.yaml
     POLICY_MODEL_NAME: &served_model_name nemotron-3.5-super-ga-mtp-boosted
-    EXPERIMENT_NAME: sglang-1p1d-gym
+    EXPERIMENT_NAME: sglang-2p4d-gym
     EXPORT_TO_CSV: '0'
     EXPORT_CSV_TO_MODEL_DIR: '0'
   command: |
