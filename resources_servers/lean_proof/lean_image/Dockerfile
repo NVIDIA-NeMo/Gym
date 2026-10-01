@@ -82,4 +82,8 @@ RUN printf 'import Mathlib\n#eval Lean.versionString\n' > /tmp/smoke.lean && \
     rm /tmp/smoke.lean
 
 WORKDIR /opt/mathlib
+
+# Ignored under enroot, which drops image config; LeanSandbox.compile names the user anyway.
+USER lean
+
 CMD ["sleep", "infinity"]
