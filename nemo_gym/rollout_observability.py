@@ -53,6 +53,10 @@ class TrajectoryResponseMetadata(ObservationModel):
     status_code: Optional[int] = None
     response_status: Optional[str] = None
     finish_reason: Optional[str] = None
+    upstream_attempted: Optional[bool] = None
+    response_source: Optional[Literal["upstream", "local"]] = None
+    upstream_status_code: Optional[int] = None
+    local_response_reason: Optional[str] = None
     error_category: Optional[str] = None
     latency_ttft_ms: Optional[float] = Field(default=None, ge=0)
 

@@ -27,7 +27,7 @@ Upstream tool surface (``finance_agent.tools``):
   - parse_html_page (ParseHtmlPage)           — writes to per-session storage
   - retrieve_information (RetrieveInformation) — LLM over stored docs
   - calculator (Calculator)                   — no key (simpleeval)
-  - price_history (PriceHistory)              — needs Tiingo key
+  - price_history (PriceHistory)              — needs Tiingo key, or local pricing data
   - submit_final_result (SubmitFinalResult)
 
 Tools implement ``async execute(args, state, logger)`` and share a per-session
@@ -76,7 +76,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
-from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage
+from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage, LocalPriceHistory
 from resources_servers.sec_local_index.cache import ToolCache
 from resources_servers.sec_local_index.local_edgar_search import LocalEdgarSearch
 
@@ -140,6 +140,16 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
         "cache and before the network. Only used in local mode, since the index is what maps a URL to its file.",
     )
     pricing_data_api_key: Optional[str] = Field(default=None, description="Tiingo API key for the price_history tool.")
+    price_history_mode: Literal["live", "local"] = Field(
+        default="live",
+        description="Where price_history reads prices from. 'live' queries Tiingo and needs pricing_data_api_key. "
+        "'local' reads local_pricing_dir and never uses the network.",
+    )
+    local_pricing_dir: Optional[str] = Field(
+        default=None,
+        description="Directory containing equity/<TICKER>.jsonl daily records, one JSON object per line with "
+        "date, open, high, low and close. Used by price_history in local mode.",
+    )
 
     # --- Retrieval model (powers retrieve_information) -----------------------
     retrieval_model_server: Optional[ModelServerRef] = Field(
@@ -405,6 +415,8 @@ class _NemoGymRetrievalLLM:
 class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
     """Exposes the upstream Vals finance-agent-v2 tools as HTTP endpoints."""
 
+    ray_enabled = False
+
     config: FinanceAgentV2ResourcesServerConfig
 
     # Tool name -> upstream Tool instance (None when the tool is unavailable,
@@ -456,6 +468,20 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         elif not self.config.sec_api_key:
             raise ValueError("edgar_search_mode is 'live' but sec_api_key is not set.")
 
+        self._local_prices: Optional[LocalPriceHistory] = None
+        if self.config.price_history_mode == "local":
+            if not self.config.local_pricing_dir:
+                raise ValueError(
+                    "price_history_mode is 'local' but local_pricing_dir is not set. Local mode never calls "
+                    "Tiingo; without it every price_history call would fail mid-rollout."
+                )
+            self._local_prices = LocalPriceHistory(self.config.local_pricing_dir)
+            logger.info(
+                "price_history: local mode, %s (%d tickers)",
+                self.config.local_pricing_dir,
+                self._local_prices.ticker_count,
+            )
+
         self._tools = self._build_tools()
 
     # ------------------------------------------------------------------
@@ -506,8 +532,10 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                 ),
             )
 
-        # price_history (Tiingo).
-        if self.config.pricing_data_api_key:
+        # price_history: local records, or Tiingo.
+        if self._local_prices is not None:
+            tools["price_history"] = self._local_prices
+        elif self.config.pricing_data_api_key:
             tools["price_history"] = self._try_build(
                 "price_history",
                 lambda: (
@@ -1175,6 +1203,10 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                 int(j.get("attempts_used") or 0) for j in criteria
             ) / len(criteria)
         return metrics
+
+    def compute_repeat_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Apply the full-run rubric scoring rules to each repeat's means."""
+        return {name: value for name, value in self.compute_metrics(tasks).items() if name.startswith("mean/")}
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Headline metrics: the usual mean/* plus judge-health counters.

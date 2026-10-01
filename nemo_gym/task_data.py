@@ -45,7 +45,7 @@ import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from pydantic import BaseModel, TypeAdapter
 
@@ -226,12 +226,26 @@ class TaskDataValidator:
 
     def validate_row(self, row_index: int, row: Dict[str, Any]) -> None:
         self.report.rows += 1
+        # A materialized task carries its task data under task_input.task_data, already in its final
+        # position, so that object is what the schema describes.
+        task_input = row.get("task_input")
+        materialized = isinstance(row.get("task_id"), Mapping) and isinstance(task_input, Mapping)
+        if materialized:
+            task_data = task_input.get("task_data")
+            if not isinstance(task_data, Mapping):
+                self.report.error_rows += 1
+                if len(self.report.errors) < TaskDataValidationReport.MAX_RECORDED_ERRORS:
+                    self.report.errors.append(
+                        f"{row_index}: task_input.task_data must be an object, got {type(task_data).__name__}"
+                    )
+                return
+            row = dict(task_data)
         # Misplacement: the schema says today's wire reads this field from inside
         # verifier_metadata, but the row carries it only top-level. Validation would accept it
         # (schemas are flat) while the server at runtime would never see it, so it is flagged.
         # Rows already in the migrated format (a task_data key) are exempt: top-level inside
         # task_data is the correct final position.
-        if self._legacy_fields and TASK_DATA_ROW_KEY not in row:
+        if self._legacy_fields and not materialized and TASK_DATA_ROW_KEY not in row:
             nested = row.get(LEGACY_METADATA_KEY)
             nested_keys = set(nested) if isinstance(nested, dict) else set()
             for key in (row.keys() & self._legacy_fields) - nested_keys:

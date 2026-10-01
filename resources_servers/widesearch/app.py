@@ -138,6 +138,7 @@ def deterministic_metric(response: str, target: str, name: str, criterion: Any) 
 
 
 class WideSearchServer(SimpleResourcesServer):
+    ray_enabled = False
     config: WideSearchConfig
 
     def model_post_init(self, context: Any) -> None:
