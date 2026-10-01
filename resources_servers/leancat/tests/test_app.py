@@ -34,6 +34,7 @@ from resources_servers.lean_proof.status import (
     STATUS_COMPILE_ERROR,
     STATUS_COMPLETED,
     STATUS_EMPTY_GENERATION,
+    STATUS_HAS_SORRY,
     STATUS_SANDBOX_ERROR,
     STATUS_STATEMENT_MODIFIED,
     STATUS_TIMEOUT,
@@ -175,7 +176,9 @@ class TestLeanCatApp:
                 STATUS_COMPILE_ERROR,
             ),
             # `lake env lean` exits 0 on a sorry-carrying build; the exit code alone would pass it.
-            ({"stdout": "warning: declaration uses 'sorry'"}, STATUS_COMPILE_ERROR),
+            # Reported as has_sorry, not compile_error: nothing was rejected, the proof is
+            # simply absent. Both score 0, so this is a diagnostic distinction only.
+            ({"stdout": "warning: declaration uses 'sorry'"}, STATUS_HAS_SORRY),
             # A non-zero exit with no error_type is how an ordinary wrong proof looks, and
             # must not be reported as infrastructure trouble.
             ({"return_code": 1}, STATUS_COMPILE_ERROR),
