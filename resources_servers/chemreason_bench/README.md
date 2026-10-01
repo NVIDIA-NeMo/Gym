@@ -268,7 +268,13 @@ al., 2024) and ChemTrans (Zeng et al., 2023), which in turn aggregate USPTO (Low
 Open Reaction Database (Kearnes et al., 2021) and Organic Syntheses. Those carry their own
 terms, which a downstream CC BY 4.0 card cannot unilaterally relicense. The instances are
 template-rendered derivatives of canonicalized action sequences rather than verbatim
-redistribution. No benchmark data is committed here; `prepare.py` downloads at run time.
+redistribution.
+
+The full dataset is not committed; `prepare.py` downloads it at run time. A small amount of
+upstream `benchmark_data/` is committed under CC BY 4.0 with the attribution below:
+`tests/fixtures/prompts.jsonl` and `answers.jsonl` (6 rows each, verbatim),
+`tests/fixtures/golden_prompts.json` (10 prompts rendered from those rows by upstream's own
+builders) and `data/example.jsonl` (5 rows restructured into the Gym row shape).
 
 Attribution, as upstream suggests: ChemReason-Bench Authors, ChemReason-Bench dataset,
 licensed under CC BY 4.0.

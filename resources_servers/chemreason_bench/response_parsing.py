@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Recover the model's JSON object and apply upstream's field coercions.
 
-Prompts ask for a bare JSON object; replies arrive with think blocks, prose and
-fences. Coercions mirror ``predict.py`` so a reply upstream would have scored is
-scored identically here.
+Derived from ``predict/predict.py`` in https://github.com/Khadaz/ChemReason-Bench
+at commit ``c0b9ac2933708fcca47b1795492952cbf280e194`` (Apache-2.0): the
+post-processors, the parse-failure contract and the lm probability rules.
+Departures are marked DEPARTURE in place. Prompts ask for a bare JSON object;
+replies arrive with think blocks, prose and fences.
 """
 
 from __future__ import annotations
