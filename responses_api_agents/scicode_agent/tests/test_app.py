@@ -624,3 +624,58 @@ class TestTokenAccounting:
         old_row = {"reward": 0.0, "response": {"usage": _usage(200)}}
         with pytest.raises(ValueError, match="different token accounting versions"):
             _aggregate([row, old_row])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("position", ["system_message", "user_message"])
+async def test_scicode_proxy_caps_substeps_and_grades_partial_solution(position):
+    from aiohttp import ClientSession, web
+    from nemo_gym.adapters.turn_counter_proxy import TurnConstraintConfig
+
+    forwarded = []
+
+    async def model(request):
+        forwarded.append(await request.json())
+        return web.json_response(_model_json("def f0(): return 1"))
+
+    upstream = web.Application()
+    upstream.router.add_post("/v1/responses", model)
+    runner = web.AppRunner(upstream)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    agent = _agent()
+    agent.config.turn_constraint = TurnConstraintConfig(
+        enforcement="proxy",
+        limit=1,
+        reminder={"trigger": "per_turn", "position": position},
+    )
+    agent.server_client.post = AsyncMock(return_value=_Resp({"reward": 0.0}))
+    try:
+        async with ClientSession() as session:
+
+            async def post(*args, **kwargs):
+                return await session.request(*args, **kwargs)
+
+            with (
+                patch.object(app, "get_server_url", return_value=f"http://127.0.0.1:{port}"),
+                patch.object(app, "http_request", side_effect=post),
+                patch.object(app, "raise_for_status", new=AsyncMock()),
+            ):
+                result = await agent.run(_FakeRequest(), _run_request(n_steps=3))
+        assert len(forwarded) == 1
+        assert "turn(s) left" in str(forwarded[0]["input"])
+        realized = result["turn_constraint"]["realized"]
+        assert realized["limit"] == 1
+        assert realized["exhausted"]
+        verify = agent.server_client.post.call_args.kwargs["json"]
+        assert [s["status"] for s in verify["step_usage"]] == [
+            "generated",
+            "turn_budget_exhausted",
+            "turn_budget_exhausted",
+        ]
+        assert len(verify["solutions"]) == 3
+        assert "def f0()" in verify["solutions"]["1.1"]
+    finally:
+        await runner.cleanup()

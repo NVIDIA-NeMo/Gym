@@ -41,6 +41,11 @@ from step_utils import (
     process_problem_steps,
 )
 
+from nemo_gym.adapters.turn_counter_proxy import (
+    TurnConstraintConfig,
+    start_turn_counter_proxy,
+    turn_constraint_metadata,
+)
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, BaseRunRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
@@ -57,7 +62,7 @@ from nemo_gym.openai_utils import (
     accumulate_response_usage,
 )
 from nemo_gym.prompt import PromptConfig, load_prompt_config
-from nemo_gym.server_utils import raise_for_status
+from nemo_gym.server_utils import get_server_url, raise_for_status, request as http_request
 
 
 LOG = logging.getLogger(__name__)
@@ -73,6 +78,7 @@ class ScicodeAgentConfig(BaseResponsesAPIAgentConfig):
     prompt_fpath: str
     # Inject each sub-step's scientific background into the prompt context.
     with_background: bool = True
+    turn_constraint: TurnConstraintConfig | None = None
 
 
 class ScicodeAgentRunRequest(BaseRunRequest):
@@ -202,6 +208,27 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         return NeMoGymResponse.model_validate(model_response_json)
 
     async def run(self, request: Request, body: ScicodeAgentRunRequest):
+        constraint = self.config.turn_constraint
+        if constraint is None:
+            return await self._run_steps(request, body)
+        proxy = await start_turn_counter_proxy(
+            upstream_base_url=self.base_url_for_run(get_server_url(self.config.model_server.name), body) + "/v1",
+            api_key="dummy",
+            max_turns=constraint.limit,
+            position=constraint.reminder.position,
+            trigger=constraint.reminder.trigger,
+            exhaustion_status=400,
+        )
+        try:
+            result = await self._run_steps(request, body, proxy)
+            result["turn_constraint"] = turn_constraint_metadata(
+                constraint, proxy, harness_version="scicode/per-substep"
+            ).model_dump()
+            return result
+        finally:
+            await proxy.stop()
+
+    async def _run_steps(self, request: Request, body: ScicodeAgentRunRequest, proxy=None):
         """Generate code for each sub-step (accumulating prior code as context), then verify."""
         cookies = request.cookies
         sub_steps = body.sub_steps
@@ -209,6 +236,7 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         previous_llm_code = [None] * total
         solutions: Dict[str, str] = {}
         out_of_context = False
+        budget_exhausted = False
         last_response_json = None
         zero_usage = NeMoGymResponseUsage.sum_from_list([])
         usage = zero_usage
@@ -231,6 +259,10 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                 previous_llm_code[cur_step] = PREFILLED_STEPS_CODE[(body.problem_id, cur_step)]
                 step_record["status"] = "prefilled"
                 continue
+            if budget_exhausted:
+                step_record["status"] = "turn_budget_exhausted"
+                solutions[f"{body.problem_id}.{cur_step + 1}"] = "# Turn budget exhausted"
+                continue
             if out_of_context:
                 solutions[f"{body.problem_id}.{cur_step + 1}"] = OUT_OF_CONTEXT
                 continue
@@ -245,15 +277,31 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             )
 
             try:
-                gen_response = await self.server_client.post(
-                    server_name=self.config.name,
-                    url_path=self.url_path_for_run("/v1/responses", body),
-                    json={
-                        **response_create_params,
-                        "input": [{"role": "user", "content": user_content}],
-                    },
-                    cookies=cookies,
-                )
+                payload = {
+                    **response_create_params,
+                    "input": [{"role": "user", "content": user_content}],
+                }
+                if proxy is None:
+                    gen_response = await self.server_client.post(
+                        server_name=self.config.name,
+                        url_path=self.url_path_for_run("/v1/responses", body),
+                        json=payload,
+                        cookies=cookies,
+                    )
+                else:
+                    gen_response = await http_request(
+                        "POST",
+                        proxy.base_url + "/responses",
+                        json=payload,
+                        cookies=cookies,
+                    )
+                    if gen_response.status == 400:
+                        error_body = await gen_response.json()
+                        if error_body.get("error", {}).get("code") == "session_budget_exhausted":
+                            budget_exhausted = True
+                            step_record["status"] = "turn_budget_exhausted"
+                            solutions[f"{body.problem_id}.{cur_step + 1}"] = "# Turn budget exhausted"
+                            continue
                 await raise_for_status(gen_response)
             except Exception as error:
                 if is_context_window_error(error):
