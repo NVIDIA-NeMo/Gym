@@ -111,3 +111,11 @@ sandbox:
       timeout_s: 30
       deadline_s: 60
       stable_count: 1
+
+oragentbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: oragentbench_agent

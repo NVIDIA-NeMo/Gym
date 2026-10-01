@@ -22,3 +22,10 @@ oragentbench_benchmark_agent:
         # IndustryOR is not itemised; TBD until a rights decision is recorded. See
         # resources_servers/oragentbench/README.md "Licensing".
         license: TBD
+
+oragentbench_benchmark_environment_server:
+  _inherit_from: oragentbench_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: oragentbench_benchmark_agent
