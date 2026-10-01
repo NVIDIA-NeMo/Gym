@@ -343,4 +343,7 @@ class TestRestoreMissingBlobs:
         sb = self._Sandbox(probe_rc=3)
         await SwemerOmlResourcesServer._restore_missing_blobs(None, sb, "/workspace/repo")
         assert len(sb.commands) == 2
-        assert "git rm -r -q --cached . && git add -A" in sb.commands[1] and "commit -q" in sb.commands[1]
+        cmd = sb.commands[1]
+        assert "git ls-files -z --stage" in cmd and "git hash-object -w --" in cmd
+        assert "100644|100755" in cmd  # gitlinks (160000) and symlinks (120000) are skipped
+        assert "git add -u" in cmd and "git add -A" not in cmd and "commit -q" in cmd

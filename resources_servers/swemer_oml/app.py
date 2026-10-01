@@ -241,14 +241,23 @@ class SwemerOmlResourcesServer(SimpleResourcesServer):
             f"[swemer_oml] {workdir}: HEAD blobs missing (blob-stripped image); restoring from the working tree",
             flush=True,
         )
+        # Rewrite a blob for every regular tracked file (gitlinks and symlinks skipped: nested
+        # checkouts have no .git/modules in these images and would abort the batch), then stage
+        # only tracked modifications so the drifted files get a readable base too.
         result = await sandbox.exec(
-            f"cd {wd} && git rm -r -q --cached . && git add -A && "
-            f"(git -c user.email=nemo-gym@nvidia.com -c user.name=nemo-gym commit -q -m "
-            f"'nemo_gym: restore blobs stripped from the image' || true)",
+            f"cd {wd} && git ls-files -z --stage | while IFS= read -r -d '' e; do "
+            "m=${e%% *}; p=${e#*$'\\t'}; case $m in 100644|100755) printf '%s\\0' \"$p\";; esac; done "
+            "| xargs -0 -r -n 500 git hash-object -w -- && git add -u && "
+            "(git -c user.email=nemo-gym@nvidia.com -c user.name=nemo-gym commit -q -m "
+            "'nemo_gym: restore blobs stripped from the image' || true)",
             timeout_s=900,
         )
         if result.return_code != 0:
-            print(f"[swemer_oml] blob restore failed ({result.return_code}): {result.stderr[-500:]}", file=sys.stderr)
+            print(
+                f"[swemer_oml] blob restore failed ({result.return_code}): "
+                f"{(result.stderr or '')[-400:]} {(result.stdout or '')[-400:]}",
+                file=sys.stderr,
+            )
 
     async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
         """Files ``workdir`` holds untracked before the agent touches it."""
