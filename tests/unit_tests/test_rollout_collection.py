@@ -1562,6 +1562,36 @@ class TestRolloutCollection:
 
         assert [r[TASK_INDEX_KEY_NAME] for r in counted] == [2]
 
+    async def test_a_missing_native_rollout_is_scored_by_its_environment_server(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A native taskset row names no agent, so its zero reaches metrics only through the server stamp."""
+        planned = [
+            {TASK_INDEX_KEY_NAME: task_index, ROLLOUT_INDEX_KEY_NAME: 0, NG_ENVIRONMENT_SERVER_KEY: "environment"}
+            for task_index in range(2)
+        ]
+        materialized = tmp_path / "output_materialized_inputs.jsonl"
+        materialized.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in planned))
+
+        # Task 0 scored 1.0, task 1 produced nothing.
+        missing = _missing_rollout_rows_counted_as_zero([materialized], [], {(0, 0)})
+        assert [row[NG_ENVIRONMENT_SERVER_KEY] for row in missing] == ["environment"]
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client.global_config_dict = _environment_server_config()
+        scored = [dict(planned[0], reward=1.0)] + missing
+
+        metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics(
+            scored, scored, tmp_path / "output.jsonl"
+        )
+
+        [entry] = json.loads(metrics_fpath.read_text())
+        assert entry[NG_ENVIRONMENT_SERVER_KEY] == "environment"
+        assert entry["key_metrics"] == {"mean/reward": 0.5}
+
     def test_a_row_without_indices_does_not_break_the_ordering(self) -> None:
         """A sort key of None against an int raises, and every row is ordered before aggregation."""
         assert _rollout_order_key({TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}) == (2, 3)
@@ -1634,6 +1664,44 @@ class TestRolloutCollection:
             ".json"
         )
         assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": expected_mean}
+
+    @pytest.mark.parametrize("count_missing", [False, True], ids=["off by default", "opted in"])
+    async def test_a_run_whose_every_rollout_went_missing_is_scored_only_when_opted_in(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        count_missing: bool,
+    ) -> None:
+        """The no-result guard counts the opted-in zeros, as it already counts opted-in failure rows."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/run":
+                return FakeResponse(200, {NG_NO_PERSIST_KEY: True})
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            count_missing_rollouts_as_zero=count_missing,
+            disable_health_check=True,
+        )
+        if count_missing:
+            await RolloutCollectionHelper().run_from_config(config)
+            metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
+                ".json"
+            )
+            assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": 0.0}
+        else:
+            with pytest.raises(RuntimeError, match="produced a result"):
+                await RolloutCollectionHelper().run_from_config(config)
 
     async def test_coverage_is_exported_when_aggregation_is_skipped(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock

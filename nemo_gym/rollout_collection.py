@@ -1359,8 +1359,10 @@ def _missing_rollout_rows_counted_as_zero(
     here would score the very rollouts that selection excluded -- silently turning the selection
     into a no-op.
 
-    Only the identity of the rollout is carried over. The score enters the metric input and
-    nothing else, the same way a counted failure row does.
+    Only the identity of the rollout is carried over, with the environment server it was routed
+    to: a native taskset row names no agent, so that stamp is the only way its zero reaches the
+    server's metrics. The score enters the metric input and nothing else, the same way a counted
+    failure row does.
     """
     recorded_failures = set(_latest_failure_rows(failures_fpaths))
     counted = []
@@ -1381,15 +1383,16 @@ def _missing_rollout_rows_counted_as_zero(
                 if key in scored_keys or key in recorded_failures:
                     continue
                 scored_keys.add(key)
-                counted.append(
-                    {
-                        TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
-                        ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
-                        AGENT_REF_KEY_NAME: row.get(AGENT_REF_KEY_NAME),
-                        "task_name": row.get("task_name"),
-                        "reward": 0.0,
-                    }
-                )
+                zero = {
+                    TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
+                    ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+                    AGENT_REF_KEY_NAME: row.get(AGENT_REF_KEY_NAME),
+                    "task_name": row.get("task_name"),
+                    "reward": 0.0,
+                }
+                if NG_ENVIRONMENT_SERVER_KEY in row:
+                    zero[NG_ENVIRONMENT_SERVER_KEY] = row[NG_ENVIRONMENT_SERVER_KEY]
+                counted.append(zero)
     return counted
 
 
@@ -2302,7 +2305,18 @@ class RolloutCollectionHelper(BaseModel):
             counted = _failure_rows_counted_as_zero(
                 [failures_fpath], config.count_failure_classes_as_zero, persisted_success_keys
             )
-            if input_rows and persisted_count == 0 and not counted:
+            # Opted-in missing rollouts are scored as well, so a run they fill still has a score.
+            missing: List[Dict[str, Any]] = (
+                _missing_rollout_rows_counted_as_zero(
+                    [config.materialized_jsonl_fpath],
+                    [failures_fpath],
+                    persisted_success_keys
+                    | {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in counted},
+                )
+                if config.count_missing_rollouts_as_zero
+                else []
+            )
+            if input_rows and persisted_count == 0 and not counted and not missing:
                 raise RuntimeError(
                     f"None of the {len(input_rows)} dispatched rollouts produced a result "
                     f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
@@ -2348,7 +2362,7 @@ class RolloutCollectionHelper(BaseModel):
 
         # Aggregate persisted results plus explicitly counted metrics-only failures and missing
         # rollouts, matching `gym eval aggregate` without changing either rollout artifact.
-        missing: List[Dict[str, Any]] = []
+        imputed: List[Dict[str, Any]] = []
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -2362,13 +2376,9 @@ class RolloutCollectionHelper(BaseModel):
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
                 )
             if config.count_missing_rollouts_as_zero:
-                missing = _missing_rollout_rows_counted_as_zero(
-                    [config.materialized_jsonl_fpath],
-                    [failures_fpath],
-                    {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in persisted_results + counted},
-                )
-                print(f"Counting {len(missing)} materialized rollout(s) with no row as scored zeros")
-                counted.extend(missing)
+                imputed = missing
+                print(f"Counting {len(imputed)} materialized rollout(s) with no row as scored zeros")
+                counted.extend(imputed)
             # Appending leaves a missing early repeat behind the repeats that did land. The two
             # lists are zipped positionally downstream, so they are reordered together.
             scored_rows = persisted_results + counted
@@ -2391,7 +2401,7 @@ class RolloutCollectionHelper(BaseModel):
                     "coverage/expected": expected_rollouts,
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": expected_rollouts - scored_rollouts,
-                    "coverage/imputed": len(missing),
+                    "coverage/imputed": len(imputed),
                 }
             )
 
