@@ -16,6 +16,8 @@ import asyncio
 from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
+from aiohttp import ClientResponseError
+from fastapi import FastAPI, Request, Response
 from pydantic import Field
 
 from nemo_gym.base_responses_api_model import (
@@ -65,6 +67,21 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
 class SimpleModelServer(SimpleResponsesAPIModel):
     ray_enabled = False
     config: SimpleModelServerConfig
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+
+        @app.exception_handler(ClientResponseError)
+        async def upstream_error(request: Request, error: ClientResponseError) -> Response:
+            # SDK harnesses must see context-limit errors instead of a generic 500.
+            # Gym's raise_for_status preserves the upstream body on the exception.
+            return Response(
+                content=getattr(error, "response_content", error.message),
+                status_code=error.status,
+                media_type=(error.headers or {}).get("Content-Type", "application/json"),
+            )
+
+        return app
 
     def model_post_init(self, context):
         self._client = NeMoGymAsyncOpenAI(
