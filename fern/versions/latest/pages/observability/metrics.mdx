@@ -104,6 +104,10 @@ the configured server name for `ServerClient` calls, `remote_agent_service` for 
 remote agent's external service, or `external` for unlabeled direct calls. This differs from
 the resource attribute `nemo.gym.server.name`, which identifies the Gym process recording the metric.
 
+These pool metrics require telemetry initialization before client construction. Standalone
+collection does not initialize telemetry automatically, so missing metrics do not mean no
+queueing. See [HTTP Connection Pool](/reference/configuration#http-connection-pool) for process coverage.
+
 ### A Note on `gym.server.request_duration_ms`
 
 `nemo-lens` declares a `gym.server.request_duration_ms` histogram. NeMo Gym does not use

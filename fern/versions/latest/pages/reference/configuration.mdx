@@ -122,8 +122,15 @@ hosts. Idle-connection reuse and aiohttp's waiter wake-up order can exceed the t
 as long as requests to more than one host are in flight. Size pools with file-descriptor,
 ephemeral-port, and downstream connection budgets in mind.
 
-When OpenTelemetry metrics export is enabled, Gym records one histogram sample per queued
-aiohttp connection acquisition. This metric is independent of the `http_client` tracing span group:
+Pool metrics require an active metrics exporter before the shared client is constructed.
+Gym server processes and the orchestrator used by `gym eval run` initialize telemetry
+automatically. Standalone `gym eval run --no-serve` and library calls to `setup_server_client()`
+do not initialize telemetry; callers must initialize it explicitly before creating the client.
+Initializing telemetry later does not replace an existing connector. Missing metrics from
+these standalone processes do not mean that no requests queued.
+
+When this instrumentation is installed, Gym records one histogram sample per queued aiohttp
+connection acquisition. This metric is independent of the `http_client` tracing span group:
 
 | Metric or attribute | Meaning |
 | --- | --- |
@@ -137,8 +144,9 @@ The destination attribute identifies the configured or fixed request destination
 across redirects. The resource attribute `nemo.gym.server.name` identifies the Gym process
 recording the metric; they are not the same.
 
-When metrics export is active, Gym uses `QueueTimedTCPConnector` to count connection attempts and
-measure queue waits. Otherwise, Gym uses aiohttp’s `TCPConnector` directly without collecting these metrics.
+When metrics export is active at client construction, Gym uses `QueueTimedTCPConnector` to count
+connection attempts and measure queue waits. Otherwise, Gym uses aiohttp’s `TCPConnector` directly
+without collecting these metrics.
 
 ### Reverse Proxy Headers
 
