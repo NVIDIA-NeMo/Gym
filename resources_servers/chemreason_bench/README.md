@@ -168,6 +168,46 @@ Model-free checks only; no model is involved in any number here.
 That 27.54 floor is the single most important number for reading this benchmark: a large part
 of a weak model's headline is reachable without answering anything.
 
+## Reproduction
+
+Full runs through this port: all 10,648 prepared rows (7,306 `gen` + 3,342 `lm`), temperature 0,
+one pass per instance, vLLM serving the policy locally. `paper` columns are the per-task rows
+from the paper's appendix; `ours` and the published Primary-Overall both average the two
+protocols on the three discriminative tasks, so they are directly comparable.
+
+**Qwen2.5-7B-Instruct** — Primary-Overall **53.73** vs published 53.94 (-0.21).
+27 of 10,648 replies carried no JSON, 2 no decision token.
+
+| task | ours gen | ours lm | ours | paper gen | paper lm |
+|---|---|---|---|---|---|
+| ordering | 78.43 | — | 78.43 | 78.74 | — |
+| contrastive_choice | 63.42 | 64.53 | 63.97 | 63.42 | 65.65 |
+| step_validation | 74.68 | 68.76 | 71.72 | 75.10 | 69.35 |
+| condition_validation | 80.72 | 85.19 | 82.95 | 80.85 | 85.06 |
+| step_completion | 7.23 | — | 7.23 | 7.25 | — |
+| rationalization | 18.09 | — | 18.09 | 17.96 | — |
+
+**Llama-3.1-8B-Instruct** — Primary-Overall **51.68** vs published 49.45 (+2.23).
+8 of 10,648 replies carried no decision token.
+
+| task | ours gen | ours lm | ours | paper gen | paper lm |
+|---|---|---|---|---|---|
+| ordering | 75.31 | — | 75.31 | 73.14 | — |
+| contrastive_choice | 62.12 | 63.79 | 62.95 | 62.58 | 61.37 |
+| step_validation | 73.28 | 50.07 | 61.67 | 70.90 | 45.45 |
+| condition_validation | 81.31 | 69.09 | 75.20 | 80.80 | 61.79 |
+| step_completion | 12.21 | — | 12.21 | 9.23 | — |
+| rationalization | 22.71 | — | 22.71 | 22.87 | — |
+
+Upstream publishes neither a spread nor a run count, so no significance test is constructible
+against these figures. They are reported side by side; neither pairing is a claim of a match.
+
+Qwen lands within 0.5 of the published row on all six tasks. Llama's +2.23 is concentrated in
+the two `lm` columns, where this port reads 50.07 and 69.09 against 45.45 and 61.79 — the
+largest per-task gaps in either table, and the tasks most exposed to the labelling difference
+described under [Known gap: `lm` labels](#known-gap-lm-labels). Read that gap as the leading
+explanation for Llama's delta rather than as a model-quality difference.
+
 ## Quickstart
 
 ```bash
