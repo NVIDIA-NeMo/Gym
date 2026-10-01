@@ -327,6 +327,70 @@ NAMESPACE_TOOL = {
 
 
 class TestSanitizeStreamingBody:
+    @pytest.mark.parametrize("phase", [None, "commentary", "final_answer"])
+    def test_preserves_replayed_assistant_text_without_annotations(self, phase: str | None) -> None:
+        # Codex replays assistant output_text without the response-only annotations field.
+        item = {
+            "type": "message",
+            "id": "msg_replayed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "The first check passed."}],
+        }
+        if phase is not None:
+            item["phase"] = phase
+        body = {"stream": True, "input": [{"role": "user", "content": "Check both files."}, item]}
+
+        cleaned, _ = sanitize_streaming_responses_body(body)
+
+        assert len(cleaned["input"]) == 2
+        assert cleaned["input"][1] == {**item, "content": [{**item["content"][0], "annotations": []}]}
+        params = NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+        assert params.input[1].content[0].text == "The first check passed."
+        assert params.input[1].phase == phase
+        assert "annotations" not in body["input"][1]["content"][0]
+
+    def test_preserves_existing_annotations_and_other_assistant_content(self) -> None:
+        annotated = {
+            "type": "output_text",
+            "text": "A source.",
+            "annotations": [
+                {
+                    "type": "url_citation",
+                    "start_index": 0,
+                    "end_index": 8,
+                    "url": "https://example.com",
+                    "title": "Example",
+                }
+            ],
+        }
+        refusal = {"type": "refusal", "refusal": "Cannot do that."}
+        item = _message_item("First part.")
+        item["content"][0].pop("annotations")
+        item["content"].extend([annotated, refusal])
+
+        cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [item]})
+
+        assert cleaned["input"][0]["content"] == [
+            {"type": "output_text", "text": "First part.", "annotations": []},
+            annotated,
+            refusal,
+        ]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    @pytest.mark.parametrize(
+        "invalid_content",
+        [
+            [{"type": "output_text", "text": "bad annotations", "annotations": None}],
+            [{"type": "output_text"}],
+            [{"type": "unknown_text", "text": "unsupported"}],
+        ],
+    )
+    def test_does_not_repair_other_invalid_assistant_content(self, invalid_content: list) -> None:
+        item = _message_item("invalid")
+        item["content"] = invalid_content
+        cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [item]})
+        assert cleaned["input"] == []
+
     def test_drops_unknown_top_level_fields(self) -> None:
         cleaned, _ = sanitize_streaming_responses_body(
             {"input": [], "stream": True, "client_metadata": {"x": 1}, "prompt_cache_key": "abc", "store": False}
@@ -628,6 +692,30 @@ def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
 
 
 class TestResponsesDispatchRoute:
+    def test_codex_replayed_assistant_text_reaches_backend(self) -> None:
+        client, server = _client(_EchoModel)
+        history = [
+            {"role": "user", "content": "Check both files."},
+            {
+                "type": "message",
+                "id": "msg_replayed",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "The first check passed."}],
+            },
+            _function_call_item("check_second_file"),
+            {"type": "function_call_output", "call_id": "call_1", "output": "passed"},
+        ]
+
+        response = client.post("/v1/responses", json={"stream": True, "input": history})
+
+        assert response.status_code == 200
+        assert len(server.last_params.input) == 4
+        assert server.last_params.input[1].content[0].text == "The first check passed."
+        assert server.last_params.input[1].phase == "commentary"
+        # The non-streaming contract remains strict.
+        assert client.post("/v1/responses", json={"input": history}).status_code == 422
+
     def test_non_streaming_request_returns_plain_json(self) -> None:
         client, server = _client(_EchoModel)
         resp = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})
