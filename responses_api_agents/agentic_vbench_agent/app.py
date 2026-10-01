@@ -149,7 +149,7 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
             ]
             if self.config.credentials_file:
                 command.extend(["--credentials-file", self.config.credentials_file])
-            exit_code = await run_process(command, output, Path(self.config.runtime_root) / episode)
+            exit_code = await run_process(command, output, Path(self.config.runtime_root) / key[:16])
             # A nonzero exit never becomes an invented zero reward. Preserve the original artifacts.
             if exit_code:
                 raise RuntimeError(f"Harbor runner exited {exit_code}; inspect {output / 'runner.log'}")
