@@ -1111,6 +1111,31 @@ class TestRolloutCollection:
         assert sorted(seen) == list(range(num_rows))
         assert completions._resident_task_count == 0
 
+    async def test_default_dispatch_starts_rollouts_in_input_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Repeats in the round-by-round order that interleave_repeats prepares.
+        rows = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                TASK_INDEX_KEY_NAME: task_index,
+                ROLLOUT_INDEX_KEY_NAME: rollout_index,
+            }
+            for rollout_index in range(3)
+            for task_index in range(3)
+        ]
+        started: list[tuple[int, int]] = []
+
+        async def post(*args, **kwargs):
+            row = kwargs["json"]
+            started.append((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]))
+            return FakeResponse(200, {"reward": 1})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        for future in RolloutCollectionHelper()._run_examples_with_metadata(rows, semaphore=asyncio.Semaphore(1)):
+            await future
+
+        assert started == [(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in rows]
+
     async def test_bounded_failure_propagates_with_concurrent_consumers(self) -> None:
         fail = asyncio.Event()
         block = asyncio.Event()
