@@ -135,3 +135,88 @@ raise SystemExit(supervisor['main']())
     receipt = json.loads(receipt_path.read_text())
     assert receipt["cleanup_confirmed"] is False
     assert receipt["error"] == "cleanup: descendant still running"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper contract")
+def test_sigterm_during_spawn_does_not_lose_child_handle(tmp_path):
+    # Deliver SIGTERM after the real child exists but before Popen returns to _supervise().
+    # Isolate signal handlers/subreaper state from pytest, and always reap the test child.
+    driver = """
+import json, os, runpy, signal, subprocess, sys
+runner = runpy.run_path(sys.argv[1])
+spawn = subprocess.Popen
+children = []
+def interrupted_spawn(*args, **kwargs):
+    child = spawn(*args, **kwargs)
+    children.append(child)
+    os.kill(os.getpid(), signal.SIGTERM)
+    return child
+subprocess.Popen = interrupted_spawn
+try:
+    summary = runner['_supervise'](
+        [sys.executable, '-c', 'import time; time.sleep(60)'], timeout=5, cleanup_timeout=0.2,
+    )
+    summary['child_alive'] = any(child.poll() is None for child in children)
+    print(json.dumps(summary))
+finally:
+    for child in children:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", driver, str(SUPERVISOR), str(tmp_path)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+        check=True,
+    )
+    summary = json.loads(completed.stdout)
+    assert summary["timed_out"] is True
+    assert summary["cleanup_confirmed"] is True
+    assert summary["child_alive"] is False
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper contract")
+def test_spawned_child_is_reaped_when_popen_loses_handle(tmp_path):
+    # A constructor failure after process creation must still drain the subreaper's children.
+    driver = """
+import json, os, runpy, subprocess, sys
+runner = runpy.run_path(sys.argv[1])
+spawn = subprocess.Popen
+children = []
+def lost_handle(*args, **kwargs):
+    child = spawn(*args, **kwargs)
+    children.append(child)
+    raise OSError('launch handle lost after process creation')
+subprocess.Popen = lost_handle
+try:
+    summary = runner['_supervise'](
+        [sys.executable, '-c', 'import time; time.sleep(60)'], timeout=5, cleanup_timeout=0.2,
+    )
+    try:
+        os.kill(children[0].pid, 0)
+        summary['child_alive'] = True
+    except ProcessLookupError:
+        summary['child_alive'] = False
+    print(json.dumps(summary))
+finally:
+    for child in children:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", driver, str(SUPERVISOR), str(tmp_path)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+        check=True,
+    )
+    summary = json.loads(completed.stdout)
+    assert summary["return_code"] != 0
+    assert summary["error"] == "launch handle lost after process creation"
+    assert summary["cleanup_confirmed"] is True
+    assert summary["child_alive"] is False
