@@ -607,6 +607,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         await state.sandbox.upload(
             Path(__file__).with_name(runtime_guards_extension), f"{state.directory}/{runtime_guards_extension}"
         )
+        await state.sandbox.upload(Path(__file__).with_name("outcome.mjs"), f"{state.directory}/outcome.mjs")
         command = [
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
@@ -623,6 +624,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             f"{state.directory}/{output_limit_extension}",
             "--extension",
             f"{state.directory}/{runtime_guards_extension}",
+            "--extension",
+            f"{state.directory}/outcome.mjs",
             "--no-skills",
             "--no-prompt-templates",
             "--no-themes",
@@ -653,8 +656,11 @@ class PiAgent(SimpleResponsesAPIAgent):
         usage = {"input_tokens": 0, "output_tokens": 0}
         cached_tokens: int | None = 0
         terminal_error = None
+        context_overflow = False
         stop_reasons = []
         for _, event in events:
+            if event.get("type") == "ng_pi_outcome":
+                context_overflow = event.get("context_overflow") is True
             message = event.get("message") or {}
             if event.get("type") == "message_end" and message.get("role") == "assistant":
                 for part in message.get("content") or []:
@@ -687,14 +693,19 @@ class PiAgent(SimpleResponsesAPIAgent):
                 usage[key] += tokens[key]
         result = state.result
         error = result.error or terminal_error
-        if result.return_code != 0 and not result.timed_out:
+        model_limit = bool(stop_reasons and stop_reasons[-1] == "error" and context_overflow)
+        if result.return_code != 0 and not result.timed_out and not model_limit:
             error = error or f"Pi exited with code {result.return_code}"
         if not stop_reasons:
             cached_tokens = None
             error = error or "Pi produced no assistant result"
         elif stop_reasons[-1] not in ("stop", "length", "error", "aborted") and not result.timed_out:
             error = error or "Pi ended without a terminal assistant result"
-        incomplete = result.timed_out or (stop_reasons and stop_reasons[-1] == "length")
+        incomplete = result.timed_out or model_limit or (stop_reasons and stop_reasons[-1] in ("length", "aborted"))
+        if model_limit or (stop_reasons and stop_reasons[-1] == "aborted"):
+            error = result.error  # Model limits/interruptions preserve a gradable partial patch.
+        if result.timed_out and not stop_reasons and result.error is None:
+            error = None
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -737,6 +748,10 @@ class PiAgent(SimpleResponsesAPIAgent):
             state.observations = AgentObservationBundle(
                 source="pi", gaps=[ObservationGap(code="observation_parse_failed")]
             )
+        if incomplete and not error:
+            for record in state.observations.records:
+                if isinstance(record, AgentInvocation):
+                    record.status = "incomplete"
         state.observations.gaps.append(ObservationGap(code="reasoning_token_usage_unavailable"))
         if cached_tokens is None:
             state.observations.gaps.append(
@@ -745,6 +760,10 @@ class PiAgent(SimpleResponsesAPIAgent):
                     detail="Pi cache counters are absent, invalid, or defaulted to zero",
                 )
             )
+        if error:
+            # Keep the captured trajectory on session state for close, but do not invoke
+            # the benchmark verifier after a provider/runtime failure (same as Hermes).
+            raise RuntimeError(f"Pi agent failed: {error}")
         return response
 
     def model_post_init(self, __context: Any) -> None:
