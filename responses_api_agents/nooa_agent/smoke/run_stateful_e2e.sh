@@ -85,10 +85,11 @@ GYM_PID=$!
 "$GYM_BIN" eval run \
   --no-serve \
   --agent example_session_state_mgmt_nooa_agent \
-  --input "$ROOT_DIR/resources_servers/example_session_state_mgmt/data/example.jsonl" \
+  --input "$ROOT_DIR/resources_servers/example_session_state_mgmt/data/example_nooa_native.jsonl" \
   --output "$RESULTS_DIR/rollouts.jsonl" \
   --limit 1 \
   --concurrency 1 \
+  "++environment_server_routes.nooa-counter=example_session_state_mgmt_environment_server" \
   --temperature 0 \
   --max-output-tokens 2048 \
   "++head_server.host=127.0.0.1" \
