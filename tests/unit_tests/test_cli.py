@@ -33,6 +33,7 @@ from nemo_gym.cli.env import (
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     RunConfig,
     RunHelper,
+    ServerStartupError,
     TestConfig,
     _resolve_server_dir,
     _select_shard,
@@ -46,6 +47,7 @@ from nemo_gym.cli.env import (
 )
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
+from nemo_gym.global_config import DEFAULT_SERVER_STARTUP_ATTEMPTS
 from nemo_gym.registry import EnvironmentEntry
 
 
@@ -583,3 +585,79 @@ class TestListEnvironments:
         list_environments()
 
         assert f"config: {cfg.resolve()}" in capsys.readouterr().out
+
+
+class TestRunHelperStartupRetry:
+    """A server that dies while spinning up (e.g. its port was taken after parse time) restarts the whole set."""
+
+    def _runner(self, monkeypatch, outcomes: list, attempts: int | None = 3) -> tuple[RunHelper, MagicMock]:
+        runner = RunHelper()
+        calls = iter(outcomes)
+
+        def start_once(_parser_config) -> None:
+            outcome = next(calls)
+            if outcome is not None:
+                raise outcome
+
+        monkeypatch.setattr(runner, "_start_once", start_once)
+        restart = MagicMock()
+        monkeypatch.setattr(runner, "_restart_with_fresh_config", restart)
+        config = {} if attempts is None else {"server_startup_attempts": attempts}
+        monkeypatch.setattr("nemo_gym.cli.env.get_global_config_dict", lambda *_a, **_k: config)
+        return runner, restart
+
+    def test_clean_start_is_not_retried(self, monkeypatch) -> None:
+        runner, restart = self._runner(monkeypatch, [None])
+
+        runner.start(MagicMock())
+
+        restart.assert_not_called()
+
+    def test_failed_startup_is_retried_with_fresh_config_until_it_succeeds(self, monkeypatch, capsys) -> None:
+        failure = ServerStartupError("Process `a` finished unexpectedly!")
+        runner, restart = self._runner(monkeypatch, [failure, failure, None])
+
+        runner.start(MagicMock())
+
+        assert restart.call_count == 2
+        assert "attempt 1/3" in capsys.readouterr().out
+
+    def test_gives_up_after_the_configured_attempts(self, monkeypatch) -> None:
+        failure = ServerStartupError("Process `a` finished unexpectedly!")
+        runner, restart = self._runner(monkeypatch, [failure, failure, failure], attempts=2)
+
+        with pytest.raises(ServerStartupError):
+            runner.start(MagicMock())
+
+        assert restart.call_count == 1
+
+    def test_default_attempts_apply_when_unset(self, monkeypatch) -> None:
+        failure = ServerStartupError("x")
+        runner, restart = self._runner(monkeypatch, [failure] * DEFAULT_SERVER_STARTUP_ATTEMPTS, attempts=None)
+
+        with pytest.raises(ServerStartupError):
+            runner.start(MagicMock())
+
+        assert restart.call_count == DEFAULT_SERVER_STARTUP_ATTEMPTS - 1
+
+    def test_restart_shuts_down_and_reparses_keeping_the_ray_address(self, monkeypatch) -> None:
+        from omegaconf import OmegaConf
+
+        old = OmegaConf.create({"ray_head_node_address": "10.0.0.1:6379"})
+        new = OmegaConf.create({})
+        current = [old]
+        monkeypatch.setattr("nemo_gym.cli.env.get_global_config_dict", lambda *_a, **_k: current[0])
+        parser_config = MagicMock()
+
+        def reparse(global_config_dict_parser_config) -> None:
+            assert global_config_dict_parser_config is parser_config
+            current[0] = new
+
+        monkeypatch.setattr("nemo_gym.cli.env.set_global_config_dict", reparse)
+        runner = RunHelper()
+        monkeypatch.setattr(runner, "shutdown", MagicMock())
+
+        runner._restart_with_fresh_config(parser_config)
+
+        runner.shutdown.assert_called_once()
+        assert new["ray_head_node_address"] == "10.0.0.1:6379"

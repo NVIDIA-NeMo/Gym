@@ -31,7 +31,7 @@ from typing import Dict, List, Optional, Tuple
 import rich
 import uvicorn
 from devtools import pprint
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
@@ -49,15 +49,18 @@ from nemo_gym.cli.utils import (
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
+    DEFAULT_SERVER_STARTUP_ATTEMPTS,
     DRY_RUN_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     QUERY_KEY_NAME,
+    SERVER_STARTUP_ATTEMPTS_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
+    set_global_config_dict,
 )
 from nemo_gym.registry import discover_environments, read_environment_details
 from nemo_gym.server_status import StatusCommand
@@ -146,6 +149,10 @@ class TestConfig(RunConfig):
         return _resolve_server_dir(self._dir_path)
 
 
+class ServerStartupError(RuntimeError):
+    """A server (or the head server) died before every server reported healthy."""
+
+
 class RunHelper:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
@@ -156,6 +163,37 @@ class RunHelper:  # pragma: no cover
     _server_client: ServerClient
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+        """Start the head server and every configured server, retrying the whole set if one dies while spinning up.
+
+        Ports are picked at config-parse time and bound only later, when each server process gets there (after its
+        venv setup), so another process can take one in between. Every server holds every other server's address,
+        so a single server cannot move; the whole set is restarted with freshly picked ports instead.
+        """
+        attempts = 1
+        while True:
+            try:
+                return self._start_once(global_config_dict_parser_config)
+            except ServerStartupError as e:
+                max_attempts = get_global_config_dict(global_config_dict_parser_config).get(
+                    SERVER_STARTUP_ATTEMPTS_KEY_NAME, DEFAULT_SERVER_STARTUP_ATTEMPTS
+                )
+                if attempts >= max_attempts:
+                    raise
+                print(f"Server startup failed (attempt {attempts}/{max_attempts}); restarting all servers:\n{e}")
+                attempts += 1
+                self._restart_with_fresh_config(global_config_dict_parser_config)
+
+    def _restart_with_fresh_config(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+        ray_head_node_address = get_global_config_dict().get("ray_head_node_address")
+        self.shutdown()
+        # Re-parsing picks new ports for every server whose port was not set explicitly.
+        set_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
+        if ray_head_node_address:
+            # Ray stays up across the restart; children must keep connecting to it instead of starting their own.
+            with open_dict(get_global_config_dict()):
+                get_global_config_dict()["ray_head_node_address"] = ray_head_node_address
+
+    def _start_once(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
         # Fail fast before starting Ray if nothing is configured to run (covers env run and the
@@ -254,24 +292,27 @@ class RunHelper:  # pragma: no cover
             global_config_dict=global_config_dict,
         )
 
-        print("Waiting for head server to spin up")
-        poll_count = 0
-        while True:
-            status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
-            if status == "success":
-                break
+        try:
+            print("Waiting for head server to spin up")
+            poll_count = 0
+            while True:
+                status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
+                if status == "success":
+                    break
 
-            if poll_count % 10 == 0:  # Print every 30s
-                print(f"Head server is not up yet (status `{status}`). Sleeping...")
+                if poll_count % 10 == 0:  # Print every 30s
+                    print(f"Head server is not up yet (status `{status}`). Sleeping...")
 
-            poll_count += 1
-            sleep(3)
+                poll_count += 1
+                sleep(3)
 
-        print("Waiting for servers to spin up")
-        if global_config_dict[DRY_RUN_KEY_NAME]:
-            self.wait_for_dry_run_spinup()
-        else:
-            self.wait_for_spinup()
+            print("Waiting for servers to spin up")
+            if global_config_dict[DRY_RUN_KEY_NAME]:
+                self.wait_for_dry_run_spinup()
+            else:
+                self.wait_for_spinup()
+        except RuntimeError as e:
+            raise ServerStartupError(str(e)) from e
 
     def display_server_instance_info(self) -> None:
         if not self._server_instance_display_configs:
