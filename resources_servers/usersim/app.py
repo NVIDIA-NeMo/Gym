@@ -63,7 +63,7 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     """Configure prepared-row validation and native trajectory verification."""
 
     usersim_revision: str = Field(
-        "8fd3ff4798af4037e164364f6c59ad14b4eabdc0",  # pragma: allowlist secret
+        "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee",  # pragma: allowlist secret
         pattern=r"^[0-9a-f]{40}$",
     )
     probe_scorer_model: ModelServerRef | None = None

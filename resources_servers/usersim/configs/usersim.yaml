@@ -49,7 +49,7 @@ usersim_resources:
       domain: agent
       verified: false
       description: Prepared-row validation and native verification for Environment-owned UserSim.
-      usersim_revision: 8fd3ff4798af4037e164364f6c59ad14b4eabdc0  # pragma: allowlist secret
+      usersim_revision: a5f676bf6dc5a73914c8a0860f97c10dd2c214ee  # pragma: allowlist secret
       probe_scorer_model:
         type: responses_api_models
         name: support_model

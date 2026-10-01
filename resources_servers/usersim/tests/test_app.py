@@ -27,7 +27,7 @@ from resources_servers.usersim.episode_contracts import (
 )
 
 
-REVISION = "8fd3ff4798af4037e164364f6c59ad14b4eabdc0"
+REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"
 
 
 def _resolved_row(probe_type: str = "tool_calling", *, provenance_as_text: bool = True) -> dict:
