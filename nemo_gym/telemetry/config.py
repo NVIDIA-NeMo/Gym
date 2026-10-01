@@ -74,19 +74,8 @@ class TelemetryConfig(BaseModel, extra="allow"):
     span_groups: str = "default"
     """Span-group spec: a preset (``default`` | ``per_rollout`` | ``all``) or a
     comma-separated list of group names (e.g. ``"default,sandbox"``). See
-    :class:`~nemo_gym.telemetry.span_groups.GymSpanGroup`."""
-
-    export_strategy: str = "all_ranks"
-    """Which processes export: ``all_ranks`` | ``single_rank`` | ``sampled`` |
-    ``first_rank_per_node``.
-
-    Defaults to ``all_ranks``, unlike NeMo-RL and Megatron-LM which default to
-    ``single_rank``. Those run one process tree per job where rank 0 sees a
-    representative slice; Gym runs N independent server processes, each rank 0 of its own
-    world. Silencing any of them puts a hole in the middle of every distributed trace."""
-
-    export_rank: int = -1
-    """For ``single_rank``: which rank exports (``-1`` = last rank)."""
+    :class:`~nemo_gym.telemetry.span_groups.GymSpanGroup`. An unknown name is logged as a
+    warning and ignored rather than rejected."""
 
     traces_enabled: bool = True
     """Emit trace spans."""
