@@ -237,6 +237,27 @@ RUN uv venv /opt/nemo-gym/cache/seed-venv && \
     rm -rf /opt/nemo-gym/cache/seed-venv && \
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
 
+# Optional: seed the same cache with every server module's venv so that
+# scripts/ci/server_tests.sh can run offline too. Pass
+# --build-arg NEMO_GYM_SEED_SERVER_ENVS=1 for an image that runs the server
+# suite without a package index. Each server installs its own unlocked
+# requirements.txt or pyproject.toml (including git sources) outside the root
+# lock, so the seed above does not cover them, and together they are large
+# (about 25 GB more cache for all 212 servers in October 2026), hence opt-in.
+# `ng_test_all +setup_only=true` installs each venv exactly as the server suite
+# does (same discovery, requirements, and head-server pins), outside the source
+# tree, and deletes it; only the downloaded and built distributions stay.
+ARG NEMO_GYM_SEED_SERVER_ENVS=""
+RUN <<"EOF" bash -exu
+if [[ -n "${NEMO_GYM_SEED_SERVER_ENVS:-}" ]]; then
+    seed_venv_root="$(mktemp -d)"
+    ng_test_all +setup_only=true +delete_venvs_after_each_test=true \
+        "+uv_cache_dir=${UV_CACHE_DIR}" "+uv_venv_dir=${seed_venv_root}"
+    rm -rf "${seed_venv_root}"
+    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
+fi
+EOF
+
 # Seed the pre-commit hook cache (PRE_COMMIT_HOME) so the image's offline lint
 # path needs no network: lint.sh reuses the baked pre-commit executable, but a
 # bare `pre-commit run` still clones the hook repositories declared in

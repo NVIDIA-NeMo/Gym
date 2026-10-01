@@ -1060,6 +1060,14 @@ def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Pop
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
 
 
+def _setup_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:
+    """Install one server's venv exactly as `_test_single` does, without running its tests."""
+    prefix = test_config.entrypoint.replace("/", "\\/")
+    resolved_dir = test_config.resolved_dir_path
+    command = setup_env_command(resolved_dir, global_config_dict, prefix)
+    return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
+
+
 def test():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_config = TestConfig.model_validate(global_config_dict)
@@ -1121,6 +1129,11 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
         ge=0,
         description="Which shard (0-based) this invocation runs; must be < num_shards (default: 0).",
     )
+    setup_only: bool = Field(
+        default=False,
+        description="Only install each selected server's venv; run no tests and validate no data (default: False). "
+        "Seeds `uv_cache_dir` so the server suite can later install the same venvs offline.",
+    )
 
 
 def _select_shard(dir_paths: List[Path], shard_index: int, num_shards: int) -> List[Path]:
@@ -1141,6 +1154,29 @@ def _delete_server_venv(dir_path: Path, global_config_dict: DictConfig) -> None:
     venv_path = get_venv_path(dir_path, global_config_dict)
     print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
     rmtree(venv_path, ignore_errors=True)
+
+
+def _setup_all(dir_paths: List[Path], test_all_config: TestAllConfig, global_config_dict: DictConfig) -> None:
+    """Install every selected server's venv the way the suite would, then exit non-zero if any failed.
+
+    The container build runs this to seed its uv cache, so `scripts/ci/server_tests.sh` can create the same
+    per-server venvs offline. Every server is attempted before failing, so one run reports every gap.
+    """
+    setup_failed: List[Path] = []
+    for dir_path in tqdm(dir_paths, desc="Setting up server venvs"):
+        proc = _setup_single(TestConfig(entrypoint=str(dir_path)), global_config_dict)
+        if proc.wait() != 0:
+            setup_failed.append(dir_path)
+        if test_all_config.delete_venvs_after_each_test:
+            _delete_server_venv(_resolve_server_dir(dir_path), global_config_dict)
+
+    set_up = len(dir_paths) - len(setup_failed)
+    print(f"""Server venvs set up {_format_pct(set_up, len(dir_paths))}
+
+Server venv setup failed {_format_pct(len(setup_failed), len(dir_paths))}:{_display_list_of_paths(setup_failed)}
+""")
+    if setup_failed:
+        exit(1)
 
 
 def test_all():  # pragma: no cover
@@ -1177,6 +1213,10 @@ def test_all():  # pragma: no cover
             f"Shard {test_all_config.shard_index + 1}/{test_all_config.num_shards}: "
             f"testing {len(dir_paths)} of {len(full_dir_paths)} modules:{_display_list_of_paths(dir_paths)}\n"
         )
+
+    if test_all_config.setup_only:
+        _setup_all(dir_paths, test_all_config, global_config_dict)
+        return
 
     tests_passed: List[Path] = []
     tests_failed: List[Path] = []
