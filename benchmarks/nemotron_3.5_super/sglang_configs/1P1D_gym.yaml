@@ -8,8 +8,6 @@
 # Before submission:
 #   export MODEL=/path/to/checkpoint
 #   export GYM_REPO=/shared/path/to/Gym
-#   export OPENSANDBOX_DOMAIN=your-sandbox-host
-#   export OPENSANDBOX_API_KEY=your-key
 #   export WANDB_API_KEY=your-key  # Or export WANDB_MODE=offline.
 #   srtctl apply -f benchmarks/nemotron_3.5_super/sglang_configs/1P1D_gym.yaml
 #
@@ -87,7 +85,6 @@ benchmark:
 
     : "${SRT_FRONTEND_HOST:?SRT must provide the router host}"
     : "${SRT_FRONTEND_PORT:?SRT must provide the router port}"
-    : "${OPENSANDBOX_API_KEY:?Export OPENSANDBOX_API_KEY before submitting}"
     export NEMO_GYM_RUN_ID="${SLURM_JOB_ID:?Must run inside a Slurm job}"
     export NEMO_GYM_USER="${NEMO_GYM_USER:-${SLURM_JOB_USER:-$USER}}"
 
@@ -123,8 +120,7 @@ benchmark:
       "++num_samples_in_parallel=$NUM_SAMPLES_IN_PARALLEL" \
       ++model_endpoint_readiness_timeout_seconds=1200 \
       ++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0 \
-      ++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95 \
-      "++sandbox.opensandbox.connection.protocol=${OPENSANDBOX_PROTOCOL:-http}"
+      ++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95
 
 roles:
   prefill:
