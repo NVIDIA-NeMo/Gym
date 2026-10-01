@@ -584,6 +584,39 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
     sandbox.stop.assert_not_awaited()
 
 
+@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
+async def test_failed_connection_closes_provider_without_publishing_session(setup, error_type):
+    agent, sandbox = setup
+    provider = SimpleNamespace(aclose=AsyncMock())
+    request = Request({"type": "http", "session": {}})
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.create_provider", return_value=provider),
+        patch(f"{module}.AsyncSandbox.connect", AsyncMock(side_effect=error_type("connection failed"))),
+        pytest.raises(error_type),
+    ):
+        await agent.seed_agent_session(request, seed())
+    provider.aclose.assert_awaited_once()
+    assert not request.session
+    assert not any(record.state is not None for record in agent._session_records.values())
+    sandbox.exec.assert_not_awaited()
+    sandbox.stop.assert_not_awaited()
+
+
+async def test_invalid_runtime_receipt_fails_activation_but_preserves_confirmed_cleanup(setup):
+    agent, sandbox = setup
+    sandbox.result["pid"] = "invalid-pid"
+    request, session_id, task = await activate(agent, sandbox)
+    with pytest.raises(RuntimeError, match="runner returned no valid result"):
+        await task
+    state = agent._session_records[session_id].state
+    assert state.result is None and state.cleanup["cleanup_confirmed"] is True
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert agent._session_records[session_id].state is None
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
 async def test_cancelled_install_never_publishes_session_or_launches_pi(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [
