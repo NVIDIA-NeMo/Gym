@@ -89,9 +89,11 @@ Use these for request latency. They are dimensioned, so you can compare `/verify
 The Gym-specific `gym.http.connection_pool.queue_duration_ms` histogram measures client-side
 connection acquisition separately from request latency. Its bounded attributes identify the
 destination server, queue outcome (`ok` or `abandoned`), and which pool constraint caused the
-wait (`total`, `per_host`, or `unknown`). It records one sample for each queued connect, including
-queued redirect hops. Connection attempts that acquire a slot immediately do not record a
-queue-duration histogram sample.
+wait (`total`, `per_host`, or `unknown`). It records one sample for each queued connection
+acquisition (`connect()`), combining repeated waiter wakeups within that acquisition.
+Redirect hops, aiohttp's internal reconnects, and Gym retries record separate samples when
+their acquisitions queue. Connection attempts that acquire a slot immediately do not record
+a queue-duration histogram sample.
 `abandoned` means the wait ended before a slot became available, including timeout and cancellation.
 Divide the number of `gym.http.connection_pool.queue_duration_ms` histogram samples by
 `gym.http.connection_pool.connect_total` over the same interval and destination to calculate the

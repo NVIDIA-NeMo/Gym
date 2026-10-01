@@ -40,8 +40,10 @@ All four carry ``nemo.gym.sandbox.provider``.
 HTTP connection pool
 --------------------
 ``gym.http.connection_pool.queue_duration_ms`` (histogram): connection-acquisition wait
-for one queued connect. Connects that acquire a slot immediately do not record a sample.
-Bounded attributes identify the binding connector limit, queue outcome, and configured server.
+for one queued connection acquisition, combining repeated waiter wakeups within it.
+Queued redirect hops, aiohttp reconnects, and Gym retries each record separate samples.
+Connection attempts that acquire a slot immediately do not record a queue-duration histogram sample.
+Bounded attributes identify the binding connector limit, queue outcome, and destination server.
 
 ``gym.http.connection_pool.connect_total`` (observable counter): all connection acquisitions.
 Compare its value with the queue-duration histogram count to calculate the queued fraction.

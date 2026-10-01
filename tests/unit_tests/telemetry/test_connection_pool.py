@@ -402,6 +402,64 @@ async def test_multi_destination_waits_are_attributed_to_the_binding_limit(colle
     assert _expanded_attribute(_points(collected_metrics), CONSTRAINT) == ["per_host", "total"]
 
 
+async def test_each_queued_redirect_hop_records_its_own_sample(collected_metrics, monkeypatch):
+    source_entered = asyncio.Event()
+    target_entered = asyncio.Event()
+    release_source = asyncio.Event()
+    release_target = asyncio.Event()
+    constraints = asyncio.Queue()
+    original = connection_pool._connector_queue_constraint
+
+    def recording(connector):
+        constraint = original(connector)
+        constraints.put_nowait(constraint)
+        return constraint
+
+    monkeypatch.setattr(connection_pool, "_connector_queue_constraint", recording)
+
+    async def target(_request):
+        target_entered.set()
+        await release_target.wait()
+        return web.json_response({"ok": True})
+
+    async with _serve(target) as target_url:
+
+        async def source(request):
+            if request.query.get("redirect"):
+                raise web.HTTPFound(location=target_url)
+            source_entered.set()
+            await release_source.wait()
+            return web.json_response({"ok": True})
+
+        async with _serve(source) as source_url, _client(monkeypatch, limit=2, limit_per_host=1):
+            tasks = []
+            try:
+                tasks.append(asyncio.create_task(_get(source_url)))
+                await asyncio.wait_for(source_entered.wait(), timeout=2)
+                tasks.append(asyncio.create_task(_get(target_url)))
+                await asyncio.wait_for(target_entered.wait(), timeout=2)
+                tasks.append(asyncio.create_task(_get(f"{source_url}?redirect=1")))
+                assert await asyncio.wait_for(constraints.get(), timeout=2) == "total"
+                release_source.set()
+                assert await asyncio.wait_for(constraints.get(), timeout=2) == "per_host"
+                release_target.set()
+                await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+            finally:
+                release_source.set()
+                release_target.set()
+                for task in tasks:
+                    task.cancel()
+                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
+
+    points = _points(collected_metrics)
+    assert _expanded_attribute(points, CONSTRAINT) == ["per_host", "total"]
+    assert _expanded_attribute(points, OUTCOME) == ["ok", "ok"]
+    assert _expanded_attribute(points, SERVER) == ["model", "model"]
+    (connect_point,) = collected_metrics()[CONNECT_TOTAL]
+    assert connect_point.value == 4
+    assert connect_point.attributes == {SERVER: "model"}
+
+
 async def test_queued_timeout_and_retry_record_separate_attempts(collected_metrics, monkeypatch):
     release = asyncio.Event()
     entered = asyncio.Event()
