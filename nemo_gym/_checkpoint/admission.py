@@ -217,7 +217,6 @@ class AdmissionLimiter:
         self._cut_lock = asyncio.Lock()
         self._admission_tombstones: set[tuple[str, int]] = set()
         self._checkpoint_exclusions: set[tuple[str, int]] = set()
-        self._seen_attempts: set[tuple[str, int]] = set()
         self._drained = asyncio.Event()
         self._drained.set()
         self._egress_open = asyncio.Event()
@@ -264,9 +263,6 @@ class AdmissionLimiter:
                 f"admission is {self.state.value} for a checkpoint; park and re-issue this "
                 f"operation after the checkpoint completes"
             )
-        if rollout_id is not None and attempt_index is not None:
-            self._seen_attempts.add((rollout_id, attempt_index))
-
         ticket = AdmissionTicket(
             rollout_id=rollout_id,
             attempt_index=attempt_index,
@@ -529,9 +525,6 @@ class AdmissionLimiter:
             and attempt_index is not None
             and (rollout_id, attempt_index) in self._admission_tombstones
         )
-
-    def seen_attempts(self) -> list[tuple[str, int]]:
-        return sorted(self._seen_attempts)
 
     # -- observation ---------------------------------------------------------
 

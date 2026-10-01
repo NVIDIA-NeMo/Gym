@@ -113,6 +113,7 @@ def generation_cut_receipts_from_lineage(
     *,
     checkpoint_id: str,
     server_name: str,
+    include_superseded: bool = False,
 ) -> tuple[Any, ...]:
     """Rebuild the active-cut restore receipt authenticated by a ledger archive."""
     from nemo_gym._checkpoint.model_control_contracts import (
@@ -145,7 +146,7 @@ def generation_cut_receipts_from_lineage(
             # The response won the race with checkpoint commit.  Its ordinary
             # lineage row is terminal for this logical call, so the older cut
             # must not reopen it during restore.
-            if record.model_call_id in committed_model_call_ids:
+            if not include_superseded and record.model_call_id in committed_model_call_ids:
                 continue
             existing = by_ticket.get(record.ticket_id)
             if existing is not None and existing != record:
@@ -699,6 +700,23 @@ class InMemoryLineageStore:
                     raise ValueError(f"conflicting generation-cut lineage event for ticket {event.ticket_id!r}")
                 continue
             rows.append(payload)
+
+    async def load_generation_cut_receipts(
+        self,
+        capture_keys: tuple[str, ...],
+        *,
+        checkpoint_id: str,
+        server_name: str,
+    ) -> tuple[Any, ...]:
+        rows_by_capture_key = {
+            capture_key: list(self._ledgers.get(capture_key) or ()) for capture_key in sorted(set(capture_keys))
+        }
+        return generation_cut_receipts_from_lineage(
+            rows_by_capture_key,
+            checkpoint_id=checkpoint_id,
+            server_name=server_name,
+            include_superseded=True,
+        )
 
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
         rows = self._ledgers.setdefault(rollout_id, [])
@@ -1279,6 +1297,37 @@ class FileLineageStore(IncrementalLineageStore):
                         raise ValueError(f"conflicting generation-cut lineage event for ticket {event.ticket_id!r}")
                     continue
                 self._append(event.capture_key, payload, records)
+
+    async def load_generation_cut_receipts(
+        self,
+        capture_keys: tuple[str, ...],
+        *,
+        checkpoint_id: str,
+        server_name: str,
+    ) -> tuple[Any, ...]:
+        return await asyncio.to_thread(
+            self._load_generation_cut_receipts,
+            capture_keys,
+            checkpoint_id,
+            server_name,
+        )
+
+    def _load_generation_cut_receipts(
+        self,
+        capture_keys: tuple[str, ...],
+        checkpoint_id: str,
+        server_name: str,
+    ) -> tuple[Any, ...]:
+        rows_by_capture_key: dict[str, list[dict[str, Any]]] = {}
+        for capture_key in sorted(set(capture_keys)):
+            with self._locked(capture_key):
+                rows_by_capture_key[capture_key] = list(self._read(capture_key))
+        return generation_cut_receipts_from_lineage(
+            rows_by_capture_key,
+            checkpoint_id=checkpoint_id,
+            server_name=server_name,
+            include_superseded=True,
+        )
 
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
         await asyncio.to_thread(self._record_failure, rollout_id, model_call_id, reason)

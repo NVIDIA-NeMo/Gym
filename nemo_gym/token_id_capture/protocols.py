@@ -207,6 +207,21 @@ class GenerationCutCaptureLedger(Protocol):
         """Publish one checkpoint's validated cut acknowledgements idempotently."""
         ...
 
+    async def load_generation_cut_receipts(
+        self,
+        capture_keys: tuple[str, ...],
+        *,
+        checkpoint_id: str,
+        server_name: str,
+    ) -> tuple["GenerationCutReceipt", ...]:
+        """Load cut receipts from their canonical lineage rows.
+
+        Multi-worker policy servers write cut details directly to the shared
+        lineage store.  The coordinator calls this method during commit to
+        prove that every compact worker-index entry has durable lineage.
+        """
+        ...
+
 
 @runtime_checkable
 class TokenSink(Protocol):
