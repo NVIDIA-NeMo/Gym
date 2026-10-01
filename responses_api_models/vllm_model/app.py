@@ -191,6 +191,8 @@ def _append_transport_io(event: Dict[str, Any]) -> None:
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
+    # Aligned with `base_url`.
+    generation_cut_control_url: Optional[Union[str, List[str]]] = None
     api_key: str
     model: str
     return_token_id_information: bool
@@ -305,6 +307,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
+        if isinstance(self.generation_cut_control_url, str):
+            self.generation_cut_control_url = [self.generation_cut_control_url]
+        if self.generation_cut_control_url is not None and len(self.generation_cut_control_url) != len(self.base_url):
+            raise ValueError(
+                "generation_cut_control_url must list one control URL per base_url: "
+                f"{len(self.generation_cut_control_url)} control URL(s) for {len(self.base_url)} base_url(s)"
+            )
         return super().model_post_init(context)
 
 
@@ -330,6 +339,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     _generation_prefix_cuts_enabled: bool = PrivateAttr(default=False)
     _generation_cut_control_token: str | None = PrivateAttr(default=None)
     _generation_cut_clients: Dict[str, NeMoGymAsyncOpenAI] = PrivateAttr(default_factory=dict)
+    _generation_cut_control_urls: Dict[str, str] = PrivateAttr(default_factory=dict)
     _restored_generation_cuts: Dict[str, GenerationCutPrefixAck] = PrivateAttr(default_factory=dict)
     _generation_cut_restore_lock: Any = PrivateAttr(default_factory=Lock)
 
@@ -384,6 +394,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        self._generation_cut_control_urls = dict(
+            zip(self.config.base_url, self.config.generation_cut_control_url or ())
+        )
         self._endpoint_file_mtime: Optional[float] = None
         self._endpoint_missing_since: Optional[float] = None
         self._endpoint_last_check_at: Optional[float] = None
@@ -427,6 +440,13 @@ class VLLMModel(SimpleResponsesAPIModel):
     def generation_cut_backend(self) -> GenerationCutBackend | None:
         """Bridge Gym's frozen call inventory to the owning RL vLLM workers."""
         return self if self._generation_prefix_cuts_enabled else None
+
+    def _generation_cut_endpoint(self, base_url: str) -> str:
+        """The generation-cut route of the backend serving `base_url`."""
+        control_url = self._generation_cut_control_urls.get(base_url)
+        if control_url is not None:
+            return f"{control_url.rstrip('/')}/ng-control/v1/generation-cut"
+        return f"{base_url.removesuffix('/v1')}/ng-control/v1/generation-cut"
 
     def _remember_generation_cut_client(self, model_call_id: str, client: NeMoGymAsyncOpenAI) -> None:
         """Retain active call routing until the model request exits."""
@@ -475,7 +495,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             async with semaphore:
                 response = await http_request(
                     method="POST",
-                    url=f"{client.base_url.removesuffix('/v1')}/ng-control/v1/generation-cut",
+                    url=self._generation_cut_endpoint(client.base_url),
                     headers={"Authorization": f"Bearer {self._generation_cut_control_token}"},
                     json=worker_inventory.model_dump(mode="json"),
                     _internal=True,

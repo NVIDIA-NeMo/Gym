@@ -15,6 +15,7 @@
 import asyncio
 import json
 import logging
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
@@ -193,24 +194,52 @@ async def test_generation_cut_routes_each_call_to_its_owning_vllm_worker(
     assert receipt.prefixes[0].staging_keys == ("prefix-1",)
 
 
+@mark.parametrize(
+    ("control_urls", "expected_routes"),
+    [
+        (
+            None,
+            {
+                "http://worker-0:8000/ng-control/v1/generation-cut": ["call-0"],
+                "http://worker-1:8000/ng-control/v1/generation-cut": ["call-1"],
+            },
+        ),
+        (
+            ["http://control-0:9000", "http://control-1:9000/"],
+            {
+                "http://control-0:9000/ng-control/v1/generation-cut": ["call-0"],
+                "http://control-1:9000/ng-control/v1/generation-cut": ["call-1"],
+            },
+        ),
+        (["http://control-0:9000"], None),
+    ],
+    ids=["own-route", "control-url", "misaligned-control-url"],
+)
 @mark.asyncio
 async def test_generation_cut_contacts_owning_workers_concurrently(
     monkeypatch: MonkeyPatch,
+    control_urls: list[str] | None,
+    expected_routes: dict[str, list[str]] | None,
 ) -> None:
     monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "test-control-token")
-    model = VLLMModel(
-        config=VLLMModelConfig(
+    with nullcontext() if expected_routes else raises(ValueError, match="one control URL per base_url"):
+        config = VLLMModelConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
             name="policy",
             base_url=["http://worker-0:8000/v1", "http://worker-1:8000/v1"],
+            generation_cut_control_url=control_urls,
             api_key="dummy_key",  # pragma: allowlist secret
             model="dummy_model",
             return_token_id_information=False,
             uses_reasoning_parser=False,
             uses_interleaved_reasoning=False,
-        ),
+        )
+    if expected_routes is None:
+        return
+    model = VLLMModel(
+        config=config,
         server_client=MagicMock(
             spec=ServerClient,
             global_config_dict={
@@ -245,14 +274,14 @@ async def test_generation_cut_contacts_owning_workers_concurrently(
     )
     both_started = asyncio.Event()
     release = asyncio.Event()
-    started_urls: set[str] = set()
+    routes: dict[str, list[str]] = {}
 
     async def fake_request(**kwargs: Any) -> SimpleNamespace:
-        started_urls.add(kwargs["url"])
-        if len(started_urls) == 2:
+        worker_inventory = GenerationCutInventory.model_validate(kwargs["json"])
+        routes[kwargs["url"]] = [prefix.model_call_id for prefix in worker_inventory.active_prefixes]
+        if len(routes) == 2:
             both_started.set()
         await release.wait()
-        worker_inventory = GenerationCutInventory.model_validate(kwargs["json"])
         receipt = GenerationCutReceipt(
             checkpoint_id=worker_inventory.checkpoint_id,
             cut_id=f"worker-{worker_inventory.inventory_digest}",
@@ -296,10 +325,7 @@ async def test_generation_cut_contacts_owning_workers_concurrently(
     release.set()
     receipt = await asyncio.wait_for(checkpoint_task, timeout=1.0)
 
-    assert started_urls == {
-        "http://worker-0:8000/ng-control/v1/generation-cut",
-        "http://worker-1:8000/ng-control/v1/generation-cut",
-    }
+    assert routes == expected_routes
     assert {prefix.ticket_id for prefix in receipt.prefixes} == {
         "ticket-0",
         "ticket-1",
