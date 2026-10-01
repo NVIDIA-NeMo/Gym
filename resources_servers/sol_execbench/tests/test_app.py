@@ -20,6 +20,7 @@ from resources_servers.sol_execbench.app import (
     SolExecBenchResourcesServerConfig,
     SolExecBenchVerifyRequest,
     classify_native_result,
+    score_native_result,
 )
 from resources_servers.sol_execbench.fixture import synthetic_problem
 from resources_servers.sol_execbench.problem_store import (
@@ -31,6 +32,7 @@ from resources_servers.sol_execbench.problem_store import (
     problem_digest,
     safe_relative_path,
 )
+from resources_servers.sol_execbench.scoring import WorkloadAnchor
 
 
 def trace(status="PASSED"):
@@ -116,6 +118,8 @@ class FakeSandbox:
         solution = json.loads(self.files["/sol-eval/solution.json"])
         native_trace = trace("INCORRECT_NUMERICAL" if self.mode == "candidate_failure" else "PASSED")
         native_trace["solution"] = solution["name"]
+        if self.mode == "sub_sol":
+            native_trace["evaluation"]["performance"]["latency_ms"] = 0.001
         records = {
             "hardware.json": {
                 "nvidia_smi": "NVIDIA B200, GPU-synthetic, synthetic",
@@ -158,6 +162,23 @@ def server(tmp_path, monkeypatch):
             }
         )
     )
+    anchor_path = tmp_path / "anchors.json"
+    anchor_path.write_bytes(
+        canonical_json(
+            {
+                "schema_version": 1,
+                "problem_manifest_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "target_hardware": "B200",
+                "provenance": {"source": "synthetic", "revision": "synthetic-v1"},
+                "tasks": {
+                    synthetic_problem().task_id: {
+                        "problem_digest": synthetic_problem().problem_digest,
+                        "workloads": {"synthetic-workload": {"baseline_ms": 0.01, "sol_ms": 0.002}},
+                    }
+                },
+            }
+        )
+    )
     config = SolExecBenchResourcesServerConfig(
         host="127.0.0.1",
         port=8080,
@@ -165,6 +186,8 @@ def server(tmp_path, monkeypatch):
         name="sol_execbench",
         problem_manifest_path=path,
         problem_manifest_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        anchor_manifest_path=anchor_path,
+        anchor_manifest_sha256=hashlib.sha256(anchor_path.read_bytes()).hexdigest(),
         artifact_root=tmp_path / "artifacts",
         sandbox_image="synthetic/image@sha256:" + "a" * 64,
         sandbox_provider={"opensandbox": {"operations": {"command_retries": 0}}},
@@ -178,7 +201,10 @@ def server(tmp_path, monkeypatch):
 async def test_native_success_uses_gpu_latency_records_evidence_and_replays(server):
     first, duplicate = await asyncio.gather(server.verify(request()), server.verify(request()))
     assert first == duplicate
-    assert first.reward == 1 and not first.mask_sample and first.sol_score is None
+    assert first.reward == 0.5 and not first.mask_sample and first.sol_score == 0.5
+    assert first.solved and first.workload_status == {"synthetic-workload": "PASSED"}
+    assert first.workload_sol_score == {"synthetic-workload": 0.5}
+    assert first.anchors["synthetic-workload"].baseline_ms == 0.01
     assert first.latency_ms == {"synthetic-workload": 0.01}
     assert first.reference_latency_ms == {}
     assert len(FakeSandbox.instances) == 1
@@ -194,7 +220,7 @@ async def test_native_success_uses_gpu_latency_records_evidence_and_replays(serv
     assert (attempt / "native.stdout").read_text() == "native stdout"
     assert (attempt / "native.stderr").read_text() == "native stderr"
     assert json.loads((attempt / "trace.jsonl").read_bytes())["evaluation"]["status"] == "PASSED"
-    assert (await server.verify(request())).reward == 1
+    assert (await server.verify(request())).reward == 0.5
     assert len(FakeSandbox.instances) == 1
 
 
@@ -213,7 +239,8 @@ async def test_native_failure_lifecycle(server, mode, masked, reward):
     FakeSandbox.mode = mode
     result = await server.verify(request())
     assert result.mask_sample is masked and result.reward == reward
-    assert result.infrastructure_error is masked and result.sol_score is None
+    assert result.infrastructure_error is masked
+    assert result.sol_score == (None if masked else 0.0)
     assert FakeSandbox.instances[0].stopped
     assert json.loads((Path(result.artifact_path) / "result.json").read_bytes())["outcome"] == result.outcome
 
@@ -320,3 +347,138 @@ async def test_missing_workload_payload_validation_is_unresolved(server):
     assert result.infrastructure_error
     assert result.outcome == "INVALID_NATIVE_RESULT"
     assert "workload payload validation" in result.detail
+
+
+@pytest.mark.parametrize(
+    "latency,score",
+    [(0.002, 1.0), (0.006, 2 / 3), (0.01, 0.5), (0.026, 0.25)],
+)
+def test_reward_tracks_sol_latency_instead_of_binary_correctness(latency, score):
+    native_trace = trace()
+    native_trace["evaluation"]["performance"]["latency_ms"] = latency
+    result = classify_native_result(
+        problem=synthetic_problem(),
+        solution_name="synthetic_solution",
+        return_code=0,
+        traces=[native_trace],
+        benchmark_reference=False,
+    )
+    result = score_native_result(result, {"synthetic-workload": WorkloadAnchor(baseline_ms=0.01, sol_ms=0.002)})
+    assert result.solved and result.sol_score == pytest.approx(score)
+    assert result.latency_ms == {"synthetic-workload": latency}
+
+
+def multi_workload_result(statuses):
+    problem = synthetic_problem()
+    traces = []
+    problem.workloads = []
+    for index, status in enumerate(statuses):
+        native_trace = trace(status)
+        native_trace["workload"]["uuid"] = f"synthetic-{index}"
+        traces.append(native_trace)
+        problem.workloads.append(native_trace["workload"])
+    return classify_native_result(
+        problem=problem,
+        solution_name="synthetic_solution",
+        return_code=1,
+        traces=traces,
+        benchmark_reference=False,
+    )
+
+
+def test_incorrect_workload_zero_preserves_credit_from_correct_workloads():
+    result = multi_workload_result(["PASSED", "INCORRECT_NUMERICAL", "COMPILE_ERROR"])
+    anchors = {uid: WorkloadAnchor(baseline_ms=0.01, sol_ms=0.002) for uid in result.workload_status}
+    result = score_native_result(result, anchors)
+    assert not result.solved and not result.infrastructure_error
+    assert result.outcome == "CANDIDATE_FAILED"
+    assert result.workload_sol_score == {"synthetic-0": 0.5, "synthetic-1": 0.0, "synthetic-2": 0.0}
+    assert result.sol_score == pytest.approx(1 / 6)
+    assert result.latency_ms == {"synthetic-0": 0.01}
+    assert result.native_traces[1]["evaluation"]["correctness"]["max_absolute_error"] == 0
+
+
+@pytest.mark.parametrize("statuses", [["RUNTIME_ERROR", "PASSED"], ["PASSED", "RUNTIME_ERROR"]])
+def test_unresolved_workload_keeps_other_measured_timings_without_partial_reward(statuses):
+    result = multi_workload_result(statuses)
+    anchors = {uid: WorkloadAnchor(baseline_ms=0.01, sol_ms=0.002) for uid in result.workload_status}
+    result = score_native_result(result, anchors)
+    assert result.infrastructure_error and result.sol_score is None
+    assert result.latency_ms == {f"synthetic-{statuses.index('PASSED')}": 0.01}
+    assert len(result.native_traces) == 2
+    assert result.workload_sol_score == {}
+
+
+@pytest.mark.asyncio
+async def test_sub_sol_timing_masks_reward_but_preserves_correctness_and_latency(server):
+    FakeSandbox.mode = "sub_sol"
+    result = await server.verify(request())
+    assert result.solved and result.outcome == "PASSED" and not result.infrastructure_error
+    assert result.mask_sample and result.sol_score is None and result.reward == 0
+    assert result.scoring_error and result.failure_kind == "sol_execbench:scoring_unresolved"
+    assert result.latency_ms == {"synthetic-workload": 0.001}
+    assert len(result.native_traces) == 1
+    assert (await server.verify(request())) == result
+    assert len(FakeSandbox.instances) == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_retains_measurements_but_masks_reward(server):
+    FakeSandbox.mode = "cleanup_failure"
+    result = await server.verify(request())
+    assert result.outcome == "CLEANUP_FAILURE" and result.mask_sample
+    assert result.sol_score is None and result.reward == 0
+    assert result.latency_ms == {"synthetic-workload": 0.01}
+    assert result.workload_status == {"synthetic-workload": "PASSED"}
+    assert len(result.native_traces) == 1
+
+
+def test_invalid_anchor_binding_blocks_server_before_gpu_allocation(server):
+    config = server.config.model_copy(update={"anchor_manifest_sha256": "f" * 64})
+    with pytest.raises(ValueError, match="SHA256"):
+        SolExecBenchResourcesServer(config=config, server_client=server.server_client)
+    assert not FakeSandbox.instances
+
+
+@pytest.mark.asyncio
+async def test_anchor_identity_changes_protocol_cache_and_reward(server):
+    initial = await server.verify(request())
+    anchor_path = server.config.anchor_manifest_path
+    anchors = json.loads(anchor_path.read_bytes())
+    anchors["tasks"][synthetic_problem().task_id]["workloads"]["synthetic-workload"]["baseline_ms"] = 0.018
+    anchor_path.write_bytes(canonical_json(anchors))
+    config = server.config.model_copy(
+        update={"anchor_manifest_sha256": hashlib.sha256(anchor_path.read_bytes()).hexdigest()}
+    )
+    other = SolExecBenchResourcesServer(config=config, server_client=server.server_client)
+    changed = await other.verify(request())
+    assert initial.protocol_sha256 != changed.protocol_sha256
+    assert initial.request_id != changed.request_id and len(FakeSandbox.instances) == 2
+    assert initial.reward == 0.5 and changed.reward == pytest.approx(2 / 3)
+    assert changed.latency_ms == initial.latency_ms
+
+
+@pytest.mark.parametrize("fault", ["missing", "identity", "duplicate"])
+def test_trace_failure_keeps_only_unique_valid_workload_measurements(fault):
+    problem = synthetic_problem()
+    first, second = trace(), trace()
+    second["workload"]["uuid"] = "synthetic-second"
+    problem.workloads = [first["workload"], second["workload"]]
+    if fault == "missing":
+        traces = [first]
+    elif fault == "identity":
+        second["solution"] = "wrong-solution"
+        traces = [first, second]
+    else:
+        traces = [first, second, second]
+    result = classify_native_result(
+        problem=problem,
+        solution_name="synthetic_solution",
+        return_code=0,
+        traces=traces,
+        benchmark_reference=False,
+    )
+    assert result.infrastructure_error and result.sol_score is None
+    assert result.latency_ms == {"synthetic-workload": 0.01}
+    assert result.workload_status == {"synthetic-workload": "PASSED"}
+    assert result.native_traces == traces

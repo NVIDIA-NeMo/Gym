@@ -7,8 +7,10 @@ import hashlib
 import json
 import logging
 import math
+from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
+from statistics import mean
 from typing import ClassVar, Literal
 
 from fastapi import FastAPI
@@ -36,6 +38,12 @@ from resources_servers.sol_execbench.problem_store import (
     load_manifest,
     safe_relative_path,
 )
+from resources_servers.sol_execbench.scoring import (
+    AnchorManifest,
+    WorkloadAnchor,
+    load_anchor_manifest,
+    score_workload,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -60,6 +68,8 @@ class SolExecBenchResourcesServerConfig(BaseResourcesServerConfig):
     num_workers: Literal[1] = 1
     problem_manifest_path: Path
     problem_manifest_sha256: Sha256
+    anchor_manifest_path: Path
+    anchor_manifest_sha256: Sha256
     artifact_root: Path
     sandbox_provider: str | dict[str, JsonValue] = "sandbox"
     sandbox_image: str = Field(pattern=r"^.+@sha256:[0-9a-f]{64}$")
@@ -95,8 +105,11 @@ class NativeResult(BaseModel):
     solved: bool = False
     infrastructure_error: bool = False
     detail: str = ""
-    # No public, verified SOL anchors are embedded or inferred from reference timing.
+    scoring_error: str | None = None
     sol_score: float | None = None
+    workload_status: dict[str, str] = Field(default_factory=dict)
+    workload_sol_score: dict[str, float] = Field(default_factory=dict)
+    anchors: dict[str, WorkloadAnchor] = Field(default_factory=dict)
     latency_ms: dict[str, float] = Field(default_factory=dict)
     reference_latency_ms: dict[str, float] = Field(default_factory=dict)
     native_traces: list[dict[str, JsonValue]] = Field(default_factory=list)
@@ -128,53 +141,101 @@ def classify_native_result(
     """Classify complete native traces, never process success or RPC elapsed time."""
     expected = {workload["uuid"] for workload in problem.workloads}
     observed = [trace.get("workload", {}).get("uuid") for trace in traces]
+    occurrences = Counter(observed)
+    # Raw traces remain diagnostic evidence; only uniquely identified rows supply timings.
+    result = NativeResult(outcome="PASSED", native_traces=traces)
+    issues = []
     if len(observed) != len(expected) or set(observed) != expected:
-        return unresolved("INCOMPLETE_TRACE", "Native traces must cover each trusted workload UUID exactly once")
-    statuses = []
-    latencies, references = {}, {}
-    for trace in traces:
+        issues.append(("INCOMPLETE_TRACE", "Native traces must cover each trusted workload UUID exactly once"))
+    for trace, uid in zip(traces, observed):
+        if uid not in expected or occurrences[uid] != 1:
+            continue
         if trace.get("definition") != problem.definition.get("name") or trace.get("solution") != solution_name:
-            return unresolved("INVALID_TRACE", "Native trace definition or solution identity mismatch")
+            issues.append(("INVALID_TRACE", f"{uid}: Native trace definition or solution identity mismatch"))
+            continue
         evaluation = trace.get("evaluation")
         if not isinstance(evaluation, dict):
-            return unresolved("INVALID_TRACE", "Native trace is missing its evaluation")
+            issues.append(("INVALID_TRACE", f"{uid}: Native trace is missing its evaluation"))
+            continue
         status = evaluation.get("status")
-        statuses.append(status)
+        if isinstance(status, str):
+            result.workload_status[uid] = status
         if status not in CANDIDATE_FAILURES | {"PASSED"}:
             # RUNTIME_ERROR also represents missing inputs, clock-lock failures and timing failures.
-            return unresolved("NATIVE_UNRESOLVED", f"Native status {status!r}: {evaluation.get('log', '')}")
-        if status == "PASSED":
-            correctness = evaluation.get("correctness")
-            performance = evaluation.get("performance")
-            if not isinstance(correctness, dict) or not isinstance(performance, dict):
-                return unresolved("INVALID_TRACE", "Passing native traces require correctness and performance")
-            if correctness.get("has_nan", False) or correctness.get("has_inf", False):
-                return unresolved("INVALID_TRACE", "Passing trace contains nonfinite correctness results")
-            for field in ("latency_ms", "reference_latency_ms", "speedup_factor"):
-                value = performance.get(field)
-                if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
-                    return unresolved("INVALID_TRACE", "Native performance values must be finite and nonnegative")
-            if performance["latency_ms"] <= 0 or (
-                benchmark_reference
-                and (performance["reference_latency_ms"] <= 0 or performance["speedup_factor"] <= 0)
-            ):
-                return unresolved(
-                    "INVALID_TRACE", "Measured native latency and enabled reference metrics must be positive"
-                )
-            uid = trace["workload"]["uuid"]
-            latencies[uid] = performance["latency_ms"]
-            if benchmark_reference:
-                references[uid] = performance["reference_latency_ms"]
-    solved = all(status == "PASSED" for status in statuses)
-    if return_code != (0 if solved else 1):
-        return unresolved("INVALID_EXIT_STATUS", "Native CLI exit status disagrees with complete workload traces")
-    return NativeResult(
-        outcome="PASSED" if solved else "CANDIDATE_FAILED",
-        solved=solved,
-        latency_ms=latencies,
-        reference_latency_ms=references,
-        native_traces=traces,
-    )
+            issues.append(("NATIVE_UNRESOLVED", f"{uid}: Native status {status!r}: {evaluation.get('log', '')}"))
+            continue
+        if status != "PASSED":
+            continue
+        correctness = evaluation.get("correctness")
+        performance = evaluation.get("performance")
+        if not isinstance(correctness, dict) or not isinstance(performance, dict):
+            issues.append(("INVALID_TRACE", f"{uid}: Passing traces require correctness and performance"))
+            continue
+        if correctness.get("has_nan", False) or correctness.get("has_inf", False):
+            issues.append(("INVALID_TRACE", f"{uid}: Passing trace contains nonfinite correctness results"))
+            continue
+        if any(
+            type(performance.get(field)) not in (int, float)
+            or not math.isfinite(performance[field])
+            or performance[field] < 0
+            for field in ("latency_ms", "reference_latency_ms", "speedup_factor")
+        ):
+            issues.append(("INVALID_TRACE", f"{uid}: Native performance values must be finite and nonnegative"))
+            continue
+        if performance["latency_ms"] <= 0 or (
+            benchmark_reference and (performance["reference_latency_ms"] <= 0 or performance["speedup_factor"] <= 0)
+        ):
+            issues.append(("INVALID_TRACE", f"{uid}: Measured latency and enabled reference metrics must be positive"))
+            continue
+        result.latency_ms[uid] = performance["latency_ms"]
+        if benchmark_reference:
+            result.reference_latency_ms[uid] = performance["reference_latency_ms"]
+    if issues:
+        result.outcome = issues[0][0]
+        result.infrastructure_error = True
+        result.detail = "; ".join(detail for _, detail in issues)
+        return result
+    result.solved = all(status == "PASSED" for status in result.workload_status.values())
+    if return_code != (0 if result.solved else 1):
+        result.outcome = "INVALID_EXIT_STATUS"
+        result.solved = False
+        result.infrastructure_error = True
+        result.detail = "Native CLI exit status disagrees with complete workload traces"
+        return result
+    result.outcome = "PASSED" if result.solved else "CANDIDATE_FAILED"
+    return result
+
+
+def score_native_result(
+    result: NativeResult,
+    anchors: dict[str, WorkloadAnchor],
+) -> NativeResult:
+    """Attach SOL scores without replacing native correctness or measured GPU timings."""
+    result.anchors = anchors
+    if result.infrastructure_error:
+        return result
+    if result.outcome == "INVALID_SOLUTION":
+        result.sol_score = 0.0
+        return result
+    if set(result.workload_status) != set(anchors):
+        result.scoring_error = "SOL anchors must cover every measured workload exactly once"
+        return result
+    errors = []
+    for uid, status in result.workload_status.items():
+        if status in CANDIDATE_FAILURES:
+            result.workload_sol_score[uid] = 0.0
+        elif status == "PASSED":
+            try:
+                result.workload_sol_score[uid] = score_workload(result.latency_ms[uid], anchors[uid])
+            except (ValueError, KeyError) as exc:
+                errors.append(f"{uid}: {exc}")
+        else:
+            errors.append(f"{uid}: Unresolved native status {status!r}")
+    if errors:
+        result.scoring_error = "; ".join(errors)
+    else:
+        result.sol_score = mean(result.workload_sol_score.values())
+    return result
 
 
 def extract_solution(body: SolExecBenchVerifyRequest, problem: Problem) -> dict:
@@ -217,6 +278,7 @@ class SolExecBenchResourcesServer(SimpleResourcesServer):
     ray_enabled = False
     config: SolExecBenchResourcesServerConfig
     _manifest: ProblemManifest = PrivateAttr()
+    _anchors: AnchorManifest = PrivateAttr()
     _provider_config: dict = PrivateAttr()
     _protocol: dict = PrivateAttr()
     _protocol_sha256: str = PrivateAttr()
@@ -226,6 +288,13 @@ class SolExecBenchResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
         self._manifest = load_manifest(self.config.problem_manifest_path, self.config.problem_manifest_sha256)
+        self._anchors = load_anchor_manifest(
+            self.config.anchor_manifest_path,
+            self.config.anchor_manifest_sha256,
+            problem_manifest=self._manifest,
+            problem_manifest_sha256=self.config.problem_manifest_sha256,
+            target_hardware=self.config.target_hardware,
+        )
         self._provider_config = resolve_provider_config(
             self.config.sandbox_provider, self.server_client.global_config_dict
         )
@@ -238,6 +307,7 @@ class SolExecBenchResourcesServer(SimpleResourcesServer):
         self._protocol = {
             "native_revision": NATIVE_REVISION,
             "problem_manifest_sha256": self.config.problem_manifest_sha256,
+            "anchor_manifest_sha256": self.config.anchor_manifest_sha256,
             "sandbox_image": self.config.sandbox_image,
             "target_hardware": self.config.target_hardware,
             "benchmark": self.config.benchmark.model_dump(),
@@ -248,9 +318,11 @@ class SolExecBenchResourcesServer(SimpleResourcesServer):
             "runner_sha256": hashlib.sha256((HERE / "native_runner.py").read_bytes()).hexdigest(),
             "verifier_source_hashes": {
                 name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
-                for name in ("app.py", "metrics.py", "problem_store.py")
+                for name in ("app.py", "metrics.py", "problem_store.py", "scoring.py")
             },
-            "reward": "native_all_workloads_correct",
+            "reward": "sol_score",
+            "score_aggregation": "workload_mean",
+            "score_domain": "baseline_gt_sol_candidate_gte_sol",
         }
         self._protocol_sha256 = hashlib.sha256(canonical_json(self._protocol)).hexdigest()
         self.config.artifact_root.mkdir(parents=True, exist_ok=True)
@@ -275,10 +347,16 @@ class SolExecBenchResourcesServer(SimpleResourcesServer):
             task_id=problem.task_id,
             protocol_sha256=self._protocol_sha256,
             artifact_path=str(self.config.artifact_root / request_id),
-            reward=float(result.solved),
-            mask_sample=result.infrastructure_error,
-            failure_kind=f"sol_execbench:{result.outcome.lower()}" if result.infrastructure_error else None,
-            failure_reason=result.detail if result.infrastructure_error else None,
+            reward=result.sol_score if result.sol_score is not None else 0.0,
+            mask_sample=result.infrastructure_error or result.sol_score is None,
+            failure_kind=(
+                f"sol_execbench:{result.outcome.lower()}"
+                if result.infrastructure_error
+                else "sol_execbench:scoring_unresolved"
+                if result.sol_score is None
+                else None
+            ),
+            failure_reason=result.detail if result.infrastructure_error else result.scoring_error,
         )
 
     async def _evaluate(
@@ -307,6 +385,10 @@ class SolExecBenchResourcesServer(SimpleResourcesServer):
                 except Exception as exc:
                     logger.exception("Native SOL sandbox failed")
                     result = unresolved("SANDBOX_FAILURE", str(exc))
+            result = score_native_result(
+                result,
+                self._anchors.tasks[problem.task_id].workloads,
+            )
             write_json(attempt / "result.json", result.model_dump(mode="json"))
             return result
 
@@ -378,7 +460,15 @@ class SolExecBenchResourcesServer(SimpleResourcesServer):
                 await sandbox.stop()
             except Exception as exc:
                 logger.exception("Native SOL sandbox cleanup failed")
-                result = unresolved("CLEANUP_FAILURE", str(exc))
+                result = result.model_copy(
+                    update={
+                        "outcome": "CLEANUP_FAILURE",
+                        "solved": False,
+                        "infrastructure_error": True,
+                        "sol_score": None,
+                        "detail": str(exc),
+                    }
+                )
         return result
 
     def _read_result(self, attempt: Path, problem: Problem, solution: dict) -> NativeResult:

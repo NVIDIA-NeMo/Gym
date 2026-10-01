@@ -3,9 +3,9 @@
 This resources server runs the public [SOL-ExecBench evaluator](https://github.com/NVIDIA/SOL-ExecBench)
 at revision `a9fa0804c793d438e70850c33fe34426e66d53dd` in a fresh OpenSandbox sandbox with one GPU per response.
 It accepts native Solution JSON with inline source files, uses server-owned problem definitions and workloads,
-and records native correctness traces and GPU timing. The Gym reward is **all-workloads correctness (0 or 1)**.
-`sol_score` is null: current reference timing is not a published SOL anchor, and this integration does not infer
-anchors.
+and returns native correctness, GPU timings, and an anchored **SOLscore reward averaged over every workload**.
+Incorrect workloads contribute zero; full-problem correctness is reported separately as `solved`. Scoring requires a
+reviewed, UUID-keyed anchor manifest. Current reference timing is not a scoring baseline or SOL anchor.
 
 This integration is experimental. Mocked transport and synthetic result tests do not establish a working GPU image,
 OpenSandbox deployment, or model rollout. These must be qualified before reporting benchmark results.
@@ -29,6 +29,7 @@ Compose `configs/sol_execbench.yaml`, the benchmark config, an existing model co
 `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`. Supply:
 
 - `problem_manifest_path` and the bare SHA256 from the preparation sidecar;
+- `anchor_manifest_path` and its exact-byte `anchor_manifest_sha256`;
 - an absolute writable `artifact_root`;
 - `sandbox_image` in immutable `registry/image@sha256:...` form;
 - a configured OpenSandbox endpoint, credentials, and one-GPU-capable deployment;
@@ -46,6 +47,32 @@ seed 200, `lock_clocks=false`, `benchmark_reference=false`. The outer command wa
 must exceed compilation plus evaluation budgets. Changing these settings changes the recorded protocol digest.
 Enable `benchmark_reference` explicitly to expose current native reference GPU timings; some references are expensive.
 RPC or wall time is never used as kernel latency.
+
+## SOLscore and anchors
+
+For a correct workload, the [pinned scoring formula](https://github.com/NVIDIA/SOL-ExecBench/blob/a9fa0804c793d438e70850c33fe34426e66d53dd/src/sol_execbench/sol_score.py)
+is `1 / (1 + (Tk - Tsol) / (Tb - Tsol))`, with all times in milliseconds. `Tk` is the measured candidate latency,
+`Tb` the reviewed optimized baseline, and `Tsol` the hardware speed-of-light bound. The baseline scores 0.5 and a
+candidate at the SOL bound scores 1. Proven candidate-failure workloads score zero. The response's `sol_score` and
+Gym `reward` follow the [current website](https://research.nvidia.com/benchmarks/sol-execbench/blog/introducing-sol-execbench):
+the arithmetic mean over all workloads, including those zeros. A partly correct solution can earn credit while
+`solved` remains false. Malformed Solution JSON receives zero.
+
+The [paper's scoring domain](https://arxiv.org/html/2603.19173v1#S4.SS3) requires `Tb > Tsol` and `Tk >= Tsol`.
+Invalid anchors fail startup. A measured candidate below its SOL bound requires an audit: the sample is masked,
+`sol_score` is null, and available correctness and timing diagnostics remain visible. Scores are not clipped or
+replaced with reference speedups.
+
+The server verifies the anchor file's SHA256, selected problem-manifest SHA256, target hardware, every problem
+digest, and exact task/UUID coverage before GPU work. Duplicate JSON keys are rejected. Each workload entry contains
+`baseline_ms` and `sol_ms`; the manifest records `provenance.source` and `provenance.revision`. See
+[`AnchorManifest`](scoring.py) for the complete schema. Anchor identity, the scoring rule, and native benchmark
+configuration are included in the recorded protocol.
+
+No verified public UUID-keyed anchor export is supplied. The pinned dataset has no timing anchors, and published
+timing tables omit workload UUIDs. Three tasks contain duplicate-axis workloads, so axes alone cannot establish
+anchor identity. Obtain a reviewed export covering every selected UUID; this integration does not guess mappings
+or substitute live reference timings.
 
 ## Runtime image
 
@@ -76,24 +103,30 @@ Hashes are metadata from the pinned Apache-2.0 evaluator, not vendored source.
 
 ## Failure and evidence contract
 
-A pass requires native-schema-validated traces with each trusted workload UUID exactly once, matching definition and
-solution identities, all `PASSED`, and the native CLI's success exit code. Complete candidate-failure traces are
-accepted
-with exit code 1. Incorrect shape, dtype, numerical results and native compile/reward-hack statuses receive zero
-correctness.
-Malformed Solution JSON also receives zero. Native CLI compile failures that produce no traces remain unresolved.
+Full-problem correctness requires native-schema-validated traces bound to each trusted workload payload exactly once,
+matching definition and solution identities, all `PASSED`, and the native CLI's success exit code. Complete
+candidate-failure traces are accepted with exit code 1. Incorrect shape, dtype, numerical results and native
+compile/reward-hack statuses identify failed workloads. Native CLI compile failures that produce no traces remain
+unresolved.
 
 Timeouts, missing/partial traces, invalid references, unexpected exits, transport errors, and cleanup failures set
 `mask_sample=true`, with an explicit failure kind and null SOL score. The native `RUNTIME_ERROR` status is ambiguous
-(it also covers missing inputs, clock failures and timing failures), so it remains masked. The required numeric Gym
-reward field is zero on masked responses; it is not a candidate-failure measurement. Official aggregate metrics are
-null
-until every declared task/repeat slot is present and measured. No timeout-zero sensitivity score is reported.
+(it also covers missing inputs, clock failures and timing failures), so it remains masked. Available native traces,
+workload statuses, correctness diagnostics, and GPU timings are retained. The required numeric Gym reward is zero
+on masked responses; that placeholder must not be used as a candidate-failure measurement.
+
+Aggregate `correctness_complete` requires every declared task/repeat slot and no infrastructure failures.
+`score_complete` additionally requires a valid score for every slot. Thus an otherwise complete native pass awaiting
+SOL-bound review can retain correctness metrics while score metrics remain null. `correctness_at_1` and `pass_at_N`
+report correctness; `sol_score` averages each task's sample scores and then averages tasks equally.
+`sol_score_best_of_N` separately averages each task's best sample score. No missing or masked score is replaced by zero,
+and these metrics do not imply reproduction of the published evaluation protocol.
 
 Every attempt records the request, protocol, candidate, native input/config files, runner stdout/stderr, native
 stdout/stderr, raw traces, GPU identity, memory/power/clock observations, compute-process observations and result under
 `artifact_root/<request_sha256>/`. Native source hashes,
-image digest, trusted manifest digest, runner digest, and native configuration define protocol identity.
+image digest, trusted problem and anchor manifest digests, runner digest, scoring rule, and native configuration
+define protocol identity.
 Concurrent identical requests share the same attempt; completed results replay without GPU work. An existing incomplete
 attempt stays unresolved rather than silently rerunning. Sandboxes are stopped in `finally`, including on cancellation.
 
@@ -105,8 +138,10 @@ every timed output independently of the native evaluator.
 
 Run `pytest resources_servers/sol_execbench/tests` and the environment's verifier fixture in Gym's dependency
 environment.
-The fixture tests the production native-result classifier with original synthetic traces; transport tests mock the
-OpenSandbox API. Neither claims GPU execution. A representative real model rollout remains required before readiness.
+The fixture tests production scoring with original synthetic traces and anchors; transport tests mock the OpenSandbox
+API. Neither claims GPU execution. A representative real model rollout remains required before readiness.
 
 This integration is Apache-2.0. The evaluator is Apache-2.0. Public dataset terms are separate: download and review its
-license at runtime; no evaluation-only corpus content or private subset is redistributed in these fixtures.
+license at runtime. Its evaluation-only terms prohibit training and redistribution; see the
+[dataset license discussion](../../benchmarks/solexecbench/README.md#licensing). No corpus content or private subset
+is redistributed in these fixtures.

@@ -8,6 +8,8 @@ sol_execbench:
       description: Native SOL-ExecBench correctness and GPU latency in isolated OpenSandbox sandboxes
       problem_manifest_path: ???
       problem_manifest_sha256: ???
+      anchor_manifest_path: ???
+      anchor_manifest_sha256: ???
       artifact_root: ???
       sandbox_provider: sandbox
       sandbox_image: ???

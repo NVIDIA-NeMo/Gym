@@ -7,6 +7,8 @@ config_paths:
 # Runtime-only values are validated by the resources server, after data preparation.
 solexecbench_manifest_sha256: ""
 solexecbench_sandbox_image: ""
+solexecbench_anchor_manifest_path: ""
+solexecbench_anchor_manifest_sha256: ""
 
 solexecbench_resources_server:
   _inherit_from: sol_execbench
@@ -14,6 +16,8 @@ solexecbench_resources_server:
     sol_execbench:
       problem_manifest_path: benchmarks/solexecbench/data/problem_manifest.json
       problem_manifest_sha256: ${solexecbench_manifest_sha256}
+      anchor_manifest_path: ${solexecbench_anchor_manifest_path}
+      anchor_manifest_sha256: ${solexecbench_anchor_manifest_sha256}
       sandbox_image: ${solexecbench_sandbox_image}
       artifact_root: benchmarks/solexecbench/data/artifacts
       samples_per_task: 1

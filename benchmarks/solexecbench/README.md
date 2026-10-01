@@ -10,10 +10,15 @@ The canonical profile asks a model for native Solution JSON containing CUDA C++ 
 It uses Gym's `simple_agent` and the [native SOL verifier](../../resources_servers/sol_execbench/README.md),
 which runs pinned SOL-ExecBench revision `a9fa0804c793d438e70850c33fe34426e66d53dd` in an isolated GPU
 sandbox. The standalone preparer also supports Triton prompts using the same trusted problems.
-The scalar reward is complete-workload correctness; native workload latencies are retained as metrics.
-Official SOL score remains unavailable: the pinned dataset has no timing anchors, and the published
-leaderboard timing tables omit workload UUIDs, leaving duplicate-axis workloads ambiguous. The adapter
-does not infer those missing identities or report partial official scores.
+The scalar reward is the arithmetic mean of anchored workload SOLscores: correct workloads receive
+`1 / (1 + (Tk - Tsol) / (Tb - Tsol))`, and proven candidate-failure workloads contribute zero. The scoring baseline
+receives 0.5 and the SOL bound receives 1. Full-problem correctness (`solved`), per-workload status, and native GPU
+timings are returned separately; partly correct solutions can receive partial credit.
+
+A SHA256-pinned anchor manifest covering every selected task and workload UUID is required at startup.
+No verified public export is supplied: the pinned dataset has no timing anchors, and published leaderboard tables
+omit workload UUIDs. Three tasks contain duplicate-axis workloads, so matching axes alone is ambiguous.
+The adapter does not guess those identities or substitute live reference timings for scoring anchors.
 
 This integration remains experimental; CPU tests and successful preparation do not establish GPU
 correctness or reproduce published benchmark results.
@@ -57,8 +62,12 @@ the agent's dataset paths, the resources server's `problem_manifest_path`, and `
 
 Configure an immutable evaluator image, the OpenSandbox GPU allocation, artifact directory, and a Gym
 model endpoint as described in the [verifier setup](../../resources_servers/sol_execbench/README.md).
-Set `solexecbench_sandbox_image` to your image digest in local Gym configuration. After preparation,
-supply the manifest SHA-256 from the generated sidecar and run:
+Set `solexecbench_sandbox_image` to your image digest in local Gym configuration. Also set
+`solexecbench_anchor_manifest_path` and `solexecbench_anchor_manifest_sha256` to a reviewed anchor export and its
+exact-byte SHA256. The server checks its selected problem-manifest digest, per-task digests, hardware, provenance
+fields, and exact UUID coverage. The [verifier scoring contract](../../resources_servers/sol_execbench/README.md#solscore-and-anchors)
+describes the schema and score domain. Missing or invalid anchor configuration prevents startup.
+After preparation, supply the problem-manifest SHA256 from the generated sidecar and run:
 
 ```bash
 gym eval run --benchmark solexecbench --model-type openai_model \
@@ -70,6 +79,13 @@ Use one evaluator per assigned GPU and preserve the image digest, observed GPU, 
 configuration, model version, sampling settings, and complete verifier artifacts with reported results.
 Artifacts default to the ignored data directory's `artifacts/` subdirectory.
 The native runtime must be validated on the deployed hardware before benchmark comparisons.
+
+Scoring requires `Tb > Tsol` and `Tk >= Tsol`. A candidate measured below the SOL bound is masked for audit while
+its correctness and timing diagnostics are retained. Infrastructure failures and incomplete traces are also masked;
+their SOLscores are null, and the numeric reward's zero placeholder is not a measured failure. Aggregate correctness
+and score completeness are separate: every task/repeat must be present without infrastructure failure for correctness
+metrics, and every score must additionally be valid for `sol_score` or `sol_score_best_of_N`. Aggregate `sol_score`
+is the equal mean of per-task sample means; the best-of-N metric is reported separately.
 
 ## Licensing
 

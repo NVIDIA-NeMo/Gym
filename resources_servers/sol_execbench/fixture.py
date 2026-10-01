@@ -5,6 +5,7 @@
 from pydantic import BaseModel, JsonValue
 
 from resources_servers.sol_execbench.problem_store import Problem, problem_digest
+from resources_servers.sol_execbench.scoring import WorkloadAnchor
 
 
 class NativeFixtureRequest(BaseModel):
@@ -31,7 +32,7 @@ def synthetic_problem() -> Problem:
 
 class NativeVerifierFixture:
     async def verify(self, body: NativeFixtureRequest) -> FixtureReward:
-        from resources_servers.sol_execbench.app import classify_native_result
+        from resources_servers.sol_execbench.app import classify_native_result, score_native_result
 
         result = classify_native_result(
             problem=synthetic_problem(),
@@ -40,4 +41,5 @@ class NativeVerifierFixture:
             traces=body.traces,
             benchmark_reference=False,
         )
-        return FixtureReward(reward=float(result.solved))
+        result = score_native_result(result, {"synthetic-workload": WorkloadAnchor(baseline_ms=0.018, sol_ms=0.01)})
+        return FixtureReward(reward=result.sol_score if result.sol_score is not None else 0.0)
