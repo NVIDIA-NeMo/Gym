@@ -234,6 +234,7 @@ class ResourcesCloseSessionResponse(BaseModel):
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
+    routes_sessions_to_owner = True
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
