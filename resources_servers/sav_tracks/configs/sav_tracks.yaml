@@ -18,6 +18,13 @@ sav_pt_tracks_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+sav_pt_tracks_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: sav_pt_tracks_agent
 sav_box_tracks_agent:
   responses_api_agents:
     simple_agent:
@@ -28,6 +35,13 @@ sav_box_tracks_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+sav_box_tracks_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: sav_box_tracks_agent
 sav_ref_tracks_agent:
   responses_api_agents:
     simple_agent:
@@ -38,3 +52,10 @@ sav_ref_tracks_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+sav_ref_tracks_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: sav_ref_tracks_agent
