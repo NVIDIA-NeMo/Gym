@@ -98,7 +98,7 @@ Check IDs identify both the evidence being evaluated and the condition detected.
 | `rollout_duplicate_identity` | Rollout | More than one input record has the same `_ng_task_index` and `_ng_rollout_index`. Every duplicated record receives the finding. |
 | `rollout_missing_agent_turns` | Rollout | Agent turns are observable, but no turn contains any of the following: (1) non-empty answer or reasoning content, (2) a tool call, or (3) a model-call reference. |
 | `rollout_ended_on_failed_model_call` | Rollout | A model's own last call in the rollout has an HTTP error status, an error category, or response status `failed`, `error`, or `cancelled`. Read from the captured calls directly rather than through a reference, because a failed call carries no response ID to be referenced by. Judged per model and in `started_at` order, so a call to a different model landing later does not mask the failure, and a failure the client retried successfully produces no finding. One finding per model. When a chain mixes failures and successes and carries no timestamps it cannot be ordered, and no finding is produced. |
-| `rollout_token_count_mismatch` | Rollout | Both top-level rollout token totals and a complete set of bound policy-model-call token counts are available, but the prompt-token total or completion-token total differs from the corresponding call-level sum. |
+| `rollout_token_count_mismatch` | Rollout | Both top-level rollout token totals and a complete set of invocation- or turn-owned policy-model-call token counts are available, but the prompt-token total or completion-token total differs from the corresponding call-level sum. |
 | `agent_turn_hollow` | Agent turn | An observable `TrajectoryTurn` does not contain any of the following: (1) non-empty answer content, (2) non-empty reasoning content, or (3) a tool call. |
 | `trajectory_capture_mismatch` | Trajectory and model calls | An explicit turn- or invocation-to-model-call reference resolves to zero or multiple model calls, or `ng_trajectory.gaps` records an unmatched, ambiguous, or conflicting reference. |
 | `model_call_failed` | Policy-model call | An exactly bound policy-model call has an HTTP error status, an error category, or response status `failed`, `error`, or `cancelled`. |
@@ -136,15 +136,19 @@ evaluated once. Unreferenced model calls are not assigned to the policy model be
 
 The per-call checks are `model_call_failed`, `model_call_missing_token_counts`, `model_call_runaway_generation`,
 `model_call_zero_completion_tokens`, and `trajectory_capture_mismatch`. Invocation ownership is sufficient for these checks
-because each evaluates one call or one explicit reference independently. `rollout_token_count_mismatch` and
-`task_no_successful_model_calls` use only turn-owned calls. These aggregate checks require per-turn placement: an invocation can
-also own support calls that should be inspected individually but must not satisfy a trajectory-level token total or successful-call
-claim.
+because each evaluates one call or one explicit reference independently.
 
-The producer gap `turn_model_call_scope_incomplete` means that turn references do not establish the complete call
-scope needed for aggregate checks. For example, invocation usage may include summarization calls outside the recorded
-task turns, or a failed attempt may lack an exact turn reference. This gap makes `rollout_token_count_mismatch` and
-`task_no_successful_model_calls` unobserved. Checks on recorded turn content and individually owned model calls still
+`rollout_token_count_mismatch` compares top-level response usage against all explicitly invocation- or turn-owned policy calls,
+including compaction summaries that have no policy turn. A call referenced by both scopes contributes once; unowned calls are
+excluded. Missing or ambiguous references, or missing usage, make the comparison unobserved rather than treating unknown tokens
+as zero. Response usage must cover the same invocation tree, including child sessions.
+
+`task_no_successful_model_calls` remains turn-bound: an invocation-only support or compaction call must not establish a
+successful task turn. Structural turn checks are unchanged.
+
+The producer gap `turn_model_call_scope_incomplete` continues to conservatively gate both aggregate checks for compatibility
+with existing producers. A producer that only lacks policy-turn placement for an otherwise exactly owned compaction call need
+not mark the invocation's usage scope incomplete. Checks on recorded turn content and individually owned model calls still
 evaluate; the gap does not suppress evidence of failed calls or hollow turns.
 
 <Note>

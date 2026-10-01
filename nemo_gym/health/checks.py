@@ -88,7 +88,7 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         id="rollout_token_count_mismatch",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.ROLLOUT,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
         id="model_call_runaway_generation",
