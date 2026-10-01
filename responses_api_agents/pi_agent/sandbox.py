@@ -77,6 +77,7 @@ class PiSandboxSession(AgentSessionState):
             temporary = quote(f"{receipt_path}.{uuid4().hex}.tmp")
             stopped = quote(json.dumps({"cleanup_confirmed": True, "error": None}))
             script = (
+                f"[ -f {quote(receipt_path)} ] && exit 0; "
                 f"touch {stop_path} || exit 1; "
                 f"ln -s stop {claim_path} 2>/dev/null || true; "
                 f'if [ "$(readlink {claim_path})" = stop ]; then '
@@ -99,6 +100,9 @@ class PiSandboxSession(AgentSessionState):
         if self.closed:
             return
         self.closing = True
+        # Provider cancellation can kill its exec process group, including the
+        # supervisor. Let the supervisor reap Pi and acknowledge cleanup first.
+        await self.stop_runner(timeout)
         if self.task is not None:
             if not self.task.done() and not self.task.cancelling():
                 self.task.cancel()
@@ -110,8 +114,7 @@ class PiSandboxSession(AgentSessionState):
             except Exception:
                 if not self.task.done():
                     raise
-                # A response error does not establish cleanup; stop_runner below must.
-        await self.stop_runner(timeout)
+                # The supervisor has already acknowledged cleanup above.
         retired = f"{self.directory}.closed"
         # Keep the claim intact until its parent path is retired, fencing delayed execs.
         result = await self.sandbox.exec(

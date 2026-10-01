@@ -205,7 +205,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     def _require_agent_session(self, agent_session_id: str) -> AgentSessionState:
         record = self._session_records.get(agent_session_id)
-        if record is None or record.state is None or record.closing:
+        # Adapters may retain partial state for cleanup while seed holds the lock.
+        if record is None or record.state is None or record.closing or record.lock.locked():
             raise HTTPException(409, "Unknown or closing agent_session_id")
         return record.state
 

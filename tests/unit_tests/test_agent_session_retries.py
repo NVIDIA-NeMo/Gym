@@ -81,6 +81,30 @@ async def test_simultaneous_seed_retries_initialize_once_and_bind_all_fields(age
         await agent.seed_agent_session(SimpleNamespace(session={}), changed)
 
 
+async def test_partial_session_is_unavailable_until_seed_finishes(agent):
+    seed = _seed()
+    entered, release = asyncio.Event(), asyncio.Event()
+    state = AgentSessionState(request=seed)
+
+    async def initialize(body):
+        agent._session_records[body.agent_session_id].state = state
+        entered.set()
+        await release.wait()
+        return state
+
+    agent._seed_agent_session_state.side_effect = initialize
+    task = asyncio.create_task(agent.seed_agent_session(SimpleNamespace(session={}), seed))
+    await entered.wait()
+    try:
+        with pytest.raises(HTTPException) as error:
+            agent._require_agent_session(seed.agent_session_id)
+        assert error.value.status_code == 409
+    finally:
+        release.set()
+        await task
+    assert agent._require_agent_session(seed.agent_session_id) is state
+
+
 async def test_close_retries_preserve_observations_after_many_other_closes(agent):
     seed = _seed()
     await agent.seed_agent_session(SimpleNamespace(session={}), seed)
