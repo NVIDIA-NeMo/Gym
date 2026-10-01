@@ -1865,8 +1865,7 @@ def resolve_dataset_agent(
 ) -> str:
     """Resolve the agent that runs a dataset declared by ``declaring_instance_name``.
 
-    Single source of truth for dataset -> agent routing, shared by benchmark discovery,
-    preparation, manifest validation, and rollout dispatch, so they can never disagree.
+    Shared by benchmark discovery, preparation, manifest validation, and flat-row dispatch.
     A declared ``taskset`` resolves through ``environment_server_routes`` and the bound
     Environment Server's ``agent_server``. It does not require an agent -> resources edge.
     Otherwise, first hit wins:
