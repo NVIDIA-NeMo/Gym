@@ -129,16 +129,17 @@ roles:
     gpus: 4
     env:
       CUDA_VISIBLE_DEVICES: 0,1,2,3
-      # UCX_NET_DEVICES: eth0  # Original
       UCX_NET_DEVICES: mlx5_0,mlx5_1,mlx5_3,mlx5_4
       SGLANG_DISAGGREGATION_NIXL_BACKEND: UCX
-      UCX_TLS: tcp,cuda_copy,cuda_ipc,sm,self
+      UCX_TLS: rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc
+      UCX_RNDV_SCHEME: get_zcopy
+      UCX_RNDV_THRESH: 0
       SGLANG_MOONCAKE_CUSTOM_MEM_POOL: NVLINK
       UCX_CUDA_IPC_ENABLE_MNNVL: y
       NCCL_MNNVL_ENABLE: '1'
       NCCL_CUMEM_ENABLE: '1'
       UCX_PROTO_INFO: y
-      UCX_LOG_LEVEL: info
+      UCX_LOG_LEVEL: err
       SGLANG_DISABLE_USAGE_REPORT: '1'
       HF_HOME: /tmp/nemotron35-hf
       HF_HUB_CACHE: /tmp/nemotron35-hf/hub
