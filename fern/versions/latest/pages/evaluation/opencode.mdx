@@ -68,10 +68,22 @@ opencode_agent:
       setup_timeout: 900
 ```
 
-For native collection, materialize prepared SWE-bench Pro rows and run the collector
-against the started composition:
+For native collection, prepare the full task prompt before materializing rows and
+run the collector against the started composition:
+
+<Warning>
+Older `resources_servers/swebench_pro/data/example.jsonl` rows may contain only
+`problem_statement` in the agent input, omitting `requirements` and `interface`.
+The native materializer preserves the supplied prompt; it does not repair it.
+Use the preparation step below for benchmark runs. For selected existing rows,
+rebuild the input with `benchmarks.swebench.pro.prepare.render_prompt` using only
+those three task-description fields, while preserving all verifier and image data.
+Check the materialized input before interpreting a reward as an accuracy result.
+</Warning>
 
 ```bash
+python benchmarks/swebench/pro/prepare.py
+
 python benchmarks/swebench/pro/materialize_single_agent_tasks.py \
     benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
     /tmp/swebench_pro_native.jsonl
@@ -143,6 +155,8 @@ Session close requires a positive cleanup receipt, removal of adapter files, and
 disconnect before verification proceeds. Unknown launch outcomes and unconfirmed
 cleanup fail closed and retain state for retries. Successful close receipts remain
 available for `session_close_retry_window_seconds` (300 seconds by default).
+The supervisor snapshots the session database only after confirming cleanup; a
+failed cleanup must not export a database that surviving tools may still write.
 Caller-assigned session IDs are idempotent for identical seed inputs. Close accepts an
 explicit ID without a cookie when the seed response is lost, and closing an unknown ID
 blocks a delayed seed. Session files use independent random paths. Abandoned sessions
