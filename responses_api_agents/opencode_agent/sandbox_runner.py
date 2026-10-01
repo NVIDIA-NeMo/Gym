@@ -128,12 +128,14 @@ def run(params: RunnerInput) -> RunnerResult:
                 cleanup_confirmed = True
             except Exception as exc:
                 error = f"cleanup: {exc}"
-    # Snapshot WAL-backed state only after all writers and tools have exited.
-    try:
-        snapshot(directory)
-    except Exception as exc:
-        error = error or f"OpenCode transcript capture failed: {exc}"
-        (directory / "export.json").write_text("{}")
+    # A failed cleanup may leave writers alive. Do not touch their database or
+    # publish a transcript; the negative receipt keeps verification blocked.
+    if cleanup_confirmed:
+        try:
+            snapshot(directory)
+        except Exception as exc:
+            error = error or f"OpenCode transcript capture failed: {exc}"
+            (directory / "export.json").write_text("{}")
     return {
         "return_code": process.returncode if process else 1,
         "timed_out": timed_out,

@@ -184,6 +184,50 @@ def test_snapshot_keeps_root_output_and_child_usage(tmp_path):
     con.close()
 
 
+def test_unconfirmed_cleanup_never_starts_snapshot(tmp_path):
+    # Keep a real detached descendant alive while cleanup reports failure. Always
+    # reap it in the isolated driver, including when testing the broken runner.
+    driver = """
+import json, os, pathlib, runpy, sys
+runner = runpy.run_path(sys.argv[1])
+drain = runner['drain_children']
+def fail_cleanup(timeout):
+    raise TimeoutError('injected cleanup uncertainty')
+def unexpected_snapshot(directory):
+    (directory / 'snapshot-started').touch()
+runner['run'].__globals__['drain_children'] = fail_cleanup
+runner['run'].__globals__['snapshot'] = unexpected_snapshot
+code = (
+    "import pathlib,subprocess,sys; "
+    "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
+    "pathlib.Path('child.pid').write_text(str(child.pid))"
+)
+try:
+    summary = runner['run']({
+        'directory': sys.argv[2], 'cwd': sys.argv[2], 'env': {}, 'prompt': 'task',
+        'command': [sys.executable, '-c', code], 'timeout': 3, 'cleanup_timeout': 2,
+    })
+    os.kill(int((pathlib.Path(sys.argv[2]) / 'child.pid').read_text()), 0)
+    print(json.dumps(summary))
+finally:
+    drain(2)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", driver, sandbox_runner.__file__, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+        check=True,
+    )
+    summary = json.loads(completed.stdout)
+    assert summary["cleanup_confirmed"] is False
+    assert summary["error"] == "cleanup: injected cleanup uncertainty"
+    assert not (tmp_path / "snapshot-started").exists()
+    assert not (tmp_path / "export.json").exists()
+
+
+@pytest.mark.parametrize("ending", ["natural", "timeout"])
 @pytest.mark.parametrize(
     "python",
     [
@@ -195,7 +239,7 @@ def test_snapshot_keeps_root_output_and_child_usage(tmp_path):
         ),
     ],
 )
-def test_snapshot_runs_after_detached_descendants_are_reaped(tmp_path, python):
+def test_snapshot_runs_after_detached_descendants_are_reaped(tmp_path, python, ending):
     import sqlite3
 
     database = tmp_path / "data/opencode/opencode.db"
@@ -229,17 +273,18 @@ code = (
     "import json,os,pathlib,subprocess,sys; "
     "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
     "pathlib.Path('child.pid').write_text(str(child.pid)); "
-    "print(json.dumps([sys.stdin.read(),os.environ['OPENCODE_TEST_VALUE']]))"
+    "print(json.dumps([sys.stdin.read(),os.environ['OPENCODE_TEST_VALUE']]),flush=True); "
+    + ("import time; time.sleep(60)" if sys.argv[3] == 'timeout' else "pass")
 )
 result = runner["run"]({
     "directory": sys.argv[2], "cwd": sys.argv[2], "prompt": "task input",
     "command": [sys.executable, "-c", code], "env": {"OPENCODE_TEST_VALUE": "override"},
-    "timeout": 3, "cleanup_timeout": 2,
+    "timeout": 0.3 if sys.argv[3] == 'timeout' else 3, "cleanup_timeout": 2,
 })
 print(json.dumps(result))
 """
     completed = subprocess.run(
-        [python, "-I", "-c", driver, sandbox_runner.__file__, str(tmp_path)],
+        [python, "-I", "-c", driver, sandbox_runner.__file__, str(tmp_path), ending],
         capture_output=True,
         text=True,
         errors="replace",
@@ -248,7 +293,8 @@ print(json.dumps(result))
     )
     summary = json.loads(completed.stdout)
     assert summary["cleanup_confirmed"] is True
-    assert summary["return_code"] == 0
+    assert summary["timed_out"] is (ending == "timeout")
+    assert summary["return_code"] == (-signal.SIGKILL if ending == "timeout" else 0)
     assert summary["error"] is None
     assert json.loads((tmp_path / "stdout.jsonl").read_text()) == ["task input", "override"]
     export = json.loads((tmp_path / "export.json").read_text())
