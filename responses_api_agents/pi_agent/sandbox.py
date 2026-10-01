@@ -5,14 +5,14 @@
 import asyncio
 import json
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.base_responses_api_agent import AgentSessionState
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxPtySession
@@ -31,10 +31,9 @@ class PiSandboxResult(BaseModel):
 
 
 @dataclass
-class PiSandboxSession:
+class PiSandboxSession(AgentSessionState):
     """Worker-local session with retryable, fail-closed runner teardown."""
 
-    seed: AgentSeedSessionRequest
     sandbox: AsyncSandbox
     directory: str
     runtime: str
@@ -43,12 +42,11 @@ class PiSandboxSession:
     exit_task: asyncio.Task[int] | None = None
     result: PiSandboxResult | None = None
     observations: AgentObservationBundle | None = None
-    activated: bool = False
+    activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     closing: bool = False
     launch_started: bool = False
     runner_closed: bool = False
     closed: bool = False
-    close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
         """Upload adapter-owned data beneath this session's directory."""
@@ -84,28 +82,27 @@ class PiSandboxSession:
 
     async def close(self, timeout: float) -> None:
         """Stop only Pi-owned work and detach; never call sandbox.stop()."""
-        async with self.close_lock:
-            if self.closed:
-                return
-            self.closing = True
-            if self.task is not None:
-                if not self.task.done() and not self.task.cancelling():
-                    self.task.cancel()
-                try:
-                    await asyncio.wait_for(asyncio.shield(self.task), timeout=timeout)
-                except asyncio.CancelledError:
-                    if not self.task.cancelled():
-                        raise
-                except Exception:
-                    if not self.task.done():
-                        raise
-                    # A response error does not establish cleanup; stop_runner below must.
-            await self.stop_runner(timeout)
-            result = await self.sandbox.exec(f"rm -rf -- {quote(self.directory)}", timeout_s=timeout)
-            if result.return_code != 0:
-                raise RuntimeError("Could not remove Pi session files")
-            await self.sandbox.disconnect()
-            self.closed = True
+        if self.closed:
+            return
+        self.closing = True
+        if self.task is not None:
+            if not self.task.done() and not self.task.cancelling():
+                self.task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(self.task), timeout=timeout)
+            except asyncio.CancelledError:
+                if not self.task.cancelled():
+                    raise
+            except Exception:
+                if not self.task.done():
+                    raise
+                # A response error does not establish cleanup; stop_runner below must.
+        await self.stop_runner(timeout)
+        result = await self.sandbox.exec(f"rm -rf -- {quote(self.directory)}", timeout_s=timeout)
+        if result.return_code != 0:
+            raise RuntimeError("Could not remove Pi session files")
+        await self.sandbox.disconnect()
+        self.closed = True
 
     async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> str:
         """Start the supervisor and Pi inside the borrowed task sandbox."""
@@ -113,7 +110,7 @@ class PiSandboxSession:
         self.launch_started = True
         self.runner = await self.sandbox.pty.create(
             command=f"exec python3 -I {quote(self.directory + '/sandbox_runner.py')} {quote(self.directory + '/input.json')}",
-            cwd=self.seed.sandbox_access.workdir,
+            cwd=self.request.sandbox_access.workdir,
             pty=False,
         )
         self.exit_task = asyncio.create_task(self.runner.wait_exit())

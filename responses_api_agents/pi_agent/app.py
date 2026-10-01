@@ -22,11 +22,9 @@ import re
 import shlex
 import shutil
 from asyncio import Semaphore
-from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Mapping
 from pathlib import Path
-from time import monotonic, time
+from time import time
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
@@ -35,16 +33,14 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
-    AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
-    AgentSeedSessionResponse,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.episode_types import EpisodeId
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -78,7 +74,6 @@ from responses_api_agents.pi_agent.setup_pi import ensure_pi
 LOG = logging.getLogger(__name__)
 MCP_SETUP_ERROR_EXIT_CODE = 78  # Must match gym_mcp.mjs (EX_CONFIG).
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
-_SANDBOX_SESSION_KEY = "nemo_gym_pi_sandbox_session"
 
 
 def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
@@ -467,13 +462,6 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0)
     sandbox_bash_timeout_seconds: int = Field(default=900, gt=0)
     session_close_timeout_seconds: float = Field(default=60, gt=0)
-    session_lifetime_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
-    session_close_retry_window_seconds: float = Field(
-        default=300.0,
-        gt=0,
-        allow_inf_nan=False,
-        description="Keep successful close receipts for this many seconds; cover the caller's retry horizon.",
-    )
 
     @property
     def command_parts(self) -> list[str]:
@@ -501,110 +489,11 @@ class PiAgent(SimpleResponsesAPIAgent):
     config: PiAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    _sandbox_sessions: dict[str, PiSandboxSession] = PrivateAttr(default_factory=dict)
-    _closed_sandbox_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse, float]] = PrivateAttr(
-        default_factory=OrderedDict
-    )
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
 
-    _session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
-    _session_lock_users: dict[str, int] = PrivateAttr(default_factory=dict)
-    _session_expiry_tasks: dict[str, asyncio.Task[None]] = PrivateAttr(default_factory=dict)
-    _closed_session_ids: dict[str, tuple[EpisodeId, float]] = PrivateAttr(default_factory=dict)
-
-    @asynccontextmanager
-    async def _session_lock(self, session_id: str) -> AsyncIterator[None]:
-        """Count holders and waiters so pruning cannot replace an in-flight ID lock."""
-        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-        self._session_lock_users[session_id] = self._session_lock_users.get(session_id, 0) + 1
-        try:
-            async with lock:
-                yield
-        finally:
-            remaining = self._session_lock_users[session_id] - 1
-            if remaining:
-                self._session_lock_users[session_id] = remaining
-            else:
-                self._session_lock_users.pop(session_id)
-                if session_id not in self._sandbox_sessions and session_id not in self._closed_session_ids:
-                    self._session_locks.pop(session_id, None)
-
-    def _session_marker(self, request: Request) -> str | None:
-        try:
-            session = request.session
-        except (AssertionError, AttributeError):
-            return None
-        if not isinstance(session, Mapping) or _SANDBOX_SESSION_KEY not in session:
-            return None
-        marker = session[_SANDBOX_SESSION_KEY]
-        if not isinstance(marker, str) or not marker:
-            raise HTTPException(409, "Invalid Pi session marker")
-        return marker
-
-    async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
-        """Borrow the Resources-owned task sandbox and install a pinned Pi runtime inside it."""
-        self._expire_closed_agent_sessions()
-        session_id = body.agent_session_id
-        previous = self._session_marker(request)
-        if previous != session_id and previous in self._sandbox_sessions:
-            raise HTTPException(409, "Pi cookie belongs to another active session")
-        if previous == session_id and session_id not in self._sandbox_sessions:
-            raise HTTPException(409, "Pi seed cookie references a closed or expired session")
-        async with self._session_lock(session_id):
-            if session_id in self._closed_session_ids:
-                raise HTTPException(409, "Pi session is already closed")
-            state = self._sandbox_sessions.get(session_id)
-            if state is not None:
-                if state.seed != body:
-                    raise HTTPException(409, "Pi session ID is bound to a different seed request")
-                if state.closing:
-                    raise HTTPException(409, "Pi session is closing")
-            else:
-                try:
-                    state = await self._initialize_agent_session_state(session_id, body)
-                except BaseException:
-                    if session_id not in self._sandbox_sessions:
-                        # Initialization either never connected or confirmed its cleanup.
-                        self._closed_sandbox_sessions[session_id] = (
-                            body.episode_id,
-                            AgentCloseSessionResponse(agent_session_id=session_id),
-                            monotonic() + self.config.session_close_retry_window_seconds,
-                        )
-                        self._remember_closed_session(session_id, body.episode_id)
-                    else:
-                        self._session_expiry_tasks[session_id] = asyncio.create_task(
-                            self._expire_agent_session(session_id, body.episode_id)
-                        )
-                    raise
-                self._sandbox_sessions[session_id] = state
-                self._session_expiry_tasks[session_id] = asyncio.create_task(
-                    self._expire_agent_session(session_id, body.episode_id)
-                )
-            request.session[_SANDBOX_SESSION_KEY] = session_id
-            return AgentSeedSessionResponse(agent_session_id=session_id)
-
-    async def _expire_agent_session(self, session_id: str, episode_id: EpisodeId) -> None:
-        """Bound abandoned sessions through the same fail-closed teardown as explicit close."""
-        try:
-            await asyncio.sleep(self.config.session_lifetime_seconds)
-            await self.close_agent_session(
-                Request({"type": "http", "session": {}}),
-                AgentCloseSessionRequest(agent_session_id=session_id, episode_id=episode_id),
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            LOG.exception("Could not clean up expired Pi session %s; retaining failed state", session_id)
-        finally:
-            self._session_expiry_tasks.pop(session_id, None)
-
-    async def _initialize_agent_session_state(
-        self, agent_session_id: str, body: AgentSeedSessionRequest
-    ) -> PiSandboxSession:
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> PiSandboxSession:
         # Match Hermes: session initialization owns the sandbox runtime setup,
         # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
-        if self.config.num_workers not in (None, 1):
-            raise HTTPException(422, "Pi sessions require num_workers=1")
         if body.sandbox_access is None or not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
             raise HTTPException(422, "Pi requires direct, Resources-owned SandboxAccess")
         if not body.sandbox_access.workdir.startswith("/"):
@@ -628,6 +517,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         directory = f"/tmp/nemo-gym-pi-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-pi-node-22.19.0-{self.config.pi_version}"
         state = PiSandboxSession(body, sandbox, directory, runtime)
+        record = self._session_records[body.agent_session_id]
+        record.state = state
         try:
             prepared = await sandbox.exec(f"mkdir -p {shlex.quote(directory + '/home/.pi/agent')}", timeout_s=30)
             if prepared.return_code != 0:
@@ -654,109 +545,45 @@ class PiAgent(SimpleResponsesAPIAgent):
             try:
                 await state.close(self.config.session_close_timeout_seconds)
             except BaseException:
-                self._sandbox_sessions[agent_session_id] = state
-                LOG.exception("Pi seed cleanup failed; retaining session %s", agent_session_id)
+                LOG.exception("Pi seed cleanup failed; retaining session %s", body.agent_session_id)
+            else:
+                record.state = None
             raise
         return state
 
-    async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
-        """Confirm Pi teardown before allowing verification; never destroy the borrowed sandbox."""
-        self._expire_closed_agent_sessions()
-        session_id = body.agent_session_id
-        cookie = self._session_marker(request)
-        if cookie is not None and cookie != session_id:
-            raise HTTPException(409, "Pi close cookie does not match the requested session")
-        async with self._session_lock(session_id):
-            closed = self._closed_sandbox_sessions.get(session_id)
-            if closed is not None:
-                if body.episode_id != closed[0]:
-                    raise HTTPException(409, "Pi close does not match the seeded episode")
-                request.session[_SANDBOX_SESSION_KEY] = session_id
-                return closed[1]
-            if session_id in self._closed_session_ids:
-                raise HTTPException(409, "Pi close receipt has expired")
-            state = self._sandbox_sessions.get(session_id)
-            if state is None:
-                if cookie is not None:
-                    raise HTTPException(409, "Pi close session is unknown or expired")
-                result = AgentCloseSessionResponse(agent_session_id=session_id)
-            else:
-                if body.episode_id != state.seed.episode_id:
-                    raise HTTPException(409, "Pi close does not match the seeded episode")
-                await state.close(self.config.session_close_timeout_seconds)
-                observations = state.observations or AgentObservationBundle(
-                    source="pi", gaps=[ObservationGap(code="agent_activation_interrupted")]
-                )
-                result = AgentCloseSessionResponse(agent_session_id=session_id, agent_observations=observations)
-                self._sandbox_sessions.pop(session_id, None)
-                expiry = self._session_expiry_tasks.pop(session_id, None)
-                if expiry is not None and expiry is not asyncio.current_task():
-                    expiry.cancel()
-            request.session[_SANDBOX_SESSION_KEY] = session_id
-            self._closed_sandbox_sessions[session_id] = (
-                body.episode_id,
-                result,
-                monotonic() + self.config.session_close_retry_window_seconds,
-            )
-            self._remember_closed_session(session_id, body.episode_id)
-            return result
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        """Stop Pi-owned work before verification, retaining the borrowed sandbox."""
+        assert isinstance(state, PiSandboxSession)
+        await state.close(self.config.session_close_timeout_seconds)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=state.observations
+            or AgentObservationBundle(source="pi", gaps=[ObservationGap(code="observation_capture_failed")]),
+        )
 
-    def _remember_closed_session(self, session_id: str, episode_id: EpisodeId) -> None:
-        """Prevent delayed seeds through the session lifetime and close retry horizon."""
-        retention = max(self.config.session_lifetime_seconds, self.config.session_close_retry_window_seconds)
-        self._closed_session_ids[session_id] = (episode_id, monotonic() + retention)
-        asyncio.get_running_loop().call_later(retention, self._expire_closed_agent_sessions)
-
-    def _expire_closed_agent_sessions(self) -> None:
-        """Prune receipts and tombstones by elapsed time, never by traffic or retry order."""
-        now = monotonic()
-        while self._closed_sandbox_sessions:
-            if next(iter(self._closed_sandbox_sessions.values()))[2] > now:
-                break
-            self._closed_sandbox_sessions.popitem(last=False)
-        for session_id, (_, deadline) in tuple(self._closed_session_ids.items()):
-            if deadline <= now:
-                self._closed_session_ids.pop(session_id)
-                if not self._session_lock_users.get(session_id, 0):
-                    self._session_locks.pop(session_id, None)
-
-    def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
-        """Validate and normalize input before consuming the session's activation."""
+    def _validate_request(
+        self, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        """Apply the same supported-control boundary to local and sandbox execution."""
         if body.model is not None and body.model != self.config.model:
             raise HTTPException(422, "Pi model must match the configured model")
-        unsupported = (
-            "include",
-            "store",
-            "service_tier",
-            "prompt_cache_key",
-            "prompt_cache_retention",
-            "safety_identifier",
-            "stream_options",
-            "user",
-            "temperature",
-            "top_p",
-            "reasoning",
-            "max_tool_calls",
-            "previous_response_id",
-            "prompt",
-            "text",
-            "context_management",
-            "conversation",
-            "moderation",
-            "top_logprobs",
-            "truncation",
-        )
-        values = body.model_dump(mode="json")
-        for name in unsupported:
-            if values.get(name) is not None:
+        if body.max_output_tokens is not None:
+            raise HTTPException(
+                422,
+                "Pi does not support the total max_output_tokens budget; "
+                "configure the agent's max_output_tokens for a per-model-call limit instead",
+            )
+        supported = {"input", "instructions", "model"}
+        for name, field in type(body).model_fields.items():
+            if name in supported:
+                continue
+            value = getattr(body, name)
+            if name in ("stream", "background") and value is False:
+                continue
+            if value != field.get_default(call_default_factory=True):
                 raise HTTPException(422, f"Pi does not support request field {name}")
-        output_limit = body.max_output_tokens if body.max_output_tokens is not None else self.config.max_output_tokens
-        if not 0 < output_limit <= 2**53 - 1:
+        if not 0 < self.config.max_output_tokens <= 2**53 - 1:
             raise HTTPException(422, "Pi max_output_tokens must be a positive JavaScript-safe integer")
-        if body.tools or body.tool_choice != "auto" or not body.parallel_tool_calls or body.background:
-            raise HTTPException(422, "Pi owns tool selection and execution policy")
-        if (body.metadata or {}).get("chat_template_kwargs") is not None:
-            raise HTTPException(422, "Configure chat_template_kwargs on the Gym model server for Pi")
         items = (
             [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
         )
@@ -769,7 +596,11 @@ class PiAgent(SimpleResponsesAPIAgent):
                 for part in item.content
             ):
                 raise HTTPException(422, "Pi only supports text input")
-        prompt, input_system = _extract_instruction(items)
+        return body.model_copy(update={"input": items}).model_copy(deep=True)
+
+    def _conversation_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+        """Build identical instructions for local and sandbox Pi."""
+        prompt, input_system = _extract_instruction(body.input)
         system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
         return prompt, system
 
@@ -784,10 +615,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         # Sandbox sessions use only Gym's provider; do not copy credentials for
         # unrelated direct providers from the host configuration into the sandbox.
         models = {
-            "providers": {"nemo": self._build_models_config(state.seed.episode_id.capture_key)["providers"]["nemo"]}
+            "providers": {"nemo": self._build_models_config(state.request.episode_id.capture_key)["providers"]["nemo"]}
         }
-        if body.max_output_tokens is not None:
-            models["providers"]["nemo"]["models"][0]["maxTokens"] = body.max_output_tokens
         await state.upload_json("home/.pi/agent/models.json", models)
         await state.upload_json("home/.pi/agent/settings.json", self._build_settings_config())
         output_limit_extension = "output-limit.mjs"
@@ -826,7 +655,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             "directory": state.directory,
             "command": command,
             "prompt": prompt,
-            "cwd": state.seed.sandbox_access.workdir,
+            "cwd": state.request.sandbox_access.workdir,
             "env": {
                 "HOME": f"{state.directory}/home",
                 "PI_CODING_AGENT_DIR": f"{state.directory}/home/.pi/agent",
@@ -918,7 +747,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         try:
             state.observations = _build_pi_observations(
                 events,
-                state.seed.episode_id.capture_key,
+                state.request.episode_id.capture_key,
                 self.config.model_server,
                 [*conversation_input, *output],
                 transcript_available=bool(output),
@@ -1102,9 +931,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
-        user_message, input_system = _extract_instruction(body.input)
-        system_parts = [p for p in [self.config.system_prompt, input_system] if p]
-        system_prompt = "\n\n".join(system_parts) if system_parts else None
+        user_message, system_prompt = self._conversation_input(body)
+        system_prompt = system_prompt or None
         conversation_input = (
             [NeMoGymEasyInputMessage(role="system", content=system_prompt)] if system_prompt is not None else []
         )
@@ -1179,23 +1007,25 @@ class PiAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        session_id = self._session_marker(request)
+        body = self._validate_request(body)
+        session_id = self._agent_session_id_from_request(request)
         if session_id is not None:
-            state = self._sandbox_sessions.get(session_id)
+            state = self._require_agent_session(session_id)
+            assert isinstance(state, PiSandboxSession)
             rollout_id = request.path_params.get("rollout_id")
-            if state is None or state.seed.episode_id.capture_key != rollout_id:
+            if state.request.episode_id.capture_key != rollout_id:
                 raise HTTPException(409, "Pi activation does not match the seeded session and rollout route")
-            if state.activated or state.closing:
-                raise HTTPException(409, "Pi sandbox sessions support one activation")
-            prompt, system = self._sandbox_input(body)
-            state.activated = True
-            state.task = asyncio.create_task(self._sandbox_response(state, body, prompt=prompt, system=system))
-            try:
-                return await asyncio.shield(state.task)
-            except asyncio.CancelledError:
-                if not state.task.done() and not state.task.cancelling():
-                    state.task.cancel()
-                raise
+            if state.closing:
+                raise HTTPException(409, "Pi session is closing")
+            prompt, system = self._conversation_input(body)
+            if state.task is None:
+                # Bind the request before the first await so retries join one invocation.
+                state.activation_request = body.model_copy(deep=True)
+                state.task = asyncio.create_task(self._sandbox_response(state, body, prompt=prompt, system=system))
+            elif body != state.activation_request:
+                raise HTTPException(409, "Pi sandbox sessions support one activation; retry the same request")
+            # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
+            return (await asyncio.shield(state.task)).model_copy(deep=True)
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         episode = await self._create_episode(
@@ -1210,7 +1040,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         )
 
     async def run(self, request: Request, body: PiAgentRunRequest) -> PiAgentVerifyResponse:
-        if self._session_marker(request) is not None:
+        if self._agent_session_id_from_request(request) is not None:
             raise HTTPException(409, "Pi sessions require EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(

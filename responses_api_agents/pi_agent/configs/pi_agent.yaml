@@ -12,7 +12,6 @@ pi_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      model: ???
+      model: ${policy_model_name}
       pi_version: 0.80.2
       timeout: 900
-      session_lifetime_seconds: 21600

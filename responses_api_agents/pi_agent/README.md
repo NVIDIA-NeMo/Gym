@@ -1,23 +1,23 @@
 # Pi Agent
 
 Pi runs the [Pi CLI](https://github.com/earendil-works/pi) inside the task sandbox supplied
-by the benchmark's Resources Server. The EnvironmentServer coordinates setup, agent execution,
+by the benchmark's Resources Server. The Environment Server coordinates setup, agent execution,
 verification, and cleanup. Pi borrows the sandbox and runs its own model/tool loop there.
 
 [configs/pi_agent.yaml](configs/pi_agent.yaml) is the default agent configuration. Benchmark
 and agent settings are independent; the run configuration connects them through the
-EnvironmentServer. This harness is currently for evaluation; token IDs and logprobs are not wired up.
+Environment Server. This harness is currently for evaluation; token IDs and logprobs are not wired up.
 
 ## Configure and run
 
 Import [configs/pi_agent.yaml](configs/pi_agent.yaml) in your environment/run configuration
-and compose its `pi_agent` with your benchmark's Resources server, a sandbox provider, and a Gym
-model server. The agent config contains no benchmark or dataset selection. Use the existing
-component names directly; the run configuration supplies the EnvironmentServer references.
+and compose its `pi_agent` with your benchmark's Resources Server, a sandbox provider, and a Gym
+Model Server. The agent config contains no benchmark or dataset selection. Use the existing
+component names directly; the run configuration supplies the Environment Server references.
 
 - On Pi, set `num_workers: 1`, an exact `pi_version` (for example `0.80.2`),
-  `model_server` pointing to the Gym model server, and `model` to its served model ID.
-- On [single-agent EnvironmentServer](../../environment_servers/single_agent_turn/configs/single_agent_turn.yaml),
+  `model_server` pointing to the Gym Model Server, and `model` to its served model ID.
+- On [single-agent Environment Server](../../environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml),
   set `agent_server` to Pi, `resources_server` to the benchmark, and `resources_tool_transports: []`.
 - Resources must support sandbox sessions and return direct `SandboxAccess` with an
   absolute task working directory. Pi does not create a fallback sandbox.
@@ -57,76 +57,65 @@ The run binds these independent components:
 config_paths:
   - resources_servers/swebench_pro/configs/swebench_pro.yaml
   - responses_api_agents/pi_agent/configs/pi_agent.yaml
-  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
-environment_routing_mode: taskset
-environment_server_routes:
-  swebench_pro: single_agent_turn
-
-single_agent_turn:
+single_agent_turn_legacy:
   environment_servers:
-    single_agent_turn:
+    single_agent_turn_legacy:
       resources_server:
         name: swebench_pro_resources_server
       agent_server:
         name: pi_agent
 ```
 
-Supply a `policy_model` model server and `sandbox` provider in `model-provider.yaml`,
-and set `pi_agent.responses_api_agents.pi_agent.model` to the served model ID there.
-Prepare typed input from the existing benchmark rows before collection. Use the same
-run configuration to launch servers and collect rollouts:
+Supply `policy_model`, `policy_model_name`, and a `sandbox` provider in `model-provider.yaml`.
+Pi uses `${policy_model_name}` by default. The Environment Server accepts the benchmark's
+prepared flat JSONL rows through `single_agent_turn_legacy`, using the same session lifecycle
+as `single_agent_turn`. No separate task conversion is required:
 
 ```bash
-python benchmarks/swebench/pro/materialize_single_agent_tasks.py prepared.jsonl tasks.jsonl --taskset swebench_pro
+python benchmarks/swebench/pro/prepare.py
 gym env start --config run.yaml --config model-provider.yaml
 gym eval run --no-serve \
   --config run.yaml --config model-provider.yaml \
-  -i tasks.jsonl -o rollouts.jsonl
+  -i benchmarks/swebench/data/swebench_pro_benchmark.jsonl -o rollouts.jsonl \
+  +agent_name=pi_agent
 ```
 
-The collector calls the EnvironmentServer's `/run`; the environment seeds Resources
+The collector calls the Environment Server's `/run`; the environment seeds Resources
 and Pi, invokes Pi's `/v1/responses`, closes Pi, then verifies and closes Resources.
 Collection does not call Pi's compatibility `/run` endpoint.
 
-After starting the composed servers, submit an episode request to EnvironmentServer's
-`/run` endpoint, not the agent's `/run`. Use the benchmark's prepared task: `task.task_input`
-contains `responses_create_params` for Pi and `task_data` matching that Resources server's
-seed contract. The request also contains `episode_id` and `task.task_id` for rollout identity.
-For a request saved as `episode.json`:
+Input is one text user message, optionally preceded by a system message. Both sandbox
+and local execution combine the configured system prompt, request `instructions`, and input
+system message in that order. Sampling and chat-template settings belong on the Gym Model Server.
+Unsupported request controls are rejected before execution.
 
-```bash
-curl --fail-with-body -H 'Content-Type: application/json' \
-  --data-binary @episode.json "${PI_ENVIRONMENT_URL}/run"
-```
-
-Input is one text user message, optionally preceded by a system message. The adapter also
-applies `instructions` and its configured system prompt. For sandbox sessions, request
-`max_output_tokens` overrides the agent's configured default. An adapter-owned Pi extension
-sends the limit as `max_tokens` on every Chat Completions request and preserves any smaller
-upstream limit. This is a per-model-call cap, including reasoning tokens, rather than a total
-episode budget. Limits must be positive JavaScript-safe integers. Model-server configuration
-must not override this request limit with a larger value. Enforcement is tested with Pi 0.80.2.
-Unsupported sampling, history, and tool-policy overrides are rejected rather than silently
-ignored; configure sampling and chat-template settings on the Gym model server.
+Set the agent configuration's `max_output_tokens` for a per-model-call output cap, including
+reasoning tokens. An adapter-owned Pi extension applies it as `max_tokens`, preserving any
+smaller upstream cap. Limits must be positive JavaScript-safe integers. Request-level
+`max_output_tokens` is rejected because a total-response budget is not implemented. Model Server
+configuration must not replace the agent's cap with a larger value. Enforcement is tested with Pi 0.80.2.
 
 ## Lifecycle and ownership
 
-1. EnvironmentServer asks Resources to seed a task. Resources creates the sandbox.
-2. EnvironmentServer passes `SandboxAccess` to Pi's `/v1/agent_sessions` endpoint.
+1. Environment Server asks Resources to seed a task. Resources creates the sandbox.
+2. Environment Server passes `SandboxAccess` to Pi's `/v1/agent_sessions` endpoint.
 3. Pi connects as a borrower and automatically runs [install_pi_runtime.sh](install_pi_runtime.sh)
    to install Node 22.19.0 and the configured Pi package outside the task repository.
    This installs the harness runtime, not task dependencies or the test environment.
-4. EnvironmentServer calls the rollout-prefixed `/v1/responses` route with the agent-session cookie.
+4. Environment Server calls the rollout-prefixed `/v1/responses` route with the agent-session cookie.
 5. Pi runs in the sandbox, uses its built-in tools, and sends Chat Completions to
    the rollout-prefixed Gym model-server URL. The sandbox must be able to reach that URL.
 6. Agent close confirms supervisor and descendant cleanup, returns observations,
    removes session files, and disconnects. A failed or missing cleanup receipt blocks close.
-7. EnvironmentServer asks Resources to verify and close the task session. The benchmark
+7. Environment Server asks Resources to verify and close the task session. The benchmark
    owns its verification procedure and sandbox teardown.
 
-Each sandbox session supports one activation, a matching episode and rollout identity,
-and a single agent-server worker. It never falls back to a host CLI when sandbox setup
+Each sandbox session supports one activation and a matching episode and rollout identity.
+Identical request retries join the running activation or replay its result; changed requests
+are rejected. A disconnected HTTP caller does not cancel Pi; session close owns cancellation.
+Use a single agent-server worker. It never falls back to a host CLI when sandbox setup
 fails. Calls without an agent session retain the local Pi behavior; they do not operate
 on the Resources-owned task sandbox.
 
@@ -139,8 +128,8 @@ detail, not a separate endpoint or a setup step users must run.
 
 - `concurrency`: max simultaneous `run()` calls
 - `command`: local compatibility launcher; task sessions use their installed Pi runtime
-- `model`: the served model ID for the configured Gym model server
-- `model_server`: Gym model server used to generate the Pi provider entry
+- `model`: the served model ID for the configured Gym Model Server
+- `model_server`: Gym Model Server used to generate the Pi provider entry
 - `context_window`: context limit for a generated model entry
 - `max_output_tokens`: output limit for a generated model entry
 - `env`: extra subprocess environment variables for local compatibility calls
@@ -169,20 +158,10 @@ the pinned Pi version. Model-call references and tool observations are returned 
 Tool timestamps are supervisor receipt times, not executor timestamps; unsupported evidence
 is explicitly marked as gaps.
 
-Cleanup is cooperative, not a security boundary against hostile sandbox code. Like Hermes,
-successful close receipts are retained for `session_close_retry_window_seconds` (default 300),
-starting after cleanup. Set it to cover the caller's retry horizon. Other sessions and retries
-do not shorten or extend that window. Expired receipts are pruned on seed/close activity;
-stale activations still cannot fall back to the host. Sessions and receipts are process-local,
-not durable recovery. Resources and the sandbox provider own sandbox cleanup and expiry.
-
-Session IDs come from EnvironmentServer. Repeating an identical seed returns the
-same session, while reusing its ID for a different seed fails. Close accepts an explicit
-session ID and episode without a cookie, so a lost seed response can still be cleaned up.
-Close-before-seed records a tombstone to reject delayed creation. The agent uses a separate
-random filesystem directory, so caller IDs never become paths. `session_lifetime_seconds`
-(default 21600) bounds abandoned sessions through the same confirmed-cleanup path. Failed
-cleanup retains the closing state for retry and blocks another activation.
+Session and close retries use Gym's shared agent-session implementation. Session state is
+process-local. The Environment Server owns normal cleanup and the sandbox provider owns
+expiry; Pi does not run a separate session-expiry timer. Failed cleanup remains retryable
+and blocks verification. Cleanup is cooperative, not a security boundary against sandbox code.
 
 ## Local CLI compatibility
 
@@ -225,6 +204,6 @@ models_config:
         reasoning: false
 ```
 
-For Gym-managed inference, set `model_server` to a Gym model server and set `model` to its served model id. The
+For Gym-managed inference, set `model_server` to a Gym Model Server and set `model` to its served model id. The
 agent creates the Pi provider entry automatically. Without `model_server`, the existing provider
 configuration is unchanged.
