@@ -15,7 +15,7 @@ docker build --file benchmarks/biomnibench_da/Dockerfile --tag benchmarks/biomni
 
 Prepare the benchmark dataset using the task environment image:
 ```shell
-uv run gym eval prepare --benchmark biomnibench_da \
+gym eval prepare --benchmark biomnibench_da \
   ++prepare_script_args.docker_image=benchmarks/biomnibench_da:latest \
   ++prepare_script_args.output_dir=benchmarks/biomnibench_da/data
 ```
@@ -27,26 +27,35 @@ uv run gym eval prepare --benchmark biomnibench_da \
 > [!warning]
 > This preparation is a large download. Use `++prepare_script_args.limit=5` to prepare only five tasks for debugging.
 
-Start the environment servers:
+Singularity must be installed; set `SINGULARITY_CACHEDIR` and `SINGULARITY_TMPDIR` to existing host directories,
+and export `NVINF_API_KEY` for the NVIDIA Inference example below.
+
+Run the benchmark evaluation:
 ```shell
-TODO
+JUDGE_MODEL=openai/nvidia/zai-org/glm-5.2 \
+JUDGE_MODEL_API_BASE=https://inference-api.nvidia.com/v1 \
+JUDGE_MODEL_API_KEY="${NVINF_API_KEY}" \
+gym eval run \
+  --benchmark biomnibench_da \
+  --split benchmark \
+  --model nvinf/nvidia/nvidia/nemotron-3-ultra \
+  --output benchmarks/biomnibench_da/logs/rollouts.jsonl \
+  --concurrency 8 \
+  --resume
 ```
 
-Run the evaluation:
-```shell
-TODO
-```
+> [!tip]
+> If you override `prepare_script_args.output_dir` during preparation, pass the same override to this command.
+> Add `--limit 5` with that override for a small debugging run.
 
 ## Configuration
 
 | Variable | Type | Description |
 | --- | --- | --- |
-| `harbor_dataset_path` | Hydra value | Path to the generated Harbor dataset. |
-| `output_jsonl_fpath` | Hydra value | Rollout output path; used as the default jobs directory. Automatically set when using the `-o/--output` flag in the script above. |
+| `output_jsonl_fpath` | Hydra value | Rollout output path. Set by `-o/--output` on `gym eval run`. |
 | `policy_model_name` | Hydra value | Model name passed to the OpenCode agent. Must use OpenCode provider in [opencode.json](./harbor/task-template/environment/opencode.json). Automatically set when using `-m/--model` flag in the script above. |
 | `SINGULARITY_CACHEDIR` | Environment variable | Singularity image cache directory; `/harbor` is appended. |
 | `SINGULARITY_TMPDIR` | Environment variable | Singularity temp directory; Must already exist on host. |
-| `SINGULARITY_FORCE_PULL` | Environment variable | Whether Singularity should force-pull images. Defaults to `false`. |
 | `NVINF_API_KEY` | Environment variable | NVIDIA Inference API key for OpenCode provider in [opencode.json](./harbor/task-template/environment/opencode.json) |
 | `VLLM_API_BASE` | Environment variable | vLLM API base for OpenCode provider in [opencode.json](./harbor/task-template/environment/opencode.json) |
 | `JUDGE_MODEL` | Environment variable | Judge model used to score the agent's response. This must use [LiteLLM](https://docs.litellm.ai/) provider prefixes. |
@@ -63,11 +72,11 @@ See [phylobio/BiomniBench-DA](https://huggingface.co/datasets/phylobio/BiomniBen
 ### Harbor
 
 The adapter generates the Harbor benchmark at
-`~/store/data/harbor/bob`. It creates one Harbor task for each `da-*` directory
+`benchmarks/biomnibench_da/data` by default. It creates one Harbor task for each `da-*` directory
 in the source dataset and a `gym.jsonl` index for use with NeMo Gym:
 
 ```text
-bob/
+data/
 ├── gym.jsonl
 └── bob-task__<task id>/
     ├── task.toml

@@ -12,7 +12,7 @@ biomnibench_da:
       datasets:
         - name: biomnibench_da
           type: benchmark
-          jsonl_fpath: ${prepare_script_args.output_dir}/gym.jsonl
+          jsonl_fpath: benchmarks/biomnibench_da/data/gym.jsonl
           prepare_script: benchmarks/biomnibench_da/harbor/adapter.py
           prepare_dependencies:
             - huggingface_hub
@@ -50,5 +50,7 @@ biomnibench_da:
 biomnibench_da_environment_server:
   environment_servers:
     legacy_agent:
+      entrypoint: app.py
       agent_server:
+        type: responses_api_agents
         name: biomnibench_da
