@@ -659,7 +659,7 @@ async def test_runner_exit_without_cleanup_receipt_blocks_close(agent, state, re
     state.sandbox.disconnect.assert_awaited_once()
 
 
-@pytest.mark.parametrize("overrides", [{}, {"max_output_tokens": 32, "temperature": 0.0}])
+@pytest.mark.parametrize("overrides", [{}, {"temperature": 0.0}])
 async def test_native_prompt_and_limits_reach_runner(agent, state, overrides, tmp_path):
     state.session_dir = str(tmp_path)
     agent.server_client.global_config_dict = {
@@ -700,7 +700,7 @@ async def test_native_prompt_and_limits_reach_runner(agent, state, overrides, tm
     assert payload["model_enable_thinking"] is False
     assert payload["history"] == []
     assert payload["system_message"] == "Configured instruction\n\nRequest instruction"
-    assert payload["max_tokens"] == overrides.get("max_output_tokens", 500)
+    assert payload["max_tokens"] == 500
     assert payload["temperature"] == overrides.get("temperature", 0.7)
     assert body.input == "Fix the bug"  # Do not mutate the caller's request.
 
@@ -770,6 +770,17 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
     "override",
     [
         {"top_p": 0.8},
+        {"top_p": 1.0},
+        {"max_output_tokens": 32},
+        {"model": "different-model"},
+        {"store": True},
+        {"store": False},
+        {"service_tier": "priority"},
+        {"include": ["reasoning.encrypted_content"]},
+        {"user": "user-id"},
+        {"metadata": {"extra_body": '{"seed": 1}'}},
+        {"metadata": {"chat_template_kwargs": '{"enable_thinking": true}'}},
+        {"prompt_cache_key": "cache"},
         {"reasoning": {"effort": "low"}},
         {"previous_response_id": "previous"},
         {"tool_choice": "none"},
@@ -786,11 +797,89 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
         {"input": [{"type": "function_call_output", "call_id": "call", "output": "result"}]},
     ],
 )
-def test_unsupported_requests_are_rejected(agent, override):
+@pytest.mark.parametrize("sandbox", [False, True])
+async def test_unsupported_requests_are_rejected(agent, state, override, sandbox):
     body = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": "task"} | override)
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+    agent._run_sandbox_episode = AsyncMock(side_effect=AssertionError("Must validate before execution"))
+    agent._create_response = AsyncMock(side_effect=AssertionError("Must validate before execution"))
     with pytest.raises(HTTPException) as error:
-        agent._validate_sandbox_request(body)
+        await agent.responses(request(state) if sandbox else SimpleNamespace(session={}), body)
     assert error.value.status_code == 422
+    assert state.phase is SessionPhase.READY
+    agent._run_sandbox_episode.assert_not_awaited()
+    agent._create_response.assert_not_awaited()
+
+
+@pytest.mark.parametrize("temperature", [None, 0.0, 0.2])
+async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypatch, temperature):
+    validations = []
+    validate = HermesAgent._validate_request
+
+    def count_validation(self, body):
+        validations.append(body)
+        return validate(self, body)
+
+    monkeypatch.setattr(HermesAgent, "_validate_request", count_validation)
+    agent.config.system_prompt = "Configured instruction"
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        model="model",
+        instructions="Request instruction",
+        temperature=temperature,
+        input=[
+            {"role": "system", "content": "Input system instruction"},
+            {"role": "user", "content": "First question"},
+            {"role": "assistant", "content": "First answer"},
+            {"role": "user", "content": "Follow-up"},
+        ],
+    )
+    original = body.model_dump()
+    result = {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}
+    runner = MagicMock()
+    runner.run_conversation.return_value = result
+    constructor = MagicMock(return_value=runner)
+    monkeypatch.setattr("run_agent.AIAgent", constructor)
+    monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
+    await agent.responses(SimpleNamespace(session={}), body)
+    user_message, system_message, history = runner.run_conversation.call_args.args
+
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+    agent._upload_json = AsyncMock()
+    agent._download_json = AsyncMock(side_effect=[{"cleanup_confirmed": True}, {"result": result, "runtime": {}}])
+    await agent.responses(request(state), body)
+    payload = agent._upload_json.await_args.args[2]
+    assert payload["user_message"] == user_message == "Follow-up"
+    assert (
+        payload["history"]
+        == history
+        == [
+            {"role": "user", "content": "First question"},
+            {"role": "assistant", "content": "First answer"},
+        ]
+    )
+    assert (
+        payload["system_message"]
+        == system_message
+        == ("Configured instruction\n\nRequest instruction\n\nInput system instruction")
+    )
+    assert (
+        payload["temperature"]
+        == constructor.call_args.kwargs["temperature"]
+        == (temperature if temperature is not None else 0.7)
+    )
+    assert payload["max_tokens"] == constructor.call_args.kwargs["max_tokens"] == 500
+    assert body.model_dump() == original
+    assert len(validations) == 2  # Exactly once per incoming request, not again in the runner.
+
+
+def test_future_schema_controls_are_rejected_unless_left_at_default(agent):
+    class ExtendedRequest(NeMoGymResponseCreateParamsNonStreaming):
+        future_control: str | None = None
+
+    body = ExtendedRequest(input="task", stream=False, background=False)
+    assert agent._validate_request(body).input[0].content == "task"
+    with pytest.raises(HTTPException, match="future_control"):
+        agent._validate_request(body.model_copy(update={"future_control": "enabled"}))
 
 
 def test_text_history_and_system_message_are_preserved(agent):
@@ -802,7 +891,7 @@ def test_text_history_and_system_message_are_preserved(agent):
             {"role": "user", "content": "Follow-up"},
         ]
     )
-    assert agent._validate_sandbox_request(body).input == body.input
+    assert agent._validate_request(body).input == body.input
 
 
 async def test_required_resources_tools_are_rejected_before_connect(agent, state):

@@ -731,8 +731,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         agent_session_id: str,
         state: HermesAgentSessionState,
     ) -> AgentEpisode:
-        body = self._validate_sandbox_request(body)
-        user_message, history, input_system = _split_input_to_user_and_history(body.input)
+        params = self._conversation_params(body)
         input_path = f"{state.session_dir}/input.json"
         output_path = f"{state.session_dir}/output.json"
         stdout_path = f"{state.session_dir}/stdout.log"
@@ -754,8 +753,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "enabled_toolsets": enabled_toolsets,
             "mcp_servers": [access.name for access in mcp_accesses],
             "required_mcp_servers": [access.name for access in mcp_accesses if access.required],
-            "history": history,
-            "max_tokens": body.max_output_tokens if body.max_output_tokens is not None else self.config.max_tokens,
+            **params,
             "max_turns": self.config.max_turns,
             "model": self._model_name(),
             "model_enable_thinking": self._model_enable_thinking(),
@@ -763,13 +761,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "model_base_url": self.resolve_model_base_url(
                 self.config.model_server.name, state.request.episode_id.capture_key
             ),
-            "system_message": "\n\n".join(
-                part for part in (self.config.system_prompt, body.instructions, input_system) if part
-            )
-            or None,
-            "temperature": body.temperature if body.temperature is not None else self.config.temperature,
             "terminal_timeout": self.config.terminal_timeout,
-            "user_message": user_message,
         }
         await self._upload_json(state.sandbox, input_path, payload)
         cleanup_timeout = self.config.session_close_timeout_seconds / 3
@@ -827,7 +819,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             body=body,
             result=result,
             model_name=self._model_name(),
-            n_input=len(history) + 1,
+            n_input=len(params["history"]) + 1,
         )
         # Verifiers see Gym's MCP naming; the model's own names stay in the captured model calls.
         server_names = [access.name for access in mcp_accesses]
@@ -846,30 +838,29 @@ class HermesAgent(SimpleResponsesAPIAgent):
             observations=self._sandbox_observations(result, output.get("observations")),
         )
 
-    @staticmethod
-    def _validate_sandbox_request(
+    def _validate_request(
+        self,
         body: NeMoGymResponseCreateParamsNonStreaming,
     ) -> NeMoGymResponseCreateParamsNonStreaming:
-        """Accept text conversations and supported limits without silently dropping request semantics."""
-        for name in (
-            "top_p",
-            "reasoning",
-            "max_tool_calls",
-            "previous_response_id",
-            "prompt",
-            "text",
-            "context_management",
-            "conversation",
-            "moderation",
-            "top_logprobs",
-            "truncation",
-        ):
-            if getattr(body, name, None) is not None:
-                raise HTTPException(422, f"Native Hermes does not support request field {name}")
-        if body.tools or body.tool_choice != "auto" or not body.parallel_tool_calls or body.background:
-            raise HTTPException(422, "Native Hermes owns tool selection and execution policy")
-        if (body.metadata or {}).get("chat_template_kwargs") is not None:
-            raise HTTPException(422, "Configure chat_template_kwargs on the Gym model server for Hermes")
+        """Validate once at the HTTP boundary, identically for host and sandbox execution."""
+        if body.model is not None and body.model != self._model_name():
+            raise HTTPException(422, "Hermes request model must match the configured model")
+        if body.max_output_tokens is not None:
+            raise HTTPException(
+                422,
+                "Hermes does not support the total max_output_tokens budget; "
+                "configure max_tokens for a per-model-call limit instead",
+            )
+        supported = {"input", "instructions", "temperature", "model"}
+        # Fail closed for new schema fields instead of silently accepting unimplemented controls.
+        for name, field in type(body).model_fields.items():
+            if name in supported:
+                continue
+            value = getattr(body, name)
+            if name in ("stream", "background") and value is False:
+                continue  # Explicit synchronous, non-streaming execution is supported.
+            if value != field.get_default(call_default_factory=True):
+                raise HTTPException(422, f"Hermes does not support request field {name}")
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -880,15 +871,28 @@ class HermesAgent(SimpleResponsesAPIAgent):
             or conversation_roles[-1] != "user"
             or any(role not in ("user", "assistant") for role in conversation_roles)
         ):
-            raise HTTPException(422, "Native Hermes accepts text history ending with a user message")
+            raise HTTPException(422, "Hermes accepts text history ending with a user message")
         for item in body.input:
             if not isinstance(item.content, str) and any(
                 (part.get("type") if isinstance(part, dict) else getattr(part, "type", None))
                 not in ("input_text", "output_text")
                 for part in item.content
             ):
-                raise HTTPException(422, "Native Hermes only supports text input")
+                raise HTTPException(422, "Hermes only supports text input")
         return body
+
+    def _conversation_params(self, body: NeMoGymResponseCreateParamsNonStreaming) -> dict[str, Any]:
+        user_message, history, input_system = _split_input_to_user_and_history(body.input)
+        return {
+            "user_message": user_message,
+            "history": history,
+            "system_message": "\n\n".join(
+                part for part in (self.config.system_prompt, body.instructions, input_system) if part
+            )
+            or None,
+            "temperature": body.temperature if body.temperature is not None else self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
 
     def _response_from_result(
         self,
@@ -990,12 +994,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         from run_agent import AIAgent  # from hermes-agent on path  # pyright: ignore[reportMissingImports]
 
-        body = body.model_copy(deep=True)
-        if isinstance(body.input, str):
-            body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
-
-        user_message, history, input_system = _split_input_to_user_and_history(body.input)
-        system_message = self.config.system_prompt or input_system
+        params = self._conversation_params(body)
 
         base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
         model_name = self._model_name()
@@ -1005,10 +1004,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
             api_key=self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym"),  # pragma: allowlist secret
             model=model_name,
             use_streaming=False,
-            temperature=self.config.temperature,
+            temperature=params["temperature"],
             insert_reasoning=True,
             max_iterations=self.config.max_turns,
-            max_tokens=self.config.max_tokens,
+            max_tokens=params["max_tokens"],
             enabled_toolsets=self.config.enabled_toolsets,
             disabled_toolsets=self.config.disabled_toolsets,
             quiet_mode=True,
@@ -1048,9 +1047,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         try:
             result = await asyncio.to_thread(
                 agent.run_conversation,
-                user_message,
-                system_message,
-                history,
+                params["user_message"],
+                params["system_message"],
+                params["history"],
                 task_id=None,
             )
         except BaseException as exc:
@@ -1086,7 +1085,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             result=result,
             model_name=model_name,
             interrupted_by_dispatch=interrupted_by_dispatch,
-            n_input=len(history) + 1,
+            n_input=len(params["history"]) + 1,
         )
 
     async def responses(
@@ -1094,6 +1093,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        body = self._validate_request(body)
         agent_session_id = self._agent_session_id_from_request(request)
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
@@ -1103,7 +1103,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             state = self._require_agent_session(agent_session_id)
             if state.request.episode_id.capture_key != rollout_id:
                 raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
-            body = self._validate_sandbox_request(body)
             if state.phase is SessionPhase.READY:
                 # No await until the task and its immutable request binding are installed.
                 state.activation_request = body.model_copy(deep=True)
