@@ -4,9 +4,11 @@
 import asyncio
 import inspect
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 import pytest
 from aiohttp import ClientSession, ClientTimeout, TCPConnector, web
+from omegaconf import DictConfig
 
 from nemo_gym import server_utils
 from nemo_gym.telemetry import connection_pool, gym_metrics
@@ -137,6 +139,92 @@ async def test_no_queue_records_no_histogram_sample(collected_metrics, monkeypat
     (connect_point,) = collected_metrics()[CONNECT_TOTAL]
     assert connect_point.value == 1
     assert connect_point.attributes == {SERVER: "model"}
+
+
+async def test_client_span_is_kept_when_queue_metrics_are_enabled(collected_metrics, monkeypatch):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(trace, "get_tracer", provider.get_tracer)
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _group: True)
+
+    async def immediate(_request):
+        return web.json_response({"ok": True})
+
+    try:
+        async with _lazy_client(monkeypatch), _serve(immediate) as url:
+            for count in (1, 2):
+                await _get(url)
+                assert isinstance(
+                    server_utils._GLOBAL_AIOHTTP_CLIENT.connector, connection_pool.QueueTimedTCPConnector
+                )
+                spans = exporter.get_finished_spans()
+                assert len(spans) == count
+                assert all(span.kind == trace.SpanKind.CLIENT and span.name == "HTTP GET" for span in spans)
+                (connect_point,) = collected_metrics()[CONNECT_TOTAL]
+                assert connect_point.value == count
+                assert connect_point.attributes == {SERVER: "model"}
+    finally:
+        provider.shutdown()
+
+
+async def test_server_client_labels_samples_with_the_destination_server(collected_metrics, monkeypatch):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    queued = asyncio.Event()
+    original = connection_pool._connector_queue_constraint
+
+    def recording(connector):
+        queued.set()
+        return original(connector)
+
+    monkeypatch.setattr(connection_pool, "_connector_queue_constraint", recording)
+
+    async def blocked(_request):
+        entered.set()
+        await release.wait()
+        return web.json_response({"ok": True})
+
+    async with _lazy_client(monkeypatch, aggregate_limit=1), _serve(blocked) as url:
+        server_client = server_utils.ServerClient(
+            head_server_config=server_utils.BaseServerConfig(host="127.0.0.1", port=1),
+            global_config_dict=DictConfig(
+                {"my_judge": {"resources_servers": {"test": {"host": "127.0.0.1", "port": urlsplit(url).port}}}}
+            ),
+        )
+
+        async def get_named() -> None:
+            response = await server_client.get(server_name="my_judge", url_path="/work")
+            assert response.status == 200
+            assert await response.json() == {"ok": True}
+            assert connection_pool._SERVER_NAME.get() == "external"
+
+        tasks = []
+        try:
+            tasks.append(asyncio.create_task(get_named()))
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            tasks.append(asyncio.create_task(get_named()))
+            await asyncio.wait_for(queued.wait(), timeout=2)
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
+        finally:
+            release.set()
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    (point,) = _points(collected_metrics)
+    assert point.count == 1
+    assert point.sum > 0
+    assert point.attributes == {SERVER: "my_judge", CONSTRAINT: "total", OUTCOME: "ok"}
+    (connect_point,) = collected_metrics()[CONNECT_TOTAL]
+    assert connect_point.value == 2
+    assert connect_point.attributes == {SERVER: "my_judge"}
 
 
 @pytest.mark.parametrize("metrics_enabled", [False, True])
