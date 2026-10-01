@@ -12,6 +12,7 @@ import pytest
 
 from nemo_gym.harness_capabilities import cli
 from nemo_gym.harness_capabilities.reader import hydrate_record
+from tests.unit_tests.harness_capabilities.synthetic import evidence_record
 
 
 SCRIPT = Path(__file__).resolve().parents[3] / "scripts/check_harness_conformance.py"
@@ -19,7 +20,7 @@ SCRIPT = Path(__file__).resolve().parents[3] / "scripts/check_harness_conformanc
 
 @pytest.fixture
 def record():
-    return json.loads((Path(__file__).parent / "fixtures/miniswe.json").read_text())
+    return evidence_record()
 
 
 @pytest.mark.parametrize(
@@ -161,21 +162,41 @@ def test_reports_do_not_include_payload_values(record, tmp_path, capsys):
     assert secret not in capsys.readouterr().out
 
 
-def test_script_matrix_routes_and_returns_failed_gate(tmp_path, monkeypatch):
-    fixtures = Path(__file__).parent / "fixtures"
-    args = [str(SCRIPT), "matrix", "--output", str(tmp_path)]
-    for name in ("opencode", "pi", "codex", "hermes"):
-        args.extend(["--harness", f"{name}={fixtures / (name + '.jsonl')}"])
+def test_script_matrix_routes_and_returns_failed_gate(record, tmp_path, monkeypatch):
+    passing = tmp_path / "passing.jsonl"
+    failing = tmp_path / "failing.jsonl"
+    passing.write_text(json.dumps(record) + "\n")
+    record["ng_trajectory"]["model_calls"][0]["request"] = None
+    failing.write_text(json.dumps(record) + "\n")
+    output = tmp_path / "reports"
+    args = [
+        str(SCRIPT),
+        "matrix",
+        "--output",
+        str(output),
+        "--harness",
+        f"complete={passing}",
+        "--harness",
+        f"missing-payload={failing}",
+    ]
     monkeypatch.setattr(sys, "argv", args)
     with pytest.raises(SystemExit) as error:
         runpy.run_path(str(SCRIPT), run_name="__main__")
     assert error.value.code == 1
-    (matrix,) = tmp_path.glob("*/harness_evidence.json")
-    assert set(json.loads(matrix.read_text())["harnesses"]) == {"opencode", "pi", "codex", "hermes"}
+    (matrix,) = output.glob("*/harness_evidence.json")
+    rows = json.loads(matrix.read_text())["harnesses"]
+    assert rows["complete"]["verdict"] == "fulfilled"
+    assert rows["missing-payload"]["evidence"]["TE-7"]["verdict"] == "not_fulfilled"
+    table = matrix.with_suffix(".md").read_text()
+    assert "| complete | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS |" in table
+    assert "| missing-payload | PASS | PASS | PASS | FAIL | PASS | PASS | FAIL | PASS | PASS | FAIL |" in table
+    # Replaying the same matrix is idempotent.
+    assert cli.inspect_matrix({"complete": passing, "missing-payload": failing}, output=output)[0] == matrix.parent
 
 
-def test_matrix_error_cannot_publish_partial_matrix(tmp_path):
-    fixtures = Path(__file__).parent / "fixtures"
+def test_matrix_error_cannot_publish_partial_matrix(record, tmp_path):
+    bundle = tmp_path / "complete.jsonl"
+    bundle.write_text(json.dumps(record) + "\n")
     with pytest.raises(OSError):
-        cli.inspect_matrix({"opencode": fixtures / "opencode.jsonl", "missing": tmp_path / "missing"}, output=tmp_path)
+        cli.inspect_matrix({"complete": bundle, "missing": tmp_path / "missing"}, output=tmp_path)
     assert not list(tmp_path.glob("*/harness_evidence.json"))

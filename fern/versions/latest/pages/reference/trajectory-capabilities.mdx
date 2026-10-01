@@ -4,8 +4,67 @@ description: "Rollout-evidence coverage by agent and execution path."
 position: 5
 ---
 
+# Trajectory Capability Matrix
+
 Use this reference to check which evidence an agent path provides. Start with
 [Rollout Evidence](/main/observability/rollout-evidence) for collection and artifact relationships.
+
+## Generated trajectory evidence (TE)
+
+This table runs the local harnesses against scripted model replies, tool executions,
+retries, and failures, then checks the collected rollouts. The
+[TE-1–TE-9 contracts](/main/observability/harness-conformance) cover model outcomes,
+token preservation, steps, history, tools, verification, payloads, and call joins.
+TE-2 checks that supplied usage is preserved; it does not require every provider
+metric to be available. Remote sandboxes, multimodal inputs, compaction, parallel
+execution, TE-10, and P1 are outside this suite.
+
+{/* BEGIN GENERATED TE TABLE */}
+
+No gated generation has been published yet. Run the command below to populate the table.
+
+{/* END GENERATED TE TABLE */}
+
+### Regenerate the TE table
+
+From a Gym checkout matching the full source commit SHA, install Gym's development
+dependencies and the selected agents' Python dependencies and runtimes. Run:
+
+```bash
+python -m scripts.harness_conformance.table \
+    --commit <40-character-gym-commit-sha> \
+    --output /absolute/path/to/new-conformance-results
+```
+
+The default selects OpenCode, Pi, Codex, and Hermes. Repeat `--harness NAME` to
+select fewer; all others are explicitly marked **Not run**. Every selected harness
+runs the full scenario suite. The probes execute local shell tools in fresh working
+directories and require no model service or model credentials. See
+[`scripts/harness_conformance/README.md`](https://github.com/NVIDIA-NeMo/Gym/blob/main/scripts/harness_conformance/README.md)
+for runtime setup, scenarios, and the execution scope.
+
+Regeneration requires passing runner unit tests, each selected harness's adapter
+unit tests, and checker unit tests at that commit. Failing, empty, or entirely
+skipped suites stop regeneration. Skipped tests in otherwise passing suites are
+reported. Source changes during testing or probing, missing runtimes, and
+execution/checker errors also stop publication, preserving the existing table.
+An unmet evidence requirement produces a FAIL cell and can be published.
+
+The command replaces only the generated block above and writes a content-addressed
+JSON generation report under `fern/assets/trajectory-capabilities/`. The report
+records the Gym commit, runtime versions/source hashes, test counts and log hashes,
+scenario results, and artifact hashes. Full logs, captures, and rollouts remain in
+`--output`; keep them when reviewing a generation. Save source changes first, then
+commit the generated page and report in a subsequent commit so their source pin
+remains stable. Git and jj checkouts are supported.
+
+## Deprecated coverage table (C-table)
+
+<Warning>
+The manually maintained C-table below is deprecated. Use the generated TE table
+above for tested evidence coverage at a specific commit. The historical claims
+remain here temporarily for comparison.
+</Warning>
 
 ✅ **Full** means complete for the documented path; 🟡 **Partial** means some fields or paths are missing;
 ❌ **Unavailable** means the path does not supply that evidence. These are manually maintained coverage
@@ -18,7 +77,7 @@ Contributors changing an agent should update its row with the config, execution 
 evidence in the same pull request.
 </Note>
 
-## Model Calls and History
+### Model Calls and History
 
 Capture requires `observability_enabled`, a shared `model_call_capture_dir`, and a rollout-prefixed
 Gym Model Server URL. Direct-provider routes bypass capture. Token counts depend on provider usage
@@ -63,7 +122,7 @@ fields. History may come from captured payloads or harness conversations.
 | `toolsandbox_agent` | ✅ | ✅ | ✅ |
 | `verifiers_agent` | ✅ | ✅ | ✅ |
 
-## Agent Activity
+### Agent Activity
 
 Turns require explicit semantic-turn records. Tool execution covers output, status, and timestamps;
 parallel timing requires independent tool intervals. Resource/sandbox coverage means that the
@@ -85,7 +144,7 @@ benchmark path emits standardized agent evidence, not that every resource metric
 The other agents listed above report these four dimensions as unavailable. Model HTTP capture
 alone does not establish tool execution or sandbox activity.
 
-## Path Qualifications
+### Path Qualifications
 
 | Path | Qualification |
 | --- | --- |

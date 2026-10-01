@@ -7,7 +7,6 @@ import copy
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 import psutil
 import pytest
@@ -19,6 +18,7 @@ from scripts.harness_conformance.scenarios import SCENARIOS
 
 from nemo_gym.base_responses_api_model import build_model_call_record
 from nemo_gym.harness_capabilities.reader import hydrate_record, json_rows
+from tests.unit_tests.harness_capabilities.synthetic import evidence_record
 
 
 SCENARIO = {s.name: s for s in SCENARIOS}
@@ -178,8 +178,7 @@ def test_verifier_records_actual_final_answer(tmp_path, name, reward):
 @pytest.fixture
 def retained_episode(tmp_path):
     # Contract fixture only: used to prove a green artifact cannot hide a missing live probe.
-    fixture = Path(__file__).resolve().parents[3] / "tests/unit_tests/harness_capabilities/fixtures/miniswe.json"
-    raw = json.loads(fixture.read_text())
+    raw = evidence_record()
     record = hydrate_record(raw)
     calls = record["ng_model_call_capture"]["calls"]
     witness = {

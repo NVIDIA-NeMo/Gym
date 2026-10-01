@@ -85,13 +85,14 @@ The command writes per-harness reports plus `harness_evidence.md` and
 comparison. A matrix FAIL identifies missing or inconsistent evidence; it is not
 a benchmark accuracy result.
 
-Regression coverage exercises the current OpenCode SQLite parser, Pi event
-parser, Codex exec parser, and Hermes observation hooks through Gym collection.
-Controlled protocol/capture inputs and a controlled verifier reward make these
-reproducible producer tests, not live harness qualifications. The captured model
-columns depend on the deployed harness actually routing calls through capture.
-The emitted fixtures are under `tests/unit_tests/harness_capabilities/fixtures/`;
-they can be used with the same matrix command.
+Checker unit tests use hand-authored synthetic evidence contracts, independent of
+harness implementations. Mutations verify missing, conflicting, and malformed
+evidence without prescribing which checks a real harness should pass.
+
+The [Trajectory Capability Matrix](/main/reference/trajectory-capabilities) is
+generated separately from fresh scripted harness runs. Its regeneration command
+requires passing runner, harness adapter, and checker unit tests at a specific
+Gym commit before replacing the table.
 
 ## Onboard a producer
 

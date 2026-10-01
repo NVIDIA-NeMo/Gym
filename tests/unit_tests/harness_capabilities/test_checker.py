@@ -5,18 +5,18 @@
 
 import copy
 import json
-from pathlib import Path
 
 import pytest
 
 from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
 from nemo_gym.harness_capabilities.cli import inspect_bundle, main
 from nemo_gym.harness_capabilities.reader import hydrate_record
+from tests.unit_tests.harness_capabilities.synthetic import evidence_record
 
 
-@pytest.fixture(params=["opencode", "miniswe"])
-def record(request):
-    return json.loads((Path(__file__).parent / f"fixtures/{request.param}.json").read_text())
+@pytest.fixture
+def record():
+    return evidence_record()
 
 
 def verdict(record, capability):
@@ -25,10 +25,10 @@ def verdict(record, capability):
 
 def test_retained_model_evidence_and_tools_pass(record):
     result = inspect_record(hydrate_record(record))
-    assert all(result["evidence"][c]["verdict"] == "fulfilled" for c in ("TE-1", "TE-2", "TE-4", "TE-7", "TE-8")), (
-        result["findings"]
-    )
-    assert result["evidence"]["TE-5"]["verdict"] == "fulfilled"
+    assert all(result["evidence"][c]["verdict"] == "fulfilled" for c in (f"TE-{i}" for i in range(1, 10))), result[
+        "findings"
+    ]
+    assert result["verdict"] == "fulfilled"
     assert result["is_behavioral_qualification"] is False
 
 
@@ -159,8 +159,6 @@ def test_cli_atomic_replay_and_exit_codes(record, tmp_path):
     bundle = tmp_path / "input.jsonl"
     bundle.write_text(json.dumps(record) + "\n")
     output = tmp_path / "reports"
-    record = json.loads((Path(__file__).parent / "fixtures/miniswe.json").read_text())
-    bundle.write_text(json.dumps(record) + "\n")
     args = ["inspect", "--bundle", str(bundle), "--output", str(output)]
     assert main(args) == 0
     assert main(args) == 0
@@ -277,7 +275,7 @@ def test_na_requires_explicit_scope_and_rejects_contradictions(record):
 
 
 def test_step_join_can_qualify_without_invocation_refs():
-    record = json.loads((Path(__file__).parent / "fixtures/miniswe.json").read_text())
+    record = evidence_record()
     for inv in record["ng_agent_observations"]["records"]:
         if inv["kind"] == "agent_invocation":
             inv["model_calls"] = []
@@ -288,7 +286,7 @@ def test_step_join_can_qualify_without_invocation_refs():
 
 
 def test_duplicated_step_ref_fails_without_closure_requirement():
-    record = json.loads((Path(__file__).parent / "fixtures/miniswe.json").read_text())
+    record = evidence_record()
     assert verdict(record, "TE-9") == "fulfilled"
     record["ng_trajectory"]["turns"][0]["model_calls"] *= 2
     assert verdict(record, "TE-9") == "not_fulfilled"
@@ -309,7 +307,7 @@ def test_binary_resolution_does_not_replace_reward(record):
 
 
 def test_canonical_only_delivery_does_not_require_capture_middleware():
-    record = json.loads((Path(__file__).parent / "fixtures/miniswe.json").read_text())
+    record = evidence_record()
     del record["ng_model_call_capture"]
     for call in record["ng_trajectory"]["model_calls"]:
         call["started_at"] = call["completed_at"] = call["duration_ms"] = None
@@ -331,7 +329,7 @@ def test_failed_response_without_response_id_preserves_status(record):
 
 
 def test_retry_and_compaction_attempts_have_distinct_accounting():
-    record = json.loads((Path(__file__).parent / "fixtures/miniswe.json").read_text())
+    record = evidence_record()
     record = hydrate_record(record)
     retry = copy.deepcopy(record["ng_model_call_capture"]["calls"][0])
     retry.update(model_call_id="retry", response_id="retry-response")
@@ -358,7 +356,7 @@ def test_retry_and_compaction_attempts_have_distinct_accounting():
 
 
 def test_conflicting_run_reference_cannot_be_hidden_by_step_join():
-    record = json.loads((Path(__file__).parent / "fixtures/miniswe.json").read_text())
+    record = evidence_record()
     record["ng_agent_observations"]["records"][0]["model_calls"] = [{"model_call_id": "missing"}]
     assert inspect_record(hydrate_record(record))["verdict"] == "not_fulfilled"
 

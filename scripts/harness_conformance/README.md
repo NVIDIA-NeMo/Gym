@@ -1,5 +1,36 @@
 # Live harness conformance probes
 
+## Regenerate the documentation table
+
+From a checkout matching a full Gym commit SHA, rebuild the TE table in
+[`reference/trajectory-capabilities`](../../fern/versions/latest/pages/reference/trajectory-capabilities.mdx):
+
+```bash
+python -m scripts.harness_conformance.table \
+    --commit <40-character-gym-commit-sha> \
+    --output /absolute/path/to/new-conformance-results
+```
+
+The command runs runner unit tests, each selected harness's adapter unit tests,
+checker unit tests, and then the full live scenario suite. The checkout must match
+the source commit before and after validation (Git and jj are supported). There is
+no test-skip switch. Failed, empty, or entirely skipped test suites, dependency or
+execution errors, and checker errors leave the previous table unchanged. Evidence
+FAILs are valid results and appear in the generated table.
+
+All four harnesses are selected by default. Repeat `--harness NAME` to select a
+subset; omitted harnesses show **Not run**, and no previous row is reused. Runtime
+versions/source hashes, test results, scenario results, and artifact hashes are
+saved in a content-addressed JSON report under `fern/assets/trajectory-capabilities/`.
+Test logs and full probe artifacts are retained in the new `--output` directory.
+Commit the generated page and report after the source commit to keep its pin stable.
+
+Checker and runner unit tests use the synthetic contracts in
+`tests/unit_tests/harness_capabilities/synthetic.py`. Actual harness capabilities
+are measured by probes; expected harness verdicts do not belong in library tests.
+
+## Run diagnostic probes
+
 Run predetermined model replies and failures through real Gym harnesses, collect
 their rollouts, and apply the existing P0 evidence checks:
 

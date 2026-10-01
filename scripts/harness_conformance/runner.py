@@ -42,8 +42,17 @@ def _fingerprint(request: dict, status: int, response: dict) -> str:
 def run_process(command: list[str], *, directory: Path, timeout: float) -> dict:
     """Keep logs and reap the worker and its descendants, including new process groups."""
     with (directory / "episode.log").open("wb") as log:
+        # Probe the checkout being reported, even when another editable Gym or
+        # extra component root is present in the caller's environment.
+        env = {**os.environ, "PYTHONPATH": str(ROOT), "NEMO_GYM_EXTRA_ROOTS": str(ROOT)}
         proc = subprocess.Popen(
-            command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+            command,
+            cwd=ROOT,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
         tracked = {}
         timed_out = False
