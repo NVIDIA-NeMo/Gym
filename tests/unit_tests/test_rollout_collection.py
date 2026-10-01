@@ -4700,12 +4700,22 @@ class TestDispatchBudget:
         assert "No completed rollouts to report latency for." in out
 
     def test_dispatch_budget_requires_finite_concurrency(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="finite positive num_samples_in_parallel"):
+        with pytest.raises(ValueError, match="num_samples_in_parallel or max_resident_rollout_tasks"):
             RolloutCollectionConfig(
                 input_jsonl_fpath=str(tmp_path / "input.jsonl"),
                 output_jsonl_fpath=str(tmp_path / "output.jsonl"),
                 dispatch_budget_s=1800.0,
             )
+
+    def test_dispatch_budget_accepts_max_resident_rollout_tasks_without_num_samples_in_parallel(
+        self, tmp_path: Path
+    ) -> None:
+        RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            dispatch_budget_s=1800.0,
+            max_resident_rollout_tasks=4,
+        )
 
     @pytest.mark.parametrize("concurrency", [0, -1])
     def test_concurrency_must_always_be_positive(self, tmp_path: Path, concurrency: int) -> None:
