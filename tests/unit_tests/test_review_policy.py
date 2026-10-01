@@ -21,12 +21,11 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_legacy_review_workflows_are_removed() -> None:
+def test_legacy_review_execution_is_removed() -> None:
     workflows = ROOT / ".github/workflows"
-    assert not list(workflows.glob("*claude*review*"))
     for path in (*workflows.glob("*.yml"), *workflows.glob("*.yaml")):
         text = path.read_text()
-        for retired in ("_claude_review", "claude-code-action", "auto-review:", "/claude review", "/claude strict-review"):
+        for retired in ("_claude_review", "claude-code-action", "auto-review:"):
             assert retired not in text, f"{path.name} contains {retired}"
 
 
@@ -44,10 +43,16 @@ def test_formal_review_rubric_is_inert_and_uses_formal_submission() -> None:
     assert "gh pr diff" not in rubric
 
 
-def test_review_guidance_uses_only_formal_commands() -> None:
+def test_review_guidance_documents_activation_and_notice_limits() -> None:
     guidance = (ROOT / "CONTRIBUTING.md").read_text().split("## Pull-request reviews", 1)[1]
-    assert "`/review`" in guidance
-    assert "`/review mode=strict`" in guidance
-    assert "protected `main`" in guidance
-    assert "/claude" not in guidance
-    assert "redirect" not in guidance
+    for requirement in (
+        "`/review`",
+        "`/review mode=strict`",
+        "model=claude",
+        "protected `main`",
+        "Ready plugin snapshot",
+        "exact command",
+        "owner, member, or collaborator",
+        "never run or automatically request a review",
+    ):
+        assert requirement in guidance

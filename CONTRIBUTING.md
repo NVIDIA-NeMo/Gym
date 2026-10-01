@@ -344,10 +344,17 @@ dispatch, with no change detection:
 ## Pull-request reviews
 
 Comment `/review` on a pull request for the formal review service. Use
-`/review mode=strict` for deeper analysis; `/review help` lists all options.
-Reviews are explicitly requested, not automatically run on pull-request events.
+`/review mode=strict` for deeper analysis, or add `model=claude` to select a
+Claude reviewer instead of the default Codex reviewer. `/review help` lists
+all options. Reviews are explicitly requested, not automatically run on
+pull-request events.
 
-The repository policy lives in `.agents/skills/pr-review/SKILL.md`. The review
-service must load this rubric from protected `main`, not the pull-request
-branch. Before relying on repository-specific reviews, publish the rubric,
-register its repository profile, and verify a Ready plugin snapshot containing it.
+The retired `/claude review` and `/claude strict-review` commands only reply
+with migration instructions when posted as an exact command by an
+owner, member, or collaborator. Other commenters, bots, and quoted mentions
+do not trigger a notice. These commands never run or automatically request a review.
+
+The repository policy lives in `.agents/skills/pr-review/SKILL.md`. The review service
+must load this rubric from protected `main`, not the pull-request branch.
+Before relying on repository-specific reviews, publish the rubric, register
+its repository profile, and verify a Ready plugin snapshot containing it.
