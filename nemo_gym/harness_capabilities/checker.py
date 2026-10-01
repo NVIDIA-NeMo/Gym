@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Deterministic checks over native Gym JSON; no producer runtime imports."""
+"""Deterministic model and semantic checks over native Gym JSON."""
 
 import base64
 import binascii
@@ -10,9 +10,11 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from typing import Iterable, TypeGuard
 
-from jsonschema import Draft202012Validator
+from pydantic import ValidationError
 
-from .schemas import CALL_REF, SCHEMAS, TOKEN_FIELDS
+from nemo_gym.rollout_observability import ModelCallRef
+
+from .contracts import TOKEN_FIELDS, model_errors
 
 
 NAMES = {
@@ -52,19 +54,6 @@ class Finding:
     assertion: str
     location: str
     reason: str
-
-
-def _schema_issues(capability: str, value: object, location: str) -> list[Finding]:
-    # Never put error.message in reports: jsonschema embeds source payloads.
-    return [
-        Finding(
-            capability,
-            "schema." + str(error.validator),
-            location + "/" + "/".join(map(str, error.absolute_path)),
-            "required artifact contract is not satisfied",
-        )
-        for error in Draft202012Validator(SCHEMAS[capability]).iter_errors(value)
-    ]
 
 
 def _objects(value: object) -> list[dict]:
@@ -111,7 +100,14 @@ def _missing_content(value: object) -> bool:
 
 
 def _resolve(reference: dict, calls: list[dict]) -> list[int]:
-    if not Draft202012Validator(CALL_REF).is_valid({k: v for k, v in reference.items() if v is not None}):
+    try:
+        ModelCallRef.model_validate(reference, strict=True)
+    except ValidationError:
+        return []
+    # TE joins require nonempty identifiers even where the model allows empty strings.
+    if any(reference.get(key) == "" for key in ("model_call_id", "response_id")):
+        return []
+    if reference.get("model_ref") is not None and not reference["model_ref"].get("name"):
         return []
     return [
         index
@@ -173,13 +169,28 @@ class _RecordInspector:
         self.bundle = _mapping(self.record.get("ng_agent_observations"))
         self.calls = _objects(self.capture.get("calls"))
         self.observations = _objects(self.bundle.get("records"))
+        self.invocation_locations = [
+            f"/ng_agent_observations/records/{i}"
+            for i, r in enumerate(self.observations)
+            if r.get("kind") == "agent_invocation"
+        ]
         self.invocations = [r for r in self.observations if r.get("kind") == "agent_invocation"]
         if not self.invocations:
             self.invocations = _objects(self.trajectory.get("invocations"))
+            self.invocation_locations = [f"/ng_trajectory/invocations/{i}" for i in range(len(self.invocations))]
         self.turns = _objects(self.trajectory.get("turns"))
         self.tools = _objects(self.trajectory.get("tool_calls")) or [
             r for r in self.observations if r.get("kind") == "tool_call"
         ]
+        self.tool_locations = (
+            [f"/ng_trajectory/tool_calls/{i}" for i in range(len(self.tools))]
+            if _objects(self.trajectory.get("tool_calls"))
+            else [
+                f"/ng_agent_observations/records/{i}"
+                for i, r in enumerate(self.observations)
+                if r.get("kind") == "tool_call"
+            ]
+        )
         self.owners: dict[int, list[str]] = {i: [] for i in range(len(self.calls))}
         self.invocation_ids = [i.get("invocation_id") for i in self.invocations]
 
@@ -214,20 +225,6 @@ class _RecordInspector:
                 "/ng_trajectory/rollout_id",
                 "trajectory and capture identities differ",
             )
-        if "calls" in self.capture and (
-            not isinstance(self.capture["calls"], list) or len(self.calls) != len(self.capture["calls"])
-        ):
-            self._fail(
-                "record",
-                "capture.shape",
-                "/ng_model_call_capture/calls",
-                "a list of call objects is required",
-            )
-        for owner, fields in ((self.trajectory, ("turns", "tool_calls", "invocations")), (self.bundle, ("records",))):
-            for field in fields:
-                values = owner.get(field)
-                if values is not None and (not isinstance(values, list) or len(_objects(values)) != len(values)):
-                    self._fail("record", "records.shape", "/" + field, "evidence records must be a list of objects")
         for issue in self.record.get("_capability_reader_issues", []):
             self._fail("record", "reader.integrity", "", issue)
 
@@ -249,7 +246,13 @@ class _RecordInspector:
             self._fail("TE-1", "identity.unique", "/ng_model_call_capture/calls", "duplicate call identity")
         for index, call in enumerate(self.calls):
             location = f"/ng_model_call_capture/calls/{index}"
-            self.findings.extend(_schema_issues("TE-1", call, self.source + location))
+            self._require_text("TE-1", call, ("model_call_id", "dialect"), location)
+            if not call.get("model_ref") or not call["model_ref"].get("name"):
+                self._fail("TE-1", "model_ref.required", location, "explicit model server identity is required")
+            if call.get("dialect") not in {"responses", "chat", "messages"}:
+                self._fail("TE-1", "dialect.supported", location + "/dialect", "unsupported capture dialect")
+            if call.get("status_code") is not None and not 100 <= call["status_code"] <= 599:
+                self._fail("TE-1", "status.range", location + "/status_code", "invalid HTTP status")
             response = _mapping(call.get("response"))
             status = call.get("status_code")
             http_success = type(status) is int and 200 <= status < 300
@@ -302,10 +305,10 @@ class _RecordInspector:
         """TE-2: preserve supplied usage on all attempts; report availability separately."""
         for index, call in enumerate(self.calls):
             location = f"/ng_model_call_capture/calls/{index}"
-            self.findings.extend(_schema_issues("TE-2", call, self.source + location))
+            self._check_token_values(call, location)
             usage = _mapping(_mapping(call.get("response")).get("usage"))
             expected = _provider_usage(usage)
-            self.findings.extend(_schema_issues("TE-2", expected, self.source + location + "/response/usage"))
+            self._check_token_values(expected, location + "/response/usage")
             for key, value in expected.items():
                 if call.get(key) != value:
                     self._fail(
@@ -409,8 +412,10 @@ class _RecordInspector:
             )
         parents = {i.get("invocation_id"): i.get("parent_invocation_id") for i in self.invocations}
         for index, invocation in enumerate(self.invocations):
-            location = f"/invocations/{index}"
-            self.findings.extend(_schema_issues("TE-8", invocation, self.source + location))
+            location = self.invocation_locations[index]
+            self._require_text("TE-8", invocation, ("invocation_id",), location)
+            if "model_calls" not in invocation:
+                self._fail("TE-8", "references.required", location + "/model_calls", "explicit call refs are required")
             parent = invocation.get("parent_invocation_id")
             seen = {invocation.get("invocation_id")}
             while parent is not None and parent not in seen and parent in parents:
@@ -450,16 +455,22 @@ class _RecordInspector:
                     "owner conflicts with captured client session",
                 )
 
-    def _check_records(self, capability: str, records: list[dict]) -> None:
+    def _require_text(self, capability: str, item: dict, fields: tuple[str, ...], location: str) -> None:
+        for field in fields:
+            if not item.get(field):
+                self._fail(capability, "identity.required", location + "/" + field, "nonempty value is required")
+
+    def _check_token_values(self, values: dict, location: str) -> None:
+        for field in TOKEN_FIELDS:
+            value = values.get(field)
+            if value is not None and (type(value) is not int or value < 0):
+                self._fail(
+                    "TE-2", "usage.count", location + "/" + field, "count must be a nonnegative integer or null"
+                )
+
+    def _check_records(self, capability: str, records: list[dict], location: str) -> None:
         if not records:
-            self._fail(
-                capability,
-                "records.required",
-                "/ng_trajectory",
-                "required records are absent",
-            )
-        for index, item in enumerate(records):
-            self.findings.extend(_schema_issues(capability, item, f"{self.source}/{capability}/{index}"))
+            self._fail(capability, "records.required", location, "required records are absent")
 
     def check_turns(self) -> None:
         """TE-3 contains step fields; TE-9 independently checks call linkage."""
@@ -476,17 +487,25 @@ class _RecordInspector:
             return
         if self.record.get("_ng_rollout_index") is None:
             self._fail("TE-3", "identity.repeat", "", "explicit repeat identity is required")
-        self._check_records("TE-3", self.turns)
+        self._check_records("TE-3", self.turns, "/ng_trajectory/turns")
         keys = [(t.get("invocation_id"), t.get("turn_no")) for t in self.turns]
         if len(set(keys)) != len(keys):
             self._fail("TE-3", "turn.unique", "/ng_trajectory/turns", "duplicate step identity")
-        for turn in self.turns:
-            if any(turn.get(k) != self.trajectory.get(k) for k in ("task_id", "rollout_id")):
-                self._fail("TE-3", "turn.identity", "/ng_trajectory/turns", "step identity differs from rollout")
-            if "answer" not in turn and "reasoning_content" not in turn:
+        for index, turn in enumerate(self.turns):
+            location = f"/ng_trajectory/turns/{index}"
+            self._require_text("TE-3", turn, ("invocation_id", "task_id", "rollout_id"), location)
+            if turn.get("question") is None:
                 self._fail(
-                    "TE-3", "turn.content", "/ng_trajectory/turns", "answer/tool or reasoning field is required"
+                    "TE-3", "turn.question", location + "/question", "non-null model-visible prompt is required"
                 )
+            if "resolved" not in turn:
+                self._fail(
+                    "TE-3", "turn.resolved", location + "/resolved", "resolution or explicit unknown is required"
+                )
+            if any(turn.get(k) != self.trajectory.get(k) for k in ("task_id", "rollout_id")):
+                self._fail("TE-3", "turn.identity", location, "step identity differs from rollout")
+            if turn.get("answer") is None and turn.get("reasoning_content") is None:
+                self._fail("TE-3", "turn.content", location, "answer/tool or reasoning field is required")
 
     def check_step_join(self) -> None:
         """TE-9: exact policy-attempt membership, independent of invocation refs."""
@@ -575,7 +594,7 @@ class _RecordInspector:
             else:
                 self.not_applicable.add("TE-5")
             return
-        self._check_records("TE-5", self.tools)
+        self._check_records("TE-5", self.tools, "/ng_trajectory/tool_calls")
         conversations = {
             (
                 invocation.get("invocation_id"),
@@ -598,7 +617,10 @@ class _RecordInspector:
             if kind == "function_call_output" and (invocation_id, call_id) not in tool_keys:
                 self._fail("TE-5", "tool.execution", "/tool_calls", "a tool result has no execution record")
         for index, tool in enumerate(self.tools):
-            location = f"/tool_calls/{index}"
+            location = self.tool_locations[index]
+            self._require_text("TE-5", tool, ("invocation_id", "tool_call_id", "tool_name"), location)
+            if tool.get("status") not in {"completed", "failed", "timeout", "cancelled"}:
+                self._fail("TE-5", "tool.terminal", location + "/status", "terminal tool outcome is required")
             tool_key = (tool.get("invocation_id"), tool.get("tool_call_id"))
             request = conversations.get((*tool_key, "function_call"), {})
             output = conversations.get((*tool_key, "function_call_output"), {}).get("output", tool.get("output"))
@@ -617,17 +639,6 @@ class _RecordInspector:
                     "tool.outcome",
                     location,
                     "execution has neither output nor error evidence",
-                )
-            if (
-                _number(tool.get("started_at"))
-                and _number(tool.get("completed_at"))
-                and tool["completed_at"] < tool["started_at"]
-            ):
-                self._fail(
-                    "TE-5",
-                    "tool.interval",
-                    location,
-                    "completion precedes start",
                 )
 
     def check_verifier(self) -> None:
@@ -746,6 +757,14 @@ class _RecordInspector:
 def inspect_record(record: dict, *, source: str = "record", scope: EvidenceScope = EvidenceScope()) -> dict:
     """Check TE-1–TE-9 on retained JSONL; do not infer missing evidence or applicability."""
     checks = _RecordInspector(record, source, scope)
+    checks.findings.extend(
+        Finding("record", code, source + path, "object at the evidence path does not validate its Gym model")
+        for path, code in model_errors(record)
+    )
+    if checks.findings:
+        # Semantic checks require typed identities and containers. An invalid native
+        # object is a record integrity failure, never partially valid evidence.
+        return checks.result()
     checks.check_identity()
     checks.check_capture_presence()
     checks.check_model_calls()

@@ -10,6 +10,8 @@ import re
 from pathlib import Path
 from typing import Iterator
 
+from .contracts import model_errors
+
 
 PAYLOADS = ("request", "response", "request_raw", "response_raw")
 
@@ -46,6 +48,10 @@ def hydrate_record(record: dict, *, capture_dir: Path | None = None) -> dict:
     Conflicts are preserved as reader failures instead of being overwritten.
     """
     result = copy.deepcopy(record)
+    # Leave malformed native objects intact for the checker to report at their
+    # actual paths; do not attempt payload joins through invalid containers.
+    if next(model_errors(result), None) is not None:
+        return result
     capture = result.get("ng_model_call_capture") or {}
     calls = capture.get("calls") or []
     trajectory = result.get("ng_trajectory") or {}
@@ -53,8 +59,11 @@ def hydrate_record(record: dict, *, capture_dir: Path | None = None) -> dict:
         # Canonical-only delivery is also a supported native surface. Copy known
         # fields exactly; do not invent clocks, usage, or ownership.
         calls = []
-        for item in trajectory["model_calls"]:
+        for index, item in enumerate(trajectory["model_calls"]):
             call = {
+                # ModelCallRecord's append index is only a reader projection of
+                # canonical array order, never evidence of identity or causality.
+                "call_index": index,
                 **item.get("response_metadata", {}),
                 "model_call_id": item.get("model_call_id"),
                 "started_at": item.get("started_at"),

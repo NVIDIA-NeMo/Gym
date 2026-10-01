@@ -52,6 +52,7 @@ def evidence_record() -> dict:
             {
                 **reference,
                 **metadata,
+                "call_index": number - 1,
                 "tokens_in": 10,
                 "tokens_out": 5,
                 "tokens_total": 15,
@@ -62,7 +63,7 @@ def evidence_record() -> dict:
         calls.append(
             {
                 "model_call_id": reference["model_call_id"],
-                "response_metadata": metadata,
+                "response_metadata": {key: value for key, value in metadata.items() if key != "client_session_id"},
                 "request": request,
                 "response": response,
                 "token_stats": {
@@ -80,6 +81,7 @@ def evidence_record() -> dict:
                 "task_id": "0",
                 "rollout_id": "0-0",
                 "turn_no": number,
+                "step_count": number,
                 "timestamp": float(number),
                 "question": deepcopy(conversation),
                 "answer": [tool_request],
@@ -111,7 +113,12 @@ def evidence_record() -> dict:
         "reward": 0.0,
         "response": {"output": deepcopy(conversation[1:])},
         "ng_model_call_capture": {"rollout_id": "0-0", "calls": deepcopy(captures)},
-        "ng_agent_observations": {"records": deepcopy([invocation, *tools]), "gaps": []},
+        "ng_agent_observations": {
+            "records": deepcopy(
+                [invocation, *[{key: value for key, value in tool.items() if key != "output"} for tool in tools]]
+            ),
+            "gaps": [],
+        },
         "ng_trajectory": {
             "schema_version": "1.0",
             "task_id": "0",

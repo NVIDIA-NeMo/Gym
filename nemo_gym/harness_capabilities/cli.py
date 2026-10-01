@@ -14,8 +14,8 @@ from pathlib import Path
 
 from . import __version__
 from .checker import NAMES, PROFILE, EvidenceScope, inspect_record
+from .contracts import PATH_MODELS, SCHEMA_VERSION
 from .reader import digest_file, hydrate_record, json_rows
-from .schemas import SCHEMA_VERSION, SCHEMAS
 
 
 def _json(value: object) -> str:
@@ -56,10 +56,15 @@ def inspect_bundle(
             raise ValueError("capture directory does not exist")
         sources.extend(sorted(capture_dir.glob("*.capture.*")))
     hashes = {str(path.resolve()): digest_file(path) for path in sources}
-    registry_hash = hashlib.sha256(_json({"schemas": SCHEMAS, "profile": PROFILE}).encode()).hexdigest()
-    checker_hash = hashlib.sha256(
-        "".join(digest_file(p) for p in sorted(Path(__file__).parent.glob("*.py"))).encode()
-    ).hexdigest()
+    registry = {path: adapter.json_schema() for path, adapter in PATH_MODELS.items()}
+    registry_hash = hashlib.sha256(_json({"path_models": registry, "profile": PROFILE}).encode()).hexdigest()
+    # Include model validators as well as generated shapes in report identity.
+    gym = Path(__file__).parent.parent
+    checker_sources = sorted(Path(__file__).parent.glob("*.py")) + [
+        gym / name
+        for name in ("rollout_observability.py", "base_responses_api_model.py", "config_types.py", "openai_utils.py")
+    ]
+    checker_hash = hashlib.sha256("".join(digest_file(p) for p in checker_sources).encode()).hexdigest()
     manifest = {
         "sources": hashes,
         "registry_sha256": registry_hash,
