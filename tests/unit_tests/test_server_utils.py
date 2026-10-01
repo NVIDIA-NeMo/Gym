@@ -570,6 +570,16 @@ class TestServerUtils:
         assert capacity.total == expected_total
         assert capacity.per_host == expected_per_host
 
+    def test_connection_pool_capacity_rounds_intended_concurrency_up(self) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_intended_concurrency=13,
+            global_aiohttp_intended_concurrency_per_host=5,
+        )
+
+        capacity = connection_pool_capacity(cfg, workers=4)
+
+        assert (capacity.intended, capacity.intended_per_host) == (4, 2)
+
     @mark.parametrize("workers", [0, -1])
     def test_connection_pool_capacity_rejects_invalid_worker_count(self, workers: int) -> None:
         with raises(ValueError, match="worker count must be at least 1"):
@@ -775,6 +785,24 @@ class TestServerUtils:
         assert "effective_per_host=8 " in visible_report
         assert "intended per-host concurrency 16 exceeds effective per-host limit 8" in caplog.text
         assert "exceeds effective total limit" not in caplog.text
+
+    def test_unlimited_per_host_is_clamped_to_the_total_limit(
+        self, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=8,
+            global_aiohttp_connector_limit_per_host=0,
+            global_aiohttp_intended_concurrency_per_host=20,
+        )
+        capacity = connection_pool_capacity(cfg, workers=1)
+        connection_pool._REPORTED_CAPACITIES.clear()
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: None)
+
+        with caplog.at_level(logging.INFO, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity)
+
+        assert "effective_per_host=8 per_worker_per_host=unlimited" in caplog.text
+        assert "intended per-host concurrency 20 exceeds effective per-host limit 8" in caplog.text
 
     def test_intended_concurrency_warns_with_file_descriptor_prefix(
         self, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch

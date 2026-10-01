@@ -45,7 +45,8 @@ Queued redirect hops, aiohttp reconnects, and Gym retries each record separate s
 Connection attempts that acquire a slot immediately do not record a queue-duration histogram sample.
 Bounded attributes identify the binding connector limit, queue outcome, and destination server.
 
-``gym.http.connection_pool.connect_total`` (observable counter): all connection acquisitions.
+``gym.http.connection_pool.connect_total`` (observable counter): all connection attempts
+(``connect()`` calls), including attempts that later fail or are abandoned.
 Compare its value with the queue-duration histogram count to calculate the queued fraction.
 """
 
@@ -65,7 +66,7 @@ SANDBOX_CREATE_RETRY_INSTRUMENT = "gym.sandbox.create_retry_total"
 HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT = "gym.http.connection_pool.queue_duration_ms"
 HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT = "gym.http.connection_pool.connect_total"
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
-HTTP_CONNECTION_POOL_ATTEMPT_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.attempt_outcome"
+HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_outcome"
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
 
 #: Milliseconds. Provisioning a remote sandbox takes tens of seconds and a long command can run
@@ -227,7 +228,7 @@ def record_http_connection_pool_queue_duration(
     duration_ms: float,
     *,
     queue_constraint: str,
-    attempt_outcome: str,
+    queue_outcome: str,
     server_name: str,
 ) -> None:
     """Record one queued connection acquisition."""
@@ -238,7 +239,7 @@ def record_http_connection_pool_queue_duration(
         duration_ms,
         {
             HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE: queue_constraint,
-            HTTP_CONNECTION_POOL_ATTEMPT_OUTCOME_ATTRIBUTE: attempt_outcome,
+            HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE: queue_outcome,
             HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE: server_name,
         },
         boundaries=HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS,
@@ -246,7 +247,7 @@ def record_http_connection_pool_queue_duration(
 
 
 def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[str, int]]) -> None:
-    """Export cumulative connection-acquisition counts without an OTel call on each connect."""
+    """Export cumulative connection-attempt counts without an OTel call on each connect."""
     meter = _meter()
     if meter is None:
         return
@@ -267,7 +268,10 @@ def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[st
                 HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT,
                 callbacks=[observe],
                 unit="{connection}",
-                description="Outbound aiohttp connection acquisitions.",
+                description=(
+                    "Outbound aiohttp connection attempts (connect() calls), "
+                    "including attempts that later fail or are abandoned."
+                ),
             ),
         )
     except Exception:

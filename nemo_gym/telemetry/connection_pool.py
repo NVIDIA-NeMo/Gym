@@ -12,7 +12,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, NamedTuple, Optional, Protocol
 
-from aiohttp import ClientTimeout, TCPConnector
+from aiohttp import TCPConnector
 from aiohttp.client_reqrep import ClientRequest, ConnectionKey
 from aiohttp.connector import Connection
 from aiohttp.tracing import Trace
@@ -234,11 +234,11 @@ class QueueTimedTCPConnector(TCPConnector):
         super().__init__(**kwargs)
         register_http_connection_pool_connect_counter(_connect_count_snapshot)
 
-    async def connect(self, req: ClientRequest, traces: list[Trace], timeout: ClientTimeout) -> Connection:
+    async def connect(self, req: ClientRequest, *args: Any, **kwargs: Any) -> Connection:
         server_name = _SERVER_NAME.get()
         with _CONNECT_COUNTS_LOCK:
             _CONNECT_COUNTS[server_name] = _CONNECT_COUNTS.get(server_name, 0) + 1
-        return await super().connect(req, traces, timeout)
+        return await super().connect(req, *args, **kwargs)
 
     async def _wait_for_available_connection(self, key: ConnectionKey, traces: list[Trace]) -> None:
         queue_constraint = _connector_queue_constraint(self)
@@ -252,7 +252,7 @@ class QueueTimedTCPConnector(TCPConnector):
                 record_http_connection_pool_queue_duration(
                     (time.perf_counter() - started_at) * 1000.0,
                     queue_constraint=queue_constraint,
-                    attempt_outcome=outcome,
+                    queue_outcome=outcome,
                     server_name=_SERVER_NAME.get(),
                 )
             except Exception:

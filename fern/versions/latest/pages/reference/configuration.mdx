@@ -119,8 +119,11 @@ a file-descriptor warning because it is not an allocation.
 
 The total aiohttp limit is a scheduling limit, not a strict open-socket cap across multiple
 hosts. Idle-connection reuse and aiohttp's waiter wake-up order can exceed the total limit for
-as long as requests to more than one host are in flight. When sizing pools, keep file-descriptor,
-ephemeral-port, and downstream connection budgets in mind.
+as long as requests to more than one host are in flight. Pool waits are also not first come, first
+served: a new request that can reuse an idle pooled connection skips requests that are already
+waiting, and aiohttp wakes waiting hosts in random order, so a few requests can wait much longer than
+the backend latency. When sizing pools, keep file-descriptor, ephemeral-port, and downstream
+connection budgets in mind.
 
 Pool metrics require an active metrics exporter before the shared client is constructed.
 Gym server processes and the orchestrator used by `gym eval run` initialize telemetry
@@ -135,9 +138,9 @@ connection acquisition. This metric is independent of the `http_client` tracing 
 | Metric or attribute | Meaning |
 | --- | --- |
 | `gym.http.connection_pool.queue_duration_ms` | Histogram of wait time for queued connects; immediate connects do not record a sample |
-| `gym.http.connection_pool.connect_total` | Observable counter of all connection acquisitions; use it as the denominator for the queued fraction |
+| `gym.http.connection_pool.connect_total` | Observable counter of all connection attempts (`connect()` calls), including attempts that later fail or are abandoned; use it as the denominator for the queued fraction |
 | `nemo.gym.http.connection_pool.queue_constraint` | Binding limit: `total`, `per_host`, or `unknown` |
-| `nemo.gym.http.connection_pool.attempt_outcome` | Queue outcome: `ok`, or `abandoned` when the wait ends before a slot is available, including timeout and cancellation |
+| `nemo.gym.http.connection_pool.queue_outcome` | Queue outcome: `ok`, or `abandoned` when the wait ends before a slot is available, including timeout and cancellation |
 | `nemo.gym.http.destination.server.name` | Configured destination server name for `ServerClient` calls, `remote_agent_service` for the remote agent's external service, or `external` for unlabeled direct calls |
 
 The destination attribute identifies the configured or fixed request destination, including

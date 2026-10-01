@@ -20,7 +20,7 @@ pytest.importorskip("opentelemetry.sdk.metrics")
 QUEUE_DURATION = gym_metrics.HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT
 CONNECT_TOTAL = gym_metrics.HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT
 CONSTRAINT = gym_metrics.HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE
-OUTCOME = gym_metrics.HTTP_CONNECTION_POOL_ATTEMPT_OUTCOME_ATTRIBUTE
+OUTCOME = gym_metrics.HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE
 SERVER = gym_metrics.HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE
 
 
@@ -223,8 +223,8 @@ async def test_server_client_labels_samples_with_the_destination_server(collecte
     assert point.sum > 0
     assert point.attributes == {
         "nemo.gym.http.destination.server.name": "my_judge",
-        CONSTRAINT: "total",
-        OUTCOME: "ok",
+        "nemo.gym.http.connection_pool.queue_constraint": "total",
+        "nemo.gym.http.connection_pool.queue_outcome": "ok",
     }
     (connect_point,) = collected_metrics()[CONNECT_TOTAL]
     assert connect_point.value == 2
@@ -558,7 +558,7 @@ async def test_metric_failure_does_not_change_response(collected_metrics, monkey
         return web.json_response({"ok": True})
 
     def failing_recorder(*_args, **kwargs):
-        recorder_calls.append(kwargs["attempt_outcome"])
+        recorder_calls.append(kwargs["queue_outcome"])
         raise RuntimeError("metrics failed")
 
     monkeypatch.setattr(connection_pool, "record_http_connection_pool_queue_duration", failing_recorder)
@@ -573,10 +573,32 @@ async def test_metric_failure_does_not_change_response(collected_metrics, monkey
     assert connect_point.value == 2
 
 
-@pytest.mark.parametrize("method", ["connect", "_wait_for_available_connection"])
-def test_connector_overrides_match_aiohttp_signatures(method):
-    base = inspect.signature(getattr(TCPConnector, method))
-    override = inspect.signature(getattr(connection_pool.QueueTimedTCPConnector, method))
+async def test_connect_override_forwards_new_aiohttp_arguments(collected_metrics, monkeypatch):
+    received = {}
+
+    async def base_connect(_self, req, *args, **kwargs):
+        received.update(req=req, args=args, kwargs=kwargs)
+        return "connection"
+
+    monkeypatch.setattr(TCPConnector, "connect", base_connect)
+    connector = connection_pool.QueueTimedTCPConnector()
+    try:
+        assert await connector.connect("request", [], timeout="timeout", added_in_future=True) == "connection"
+    finally:
+        await connector.close()
+
+    assert received == {
+        "req": "request",
+        "args": ([],),
+        "kwargs": {"timeout": "timeout", "added_in_future": True},
+    }
+    (connect_point,) = collected_metrics()[CONNECT_TOTAL]
+    assert connect_point.value == 1
+
+
+def test_queue_wait_override_matches_aiohttp_signature():
+    base = inspect.signature(TCPConnector._wait_for_available_connection)
+    override = inspect.signature(connection_pool.QueueTimedTCPConnector._wait_for_available_connection)
     assert [(name, parameter.kind, parameter.default) for name, parameter in base.parameters.items()] == [
         (name, parameter.kind, parameter.default) for name, parameter in override.parameters.items()
     ]
