@@ -346,7 +346,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             "export MSWEA_CONFIGURED=true MSWEA_SILENT_STARTUP=true LITELLM_LOCAL_MODEL_COST_MAP=true "
             "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT=1; "
             f"export MSWEA_GLOBAL_CONFIG_DIR={quote(remote + '/config')}; "
-            f"exec {quote(remote + '/venv/bin/python')} -m minisweagent.run.mini "
+            f"exec {quote(remote + '/venv/bin/python')} {quote(remote + '/native.py')} "
             f"-c mini.yaml -c {quote(remote + '/config.yaml')} -o {quote(remote + '/trajectory.json')} "
             f"> {quote(remote + '/agent.log')} 2>&1"
         )
@@ -355,6 +355,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
         run_result = None
         try:
             await self.sandbox.upload(local_config, f"{remote}/config.yaml")
+            await self.sandbox.upload(Path(__file__).with_name("native.py"), f"{remote}/native.py")
             # --wait keeps this single exec open until mini-SWE exits. There is
             # no host-side request loop or sandbox polling between model calls.
             run_result = await self.sandbox.exec(
