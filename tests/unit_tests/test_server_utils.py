@@ -20,7 +20,7 @@ from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
 import uvicorn
-from aiohttp import ClientOSError, ClientResponseError, RequestInfo
+from aiohttp import ClientOSError, ClientResponseError, ClientSession, RequestInfo
 from fastapi import Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -51,6 +51,7 @@ from nemo_gym.server_utils import (
     ServerClient,
     SimpleServer,
     UvicornProxyHeadersConfig,
+    _client_timeout,
     _format_upstream_error_log,
     _log_validation_exception,
     _make_keepalive_socket_factory,
@@ -576,6 +577,53 @@ class TestServerUtils:
             opt = getattr(socket, opt_name, None)
             if opt is not None:
                 mock_sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, opt, opt_value)
+
+    def test_GlobalAIOHTTPAsyncClientConfig_timeouts_default_to_none(self) -> None:
+        timeout = _client_timeout(GlobalAIOHTTPAsyncClientConfig())
+        assert timeout.total is None
+        assert timeout.sock_read is None
+
+    def test_GlobalAIOHTTPAsyncClientConfig_timeouts_are_passed_to_the_client(self) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_client_timeout_total_seconds=900,
+            global_aiohttp_client_timeout_sock_read_seconds=300,
+        )
+        timeout = _client_timeout(cfg)
+        assert timeout.total == 900
+        assert timeout.sock_read == 300
+
+    def test_GlobalAIOHTTPAsyncClientConfig_rejects_non_positive_timeouts(self) -> None:
+        with raises(ValidationError):
+            GlobalAIOHTTPAsyncClientConfig(global_aiohttp_client_timeout_total_seconds=0)
+        with raises(ValidationError):
+            GlobalAIOHTTPAsyncClientConfig(global_aiohttp_client_timeout_sock_read_seconds=-1)
+
+    @mark.parametrize(
+        "field",
+        ["global_aiohttp_client_timeout_total_seconds", "global_aiohttp_client_timeout_sock_read_seconds"],
+    )
+    async def test_configured_timeout_fails_a_request_the_server_never_answers(self, field: str) -> None:
+        # The upstream accepts the connection and never answers, as a hung gateway does.
+        release = asyncio.Event()
+
+        async def hang(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await release.wait()
+            writer.close()
+
+        server = await asyncio.start_server(hang, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        timeout = _client_timeout(GlobalAIOHTTPAsyncClientConfig(**{field: 0.2}))
+        loop = asyncio.get_running_loop()
+        try:
+            async with ClientSession(timeout=timeout) as session:
+                started = loop.time()
+                with raises(asyncio.TimeoutError):
+                    await session.get(f"http://127.0.0.1:{port}/")
+                assert loop.time() - started < 5
+        finally:
+            release.set()
+            server.close()
+            await server.wait_closed()
 
     def test_dry_run_skips_webserver_spinup(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_ray_return_value(monkeypatch, True)

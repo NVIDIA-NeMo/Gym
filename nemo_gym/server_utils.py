@@ -255,6 +255,25 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
         description=("TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection."),
     )
 
+    global_aiohttp_client_timeout_total_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "aiohttp ClientTimeout.total for every request through the global client: the longest a request may "
+            "take, connecting included. None (the default) waits forever. A request over the limit raises "
+            "asyncio.TimeoutError in the caller, so a hung upstream fails its rollout instead of stalling it."
+        ),
+    )
+    global_aiohttp_client_timeout_sock_read_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "aiohttp ClientTimeout.sock_read for every request through the global client: the longest to wait for "
+            "the next chunk of a response. Catches a peer that keeps the connection open but never answers, without "
+            "capping long streamed responses. None (the default) waits forever."
+        ),
+    )
+
 
 def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
@@ -296,6 +315,14 @@ def _make_keepalive_socket_factory(
     return factory
 
 
+def _client_timeout(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientTimeout:
+    """The global client's request timeout; no limit unless the config sets one."""
+    return ClientTimeout(
+        total=cfg.global_aiohttp_client_timeout_total_seconds,
+        sock_read=cfg.global_aiohttp_client_timeout_sock_read_seconds,
+    )
+
+
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
     assert not is_global_aiohttp_client_setup(), (
         "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
@@ -313,7 +340,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
                 probes=cfg.global_aiohttp_tcp_keepalive_probes,
             ),
         ),
-        timeout=ClientTimeout(),
+        timeout=_client_timeout(cfg),
         cookie_jar=DummyCookieJar(),
     )
 
