@@ -584,6 +584,21 @@ def test_stale_mirrors_are_reported_and_sync_changes_only_them(tmp_path: Path) -
     assert synchronized.description == original.description
 
 
+def test_manifest_composition_resolves_dynamic_dataset_defaults(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    config_path = manifest_path.with_name("config.yaml")
+    config_path.write_text(
+        config_path.read_text().replace(
+            "jsonl_fpath: benchmarks/demo/data/example.jsonl",
+            "jsonl_fpath: ${oc.select:prepare_script_args.input,benchmarks/demo/data/example.jsonl}",
+        )
+    )
+
+    report = validate_environment(manifest_path)
+
+    assert report.datasets[0].path.endswith("benchmarks/demo/data/example.jsonl")
+
+
 @pytest.mark.parametrize(
     ("content", "message"),
     [

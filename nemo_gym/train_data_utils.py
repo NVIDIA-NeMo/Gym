@@ -44,6 +44,7 @@ from nemo_gym.global_config import (
     HF_TOKEN_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
+    get_first_server_config_dict,
     get_global_config_dict,
 )
 from nemo_gym.hf_utils import (
@@ -385,6 +386,27 @@ class TrainDataProcessor(BaseModel):
     ) -> List[ServerInstanceConfig]:
         parser = GlobalConfigDictParser()
         server_instance_configs = parser.filter_for_server_instance_configs(global_config_dict)
+
+        # Server models retain unresolved OmegaConf strings so runtime-only settings can remain
+        # deferred. Dataset paths are consumed in this process, however, and must reflect resolved
+        # selectors such as `${oc.select:prepare_script_args.input,...}` before filesystem access.
+        for server_instance_config in server_instance_configs:
+            # Tests and programmatic callers may provide pre-built server models that are not
+            # represented in the global config. Their datasets are already concrete.
+            if server_instance_config.name not in global_config_dict:
+                continue
+            resolved_config = get_first_server_config_dict(global_config_dict, server_instance_config.name)
+            resolved_datasets = resolved_config.get("datasets")
+            if resolved_datasets is None:
+                continue
+            server_instance_config.get_inner_run_server_config().datasets = [
+                (
+                    BenchmarkDatasetConfig.model_validate(dataset)
+                    if dataset.get("type") == "benchmark"
+                    else DatasetConfig.model_validate(dataset)
+                )
+                for dataset in resolved_datasets
+            ]
 
         # Datasets may be declared by resources servers (the normal, decoupled home: the RS owns
         # the task schema and verifier) or by agents (self-contained environments that verify

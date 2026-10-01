@@ -1044,3 +1044,52 @@ class TestConfigYaml:
         assert inner.get("token_id_capture", False) is False
         assert inner["concurrency"] == 32
         assert inner["max_turns"] == 30
+
+
+def test_partial_claude_output_preserves_trajectory_and_marks_response_failed() -> None:
+    agent = _make_agent()
+    partial = NeMoGymResponseOutputMessage.model_validate(
+        {
+            "id": "msg-1",
+            "content": [{"type": "output_text", "text": "partial answer", "annotations": []}],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+        }
+    )
+
+    async def fake_run_claude_code(*args, **kwargs):
+        return [partial], "claude-test", {"status": "failed", "error_type": "process_exit_1"}
+
+    object.__setattr__(agent, "_run_claude_code", fake_run_claude_code)
+    response = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="perform the task")))
+
+    assert response.output
+    assert response.status == "failed"
+    assert response.error is not None
+    assert "process_exit_1" in response.error.message
+
+
+def test_claude_max_turn_output_is_a_scoreable_incomplete_outcome() -> None:
+    agent = _make_agent()
+    partial = NeMoGymResponseOutputMessage.model_validate(
+        {
+            "id": "msg-1",
+            "content": [{"type": "output_text", "text": "partial answer", "annotations": []}],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+        }
+    )
+
+    async def fake_run_claude_code(*args, **kwargs):
+        return [partial], "claude-test", {"status": "incomplete", "error_type": "error_max_turns"}
+
+    object.__setattr__(agent, "_run_claude_code", fake_run_claude_code)
+    response = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="perform the task")))
+
+    assert response.output
+    assert response.status == "incomplete"
+    assert response.error is None
+    assert response.incomplete_details.reason == "max_output_tokens"
+    assert response.metadata == {"nemo_gym_stop_reason": "max_turns"}

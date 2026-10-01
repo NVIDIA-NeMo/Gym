@@ -36,6 +36,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     dataset_agent_pins,
+    get_first_server_config_dict,
     resolve_dataset_agent,
     translate_interpolation_error,
 )
@@ -101,7 +102,12 @@ def _implementation_name(server: Any) -> str:
 
 
 def _manifest_dataset(dataset: Any) -> ManifestDataset:
-    values = dataset.model_dump(mode="json", exclude_none=True)
+    values = (
+        OmegaConf.to_container(dataset, resolve=True)
+        if isinstance(dataset, DictConfig)
+        else dataset.model_dump(mode="json", exclude_none=True)
+    )
+    assert isinstance(values, dict)
     return ManifestDataset.model_validate(
         {
             key: values[key]
@@ -243,7 +249,8 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
     resources_server = _implementation_name(resources_instance) if resources_instance is not None else None
     model_server = model_ref.get("name") if isinstance(model_ref, DictConfig) else None
     owner = dataset_rs if dataset_rs is not None else selected_agent
-    datasets = tuple(_manifest_dataset(dataset) for dataset in (owner.datasets or []))
+    owner_config = get_first_server_config_dict(resolved, owner.name)
+    datasets = tuple(_manifest_dataset(dataset) for dataset in (owner_config.get("datasets") or []))
     grading_mode = None
     if resources_instance is not None:
         grading_mode = resources_instance.get_inner_run_server_config_dict().get("grading_mode")

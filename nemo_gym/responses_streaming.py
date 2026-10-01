@@ -40,7 +40,11 @@ from uuid import uuid4
 from openai.types.responses.response_create_params import ToolParam
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseInputItem
+from nemo_gym.openai_utils import (
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputItem,
+    _normalize_output_item_for_replay,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -133,7 +137,8 @@ def sanitize_streaming_responses_body(body: dict[str, Any]) -> tuple[dict[str, A
     if isinstance(input_items, list):
         kept_items = []
         carrier_tools: list[Any] = []
-        for item in input_items:
+        for item_index, item in enumerate(input_items):
+            item = _normalize_output_item_for_replay(item, item_index)
             if isinstance(item, dict) and item.get("type") == "function_call" and item.get("namespace"):
                 item["name"] = f"{item.pop('namespace')}{NAMESPACE_TOOL_DELIMITER}{item.get('name')}"
             # Codex's code mode ships tools inside an `additional_tools` input item instead of the

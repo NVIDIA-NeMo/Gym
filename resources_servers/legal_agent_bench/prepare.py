@@ -5,11 +5,14 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
+import subprocess
 import tarfile
 import tempfile
 import time
@@ -45,7 +48,7 @@ DEFAULT_SKILLS_DIR = PACKAGE_DIR / "data" / "cache" / "harness" / "skills"
 INDEX_FILENAME = "all.jsonl"
 DEFAULT_INDEX_FPATH = PACKAGE_DIR / "data" / "generated" / INDEX_FILENAME
 CACHE_MARKER = ".nemo_gym_asset.json"
-CACHE_FORMAT_VERSION = 4
+CACHE_FORMAT_VERSION = 5
 REWARD_MODES = ("full_task", "criteria_pass_rate")
 REWARD_MODE_ENV_KEY = "LEGAL_AGENT_BENCH_REWARD_MODE"
 LAB_HARBOR_SOURCE_DIR = PACKAGE_DIR / "vendor" / "harvey_labs" / "lab_harbor"
@@ -79,8 +82,16 @@ RUN apt-get update \\
     && apt-get install -y --no-install-recommends \\
         bash ca-certificates coreutils curl file findutils fonts-liberation g++ \\
         gawk gcc git grep jq libreoffice nodejs npm pandoc poppler-utils procps \\
-        qpdf ripgrep sed tesseract-ocr \\
+        iproute2 qpdf ripgrep sed tesseract-ocr \\
     && rm -rf /var/lib/apt/lists/*
+
+# OpenShell executes commands as a restricted sandbox identity and requires
+# iproute2 for its network namespace. The high UID/GID avoids colliding with
+# ordinary host users when user-namespace remapping is unavailable.
+RUN groupadd --gid 1000660000 sandbox \\
+    && useradd -K UID_MAX=1000660000 --no-log-init --uid 1000660000 \\
+        --gid sandbox --create-home --shell /bin/bash sandbox \\
+    && install -d -o sandbox -g sandbox /workspace/output
 
 RUN python -m pip install --upgrade pip \\
     && python -m pip install \\
@@ -101,12 +112,14 @@ WORKDIR /workspace/output
 _TEST_SCRIPT = """#!/usr/bin/env bash
 set -euo pipefail
 
-mkdir -p /logs/verifier
-python /tests/legal_agent_bench_verify.py \\
-  --task-json /tests/task.json \\
-  --run-dir /logs/agent/artifacts/lab-run \\
-  --verifier-dir /logs/verifier \\
-  --reward-json /logs/verifier/reward.json
+tests_dir="${LAB_TESTS_DIR:-/tests}"
+logs_dir="${LAB_LOGS_DIR:-/logs}"
+mkdir -p "$logs_dir/verifier"
+python "$tests_dir/legal_agent_bench_verify.py" \\
+  --task-json "$tests_dir/task.json" \\
+  --run-dir "$logs_dir/agent/artifacts/lab-run" \\
+  --verifier-dir "$logs_dir/verifier" \\
+  --reward-json "$logs_dir/verifier/reward.json"
 """
 
 
@@ -122,6 +135,47 @@ def flatten_task_id(source_id: str) -> str:
     if len(parts) < 2 or any(part in {"", ".", ".."} for part in parts):
         raise ValueError(f"Unexpected LAB task id: {source_id!r}")
     return "__".join(parts)
+
+
+def read_task_selection(input_jsonl: str | Path) -> tuple[str, ...]:
+    """Read unique LAB task names; the caller's evaluation rows are left untouched."""
+    task_ids = set()
+    with Path(input_jsonl).expanduser().open(encoding="utf-8") as source:
+        for line_number, line in enumerate(source, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                instance_id = row.get("instance_id") if isinstance(row, dict) else None
+                if not isinstance(instance_id, str) or not instance_id.startswith("legal_agent_bench::"):
+                    raise ValueError("expected a legal_agent_bench:: instance_id")
+                task_id = instance_id.removeprefix("legal_agent_bench::")
+                _validate_selected_task_ids([task_id])
+            except ValueError as exc:
+                raise ValueError(f"Invalid LAB selection on line {line_number}: {exc}") from exc
+            task_ids.add(task_id)
+    return _validate_selected_task_ids(sorted(task_ids))
+
+
+def _validate_selected_task_ids(task_ids: Any) -> tuple[str, ...]:
+    if (
+        not isinstance(task_ids, (list, tuple))
+        or not task_ids
+        or any(
+            not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+__[A-Za-z0-9_-]+", name) for name in task_ids
+        )
+        or list(task_ids) != sorted(set(task_ids))
+    ):
+        raise ValueError("LAB task selection must contain sorted, unique, nonempty flattened task IDs")
+    return tuple(task_ids)
+
+
+def _cached_task_ids(path: Path) -> tuple[str, ...] | None:
+    marker = json.loads((path / CACHE_MARKER).read_text(encoding="utf-8"))
+    if not isinstance(marker, dict):
+        raise ValueError(f"Invalid LAB cache marker in {path}")
+    selected = marker.get("selected_task_ids")
+    return _validate_selected_task_ids(selected) if selected is not None else None
 
 
 def discover_harness_skills(skills_dir: str | Path) -> list[str]:
@@ -151,9 +205,13 @@ def validate_harbor_tasks(tasks_dir: str | Path, *, require_marker: bool = True,
         raise FileNotFoundError(f"Legal Agent Bench task cache does not exist: {path}")
     if require_marker:
         _validate_marker(path, "tasks")
+    selected = _cached_task_ids(path) if require_marker else None
     task_dirs = sorted(child for child in path.iterdir() if child.is_dir())
-    if len(task_dirs) != EXPECTED_TASK_COUNT:
-        raise ValueError(f"Expected {EXPECTED_TASK_COUNT} Harbor tasks in {path}, found {len(task_dirs)}")
+    expected_count = len(selected) if selected is not None else EXPECTED_TASK_COUNT
+    if len(task_dirs) != expected_count:
+        raise ValueError(f"Expected {expected_count} Harbor tasks in {path}, found {len(task_dirs)}")
+    if selected is not None and tuple(child.name for child in task_dirs) != selected:
+        raise ValueError(f"LAB task cache contents differ from its selected task IDs: {path}")
     invalid: list[str] = []
     source_ids: list[str] = []
     verifier_templates = {relpath: source.read_bytes() for relpath, source in VERIFIER_TEMPLATE_SOURCES.items()}
@@ -208,7 +266,7 @@ def validate_harbor_tasks(tasks_dir: str | Path, *, require_marker: bool = True,
     expected_index = _render_task_index(source_ids)
     if index_text != expected_index:
         raise ValueError(f"Legal Agent Bench task index is stale or non-deterministic: {index_path}")
-    for source_id in SMOKE_TASK_IDS:
+    for source_id in SMOKE_TASK_IDS if selected is None else ():
         if not (path / flatten_task_id(source_id)).is_dir():
             raise FileNotFoundError(f"Pinned smoke task is missing from {path}: {source_id}")
     return path
@@ -221,16 +279,35 @@ def prepare_assets(
     skills_dir: str | Path = DEFAULT_SKILLS_DIR,
     force: bool = False,
     allow_download: bool = True,
+    task_ids: tuple[str, ...] | None = None,
 ) -> dict[str, Path]:
     if asset not in {"all", "tasks", "skills"}:
         raise ValueError(f"Unknown asset {asset!r}")
+    if task_ids is not None:
+        task_ids = _validate_selected_task_ids(task_ids)
+        if asset == "skills":
+            raise ValueError("Task selection cannot be used with --asset skills")
+
+    reusable_tasks: Path | None = None
+
+    def validate_requested_tasks(path: Path) -> Path:
+        nonlocal reusable_tasks
+        validated = validate_harbor_tasks(path)
+        reusable_tasks = validated
+        cached_ids = _cached_task_ids(path)
+        if task_ids is None and cached_ids is not None and len(cached_ids) != EXPECTED_TASK_COUNT:
+            raise ValueError(f"LAB cache selection differs from the requested task set: {path}")
+        if task_ids is not None and any(not (path / name).is_dir() for name in task_ids):
+            raise ValueError(f"LAB cache selection differs from the requested task set: {path}")
+        return validated
+
     targets = {
         "tasks": resolve_repo_path(tasks_dir),
         "skills": resolve_repo_path(skills_dir),
     }
     requested = [name for name in ("tasks", "skills") if asset in {"all", name}]
     validators: dict[str, Callable[[Path], Path]] = {
-        "tasks": validate_harbor_tasks,
+        "tasks": validate_requested_tasks,
         "skills": validate_harness_skills,
     }
     prepared: dict[str, Path] = {}
@@ -242,11 +319,18 @@ def prepare_assets(
                 print(f"Using cached Legal Agent Bench {name} in {prepared[name]}", flush=True)
                 continue
             except (FileNotFoundError, ValueError):
-                pass
+                if name == "tasks" and task_ids is None and _migrate_legacy_agent_index(targets[name]):
+                    try:
+                        prepared[name] = validators[name](targets[name])
+                    except (FileNotFoundError, ValueError):
+                        pass
+                    else:
+                        print(f"Migrated cached Legal Agent Bench {name} index in {prepared[name]}", flush=True)
+                        continue
         missing.append(name)
 
     if not missing:
-        if "tasks" in prepared:
+        if "tasks" in prepared and task_ids is None:
             _publish_task_index(prepared["tasks"])
         return prepared
     if not allow_download:
@@ -258,12 +342,25 @@ def prepare_assets(
     download_parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=download_parent, prefix=".lab-source-") as temp_dir_str:
         temp_dir = Path(temp_dir_str)
-        archive_path = temp_dir / "lab-source.tar.gz"
-        _download_source_archive(archive_path)
-        extracted = temp_dir / "source"
-        extracted.mkdir()
-        _safe_extract_archive(archive_path, extracted)
-        source_root = _validate_source_tree(extracted / LAB_SOURCE_ARCHIVE_ROOT)
+        downloaded_ids = task_ids
+        if task_ids is None and reusable_tasks is None:
+            archive_path = temp_dir / "lab-source.tar.gz"
+            _download_source_archive(archive_path)
+            extracted = temp_dir / "source"
+            extracted.mkdir()
+            _safe_extract_archive(archive_path, extracted)
+            source_root = _validate_source_tree(extracted / LAB_SOURCE_ARCHIVE_ROOT)
+        else:
+            source_root = temp_dir / LAB_SOURCE_ARCHIVE_ROOT
+            cached_ids = (
+                tuple(sorted(child.name for child in reusable_tasks.iterdir() if child.is_dir()))
+                if reusable_tasks
+                else ()
+            )
+            downloaded_ids = _download_selected_source(
+                source_root, task_ids, include_skills="skills" in missing, cached_task_ids=cached_ids
+            )
+            _validate_source_tree(source_root, task_ids=downloaded_ids, require_skills="skills" in missing)
 
         with ExitStack() as stack:
             staged: dict[str, Path] = {}
@@ -279,7 +376,24 @@ def prepare_assets(
                 )
                 stage = stage_parent / targets[name].name
                 if name == "tasks":
-                    _build_task_cache(source_root, stage)
+                    if downloaded_ids == ():
+                        stage.mkdir(parents=True)
+                    else:
+                        _build_task_cache(source_root, stage, task_ids=downloaded_ids)
+                    if reusable_tasks is not None:
+                        for cached_task in reusable_tasks.iterdir():
+                            if cached_task.is_dir():
+                                shutil.copytree(cached_task, stage / cached_task.name, copy_function=_hardlink_or_copy)
+                        source_ids = [
+                            json.loads((child / "task.json").read_text(encoding="utf-8"))["metadata"]["lab_task_id"]
+                            for child in stage.iterdir()
+                            if child.is_dir()
+                        ]
+                        (stage / INDEX_FILENAME).write_text(_render_task_index(source_ids), encoding="utf-8")
+                        combined_ids = (
+                            tuple(sorted(map(flatten_task_id, source_ids))) if task_ids is not None else None
+                        )
+                        _write_marker(stage, "tasks", task_ids=combined_ids)
                     validate_harbor_tasks(stage)
                 else:
                     _build_skills_cache(source_root, stage)
@@ -290,7 +404,7 @@ def prepare_assets(
                 _replace_directory(staged[name], targets[name])
                 prepared[name] = validators[name](targets[name])
                 print(f"Prepared Legal Agent Bench {name} in {prepared[name]}", flush=True)
-    if "tasks" in prepared:
+    if "tasks" in prepared and task_ids is None:
         _publish_task_index(prepared["tasks"])
     return prepared
 
@@ -301,11 +415,22 @@ def ensure_assets(
     skills_dir: str | Path = DEFAULT_SKILLS_DIR,
     allow_download: bool = True,
 ) -> dict[str, Path]:
+    # Startup honors an explicitly prepared subset, including when repairing stale templates.
+    try:
+        task_ids = _cached_task_ids(resolve_repo_path(tasks_dir))
+    except (OSError, ValueError):
+        # A damaged marker must not bypass cache repair or expand a subset to the
+        # full benchmark. Recover its selection from the independently stored index.
+        index = resolve_repo_path(tasks_dir) / INDEX_FILENAME
+        task_ids = read_task_selection(index) if index.is_file() else None
+        if task_ids is not None and len(task_ids) == EXPECTED_TASK_COUNT:
+            task_ids = None
     return prepare_assets(
         "all",
         tasks_dir=tasks_dir,
         skills_dir=skills_dir,
         allow_download=allow_download,
+        task_ids=task_ids,
     )
 
 
@@ -328,8 +453,10 @@ def hydrate_runtime_tasks(
         env = dict(verifier_env)
         env[REWARD_MODE_ENV_KEY] = reward_mode
         task_dirs = sorted(child for child in stage.iterdir() if child.is_dir())
-        if len(task_dirs) != EXPECTED_TASK_COUNT:
-            raise ValueError(f"Expected {EXPECTED_TASK_COUNT} hydrated tasks in {stage}, found {len(task_dirs)}")
+        selected = _cached_task_ids(cache)
+        expected_count = len(selected) if selected is not None else EXPECTED_TASK_COUNT
+        if len(task_dirs) != expected_count:
+            raise ValueError(f"Expected {expected_count} hydrated tasks in {stage}, found {len(task_dirs)}")
         for task_dir in task_dirs:
             toml_path = task_dir / "task.toml"
             clean_toml = toml_path.read_text(encoding="utf-8")
@@ -337,6 +464,77 @@ def hydrate_runtime_tasks(
             toml_path.write_text(_replace_verifier_env(clean_toml, env), encoding="utf-8")
         _replace_directory(stage, runtime)
     return runtime
+
+
+def _download_selected_source(
+    source_root: Path,
+    task_ids: tuple[str, ...] | None,
+    *,
+    include_skills: bool,
+    cached_task_ids: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Fetch the pinned Git tree, then only the selected tasks' blobs and required skills."""
+    if shutil.which("git") is None:
+        raise RuntimeError("Selective LAB preparation requires git with sparse-checkout support")
+    source_root.mkdir(parents=True)
+
+    def git(*args: str, input: str | None = None) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(source_root), *args],
+            input=input,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=600,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+        if result.returncode:
+            raise RuntimeError(f"LAB source git {args[0]} failed: {result.stderr.strip()}")
+        return result.stdout
+
+    print(f"Checking pinned LAB source {LAB_SOURCE_REVISION} for missing tasks ...", flush=True)
+    git("init", "--quiet")
+    git("remote", "add", "origin", LAB_SOURCE_REPOSITORY)
+    git("fetch", "--quiet", "--depth=1", "--filter=blob:none", "origin", LAB_SOURCE_REVISION)
+    if git("rev-parse", "FETCH_HEAD").strip() != LAB_SOURCE_REVISION:
+        raise ValueError("LAB source Git revision does not match the pinned revision")
+    entries = []
+    source_ids = {}
+    for entry in git("ls-tree", "-rz", "FETCH_HEAD").split("\0"):
+        if not entry:
+            continue
+        metadata, filename = entry.split("\t", 1)
+        mode, kind, _sha = metadata.split()
+        path = PurePosixPath(filename)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"Unsafe LAB source path: {filename}")
+        entries.append((mode, kind, filename))
+        if filename.startswith("tasks/") and path.name == "task.json":
+            source_id = path.parent.relative_to("tasks").as_posix()
+            name = flatten_task_id(source_id)
+            if name in source_ids:
+                raise ValueError(f"Flattening LAB source task ids produces a collision: {name}")
+            source_ids[name] = source_id
+    if task_ids is None:
+        if len(source_ids) != EXPECTED_TASK_COUNT:
+            raise ValueError(f"Pinned LAB source must contain {EXPECTED_TASK_COUNT} tasks, found {len(source_ids)}")
+        task_ids = tuple(sorted(source_ids))
+    unknown = sorted(set(task_ids) - source_ids.keys())
+    if unknown:
+        raise ValueError(f"Unknown LAB task IDs at {LAB_SOURCE_REVISION}: {', '.join(unknown)}")
+    missing_ids = tuple(sorted(set(task_ids) - set(cached_task_ids)))
+    print(f"Downloading {len(missing_ids)} missing LAB tasks; reusing {len(cached_task_ids)} cached tasks", flush=True)
+    directories = [f"tasks/{source_ids[name]}" for name in missing_ids]
+    if include_skills:
+        directories.extend(f"harness/skills/{skill}" for skill in REQUIRED_SKILLS)
+    for mode, kind, filename in entries:
+        if any(filename.startswith(directory + "/") for directory in directories):
+            if kind != "blob" or mode not in {"100644", "100755"}:
+                raise ValueError(f"Unsupported LAB source entry: {filename} ({mode})")
+    if directories:
+        git("sparse-checkout", "set", "--cone", "--stdin", input="\n".join(directories) + "\n")
+        git("checkout", "--quiet", "--detach", "FETCH_HEAD")
+    return missing_ids
 
 
 def _download_source_archive(output_path: Path) -> None:
@@ -428,20 +626,25 @@ def _safe_extract_archive(archive_path: Path, destination: Path) -> None:
         raise ValueError(f"Invalid LAB source archive: {exc}") from exc
 
 
-def _validate_source_tree(source_root: Path) -> Path:
+def _validate_source_tree(
+    source_root: Path, *, task_ids: tuple[str, ...] | None = None, require_skills: bool = True
+) -> Path:
     if source_root.name != LAB_SOURCE_ARCHIVE_ROOT or not source_root.is_dir():
         raise ValueError(f"LAB archive does not contain expected revision root {LAB_SOURCE_ARCHIVE_ROOT}")
     entries = _source_task_entries(source_root)
-    if len(entries) != EXPECTED_TASK_COUNT:
-        raise ValueError(f"Pinned LAB source must contain {EXPECTED_TASK_COUNT} tasks, found {len(entries)}")
+    expected_count = len(task_ids) if task_ids is not None else EXPECTED_TASK_COUNT
+    if len(entries) != expected_count:
+        raise ValueError(f"Pinned LAB source must contain {expected_count} tasks, found {len(entries)}")
     source_ids = {source_id for source_id, _ in entries}
-    missing_smoke = sorted(set(SMOKE_TASK_IDS) - source_ids)
+    missing_smoke = sorted(set(SMOKE_TASK_IDS) - source_ids) if task_ids is None else []
     if missing_smoke:
         raise ValueError(f"Pinned LAB source is missing smoke tasks: {', '.join(missing_smoke)}")
     flattened = [flatten_task_id(source_id) for source_id in source_ids]
     if len(flattened) != len(set(flattened)):
         raise ValueError("Flattening LAB source task ids produces a collision")
-    for skill in REQUIRED_SKILLS:
+    if task_ids is not None and set(flattened) != set(task_ids):
+        raise ValueError("Pinned LAB source does not match the selected task IDs")
+    for skill in REQUIRED_SKILLS if require_skills else ():
         if not (source_root / "harness" / "skills" / skill / "SKILL.md").is_file():
             raise ValueError(f"Pinned LAB source is missing skill {skill}/SKILL.md")
     return source_root
@@ -479,10 +682,6 @@ def _render_task_index(source_ids: Iterable[str]) -> str:
     rows = []
     for source_id in sorted(source_ids):
         row = {
-            "agent_ref": {
-                "name": "legal_agent_bench_harbor_agent",
-                "type": "responses_api_agents",
-            },
             "instance_id": f"legal_agent_bench::{flatten_task_id(source_id)}",
             "responses_create_params": {
                 "input": [],
@@ -494,7 +693,7 @@ def _render_task_index(source_ids: Iterable[str]) -> str:
     return "".join(rows)
 
 
-def _build_task_cache(source_root: Path, output_dir: Path) -> None:
+def _build_task_cache(source_root: Path, output_dir: Path, *, task_ids: tuple[str, ...] | None = None) -> None:
     output_dir.mkdir(parents=True)
     missing_templates = [
         source for source in (*VERIFIER_TEMPLATE_SOURCES.values(), TOOL_RUNNER_SOURCE) if not source.is_file()
@@ -541,7 +740,7 @@ def _build_task_cache(source_root: Path, output_dir: Path) -> None:
         _render_task_index(source_id for source_id, _ in source_entries),
         encoding="utf-8",
     )
-    _write_marker(output_dir, "tasks")
+    _write_marker(output_dir, "tasks", task_ids=task_ids)
 
 
 def _task_toml(config: dict[str, Any], source_id: str) -> str:
@@ -586,7 +785,7 @@ def _build_skills_cache(source_root: Path, output_dir: Path) -> None:
     _write_marker(output_dir, "skills")
 
 
-def _marker(kind: str) -> dict[str, Any]:
+def _marker(kind: str, *, task_ids: tuple[str, ...] | None = None) -> dict[str, Any]:
     marker: dict[str, Any] = {
         "kind": kind,
         "cache_format_version": CACHE_FORMAT_VERSION,
@@ -607,6 +806,9 @@ def _marker(kind: str) -> dict[str, Any]:
                 },
             }
         )
+    if task_ids is not None:
+        marker["selected_task_ids"] = list(_validate_selected_task_ids(task_ids))
+        marker["task_count"] = len(task_ids)
     return marker
 
 
@@ -618,8 +820,10 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _write_marker(path: Path, kind: str) -> None:
-    (path / CACHE_MARKER).write_text(json.dumps(_marker(kind), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+def _write_marker(path: Path, kind: str, *, task_ids: tuple[str, ...] | None = None) -> None:
+    (path / CACHE_MARKER).write_text(
+        json.dumps(_marker(kind, task_ids=task_ids), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def _validate_marker(path: Path, kind: str) -> None:
@@ -628,7 +832,8 @@ def _validate_marker(path: Path, kind: str) -> None:
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Missing or invalid Legal Agent Bench cache marker: {marker_path}") from exc
-    if marker != _marker(kind):
+    task_ids = _cached_task_ids(path) if kind == "tasks" else None
+    if marker != _marker(kind, task_ids=task_ids):
         raise ValueError(f"Legal Agent Bench {kind} cache marker is stale: {marker_path}")
 
 
@@ -658,21 +863,72 @@ def _hardlink_or_copy(source: str, destination: str) -> str:
 
 def _replace_directory(source: Path, target: Path) -> None:
     backup = target.with_name(f".{target.name}.backup")
-    if backup.exists():
-        shutil.rmtree(backup)
-    if target.exists():
-        target.rename(backup)
+    lock_path = target.with_name(f".{target.name}.replace.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            if backup.exists():
+                if target.exists():
+                    shutil.rmtree(backup)
+                else:
+                    backup.rename(target)
+            if target.exists():
+                target.rename(backup)
+            try:
+                source.rename(target)
+            except Exception:
+                if target.exists():
+                    shutil.rmtree(target)
+                if backup.exists():
+                    backup.rename(target)
+                raise
+            else:
+                if backup.exists():
+                    shutil.rmtree(backup)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _migrate_legacy_agent_index(tasks_dir: Path) -> bool:
+    """Atomically remove the retired Harbor agent_ref from an otherwise exact cached index."""
+    index_path = tasks_dir / INDEX_FILENAME
     try:
-        source.rename(target)
-    except Exception:
-        if target.exists():
-            shutil.rmtree(target)
-        if backup.exists():
-            backup.rename(target)
-        raise
-    else:
-        if backup.exists():
-            shutil.rmtree(backup)
+        rows = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines()]
+    except (OSError, json.JSONDecodeError):
+        return False
+    legacy_ref = {
+        "name": "legal_agent_bench_harbor_agent",
+        "type": "responses_api_agents",
+    }
+    if not rows or any(not isinstance(row, dict) or row.get("agent_ref") != legacy_ref for row in rows):
+        return False
+    candidate_rows = []
+    for row in rows:
+        row = dict(row)
+        row.pop("agent_ref")
+        candidate_rows.append(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    candidate = "".join(candidate_rows)
+
+    source_ids = []
+    try:
+        for task_dir in sorted(child for child in tasks_dir.iterdir() if child.is_dir()):
+            task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+            source_ids.append(str(task["metadata"]["lab_task_id"]))
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if candidate != _render_task_index(source_ids):
+        return False
+
+    file_descriptor, temp_name = tempfile.mkstemp(dir=index_path.parent, prefix=f".{index_path.name}.")
+    os.close(file_descriptor)
+    temp_path = Path(temp_name)
+    try:
+        temp_path.write_text(candidate, encoding="utf-8")
+        os.replace(temp_path, index_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return True
 
 
 def _publish_task_index(tasks_dir: Path) -> Path:
@@ -694,8 +950,13 @@ def _publish_task_index(tasks_dir: Path) -> Path:
 def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--asset", choices=("all", "tasks", "skills"), default="all")
-    parser.add_argument("--tasks-dir", type=Path, default=DEFAULT_TASKS_DIR)
-    parser.add_argument("--skills-dir", type=Path, default=DEFAULT_SKILLS_DIR)
+    parser.add_argument(
+        "--tasks-dir", type=Path, default=os.environ.get("LEGAL_AGENT_BENCH_TASK_CACHE_DIR", DEFAULT_TASKS_DIR)
+    )
+    parser.add_argument(
+        "--skills-dir", type=Path, default=os.environ.get("LEGAL_AGENT_BENCH_SKILLS_DIR", DEFAULT_SKILLS_DIR)
+    )
+    parser.add_argument("--input", type=Path, help="Prepare only the LAB instance_ids in this evaluation JSONL")
     parser.add_argument("--force", action="store_true")
     return parser.parse_args(argv)
 
@@ -707,6 +968,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         tasks_dir=args.tasks_dir,
         skills_dir=args.skills_dir,
         force=args.force,
+        task_ids=read_task_selection(args.input) if args.input is not None else None,
     )
 
 

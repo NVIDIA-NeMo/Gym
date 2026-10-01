@@ -1,0 +1,2 @@
+# The LAB-native loop installs nemo_gym through its setup script.
+tenacity>=9.1.4

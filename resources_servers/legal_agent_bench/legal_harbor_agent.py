@@ -21,6 +21,7 @@ from resources_servers.legal_agent_bench.prepare import (
     resolve_repo_path,
     validate_harness_skills,
 )
+from responses_api_agents.legal_agent_bench_native_agent.model_retry import retry_model_request
 
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
@@ -56,6 +57,10 @@ REQUIRED_TASK_KEYS = {"title", "instructions", "criteria"}
 REQUIRED_CRITERION_KEYS = {"id", "title", "match_criteria"}
 SYSTEM_PROMPT_PATH = _VENDOR_ROOT / "harness" / "system-prompt.md"
 SYSTEM_PROMPT_PREAMBLE = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+
+
+class LegalAgentBenchHarnessError(RuntimeError):
+    """The LAB Harbor harness failed after preserving its partial artifacts."""
 
 
 class HarborToolExecutor:
@@ -220,6 +225,7 @@ class LegalAgentBenchHarborAgent(BaseAgent):
         self.temperature = 1.0 if temperature is None else float(temperature)
         self.reasoning_effort = kwargs.pop("reasoning_effort", _reasoning_effort(responses_create_params))
         self.max_turns = int(kwargs.pop("max_turns", 60))
+        self.model_retry_404 = kwargs.pop("model_retry_404", False)
         self.shell_timeout = int(kwargs.pop("shell_timeout", 60))
         self.skills = kwargs.pop("skills", None)
         self.skills_dir = resolve_repo_path(kwargs.pop("skills_dir", DEFAULT_SKILLS_DIR))
@@ -228,7 +234,7 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             kwargs["agent_model_base_url"] = api_base
         if responses_create_params.get("max_output_tokens") and not kwargs.get("agent_model_max_tokens"):
             kwargs["agent_model_max_tokens"] = responses_create_params["max_output_tokens"]
-        if kwargs.get("agent_model_top_p") is None:
+        if "agent_model_top_p" not in kwargs:
             kwargs["agent_model_top_p"] = responses_create_params.get("top_p", 0.95)
 
         self.adapter_kwargs = kwargs
@@ -282,6 +288,7 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             tools=tools,
             max_turns=self.max_turns,
             transcript_path=transcript_path,
+            retry_404=self.model_retry_404,
         )
 
         await environment.download_dir("/workspace/output", output_artifact)
@@ -310,8 +317,11 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             model_name=self.model,
             agent_name=self.name(),
         )
+        agent_failed = bool(result.get("model_error"))
         _write_agent_error_flags(Path(self.logs_dir), metrics)
         _populate_context(context, result, metrics, task_id, self.agent_id, artifact_dir)
+        if agent_failed:
+            raise LegalAgentBenchHarnessError(result["model_error"])
 
     async def _hydrate_environment(self, environment: BaseEnvironment, docs_dir: Path) -> None:
         validate_harness_skills(self.skills_dir)
@@ -357,6 +367,7 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             "task_dir": str(task_dir),
             "run_id": self._run_id(task_id),
             "max_turns": self.max_turns,
+            "model_retry_404": self.model_retry_404,
             "temperature": self.temperature,
             "shell_timeout": self.shell_timeout,
             "reasoning_effort": self.reasoning_effort,
@@ -383,6 +394,7 @@ async def _run_agent_async(
     tools: list[dict],
     max_turns: int,
     transcript_path: Path,
+    retry_404: bool = False,
 ) -> dict:
     messages = [adapter.make_system_message(system_prompt), adapter.make_user_message(INITIAL_USER_PROMPT)]
     total_input_tokens = 0
@@ -391,6 +403,9 @@ async def _run_agent_async(
     finished_cleanly = False
     context_overflow = False
     model_error = None
+    model_error_type = None
+    model_connection_failed = False
+    agent_timed_out = False
     empty_response_count = 0
     start_time = time.time()
 
@@ -400,14 +415,19 @@ async def _run_agent_async(
             turn_count = turn + 1
             _log_model_input(transcript_file, turn_count, messages, tools, total_input_tokens, total_output_tokens)
             try:
-                response = await _chat_with_timeout(adapter, messages, tools)
+                response = await _chat_with_timeout(adapter, messages, tools, retry_404=retry_404)
             except Exception as exc:
                 err_msg = str(exc)
                 _log_model_error(transcript_file, turn_count, exc)
                 if _is_context_overflow_error(err_msg):
+                    # Context exhaustion is a valid incomplete model outcome.
+                    # Preserve the partial artifacts and let Harbor verify them.
                     context_overflow = True
                     break
                 model_error = err_msg
+                model_error_type = type(exc).__name__
+                agent_timed_out = isinstance(exc, TimeoutError)
+                model_connection_failed = isinstance(exc, (ConnectionError, OSError)) and not agent_timed_out
                 break
 
             messages.append(response.message)
@@ -453,20 +473,26 @@ async def _run_agent_async(
         "finished_cleanly": (not context_overflow and finished_cleanly),
         "context_overflow": context_overflow,
         "model_error": model_error,
+        "model_error_type": model_error_type,
+        "model_connection_failed": model_connection_failed,
+        "agent_timed_out": agent_timed_out,
         "tool_metrics": tool_executor.get_metrics(),
     }
 
 
 async def _chat_with_timeout(
-    adapter: OpenAICompatibleAdapter, messages: list[dict], tools: list[dict]
+    adapter: OpenAICompatibleAdapter, messages: list[dict], tools: list[dict], *, retry_404: bool = False
 ) -> ModelResponse:
     timeout_seconds = getattr(adapter, "timeout_seconds", None)
-    chat_call = adapter.chat(messages, tools)
-    if not timeout_seconds:
-        return await chat_call
     try:
-        return await asyncio.wait_for(chat_call, timeout=float(timeout_seconds))
+        return await retry_model_request(
+            lambda: adapter.chat(messages, tools),
+            timeout_seconds=float(timeout_seconds) if timeout_seconds else None,
+            retry_404=retry_404,
+        )
     except asyncio.TimeoutError as exc:
+        if not timeout_seconds:
+            raise
         raise TimeoutError(f"agent model request exceeded timeout of {float(timeout_seconds):g}s") from exc
 
 
@@ -717,6 +743,9 @@ def _populate_context(
         "lab_run_id": metrics["run_id"],
         "artifact_dir": str(artifact_dir),
         "finished_cleanly": metrics["finished_cleanly"],
+        "agent_failed": bool(result.get("model_error")),
+        "model_connection_failed": bool(result.get("model_connection_failed")),
+        "agent_timed_out": bool(result.get("agent_timed_out")),
         "model_error": metrics.get("model_error"),
         "turn_count": metrics["turn_count"],
         "tool_metrics": {

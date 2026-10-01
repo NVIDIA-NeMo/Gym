@@ -150,6 +150,47 @@ class TestLoadAndValidateServerInstanceConfigs:
         ]
         assert expected_agent_configs_with_data_dict == actual_agent_configs_with_data_dict
 
+    def test_resolves_dataset_paths_without_resolving_all_server_fields(self) -> None:
+        global_config_dict = DictConfig(
+            {
+                "selected_input": "selected.jsonl",
+                "agent": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "host": "127.0.0.1",
+                            "port": 12345,
+                            "entrypoint": "app.py",
+                            "datasets": [
+                                {
+                                    "name": "benchmark",
+                                    "type": "benchmark",
+                                    "jsonl_fpath": "${selected_input}",
+                                    "prompt_config": None,
+                                    "prepare_script": "benchmarks/example/prepare.py",
+                                    "num_repeats": 1,
+                                }
+                            ],
+                            "resources_server": {
+                                "type": "resources_servers",
+                                "name": "resources",
+                            },
+                            "model_server": {
+                                "type": "responses_api_models",
+                                "name": "policy_model",
+                            },
+                        }
+                    }
+                },
+            }
+        )
+
+        result = TrainDataProcessor().load_and_validate_server_instance_configs(
+            config=TrainDataProcessorConfig(output_dirpath="", mode="train_preparation"),
+            global_config_dict=global_config_dict,
+        )
+
+        assert result[0].datasets[0].jsonl_fpath == Path("selected.jsonl")
+
     def test_load_and_validate_server_instance_configs_filters_out_of_scope_datasets(
         self, monkeypatch: MonkeyPatch
     ) -> None:
