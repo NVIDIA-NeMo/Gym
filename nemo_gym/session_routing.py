@@ -31,6 +31,14 @@ the router reads the owner from the token on the MCP path, and on any request wi
 
 The owner lives in the cookie or token rather than in a central session table, so creating or ending a
 session costs no extra round trip, and nothing grows with the number of sessions a server has served.
+
+A request that belongs to a worker without a session, such as an agent's call to itself within one
+``/run``, names that worker in the ``x-ng-session-owner`` header instead.
+
+A partial-rollout checkpoint restore installs the sessions of each worker that ran before a crash on one
+live worker, and sets an alias from the old worker ID to the new one (see
+``nemo_gym._checkpoint.participant_workers``). Requests whose cookie or token names an old worker then
+reach the worker that holds its sessions now.
 """
 
 import asyncio
@@ -62,6 +70,8 @@ from yarl import URL
 SESSION_SOCKET_DIR_ENV = "NEMO_GYM_SESSION_SOCKET_DIR"
 #: Session key naming the worker that created the session.
 SESSION_OWNER_KEY = "nemo_gym_worker"
+#: Header naming the worker a request belongs to, for a request without a session.
+SESSION_OWNER_HEADER = "x-ng-session-owner"
 #: Scope key marking a request that arrived over a worker's private socket.
 _FORWARDED_SCOPE_KEY = "nemo_gym.session_forwarded"
 
@@ -92,7 +102,18 @@ def worker_socket_path(socket_dir: str, worker_id: str) -> str:
 
 def _valid_owner(claims: Any) -> Optional[str]:
     owner = claims.get(SESSION_OWNER_KEY) if isinstance(claims, dict) else None
+    return _valid_worker_id(owner)
+
+
+def _valid_worker_id(owner: Any) -> Optional[str]:
     return owner if isinstance(owner, str) and _WORKER_ID_PATTERN.fullmatch(owner) else None
+
+
+def session_aliases(app: FastAPI) -> dict[str, str]:
+    """The app's table of restored session owners: an old worker ID to the live worker that holds its sessions."""
+    if not hasattr(app.state, "nemo_gym_session_aliases"):
+        app.state.nemo_gym_session_aliases = {}
+    return app.state.nemo_gym_session_aliases
 
 
 def session_owner(cookie: str, *, signer: itsdangerous.TimestampSigner) -> Optional[str]:
@@ -138,6 +159,7 @@ class SessionRoutingMiddleware:
         session_cookie: str,
         secret_key: str,
         clients: dict[str, ClientSession],
+        aliases: Optional[dict[str, str]] = None,
         mcp_token_header: Optional[str] = None,
         mcp_token_serializer: Optional[itsdangerous.URLSafeSerializer] = None,
         mcp_path: str = "/mcp",
@@ -149,6 +171,8 @@ class SessionRoutingMiddleware:
         self.signer = itsdangerous.TimestampSigner(secret_key)
         # One connection pool per owner socket, kept for the life of this worker and closed at its shutdown.
         self.clients = clients
+        # Updated in place when a checkpoint restore moves an old worker's sessions to this server's workers.
+        self.aliases = aliases if aliases is not None else {}
         self.mcp_token_header = mcp_token_header
         self.mcp_token_serializer = mcp_token_serializer
         self.mcp_path = mcp_path
@@ -159,6 +183,7 @@ class SessionRoutingMiddleware:
             await self.app(scope, receive, send)
             return
         owner = self._owner(HTTPConnection(scope))
+        owner = self.aliases.get(owner, owner)
         if owner is None or owner == self.worker_id:
             await self.app(scope, receive, send)
             return
@@ -174,7 +199,7 @@ class SessionRoutingMiddleware:
             return mcp_token_owner(token, serializer=self.mcp_token_serializer)
         if cookie is not None:
             return session_owner(cookie, signer=self.signer)
-        return None
+        return _valid_worker_id(connection.headers.get(SESSION_OWNER_HEADER))
 
     def _client(self, owner: str) -> ClientSession:
         client = self.clients.get(owner)
@@ -332,6 +357,7 @@ def install_session_routing(
         session_cookie=session_cookie,
         secret_key=secret_key,
         clients=clients,
+        aliases=session_aliases(app),
         mcp_token_header=mcp_token_header,
         mcp_token_serializer=mcp_token_serializer,
     )

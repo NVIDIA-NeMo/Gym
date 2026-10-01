@@ -51,7 +51,9 @@ from nemo_gym.episode_types import EpisodeId
 
 LOGGER = logging.getLogger(__name__)
 
-_MAX_FRAME_BYTES = 64 * 1024 * 1024
+# Commit and restore carry a worker's records in one message, which can reach hundreds of megabytes for
+# servers with large sessions; the limit only rejects a corrupt length prefix.
+_MAX_FRAME_BYTES = 1024 * 1024 * 1024
 # How long past a control call's own deadline a worker waits for the coordinator's reply.
 REPLY_GRACE_SECONDS = 10.0
 # Timeout for messages that do no slow work (registration, reports, claims, reopening).
@@ -93,21 +95,32 @@ async def _read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
 
 # Handles one incoming message kind and body; returns the reply body.
 Handler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+# Handles a message kind at once, on the reading loop, or returns None to leave it to the ``Handler``.
+ImmediateHandler = Callable[[str, dict[str, Any]], Optional[dict[str, Any]]]
 
 
 class Channel:
     """Request and reply messages in both directions over one connection."""
 
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, handler: Handler) -> None:
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        handler: Handler,
+        *,
+        immediate: Optional[ImmediateHandler] = None,
+    ) -> None:
         self._reader = reader
         self._writer = writer
         self._handler = handler
+        self._immediate = immediate
         self._pending: dict[int, asyncio.Future] = {}
         self._next_id = 0
         self._write_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task] = set()
 
-    async def call(self, kind: str, body: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+    async def call(self, kind: str, body: dict[str, Any], *, timeout: Optional[float]) -> dict[str, Any]:
+        """Send a message and wait for its reply; a ``timeout`` of None waits as long as the caller does."""
         self._next_id += 1
         message_id = self._next_id
         future = asyncio.get_running_loop().create_future()
@@ -132,7 +145,7 @@ class Channel:
                         else:
                             error = message["error"]
                             future.set_exception(_RemoteControlError(error["status"], error["code"], error["detail"]))
-                else:
+                elif not self._reply_immediately(message):
                     task = asyncio.create_task(self._serve(message))
                     self._tasks.add(task)
                     task.add_done_callback(self._tasks.discard)
@@ -151,6 +164,24 @@ class Channel:
         async with self._write_lock:
             self._writer.write(_frame(message))
             await self._writer.drain()
+
+    def _reply_immediately(self, message: dict[str, Any]) -> bool:
+        """Answer a message without yielding to the event loop, so its reply precedes any later message.
+
+        Each frame is written whole, so this reply never interleaves with a frame another task is sending.
+        """
+        if self._immediate is None:
+            return False
+        try:
+            body = self._immediate(message["kind"], message["body"])
+        except ControlError as error:
+            reply = _error_reply(message, error.status_code, error.code, error.detail)
+        else:
+            if body is None:
+                return False
+            reply = {"reply_to": message["id"], "ok": True, "body": body}
+        self._writer.write(_frame(reply))
+        return True
 
     async def _serve(self, message: dict[str, Any]) -> None:
         try:
@@ -238,6 +269,10 @@ class CoordinatedParticipant(CheckpointParticipant, Generic[ReportT]):
         """Serve a kind-specific message from a worker."""
         raise ControlError(f"unknown checkpoint message {kind!r}")
 
+    def handle_now(self, worker_id: int, kind: str, body: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """Serve a kind-specific message before any later message to that worker, or return None."""
+        return None
+
     # -- workers ----------------------------------------------------------------------------------
 
     def join(self, worker_id: int, channel: Channel, registration: dict[str, Any]) -> dict[str, Any]:
@@ -261,12 +296,14 @@ class CoordinatedParticipant(CheckpointParticipant, Generic[ReportT]):
             worker.keep(seq, self.report_model.model_validate(report))
             await self.notify()
 
-    async def broadcast(self, kind: str, body: dict[str, Any], *, timeout: float) -> dict[int, dict[str, Any]]:
+    async def broadcast(
+        self, kind: str, body: dict[str, Any], *, timeout: Optional[float]
+    ) -> dict[int, dict[str, Any]]:
         workers = dict(self.workers)
         return await self.call_each({worker_id: (kind, body) for worker_id in workers}, timeout=timeout)
 
     async def call_each(
-        self, messages: dict[int, tuple[str, dict[str, Any]]], *, timeout: float
+        self, messages: dict[int, tuple[str, dict[str, Any]]], *, timeout: Optional[float]
     ) -> dict[int, dict[str, Any]]:
         """Send each worker its own message at once; fail if any worker does not complete it."""
         calls = {worker_id: message for worker_id, message in messages.items() if worker_id in self.workers}
@@ -407,7 +444,10 @@ class WorkerCoordinator:
                 return await dispatch_control(self.controller, body["operation"], body.get("body"))
             return await self.participant.handle(worker_id, kind, body)
 
-        channel = Channel(reader, writer, handle)
+        def handle_now(kind: str, body: dict[str, Any]) -> Optional[dict[str, Any]]:
+            return self.participant.handle_now(worker_id, kind, body)
+
+        channel = Channel(reader, writer, handle, immediate=handle_now)
         try:
             await channel.run()
         finally:
@@ -520,7 +560,7 @@ class WorkerLink:
         self.on_coordinator_lost()
 
     async def call(
-        self, kind: str, body: dict[str, Any], *, timeout: float = MESSAGE_TIMEOUT_SECONDS
+        self, kind: str, body: dict[str, Any], *, timeout: Optional[float] = MESSAGE_TIMEOUT_SECONDS
     ) -> dict[str, Any]:
         if self._channel is None:
             raise CoordinatorUnavailableError(

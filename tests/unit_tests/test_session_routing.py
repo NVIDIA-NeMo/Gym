@@ -36,9 +36,11 @@ from nemo_gym.base_resources_server import BaseResourcesServerConfig, SimpleReso
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.session_routing import (
+    SESSION_OWNER_HEADER,
     SESSION_OWNER_KEY,
     SessionRoutingMiddleware,
     install_session_routing,
+    session_aliases,
     worker_socket_path,
 )
 
@@ -180,6 +182,29 @@ class TestSessionRouting:
         response = b.client.get("/echo?x=1&y=a%20b", headers={"x-probe": "p"}, cookies={a.cookie_name: cookie})
 
         assert response.json() == {"worker": "a", "query": "x=1&y=a%20b", "probe": "p"}
+
+    def test_a_request_without_a_session_goes_to_the_worker_its_header_names(self, workers) -> None:
+        a, b = workers
+
+        response = b.client.get("/echo", headers={SESSION_OWNER_HEADER: a.worker_id})
+        b.client.cookies.clear()
+        own = b.client.get("/echo")
+
+        assert response.json()["worker"] == "a"
+        assert own.json()["worker"] == "b"
+
+    def test_a_session_of_an_aliased_worker_goes_to_the_worker_that_holds_it_now(self, socket_dir: str) -> None:
+        old, a, b = Worker("old", socket_dir), Worker("a", socket_dir), Worker("b", socket_dir)
+        with old.client:
+            cookie = old.client.post("/store", json={"value": 7}).cookies[old.cookie_name]
+        # A restore moved the exited worker's session to a, and every worker's router knows it.
+        a.server.store.update(old.server.store)
+        for worker in (a, b):
+            session_aliases(worker.app)[old.worker_id] = a.worker_id
+        with a.client, b.client:
+            response = b.client.post("/take", cookies={old.cookie_name: cookie})
+
+        assert response.json() == {"worker": "a", "value": 7}
 
     def test_a_forwarded_request_is_never_forwarded_again(self, workers) -> None:
         a, b = workers

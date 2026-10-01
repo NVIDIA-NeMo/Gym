@@ -20,7 +20,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from nemo_gym._checkpoint.errors import CheckpointStateError
 
@@ -43,7 +43,9 @@ def write_participant_state(
     instance: str,
     checkpoint_id: str,
     records: list[dict[str, Any]],
+    extra: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
+    """Write ``records`` and then their manifest, which also keeps the participant's ``extra`` fields."""
     directory = participant_dir(checkpoint_dir, kind=kind, instance=instance)
     manifest_path = directory / "manifest.json"
     # Keep each record's key order: a restored episode must see its state exactly as exported, and state such as a
@@ -57,6 +59,7 @@ def write_participant_state(
         "records_file": "records.jsonl",
         "records_sha256": hashlib.sha256(payload).hexdigest(),
         "record_count": len(records),
+        **(extra or {}),
     }
     if manifest_path.exists():
         existing = json.loads(manifest_path.read_text())
