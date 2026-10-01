@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run Codex inside a Linux task sandbox; confirm descendant cleanup before verification."""
 
+from __future__ import annotations
+
 import ctypes
 import json
 import os
@@ -97,15 +99,21 @@ def run(params: RunnerInput) -> RunnerResult:
             capture_errors.append(str(exc))
 
     signal.signal(signal.SIGTERM, interrupt)
+    stop_file = directory / "runner.stop"
     (directory / "prompt.txt").write_text(params["prompt"])
     (directory / "events.jsonl").touch()
     with (directory / "stderr.log").open("wb") as stderr, (directory / "prompt.txt").open("rb") as stdin:
         try:
             enable_subreaper()
+            if stopping or stop_file.exists():
+                raise RuntimeError("Codex closed before process launch")
             process = subprocess.Popen(
                 params["command"],
                 cwd=params["cwd"],
-                env={key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL") if key in os.environ} | params["env"],
+                env={
+                    **{key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL") if key in os.environ},
+                    **params["env"],
+                },
                 stdin=stdin,
                 stdout=subprocess.PIPE,
                 stderr=stderr,
@@ -115,7 +123,7 @@ def run(params: RunnerInput) -> RunnerResult:
             reader.start()
             deadline = monotonic() + params["timeout"]
             while process.poll() is None:
-                if stopping or monotonic() >= deadline:
+                if stopping or stop_file.exists() or monotonic() >= deadline:
                     timed_out = True
                     break
                 sleep(0.05)

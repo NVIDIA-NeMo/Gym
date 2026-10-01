@@ -89,6 +89,15 @@ def test_spawn_error_is_not_success(tmp_path):
     assert summary["return_code"] != 0
 
 
+def test_stop_marker_prevents_process_launch(tmp_path):
+    (tmp_path / "runner.stop").touch()
+    process = launch(tmp_path, "open('should-not-exist', 'w').close()")
+    summary = result(tmp_path, process)
+    assert summary["cleanup_confirmed"] is True
+    assert summary["return_code"] != 0
+    assert not (tmp_path / "should-not-exist").exists()
+
+
 def test_sigterm_during_spawn_does_not_lose_child_handle(tmp_path):
     # Deliver SIGTERM after the real child exists but before Popen returns to run().
     # Isolate signal handlers/subreaper state from pytest, and always reap the test child.

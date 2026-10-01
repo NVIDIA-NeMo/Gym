@@ -81,15 +81,21 @@ endpoints reject this parameter, and no documented Codex configuration omits it.
 caller caching controls. A validation-only NIM compatibility bridge that explicitly omits this
 optimization does not establish direct NIM compatibility for this adapter.
 
-Native setup currently requires a direct connection, one agent worker, Linux/glibc on x86_64 or
-AArch64, Bash, and Python 3.9+. The installer checks bootstrap dependencies and installs missing
-curl, CA certificates, tar, xz, coreutils, awk, and flock (util-linux) on root/apt-get images; other images must provide
+Native setup requires a direct connection, one agent worker, Linux/glibc on x86_64 or
+AArch64 (or musl on x86_64), Bash, and Python 3.8+. The installer checks bootstrap dependencies and installs missing
+curl, CA certificates, tar, gzip, coreutils, awk, and flock (util-linux) on root/apt-get or root/apk images; other images must provide
 them. It installs Node 22.19.0 and `@openai/codex@0.144.4` under `/tmp/nemo-gym-codex-node-*`, verifies
 the CLI version, and reuses that runtime. An interprocess flock serializes cache setup before checking
 readiness, so concurrent sessions sharing a sandbox cannot rewrite a running runtime. Session configuration, HOME, and cache files live under
 `/tmp/nemo-gym-codex-sessions/*`, outside the task repository. `/`, `/tmp`, and adapter-owned paths
 cannot be task working directories. No CLI is required or installed on the agent host for native sessions.
 Image architecture support describes the installer contract; validate the actual task image before use.
+
+The runner uses ordinary sandbox `exec`, not the PTY/session API. It enforces its own deadline,
+with additional time for descendant cleanup before the provider timeout. Cancellation requests a
+stop and waits for the cleanup receipt; uncertain cleanup blocks verification and remains retryable.
+Old musl images use a checksum-pinned private C++ runtime for the private Node binary. The task's
+Node/Python and global library search path are not replaced.
 
 Each session accepts one activation: a string or one text user message with an optional preceding
 system/developer message. Configured `system_prompt`, request `instructions`, and that preceding

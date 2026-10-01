@@ -80,15 +80,25 @@ class Sandbox:
         self.blocked = False
         self.started = asyncio.Event()
         self.exited = asyncio.Event()
-        self.exec = AsyncMock(return_value=SimpleNamespace(error_type=None, return_code=0, stdout="", stderr=""))
+        self.exec = AsyncMock(
+            side_effect=self.run_exec,
+            return_value=SimpleNamespace(error_type=None, return_code=0, stdout="", stderr=""),
+        )
         self.stop = AsyncMock()
         self.disconnect = AsyncMock()
-        self.runner = SimpleNamespace(
-            wait_exit=AsyncMock(side_effect=self.wait_exit),
-            send_signal=AsyncMock(side_effect=self.signal),
-            close=AsyncMock(),
-        )
-        self.pty = SimpleNamespace(create=AsyncMock(side_effect=self.create))
+        self.launch = AsyncMock(side_effect=self.create)
+        self.request_stop = AsyncMock(side_effect=self.signal)
+
+    @property
+    def pty(self):
+        raise AssertionError("This provider supports exec only; no PTY API")
+
+    async def run_exec(self, command, **kwargs):
+        if command.startswith("trap '' TERM;"):
+            return await self.launch(command=command, **kwargs)
+        if "runner.stop" in command:
+            await self.request_stop()
+        return self.exec.return_value
 
     async def upload(self, source, destination):
         self.files[destination] = Path(source).read_text()
@@ -106,12 +116,14 @@ class Sandbox:
         self.started.set()
         if not self.blocked:
             self.exited.set()
-        return self.runner
+        await self.wait_exit()
+        return SimpleNamespace(error_type=None, return_code=0, stdout="", stderr="")
 
-    async def signal(self, name):
-        assert name == "SIGTERM"
-        self.result["timed_out"] = True
-        self.exited.set()
+    async def signal(self):
+        if hasattr(self, "directory"):
+            self.result["timed_out"] = True
+            self.exited.set()
+            await asyncio.sleep(0)
 
     async def wait_exit(self):
         await self.exited.wait()
@@ -166,7 +178,7 @@ def test_http_native_flow_runs_codex_in_borrowed_sandbox(setup):
             installer = f"{directory}/install_codex_runtime.sh"
             assert installer in sandbox.files
             assert agent.config.resources_server is None
-            assert not sandbox.pty.create.called
+            assert not sandbox.launch.called
             assert not any(path.startswith("/app/") for path in sandbox.files)
             install_call = sandbox.exec.await_args_list[1]
             assert install_call.args[0] == (f"bash {installer} /tmp/nemo-gym-codex-node-22.19.0-0.144.4 0.144.4")
@@ -346,7 +358,7 @@ def test_cookie_identity_and_single_activation(setup):
         assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
         assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code == 409
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
-    sandbox.pty.create.assert_awaited_once()
+    sandbox.launch.assert_awaited_once()
 
 
 @pytest.mark.parametrize("reason,expected", [("error", "failed"), ("aborted", "failed")])
@@ -546,7 +558,7 @@ def test_unsupported_request_is_not_silently_ignored(setup, override):
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task", **override})
         assert result.status_code == 422, result.text
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
-    sandbox.pty.create.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
 
 
 def test_rejected_request_does_not_consume_activation(setup):
@@ -555,11 +567,11 @@ def test_rejected_request_does_not_consume_activation(setup):
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         path = "/ng-rollout/codex-smoke-a2/v1/responses"
         assert client.post(path, json={"input": "task", "temperature": 0.2}).status_code == 422
-        sandbox.pty.create.assert_not_awaited()
+        sandbox.launch.assert_not_awaited()
         accepted = client.post(path, json={"input": "task"})
         assert accepted.status_code == 200, accepted.text
         assert client.post(path, json={"input": "task"}).status_code == 409
-    sandbox.pty.create.assert_awaited_once()
+    sandbox.launch.assert_awaited_once()
 
 
 def test_no_session_keeps_existing_local_path(setup):
@@ -569,7 +581,7 @@ def test_no_session_keeps_existing_local_path(setup):
             with pytest.raises(RuntimeError, match="legacy path reached"):
                 client.post("/v1/responses", json={"input": "task"})
         legacy.assert_awaited_once()
-    sandbox.pty.create.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
 
 
 async def activate(agent, sandbox):
@@ -587,7 +599,7 @@ async def test_close_cancels_active_codex_before_detaching(setup):
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     with pytest.raises(asyncio.CancelledError):
         await task
-    sandbox.runner.send_signal.assert_awaited_once_with("SIGTERM")
+    sandbox.request_stop.assert_awaited_once()
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
 
@@ -602,7 +614,7 @@ async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
         await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert session_id in agent._sandbox_sessions
     sandbox.disconnect.assert_not_awaited()
-    sandbox.runner.close.assert_not_awaited()
+    assert not any("rm -rf" in call.args[0] for call in sandbox.exec.await_args_list)
 
 
 async def test_disconnect_failure_retains_session_for_retry(setup):
@@ -615,7 +627,7 @@ async def test_disconnect_failure_retains_session_for_retry(setup):
     assert session_id in agent._sandbox_sessions
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert session_id not in agent._sandbox_sessions
-    sandbox.runner.close.assert_awaited_once()
+    sandbox.launch.assert_awaited_once()
 
 
 def test_cleanup_receipt_is_required():
@@ -791,7 +803,7 @@ async def test_unknown_launch_outcome_fails_closed(setup):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": "codex-smoke-a2"}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
-    sandbox.pty.create.side_effect = TimeoutError("lost launch response")
+    sandbox.launch.side_effect = TimeoutError("lost launch response")
     with pytest.raises(TimeoutError):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     with pytest.raises(RuntimeError, match="launch outcome is unknown"):
@@ -829,7 +841,7 @@ async def test_cancelled_install_never_publishes_session_or_launches_codex(setup
         await agent.seed_agent_session(request, seed())
     assert not agent._sandbox_sessions
     assert not request.session
-    sandbox.pty.create.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
 
@@ -851,7 +863,9 @@ async def test_provider_error_type_blocks_success_even_with_zero_exit(setup, sta
         sandbox.disconnect.assert_awaited_once()
         if stage == "prepare":
             assert sandbox.exec.await_count == 2
-            assert sandbox.exec.await_args.args[0].startswith("rm -rf -- /tmp/nemo-gym-codex-sessions/")
+            command = sandbox.exec.await_args.args[0]
+            assert "mv /tmp/nemo-gym-codex-sessions/" in command
+            assert ".closed || exit 1; fi; rm -rf -- " in command
         return
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     sandbox.exec.return_value = error
@@ -920,7 +934,7 @@ def test_model_boundary_options_are_rejected_before_activation(setup, field, val
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task", field: value})
         assert response.status_code == 422
-        sandbox.pty.create.assert_not_awaited()
+        sandbox.launch.assert_not_awaited()
         accepted = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
         assert accepted.status_code == 200, accepted.text
 
@@ -945,7 +959,7 @@ async def test_malformed_session_markers_cannot_fall_back_to_host(setup, marker)
     with pytest.raises(HTTPException) as error:
         await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seed().agent_session_id)))
     assert error.value.status_code == 409
-    sandbox.pty.create.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
 
 
 @pytest.mark.parametrize("complete", [False, True])

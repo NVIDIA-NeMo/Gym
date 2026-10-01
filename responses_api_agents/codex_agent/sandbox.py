@@ -4,10 +4,12 @@
 
 import asyncio
 import json
+import logging
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
@@ -15,7 +17,7 @@ from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.providers.base import SandboxPtySession
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 
 
 class CodexSandboxResult(BaseModel):
@@ -39,14 +41,12 @@ class CodexSandboxSession:
     directory: str
     runtime: str
     task: asyncio.Task[NeMoGymResponse] | None = None
-    runner: SandboxPtySession | None = None
-    exit_task: asyncio.Task[int] | None = None
+    exec_task: asyncio.Task[SandboxExecResult] | None = None
     result: CodexSandboxResult | None = None
     observations: AgentObservationBundle | None = None
     activated: bool = False
     closing: bool = False
     launch_started: bool = False
-    runner_closed: bool = False
     closed: bool = False
     close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -72,22 +72,50 @@ class CodexSandboxSession:
             return path.read_text(errors="replace")
 
     async def stop_runner(self, timeout: float) -> None:
-        """Wait for the supervisor's cleanup receipt; retain handles on any failure."""
-        if not self.launch_started:
+        """Fence delayed launches and require a receipt before allowing verification."""
+        if not self.launch_started or (self.result is not None and self.result.cleanup_confirmed):
             return
-        if self.runner is None or self.exit_task is None:
-            raise RuntimeError("Codex launch outcome is unknown; cannot authorize verification")
-        if not self.exit_task.done():
-            await self.runner.send_signal("SIGTERM")
-        await asyncio.wait_for(asyncio.shield(self.exit_task), timeout=timeout)
-        if self.result is None:
-            self.result = CodexSandboxResult.model_validate_json(await self.read_text("result.json"))
-        if not self.result.cleanup_confirmed:
-            raise RuntimeError(f"Codex sandbox cleanup was not confirmed: {self.result.error}")
-        if not self.runner_closed:
-            await self.runner.close()
-            self.runner_closed = True
-        # Keep the successful receipt for retries if file cleanup/disconnect fails.
+        receipt_path = f"{self.directory}/result.json"
+        try:
+            result = CodexSandboxResult.model_validate_json(await self.read_text("result.json"))
+        except Exception:
+            result = None
+        if result is None:
+            # The atomic claim decides whether launch or close won. A stopped
+            # claim can never start a harness, even if exec arrives much later.
+            stop_path = quote(f"{self.directory}/runner.stop")
+            claim_path = quote(f"{self.directory}/launch.claim")
+            temporary = quote(f"{receipt_path}.{uuid4().hex}.tmp")
+            stopped = quote(
+                json.dumps(
+                    {
+                        "return_code": 1,
+                        "timed_out": False,
+                        "cleanup_confirmed": True,
+                        "error": "Closed before runner launch",
+                        "hostname": "",
+                        "pid": 0,
+                    }
+                )
+            )
+            script = (
+                f"[ -f {quote(receipt_path)} ] && exit 0; "
+                f"touch {stop_path} || exit 1; "
+                f"ln -s stop {claim_path} 2>/dev/null || true; "
+                f'if [ "$(readlink {claim_path})" = stop ]; then '
+                f"printf '%s' {stopped} > {temporary} && mv {temporary} {quote(receipt_path)}; exit $?; fi; "
+                f"for _ in $(seq 1 {max(1, int(timeout))}); do "
+                f"[ -f {quote(receipt_path)} ] && exit 0; sleep 1; done; exit 1"
+            )
+            await self.sandbox.exec(script, cwd=self.seed.sandbox_access.workdir, timeout_s=timeout + 5)
+            try:
+                result = CodexSandboxResult.model_validate_json(await self.read_text("result.json"))
+            except Exception as error:
+                raise RuntimeError("Codex launch outcome is unknown; cannot authorize verification") from error
+        if not result.cleanup_confirmed:
+            raise RuntimeError(f"Codex sandbox cleanup was not confirmed: {result.error}")
+        # Cache only a successful receipt; failed cleanup remains retryable.
+        self.result = result
 
     async def close(self, timeout: float) -> None:
         """Stop only Codex-owned work and detach; never call sandbox.stop()."""
@@ -95,6 +123,9 @@ class CodexSandboxSession:
             if self.closed:
                 return
             self.closing = True
+            # Cancelling provider exec can kill the supervisor. Obtain its
+            # descendant-cleanup receipt before cancelling the response task.
+            await self.stop_runner(timeout)
             if self.task is not None:
                 if not self.task.done() and not self.task.cancelling():
                     self.task.cancel()
@@ -106,28 +137,61 @@ class CodexSandboxSession:
                 except Exception:
                     if not self.task.done():
                         raise
-                    # A response error does not establish cleanup; stop_runner below must.
-            await self.stop_runner(timeout)
-            result = await self.sandbox.exec(f"rm -rf -- {quote(self.directory)}", timeout_s=timeout)
-            if result.return_code != 0 or result.error_type:
-                raise RuntimeError(f"Could not remove Codex session files: {result}")
+            if self.exec_task is not None:
+                # A confirmed receipt makes it safe to cancel a stuck provider
+                # response; transport completion is not another cleanup gate.
+                if not self.exec_task.done():
+                    self.exec_task.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(self.exec_task), timeout=timeout)
+                except asyncio.CancelledError:
+                    if not self.exec_task.cancelled():
+                        raise
+                except Exception:
+                    if not self.exec_task.done():
+                        raise
+                    # Transport failure is not cleanup failure once the receipt is confirmed.
+            retired = f"{self.directory}.closed"
+            result = await self.sandbox.exec(
+                f"if [ -d {quote(self.directory)} ]; then "
+                f"mv {quote(self.directory)} {quote(retired)} || exit 1; fi; rm -rf -- {quote(retired)}",
+                timeout_s=timeout,
+            )
+            if result.return_code != 0 or getattr(result, "error_type", None):
+                raise RuntimeError(f"Could not remove Codex session files: {result.stderr}")
             await self.sandbox.disconnect()
             self.closed = True
 
     async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> str:
-        """Start the supervisor and Codex inside the borrowed task sandbox."""
+        """Run the supervisor through provider-neutral exec, without a PTY."""
         await self.upload_json("input.json", payload)
-        self.launch_started = True
-        self.runner = await self.sandbox.pty.create(
-            command=f"exec python3 -I {quote(self.directory + '/sandbox_runner.py')} {quote(self.directory + '/input.json')}",
-            cwd=self.seed.sandbox_access.workdir,
-            pty=False,
+        command = (
+            f"trap '' TERM; ln -s launch {quote(self.directory + '/launch.claim')} 2>/dev/null || exit 0; "
+            f"exec python3 -I {quote(self.directory + '/sandbox_runner.py')} {quote(self.directory + '/input.json')} "
+            f">{quote(self.directory + '/runner.log')} 2>&1"
         )
-        self.exit_task = asyncio.create_task(self.runner.wait_exit())
+        self.launch_started = True
         try:
-            # The supervisor owns the execution timeout; this bounds missing receipts/provider failures too.
-            await asyncio.wait_for(asyncio.shield(self.exit_task), timeout=timeout + close_timeout * 3)
-            self.result = CodexSandboxResult.model_validate_json(await self.read_text("result.json"))
-            return await self.read_text("events.jsonl")
-        finally:
+            # The runner enforces its own deadline and reaps descendants.
+            # Leave extra time for cleanup and transport before provider timeout.
+            self.exec_task = asyncio.create_task(
+                self.sandbox.exec(
+                    command, cwd=self.seed.sandbox_access.workdir, timeout_s=timeout + close_timeout * 3 + 30
+                )
+            )
+            # HTTP cancellation must not propagate into provider exec before
+            # the supervisor has stopped and reaped the harness descendants.
+            launched = await asyncio.shield(self.exec_task)
+            if getattr(launched, "error_type", None) == "timeout":
+                raise TimeoutError("Codex sandbox supervisor exceeded its execution deadline")
+            if launched.return_code != 0 or getattr(launched, "error_type", None):
+                raise RuntimeError(f"Codex sandbox supervisor failed: {launched.stderr}")
+        except BaseException:
+            try:
+                await self.stop_runner(close_timeout)
+            except Exception:
+                logging.getLogger(__name__).exception("Codex cleanup remains unconfirmed; close must retry")
+            raise
+        else:
             await self.stop_runner(close_timeout)
+        return await self.read_text("events.jsonl")
