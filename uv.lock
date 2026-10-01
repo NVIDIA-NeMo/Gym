@@ -20,6 +20,7 @@ overrides = [
     { name = "torchaudio", marker = "sys_platform == 'never'" },
     { name = "torchcodec", marker = "sys_platform == 'never'" },
     { name = "torchvision", marker = "sys_platform == 'never'" },
+    { name = "wcwidth", marker = "sys_platform == 'never'" },
 ]
 excludes = [
     "alembic",
@@ -38,7 +39,6 @@ excludes = [
     "skops",
     "sqlalchemy",
     "waitress",
-    "wcwidth",
     "werkzeug",
 ]
 
