@@ -159,6 +159,20 @@ Model-free checks only; no model is involved in any number here.
   reply, where upstream's first-`{`-to-last-`}` span fails to parse and its raw scan takes the
   first option mentioned while the rightmost-object rule above reads the last -- gold was a
   fourth option, so both are wrong.
+
+  Scores from upstream's `eval.py` on upstream's post-processing; this port's post-processing
+  and this port's metrics produced the same value in every cell. `≠` is the number of rows whose
+  prediction record differs between the two post-processors.
+
+  | task (`gen`) | Qwen2.5-7B | ≠ | Llama-3.1-8B | ≠ | Phi-3-mini-4k | ≠ |
+  |---|---|---|---|---|---|---|
+  | ordering | 78.70 | 0 | 73.15 | 0 | 79.76 | 0 |
+  | contrastive_choice | 63.51 | 1 | 62.40 | 0 | 59.80 | 0 |
+  | step_validation | 75.04 | 0 | 70.86 | 0 | 72.04 | 0 |
+  | condition_validation | 80.59 | 0 | 80.88 | 0 | 83.39 | 0 |
+  | step_completion | 7.10 | 3 | 9.48 | 10 | 5.27 | 36 |
+  | rationalization | 18.05 | 0 | 22.99 | 0 | 24.33 | 0 |
+  | rows | 7,306 | 4 | 7,306 | 10 | 7,306 | 36 |
 - **Gold cannot reach 100 on `step_completion`.** This is an upstream data property the port
   reproduces exactly, not a defect here: 460 of 1,483 rows have empty gold slots and
   `slot_f1({}, {})` is 0 by construction, 2 rows use slot keys outside the schema (`reagents`,
