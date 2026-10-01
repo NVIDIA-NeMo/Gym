@@ -60,6 +60,33 @@ from resources_servers.swe_next.verification import (
     verification_files,
 )
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
+from resources_servers.swebench.patch_capture import (
+    PatchCapture,
+    PatchCaptureMode,
+    capture_model_patch,
+    prepare_git_for_commits,
+)
+
+
+GRADING_ARTIFACTS = (
+    "r2e_tests",
+    "parsed_commit.json",
+    "modified_files.json",
+    "modified_entities.json",
+    "syn_issue.json",
+    "expected_test_output.json",
+    "execution_result.json",
+)
+
+
+async def hide_grading_artifacts(sandbox: AsyncSandbox, workdir: str) -> None:
+    targets = " ".join(shlex.quote(name) for name in GRADING_ARTIFACTS)
+    result = await sandbox.exec(
+        f"cd {shlex.quote(workdir)} && rm -rf {targets} "
+        "&& if grep -qs r2e_tests run_tests.sh; then rm -f run_tests.sh; fi"
+    )
+    if result.return_code != 0:
+        print(f"Failed to hide grading artifacts in {workdir}: {result.stdout}\n{result.stderr}", file=sys.stderr)
 
 
 GRADING_ARTIFACTS = (
@@ -85,6 +112,9 @@ async def hide_grading_artifacts(sandbox: AsyncSandbox, workdir: str) -> None:
 
 class SWENextResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
+    # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
+    patch_capture_mode: PatchCaptureMode = "worktree"
+    include_model_patch_in_response: bool = True
     evaluation_timeout: int | None = 1200
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
@@ -137,9 +167,19 @@ class SWENextVerifyResponse(BaseVerifyResponse):
     error: str | None
     eval_sandbox_start_time_taken: float
     patch_verification_time_taken: float
+    # Patch-capture provenance; see resources_servers/swebench/patch_capture.py.
+    patch_source: str = "none"
+    patch_branch: str | None = None
+    patch_commits: int = 0
+    worktree_dirty: bool = False
+    model_patch_bytes: int = 0
+    model_patch: str | None = None
+    model_patch_sha256: str = ""
+    model_patch: str | None = None
 
 
 class SWENextResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: SWENextResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -227,22 +267,19 @@ class SWENextResourcesServer(SimpleResourcesServer):
             print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
             return frozenset()
 
-    async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> str:
-        """Diff the agent's own sandbox against ``base_commit``, then stop it.
-
-        ``git add -N`` (intent-to-add) is what makes brand-new files show up in ``git diff`` too,
-        not just edits to already-tracked files.
-        """
+    async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
+        """Capture the agent's patch per ``config.patch_capture_mode``, then stop its sandbox."""
         original_sandbox = self._session_id_to_sandbox.pop(session_id)
         pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
         try:
-            result = await original_sandbox.exec(
-                f"git -C {shlex.quote(workdir)} add -N . "
-                f"&& git -C {shlex.quote(workdir)} --no-pager diff {shlex.quote(base_commit)}"
+            return await capture_model_patch(
+                original_sandbox,
+                workdir,
+                base_commit,
+                mode=self.config.patch_capture_mode,
+                pristine_untracked=pristine_untracked,
+                drop_sections=drop_patch_sections,
             )
-            if result.return_code != 0:
-                raise RuntimeError(result.stderr or "git diff failed")
-            return drop_patch_sections(result.stdout or "", pristine_untracked)
         finally:
             await self._stop_sandbox(original_sandbox)
 
@@ -258,6 +295,8 @@ class SWENextResourcesServer(SimpleResourcesServer):
         await self._init_git_repo(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
             await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swe_next")
+        # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
+        await prepare_git_for_commits(sandbox, body.workdir, "swe_next")
 
         head_result = await sandbox.exec(f"git -C {shlex.quote(body.workdir)} rev-parse HEAD")
         self._session_id_to_base_commit[session_id] = (head_result.stdout or "").strip()
@@ -270,19 +309,21 @@ class SWENextResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: SWENextVerifyRequest) -> SWENextVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         extraction_error = None
+        mode = self.config.patch_capture_mode
         if self.config.is_verifying_golden_patch:
-            patch = body.patch
+            capture = PatchCapture.static(body.patch, mode, "golden")
         else:
             base_commit = self._session_id_to_base_commit.pop(session_id, "")
             if not base_commit:
-                patch = ""
+                capture = PatchCapture.static("", mode, "none")
                 extraction_error = "Failed to extract model patch: no base commit recorded (seed_session did not run for this session)"
             else:
                 try:
-                    patch = await self._extract_model_patch(session_id, body.workdir, base_commit)
+                    capture = await self._extract_model_patch(session_id, body.workdir, base_commit)
                 except Exception as exc:
-                    patch = ""
+                    capture = PatchCapture.static("", mode, "none")
                     extraction_error = f"Failed to extract model patch: {exc}"
+        patch = capture.patch
 
         inputs = self._inputs(body, patch)
         log_dir = Path(__file__).parent / "logs" / body.instance_id
@@ -351,6 +392,7 @@ class SWENextResourcesServer(SimpleResourcesServer):
                 "error": extraction_error or result.error,
                 "eval_sandbox_start_time_taken": start_time_taken,
                 "patch_verification_time_taken": verification_time_taken,
+                **capture.response_fields(self.config.include_model_patch_in_response),
             }
         )
 

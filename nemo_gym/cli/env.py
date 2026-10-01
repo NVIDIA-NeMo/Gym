@@ -66,6 +66,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     QUERY_KEY_NAME,
+    SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
@@ -300,6 +301,32 @@ def _model_endpoint_timeout_seconds(global_config_dict: DictConfig) -> float:
         ) from None
 
 
+_DEFAULT_SERVER_SPINUP_TIMEOUT_SEC: float = 600.0
+
+# Longest single readiness probe of a Gym server. A probe is capped further by the time left before the deadline.
+_SERVER_PROBE_TIMEOUT_SEC: float = 5.0
+
+
+def _server_spinup_timeout_seconds(global_config_dict: DictConfig) -> float:
+    """How long to wait for Gym servers to become ready, from config. 0 or a negative value waits forever.
+
+    An unset or null key falls back to the same default the config parser applies.
+    Environment interpolation yields a string, so numeric strings are accepted.
+    Anything else is reported as a `ConfigError` rather than a `TypeError` traceback mid-startup.
+    """
+    value = global_config_dict.get(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME)
+    if value is None:
+        return _DEFAULT_SERVER_SPINUP_TIMEOUT_SEC
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"`{SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}` must be a number of seconds, got {value!r}. "
+            "Set it to 0 to wait for Gym servers without a limit."
+        ) from None
+
+
 def _resolve_server_dir(rel_path: Path) -> Path:
     """Resolve a relative server dir (e.g. ``resources_servers/<name>``) to an absolute path.
 
@@ -311,6 +338,26 @@ def _resolve_server_dir(rel_path: Path) -> Path:
     return _resolve_under_cwd_or_install(
         rel_path, validator=lambda d: (d / "requirements.txt").exists() or (d / "pyproject.toml").exists()
     )
+
+
+def _server_launch_command(
+    dir_path: Path,
+    global_config_dict: DictConfig,
+    server_name: str,
+    entrypoint_fpath: Path,
+    escaped_config_dict_yaml_str: str,
+) -> str:
+    """Shell command that sets up a server's venv and starts its entrypoint with that venv's own interpreter.
+
+    The interpreter is named explicitly instead of relying on the bare `python` that `source bin/activate`
+    puts on PATH: a venv copied or moved after creation still names its original prefix in `bin/activate`,
+    so activating it would silently run a different interpreter than `uv_venv_dir` selected.
+    """
+    venv_python_fpath = get_venv_path(dir_path, global_config_dict) / "bin" / "python"
+    return f"""{setup_env_command(dir_path, global_config_dict, server_name)} \\
+    && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
+    {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(server_name)} \\
+    {shlex.quote(str(venv_python_fpath))} {shlex.quote(str(entrypoint_fpath))}"""
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -382,8 +429,10 @@ class RunHelper:  # pragma: no cover
     _telemetry_metrics_enabled: bool
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
-        # Entry points may call start before entering their own cleanup region.
-        # Own partial startup here, including Ctrl-C after a child was spawned.
+        """Start all configured servers and clean up partial startup on failure or interruption.
+
+        Callers may reach their own cleanup region only after this returns.
+        """
         self._processes = {}
         self._owned_process_groups = {}
         self._head_server = None
@@ -403,6 +452,7 @@ class RunHelper:  # pragma: no cover
         # Fail fast before starting Ray if nothing is configured to run (covers env run and the
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
+        self._server_spinup_timeout_seconds = _server_spinup_timeout_seconds(global_config_dict)
 
         # Translate the `telemetry:` block into NEMO_GYM_OTEL_* env vars *before* anything is
         # spawned. run_command copies os.environ into every server process, and that copy is
@@ -427,8 +477,6 @@ class RunHelper:  # pragma: no cover
 
         top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
-        self._processes: Dict[str, Popen] = dict()
-        self._owned_process_groups: Dict[str, int] = dict()
         self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
 
         start_time = time()
@@ -458,10 +506,11 @@ class RunHelper:  # pragma: no cover
             # Resolve cwd-first (a local server), else the install location for built-ins.
             dir_path = _resolve_server_dir(Path(first_key, second_key))
 
-            command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
-    && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
-    {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
-    python {str(entrypoint_fpath)}"""
+            # Name the venv in the logs: the server runs that venv's interpreter (see _server_launch_command).
+            print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
+            command = _server_launch_command(
+                dir_path, global_config_dict, top_level_path, entrypoint_fpath, escaped_config_dict_yaml_str
+            )
 
             managed_subprocess = (
                 first_key == "responses_api_models"
@@ -625,11 +674,13 @@ Process `{process_name}` stderr:
         poll_count = 0
         successful_servers = []
         total_servers = len(self._server_instance_display_configs)
+        timeout_seconds = self._server_spinup_timeout_seconds
+        deadline = monotonic() + timeout_seconds if timeout_seconds > 0 else None
 
         # Until we spin up or error out.
         while True:
             self.poll()
-            statuses = self.check_http_server_statuses(successful_servers)
+            statuses = self.check_http_server_statuses(successful_servers, deadline=deadline)
             successful_servers.extend(s for s, status in statuses if status == "success")
 
             waiting = []
@@ -638,6 +689,15 @@ Process `{process_name}` stderr:
                     waiting.append(name)
 
             if len(successful_servers) != total_servers:
+                if deadline is not None and monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"Timed out after {timeout_seconds:g}s waiting for Gym servers to become ready: "
+                        f"{', '.join(waiting)}\n"
+                        "This wait covers dependency installation and any local model download or loading "
+                        "that a server does before it opens its port.\n"
+                        f"Raise the limit with `++{SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}=<seconds>`, "
+                        "or set it to 0 to wait without a limit."
+                    )
                 if poll_count % 10 == 0:  # Print every sleep_interval * poll_count = 3 * 10 = 30s
                     print(
                         f"""Checking for HTTP server statuses.
@@ -649,7 +709,10 @@ Process `{process_name}` stderr:
                 self.display_server_instance_info()
                 return
 
-            sleep(sleep_interval)
+            if deadline is None:
+                sleep(sleep_interval)
+            else:
+                sleep(max(0.0, min(sleep_interval, deadline - monotonic())))
 
     def shutdown(self) -> None:
         memory_profiler = getattr(self, "_memory_profiler", None)
@@ -755,10 +818,7 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
         each came from. It raises rather than exits because `RunHelper` is imported and driven as a
         library, so the caller decides what an unreachable endpoint means; the CLI entrypoints turn
         it into an exit.
-
-        The servers spawned above are shut down first. They hold ports and have neither a process
-        group nor an atexit handler, and every caller reaches its own `shutdown()` only after
-        `start()` returns.
+        `start()` shuts down the servers it already spawned before the error reaches the caller.
         """
         timeout_seconds = _model_endpoint_timeout_seconds(global_config_dict)
         unreachable = _wait_for_model_endpoints(_collect_model_endpoints(global_config_dict), timeout_seconds)
@@ -766,7 +826,6 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
             return
 
         listed = "\n".join(f"  - {url} (from `{key}`)" for key, url in unreachable)
-        self.shutdown()
         raise ConfigError(
             f"""{len(unreachable)} model endpoint(s) never answered within {timeout_seconds:.0f}s:
 {listed}
@@ -779,7 +838,14 @@ in your config does not match where it is listening.
   - Raise `{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}` to wait longer, or set it to 0 to skip this check."""
         )
 
-    def check_http_server_statuses(self, successful_servers: List[str]) -> List[Tuple[str, ServerStatus]]:
+    def check_http_server_statuses(
+        self, successful_servers: List[str], *, deadline: Optional[float] = None
+    ) -> List[Tuple[str, ServerStatus]]:
+        """Probe every server not yet ready.
+
+        With a `deadline` from `monotonic()`, each probe is capped at the time left before it.
+        Servers still unprobed once it passes are reported as `timeout` without a request.
+        """
         statuses = []
         for server_instance_display_config in self._server_instance_display_configs:
             name = server_instance_display_config.config_path
@@ -788,7 +854,15 @@ in your config does not match where it is listening.
             if name in successful_servers:
                 continue
 
-            status = self._server_client.poll_for_status(name)
+            probe_timeout_seconds = _SERVER_PROBE_TIMEOUT_SEC
+            if deadline is not None:
+                remaining_seconds = deadline - monotonic()
+                if remaining_seconds <= 0:
+                    statuses.append((name, "timeout"))
+                    continue
+                probe_timeout_seconds = min(probe_timeout_seconds, remaining_seconds)
+
+            status = self._server_client.poll_for_status(name, timeout_seconds=probe_timeout_seconds)
             statuses.append((name, status))
 
         return statuses
@@ -1224,7 +1298,7 @@ gym env test +entrypoint={data_validation_failed[0]} +should_validate_data=true
 
 Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
 
-    if tests_missing or tests_failed or data_validation_failed:
+    if tests_missing or tests_failed or tests_unrecognized or data_validation_failed:
         exit(1)
 
 

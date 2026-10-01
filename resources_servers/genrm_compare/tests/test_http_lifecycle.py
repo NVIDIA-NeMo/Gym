@@ -33,8 +33,9 @@ from fastapi.responses import JSONResponse, Response
 from omegaconf import OmegaConf
 
 import nemo_gym.server_utils as http
+from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from nemo_gym.base_resources_server import BaseVerifyResponse
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.reward_profile import RewardProfiler
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
@@ -77,7 +78,12 @@ async def services(config, monkeypatch):
     monkeypatch.setattr(http, "_GLOBAL_AIOHTTP_CLIENT", None)
     session = http.set_global_aiohttp_client(http.GlobalAIOHTTPAsyncClientConfig())
     client = http.ServerClient.model_construct(
-        global_config_dict=OmegaConf.create({"agent": {"responses_api_agents": {"simple_agent": {}}}})
+        global_config_dict=OmegaConf.create(
+            {
+                "agent": {"responses_api_agents": {"simple_agent": {}}},
+                "environment": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "agent"}}}},
+            }
+        )
     )
     config.num_rollouts_per_prompt = 4
     config.cohort_collection_timeout_s = 3
@@ -149,6 +155,14 @@ async def services(config, monkeypatch):
         resources_server=ResourcesServerRef(type="resources_servers", name="resource"),
     )
     agent = SimpleAgent(config=agent_config, server_client=client)
+    environment_config = LegacyAgentEnvironmentServerConfig(
+        host="127.0.0.1",
+        port=0,
+        name="environment",
+        entrypoint="app.py",
+        agent_server=AgentServerRef(type="responses_api_agents", name="agent"),
+    )
+    environment = LegacyAgentEnvironmentServer(config=environment_config, server_client=client)
     try:
         async with AsyncExitStack() as stack:
             for name, app in (
@@ -156,6 +170,7 @@ async def services(config, monkeypatch):
                 ("judge", judge_app),
                 ("resource", production_app(resource)),
                 ("agent", production_app(agent)),
+                ("environment", production_app(environment)),
             ):
                 url, server, task = await stack.enter_async_context(listening(app))
                 client._server_base_urls[name] = url

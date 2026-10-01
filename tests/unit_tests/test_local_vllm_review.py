@@ -17,10 +17,11 @@ from nemo_gym.cli import env
 
 
 @pytest.mark.parametrize("error", [RuntimeError("readiness failed"), KeyboardInterrupt()])
-def test_partial_start_reaps_owned_cpu_child(monkeypatch, error):
+def test_partial_start_reaps_owned_cpu_child(monkeypatch, tmp_path, error):
     config = OmegaConf.create(
         {
             "dry_run": False,
+            "uv_venv_dir": str(tmp_path),
             "policy_model": {
                 "responses_api_models": {"local_vllm_model": {"entrypoint": "app.py", "launcher": "subprocess"}}
             },

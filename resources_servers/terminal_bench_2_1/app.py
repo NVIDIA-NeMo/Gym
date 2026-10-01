@@ -135,6 +135,7 @@ TEST_SH_PATCHES = {
 
 
 class TerminalBench21ResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: TerminalBench21ResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
