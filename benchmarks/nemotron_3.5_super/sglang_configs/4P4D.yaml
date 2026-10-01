@@ -48,9 +48,9 @@ frontend:
     pool-idle-timeout-secs: 2
     health-check-interval-secs: 5
     log-level: info
-    dp-aware: true
+    dp-aware: false
     prefill-policy: cache_aware
-    decode-policy: round_robin
+    decode-policy: cache_aware
     balance-abs-threshold: 64
 # Keep the Gym checkout and its results visible outside the evaluation container.
 # SRT already mounts its job log directory at /logs and the checkpoint at /model.
@@ -180,8 +180,8 @@ roles:
       log-level-http: warning
   decode:
     nodes: 4
-    workers: 1
-    gpus: 16
+    workers: 4
+    gpus: 4
     env:
       CUDA_VISIBLE_DEVICES: 0,1,2,3
       UCX_NET_DEVICES: mlx5_0,mlx5_1,mlx5_3,mlx5_4
@@ -213,19 +213,19 @@ roles:
       skip-server-warmup: true
       attention-backend: trtllm_mha
       context-length: 262144
-      cuda-graph-max-bs-decode: 256
+      cuda-graph-max-bs-decode: 128
       disaggregation-decode-extra-slots: 0
       disaggregation-transfer-backend: nixl
       dtype: bfloat16
       enable-cache-report: true
       enable-metrics: true
-      ep-size: 16
+      ep-size: 4
       kv-cache-dtype: fp8_e4m3
       linear-attn-backend: triton
       mamba-backend: flashinfer
       mamba-radix-cache-strategy: extra_buffer
       mamba-ssm-dtype: float32
-      max-running-requests: 512
+      max-running-requests: 128
       max-total-tokens: 16777216
       mem-fraction-static: 0.8
       moe-a2a-backend: none
@@ -239,10 +239,10 @@ roles:
       speculative-num-steps: 3
       tokenizer-worker-num: 4
       tool-call-parser: qwen3_coder
-      tp-size: 16
+      tp-size: 4
       trust-remote-code: true
       weight-loader-drop-cache-after-load: true
-      dp-size: 4
-      enable-dp-attention: true
-      enable-dp-lm-head: true
+      dp-size: 1
+      enable-dp-attention: false
+      enable-dp-lm-head: false
       log-level-http: warning
