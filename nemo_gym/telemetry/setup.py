@@ -453,8 +453,12 @@ def get_telemetry() -> Optional["TelemetryHandle"]:
     return _TELEMETRY_HANDLE
 
 
-def is_metrics_exporting() -> bool:
-    """Whether this process has an active metrics exporter."""
+def is_metrics_exporter_active() -> bool:
+    """Whether this process initialized an exporting metrics provider.
+
+    Unlike :func:`is_telemetry_metrics_enabled`, this stays false until telemetry
+    setup succeeds with metrics enabled and this process selected for export.
+    """
     return _METRICS_EXPORTING
 
 

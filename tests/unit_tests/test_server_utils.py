@@ -709,7 +709,7 @@ class TestServerUtils:
     async def test_connection_pool_telemetry_is_not_installed_when_disabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
         monkeypatch.setattr(nemo_gym.server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 1)
-        monkeypatch.setattr(connection_pool, "is_metrics_exporting", lambda: False)
+        monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: False)
         monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
         report = MagicMock()
         monkeypatch.setattr(nemo_gym.server_utils, "report_connection_pool_capacity", report)
@@ -726,7 +726,7 @@ class TestServerUtils:
     async def test_connection_pool_telemetry_is_installed_when_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
         monkeypatch.setattr(nemo_gym.server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 1)
-        monkeypatch.setattr(connection_pool, "is_metrics_exporting", lambda: True)
+        monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: True)
         monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: False)
         monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
 

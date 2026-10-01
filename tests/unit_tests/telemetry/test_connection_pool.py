@@ -37,7 +37,7 @@ def collected_metrics(monkeypatch):
         meter = provider.get_meter("connection-pool-test")
 
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
-    monkeypatch.setattr(connection_pool, "is_metrics_exporting", lambda: True)
+    monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: True)
     monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
     gym_metrics._reset_for_testing()
     connection_pool._CONNECT_COUNTS.clear()
@@ -92,7 +92,7 @@ async def _client(monkeypatch, *, limit: int, limit_per_host: int):
 async def _lazy_client(monkeypatch, *, metrics_enabled: bool = True, workers: int = 1, aggregate_limit: int = 4):
     monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
     monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
-    monkeypatch.setattr(connection_pool, "is_metrics_exporting", lambda: metrics_enabled)
+    monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: metrics_enabled)
     monkeypatch.setattr(server_utils, "get_nemo_gym_fastapi_num_workers", lambda: workers)
     monkeypatch.setattr(server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
     monkeypatch.setattr(

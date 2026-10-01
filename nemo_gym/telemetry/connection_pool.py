@@ -21,7 +21,7 @@ from nemo_gym.telemetry.gym_metrics import (
     record_http_connection_pool_queue_duration,
     register_http_connection_pool_connect_counter,
 )
-from nemo_gym.telemetry.setup import is_metrics_exporting
+from nemo_gym.telemetry.setup import is_metrics_exporter_active
 
 
 logger = logging.getLogger(__name__)
@@ -237,5 +237,5 @@ class QueueTimedTCPConnector(TCPConnector):
 
 def build_connection_pool_connector(**kwargs: Any) -> TCPConnector:
     """Build the timed connector only while this process exports metrics."""
-    connector_cls = QueueTimedTCPConnector if is_metrics_exporting() else TCPConnector
+    connector_cls = QueueTimedTCPConnector if is_metrics_exporter_active() else TCPConnector
     return connector_cls(**kwargs)

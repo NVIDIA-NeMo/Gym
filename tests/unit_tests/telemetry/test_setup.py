@@ -28,8 +28,9 @@ from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.setup import (
     get_telemetry,
     init_telemetry,
-    is_metrics_exporting,
+    is_metrics_exporter_active,
     is_telemetry_env_enabled,
+    is_telemetry_metrics_enabled,
     shutdown_telemetry,
 )
 from tests.unit_tests.telemetry.conftest import import_without_lens, no_lens, requires_lens
@@ -57,6 +58,7 @@ def enabled_console_env(clean_otel_env):
 def test_init_returns_none_when_disabled(clean_otel_env):
     assert init_telemetry(server_name="x") is None
     assert get_telemetry() is None
+    assert is_metrics_exporter_active() is False
 
 
 def test_init_does_not_import_lens_when_disabled(clean_otel_env, monkeypatch):
@@ -90,6 +92,7 @@ def test_init_returns_none_when_lens_is_absent(clean_otel_env):
     with no_lens():
         assert init_telemetry(server_name="x") is None
     assert get_telemetry() is None
+    assert is_metrics_exporter_active() is False
 
 
 def test_invalid_env_disables_rather_than_crashing_the_server(clean_otel_env):
@@ -108,6 +111,7 @@ def test_setup_failure_is_swallowed(clean_otel_env, monkeypatch):
 
     monkeypatch.setattr("nemo.lens.setup_telemetry", boom)
     assert init_telemetry(server_name="x") is None
+    assert is_metrics_exporter_active() is False
 
 
 # --------------------------------------------------------------------------- #
@@ -115,19 +119,25 @@ def test_setup_failure_is_swallowed(clean_otel_env, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
+def test_configured_metrics_do_not_imply_an_active_exporter(enabled_console_env):
+    enabled_console_env.setenv("NEMO_GYM_OTEL_METRICS_ENABLED", "1")
+    assert is_telemetry_metrics_enabled() is True
+    assert is_metrics_exporter_active() is False
+
+
 def test_init_builds_an_exporting_handle(enabled_console_env):
     handle = init_telemetry(server_name="weather", server_type="resources_servers")
     assert handle is not None
     assert handle.is_exporting is True
     assert get_telemetry() is handle
-    assert is_metrics_exporting() is True
+    assert is_metrics_exporter_active() is True
 
 
-def test_metrics_exporting_is_false_when_metrics_are_disabled(enabled_console_env):
+def test_metrics_exporter_is_inactive_when_metrics_are_disabled(enabled_console_env):
     enabled_console_env.setenv("NEMO_GYM_OTEL_METRICS_ENABLED", "0")
     handle = init_telemetry(server_name="weather")
     assert handle is not None and handle.is_exporting is True
-    assert is_metrics_exporting() is False
+    assert is_metrics_exporter_active() is False
 
 
 def test_enabled_span_groups_follow_the_config(enabled_console_env):
@@ -271,6 +281,7 @@ def test_non_exporting_rank_gets_a_silent_handle(clean_otel_env):
     handle = init_telemetry(server_name="weather", rank=3, world_size=4)
     assert handle is not None
     assert handle.is_exporting is False
+    assert is_metrics_exporter_active() is False
     assert is_span_group_enabled("server") is False
 
 
@@ -349,6 +360,7 @@ def test_is_telemetry_env_enabled_does_not_require_lens(clean_otel_env):
     clean_otel_env.setenv("NEMO_LENS_ENABLED", "1")
     module = import_without_lens("nemo_gym.telemetry.setup")
     assert module.is_telemetry_env_enabled() is True
+    assert module.is_metrics_exporter_active() is False
     assert is_telemetry_env_enabled() is True
 
 
