@@ -11,6 +11,7 @@ import shutil
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
+from string import ascii_letters, digits
 
 from . import __version__
 from .checker import NAMES, PROFILE, EvidenceScope, inspect_record
@@ -184,7 +185,7 @@ def inspect_matrix(
         raise ValueError("at least one harness is required")
     rows = {}
     for name, bundle in harnesses.items():
-        if not name or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in name):
+        if not name or any(c not in ascii_letters + digits + "_-" for c in name):
             raise ValueError("harness names must be alphanumeric with hyphens or underscores")
         path, summary = inspect_bundle(bundle, output=output / name, scope=scope)
         rows[name] = {"report": str(path / "evidence_summary.json"), **summary}
