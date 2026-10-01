@@ -21,18 +21,21 @@ response is re-emitted as a synthesized ``chat.completion.chunk`` SSE stream. No
 requests keep the historical strict-validation behavior.
 """
 
+import asyncio
 import json
 from time import time
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
+import nemo_gym.base_responses_api_model as base_responses_api_model
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     SimpleResponsesAPIModel,
+    _consume_terminal_sse_event,
     _parse_sse_events,
     _reconstruct_chat_sse,
 )
@@ -447,3 +450,107 @@ class TestSynthesizeSystemFingerprint:
         events = _events("".join(synthesize_chat_completion_sse(completion)))
         assert events
         assert all(event.get("system_fingerprint") == "fp_abc123" for event in events)
+
+
+_SLOW_COMPLETION = _completion(content="slow answer", usage=_USAGE)
+_STREAM_BODY = {
+    "stream": True,
+    "stream_options": {"include_usage": True},
+    "messages": [{"role": "user", "content": "hi"}],
+}
+
+
+class _DelayedChatModel(SimpleResponsesAPIModel):
+    """Fake model server whose chat call waits, then returns a fixed completion or raises."""
+
+    config: BaseResponsesAPIModelConfig
+    delay_s: float = 0.0
+    error: object = None
+    model_config = {"arbitrary_types_allowed": True}
+
+    async def chat_completions(
+        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        await asyncio.sleep(self.delay_s)
+        if self.error is not None:
+            raise self.error
+        return _SLOW_COMPLETION
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        raise NotImplementedError
+
+
+def _delayed_server(delay_s: float, error: BaseException | None = None) -> _DelayedChatModel:
+    server = _DelayedChatModel(
+        config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
+        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+    )
+    object.__setattr__(server, "delay_s", delay_s)
+    object.__setattr__(server, "error", error)
+    return server
+
+
+def _without_comments(sse_text: str) -> str:
+    return "".join(block + "\n\n" for block in sse_text.split("\n\n") if block and not block.startswith(":"))
+
+
+class TestChatStreamKeepAlive:
+    """A slow buffered streaming call commits early and sends SSE comments; a fast call is served as before."""
+
+    @pytest.fixture(autouse=True)
+    def _short_timers(self, monkeypatch) -> None:
+        monkeypatch.setattr(base_responses_api_model, "_SSE_KEEPALIVE_GRACE_S", 0.05)
+        monkeypatch.setattr(base_responses_api_model, "_SSE_KEEPALIVE_INTERVAL_S", 0.05)
+
+    @staticmethod
+    def _replay() -> str:
+        completion = _SLOW_COMPLETION.model_dump(mode="json")
+        return "".join(synthesize_chat_completion_sse(completion, include_usage=True))
+
+    def test_fast_call_is_byte_identical_to_the_plain_replay(self) -> None:
+        client = TestClient(_delayed_server(0.0).setup_webserver())
+        resp = client.post("/v1/chat/completions", json=_STREAM_BODY)
+        assert resp.status_code == 200
+        assert resp.text == self._replay()
+
+    def test_slow_call_sends_comments_then_the_same_events(self) -> None:
+        client = TestClient(_delayed_server(0.4).setup_webserver())
+        resp = client.post("/v1/chat/completions", json=_STREAM_BODY)
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert resp.text.startswith(": keep-alive\n\n")
+        assert resp.text.count(": keep-alive\n\n") >= 3
+        assert _without_comments(resp.text) == self._replay()
+        # Model-call capture rebuilds the response from data lines only, so the comments do not change it.
+        rebuilt = _reconstruct_chat_sse(_parse_sse_events(resp.content))
+        assert rebuilt["choices"][0]["message"]["content"] == "slow answer"
+        assert rebuilt["usage"]["total_tokens"] == 10
+
+    def test_slow_failure_is_an_in_stream_error_event(self) -> None:
+        error = HTTPException(status_code=502, detail="decode worker failed")
+        client = TestClient(_delayed_server(0.2, error).setup_webserver())
+        resp = client.post("/v1/chat/completions", json=_STREAM_BODY)
+        assert resp.status_code == 200
+        assert resp.text.startswith(": keep-alive\n\n")
+        events = _events(resp.text)
+        assert len(events) == 1
+        assert events[0]["error"]["code"] == 502
+        assert events[0]["error"]["type"] == "server_error"
+        assert "decode worker failed" in events[0]["error"]["message"]
+        assert "data: [DONE]" not in resp.text
+        assert _consume_terminal_sse_event(bytearray(resp.content), "chat") == "error"
+
+    def test_fast_failure_is_still_an_http_error(self) -> None:
+        error = HTTPException(status_code=400, detail="maximum context length exceeded")
+        client = TestClient(_delayed_server(0.0, error).setup_webserver())
+        resp = client.post("/v1/chat/completions", json=_STREAM_BODY)
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "maximum context length exceeded"
+
+    async def test_closing_the_stream_cancels_the_call(self) -> None:
+        call = asyncio.ensure_future(asyncio.sleep(30))
+        stream = _delayed_server(0.0)._keepalive_chat_sse(call, include_usage=False)
+        assert await stream.__anext__() == b": keep-alive\n\n"
+        await stream.aclose()
+        with pytest.raises(asyncio.CancelledError):
+            await call
