@@ -216,7 +216,7 @@ async def test_server_client_labels_samples_with_the_destination_server(collecte
             release.set()
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
 
     (point,) = _points(collected_metrics)
     assert point.count == 1
@@ -314,7 +314,7 @@ async def test_lazy_client_preserves_concurrent_destination_labels(collected_met
             release.set()
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
 
     points = collected_metrics()[CONNECT_TOTAL]
     assert {point.attributes[SERVER]: point.value for point in points} == {"policy_model": 1, "resources": 1}
@@ -379,16 +379,21 @@ async def test_multi_destination_waits_are_attributed_to_the_binding_limit(colle
         _serve_on("127.0.0.2", blocked) as url_b,
         _client(monkeypatch, limit=2, limit_per_host=1),
     ):
-        tasks = [asyncio.create_task(_get(url_a))]
-        await asyncio.wait_for(entered.get(), timeout=2)
-        tasks.append(asyncio.create_task(_get(url_a)))
-        assert await asyncio.wait_for(constraints.get(), timeout=2) == "per_host"
-        tasks.append(asyncio.create_task(_get(url_b)))
-        await asyncio.wait_for(entered.get(), timeout=2)
-        tasks.append(asyncio.create_task(_get(url_b)))
-        assert await asyncio.wait_for(constraints.get(), timeout=2) == "total"
-        release.set()
-        await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+        tasks = []
+        try:
+            tasks.append(asyncio.create_task(_get(url_a)))
+            await asyncio.wait_for(entered.get(), timeout=2)
+            tasks.append(asyncio.create_task(_get(url_a)))
+            assert await asyncio.wait_for(constraints.get(), timeout=2) == "per_host"
+            tasks.append(asyncio.create_task(_get(url_b)))
+            await asyncio.wait_for(entered.get(), timeout=2)
+            tasks.append(asyncio.create_task(_get(url_b)))
+            assert await asyncio.wait_for(constraints.get(), timeout=2) == "total"
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+        finally:
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
 
     assert _expanded_attribute(_points(collected_metrics), CONSTRAINT) == ["per_host", "total"]
 
@@ -412,15 +417,22 @@ async def test_queued_timeout_and_retry_record_separate_attempts(collected_metri
         return web.json_response({"ok": True})
 
     async with _serve(blocked) as url, _client(monkeypatch, limit=1, limit_per_host=1):
-        occupying = asyncio.create_task(_get(url))
-        await asyncio.wait_for(entered.wait(), timeout=1)
+        tasks = []
+        try:
+            occupying = asyncio.create_task(_get(url))
+            tasks.append(occupying)
+            await asyncio.wait_for(entered.wait(), timeout=1)
 
-        waiting = asyncio.create_task(_get(url, timeout=ClientTimeout(connect=0.1), _max_connection_retries=2))
-        assert await asyncio.wait_for(queued.get(), timeout=1) == "total"
-        assert await asyncio.wait_for(queued.get(), timeout=1) == "total"
-        release.set()
-        await waiting
-        await occupying
+            waiting = asyncio.create_task(_get(url, timeout=ClientTimeout(connect=0.1), _max_connection_retries=2))
+            tasks.append(waiting)
+            assert await asyncio.wait_for(queued.get(), timeout=1) == "total"
+            assert await asyncio.wait_for(queued.get(), timeout=1) == "total"
+            release.set()
+            await waiting
+            await occupying
+        finally:
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
 
     points = _points(collected_metrics)
     assert _expanded_attribute(points, OUTCOME) == ["abandoned", "ok"]
@@ -455,15 +467,22 @@ async def test_cancelled_queue_wait_is_recorded(collected_metrics, monkeypatch):
         return web.json_response({"ok": True})
 
     async with _serve(blocked) as url, _client(monkeypatch, limit=1, limit_per_host=1):
-        occupying = asyncio.create_task(_get(url))
-        await asyncio.wait_for(entered.wait(), timeout=1)
-        waiting = asyncio.create_task(_get(url))
-        await asyncio.wait_for(queued.wait(), timeout=1)
-        waiting.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await waiting
-        release.set()
-        await occupying
+        tasks = []
+        try:
+            occupying = asyncio.create_task(_get(url))
+            tasks.append(occupying)
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            waiting = asyncio.create_task(_get(url))
+            tasks.append(waiting)
+            await asyncio.wait_for(queued.wait(), timeout=1)
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+            release.set()
+            await occupying
+        finally:
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
 
     cancelled = next(point for point in _points(collected_metrics) if point.attributes[OUTCOME] == "abandoned")
     assert cancelled.sum > 0
