@@ -679,7 +679,7 @@ class TestUpstreamPostProcessing:
 
 
 class TestLmLogprobs:
-    """lm labels come from an argmax restricted to the decision tokens."""
+    """lm labels come from summed token mass, as upstream computes them."""
 
     @staticmethod
     def _with_logprobs(server, text, top, **fields):
@@ -770,6 +770,80 @@ class TestLmLogprobs:
             protocol="lm",
         )
         assert result.status == "ok"
+        assert result.reward == pytest.approx(1.0)
+
+    def test_summed_mass_beats_the_single_largest_token(self):
+        """Upstream compares total YES mass against total NO mass.
+
+        `NO` is the single most likely token here, so an argmax says NO, but three
+        YES-suffixed variants together outweigh it: 3*exp(-1.5)=0.669 > exp(-1.0)=0.368.
+        """
+        result = self._with_logprobs(
+            _make_server(),
+            "NO",
+            [("NO", -1.0), ("YES", -1.5), (" YES", -1.5), ("_YES", -1.5)],
+            task_type="step_validation",
+            ground_truth={"label": True},
+        )
+        assert result.status == "ok_logprobs"
+        assert result.reward == pytest.approx(1.0)
+
+    def test_one_sided_mass_abstains_positive(self):
+        """Upstream returns None, which post_binary turns into 0.5 -> label True.
+
+        float(None) raises inside post_binary, so the conservative fallback runs and
+        0.5 >= 0.5 counts POSITIVE. Abstention is not a negative label upstream.
+        """
+        server = _make_server()
+        positive = self._with_logprobs(
+            server,
+            "YES",
+            [("YES", -0.1), ("MAYBE", -2.0)],
+            task_type="step_validation",
+            ground_truth={"label": True},
+        )
+        negative = self._with_logprobs(
+            server,
+            "YES",
+            [("YES", -0.1), ("MAYBE", -2.0)],
+            task_type="step_validation",
+            ground_truth={"label": False},
+        )
+        assert positive.status == "lm_abstained"
+        assert positive.reward == pytest.approx(1.0)
+        assert negative.reward == pytest.approx(0.0)
+
+    def test_contrastive_abstains_when_fewer_than_two_indices_are_visible(self):
+        """Upstream requires two distinct indices; with one it returns None and
+        then raises on indexing it. Over an API that is reachable, so it becomes
+        upstream's own -1 'no valid index' sentinel instead of a 500.
+        """
+        result = self._with_logprobs(
+            _make_server(),
+            "2",
+            [("2", -0.2), ("the", -1.0), ("an", -2.0)],
+            task_type="contrastive_choice",
+            ground_truth={"correct_option_idx": 2},
+            options=["a", "b", "c", "d"],
+        )
+        assert result.status == "lm_abstained"
+        assert result.reward == pytest.approx(0.0)
+
+    def test_the_sampled_token_is_not_counted_twice(self):
+        """vLLM repeats the sampled token inside top_logprobs; upstream walks each
+        vocabulary entry once. Double counting would let the sampled side win a
+        comparison it should lose.
+        """
+        result = self._with_logprobs(
+            _make_server(),
+            "YES",
+            # Sampled YES repeats in the alternatives. Counted once, NO wins
+            # (0.368 > 0.223); counted twice, YES would (0.446).
+            [("YES", -1.5), ("NO", -1.0)],
+            task_type="step_validation",
+            ground_truth={"label": False},
+        )
+        assert result.status == "ok_logprobs"
         assert result.reward == pytest.approx(1.0)
 
 

@@ -10,6 +10,7 @@ scored identically here.
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -264,6 +265,11 @@ _NO_RE = re.compile(r"\bno\b", re.IGNORECASE)
 # `$5$` reagent placeholder is not read as option 5, and a 5,000-digit run does
 # not reach int(), whose 4,300-digit limit raises ValueError.
 _INDEX_RE = re.compile(r"(?<![\w$.])-?\d{1,6}(?![\w$.])")
+_DIGITS_ONLY_RE = re.compile(r"[0-9]+")
+# Upstream's defaults: predict.py --lm_eps / --lm_binary_eps (1e-12) and
+# --binary_threshold (0.5).
+_LM_EPS = 1e-12
+_BINARY_THRESHOLD = 0.5
 
 
 def _norm_token(token: str) -> str:
@@ -271,70 +277,115 @@ def _norm_token(token: str) -> str:
     return str(token).strip().strip('"').strip("'").strip()
 
 
-def _first_token_alternatives(logprobs: Any) -> List[Tuple[str, float]]:
-    """``(token, logprob)`` candidates at the first generated position only, which
-    is where upstream compares the decision tokens. The chosen token is included
-    because a provider may omit it from its own ``top_logprobs``.
+def _first_token_mass(logprobs: Any) -> List[Tuple[str, float]]:
+    """``(token, probability)`` at the first generated position, counted once.
+
+    Upstream walks each vocabulary entry exactly once. vLLM repeats the sampled
+    token inside ``top_logprobs``, so when alternatives are present they are the
+    whole visible population and the separately reported chosen token must not be
+    added again -- doing so double-counts the largest mass in the comparison.
     """
     if not isinstance(logprobs, list) or not logprobs:
         return []
     first = logprobs[0]
     if not isinstance(first, dict):
         return []
+    entries = first.get("top_logprobs") or [first]
     out: List[Tuple[str, float]] = []
-    token, logprob = first.get("token"), first.get("logprob")
-    if isinstance(token, str) and isinstance(logprob, (int, float)):
-        out.append((token, float(logprob)))
-    for alternative in first.get("top_logprobs") or []:
-        if not isinstance(alternative, dict):
+    for entry in entries:
+        if not isinstance(entry, dict):
             continue
-        token, logprob = alternative.get("token"), alternative.get("logprob")
+        token, logprob = entry.get("token"), entry.get("logprob")
         if isinstance(token, str) and isinstance(logprob, (int, float)):
-            out.append((token, float(logprob)))
+            out.append((token, math.exp(float(logprob))))
     return out
 
 
-def _restricted_argmax(alternatives: List[Tuple[str, float]], match) -> Optional[Any]:
-    """Highest-logprob candidate whose token ``match``es, or None. Restricting to
-    the decision tokens makes any surrounding scaffolding irrelevant.
+def _lm_binary_prob_yes(alternatives: List[Tuple[str, float]]) -> Optional[float]:
+    """Upstream's ``_lm_binary_prob_yes_from_prompt_ids``, over visible tokens.
+
+    Upstream sums softmax mass across the entire vocabulary; an OpenAI-compatible
+    API exposes only the top-k at the first position, so these sums are truncated.
+    The matching rule, the epsilon and the both-sides-observed abstention are
+    upstream's unchanged.
     """
-    best_value, best_logprob = None, float("-inf")
-    for token, logprob in alternatives:
-        value = match(_norm_token(token))
-        if value is not None and logprob > best_logprob:
-            best_value, best_logprob = value, logprob
-    return best_value
+    m_yes = m_no = 0.0
+    for token, probability in alternatives:
+        if probability <= 0.0:
+            continue
+        normalized = _norm_token(token).upper()
+        if not normalized:
+            continue
+        # predict.py's rule, which produced the published numbers. NOTE that the
+        # paper's appendix F.3.2 eq. (1) instead normalizes over the candidate set
+        # {YES, NO} itself; the two agree only when one token maps to each side.
+        # Measured on a full Llama-3.1-8B lm subset, the choice is worth <1 point.
+        if normalized == "YES" or normalized.endswith("YES"):
+            m_yes += probability
+        elif normalized == "NO" or normalized.endswith("NO"):
+            m_no += probability
+    if m_yes <= 0.0 or m_no <= 0.0:
+        return None
+    return float((m_yes + _LM_EPS) / (m_yes + m_no + 2.0 * _LM_EPS))
 
 
-def _match_yes_no(token: str) -> Optional[bool]:
-    upper = token.upper()
-    if upper in ("YES", "Y", "TRUE"):
-        return True
-    if upper in ("NO", "N", "FALSE"):
-        return False
-    return None
+def _lm_choice_probs(alternatives: List[Tuple[str, float]], num_options: int) -> Optional[List[float]]:
+    """Upstream's ``_lm_choice_probs_from_prompt_ids``, over visible tokens."""
+    if num_options <= 0:
+        return None
+    mass = [0.0] * num_options
+    seen = set()
+    for token, probability in alternatives:
+        if probability <= 0.0:
+            continue
+        normalized = _norm_token(token)
+        if not _DIGITS_ONLY_RE.fullmatch(normalized):
+            continue
+        index = int(normalized)
+        if 0 <= index < num_options:
+            mass[index] += probability
+            seen.add(index)
+    # Upstream requires at least two distinct indices before it trusts the mass.
+    if len(seen) < 2:
+        return None
+    mass = [m + _LM_EPS for m in mass]
+    total = sum(mass)
+    if total <= 0.0:
+        return None
+    return [m / total for m in mass]
 
 
-def _match_index(token: str) -> Optional[int]:
-    return int(token) if token.isdigit() else None
-
-
-def to_prediction_lm(task_type: str, raw: Optional[str], logprobs: Any = None) -> Dict[str, Any]:
+def to_prediction_lm(
+    task_type: str,
+    raw: Optional[str],
+    logprobs: Any = None,
+    options: Optional[List[Any]] = None,
+) -> Dict[str, Any]:
     """Parse an lm-protocol reply, whose contract is one bare decision token.
 
     Upstream decides from token probabilities; this agrees whenever the reply
     opens with a decision token. Replies opening with neither take the
     conservative default rather than leaving the denominator. See README.
     """
-    alternatives = _first_token_alternatives(logprobs)
-    if task_type in ("step_validation", "condition_validation"):
-        decided = _restricted_argmax(alternatives, _match_yes_no)
-        if decided is not None:
-            return {"score": 1.0 if decided else 0.0, "label": decided, "status": "ok_logprobs"}
-    elif task_type == "contrastive_choice":
-        decided = _restricted_argmax(alternatives, _match_index)
-        if decided is not None:
-            return {"predicted_option_idx": decided, "status": "ok_logprobs"}
+    alternatives = _first_token_mass(logprobs)
+    if alternatives and task_type in ("step_validation", "condition_validation"):
+        score = _lm_binary_prob_yes(alternatives)
+        if score is None:
+            # Upstream hands `score=None` to post_binary, where float(None) raises
+            # and the conservative fallback takes over: 0.5, which thresholds
+            # POSITIVE. Abstention is a positive label upstream, not a negative one.
+            return {"score": 0.5, "label": True, "status": "lm_abstained"}
+        return {"score": score, "label": bool(score >= _BINARY_THRESHOLD), "status": "ok_logprobs"}
+    if alternatives and task_type == "contrastive_choice":
+        probabilities = _lm_choice_probs(alternatives, len(options or []))
+        if probabilities is not None:
+            best = int(max(range(len(probabilities)), key=lambda i: probabilities[i]))
+            return {"predicted_option_idx": best, "status": "ok_logprobs"}
+        # DEPARTURE, forced: upstream indexes its None result here and raises.
+        # Over an API the top-k often shows fewer than two option indices, so this
+        # is reachable where upstream's full-vocabulary scan made it vanishing.
+        # -1 is upstream's own "no valid index" sentinel.
+        return {"predicted_option_idx": -1, "status": "lm_abstained"}
 
     text = _norm_token(_THINK_BLOCK_RE.sub(" ", raw or ""))
     text = _OPEN_THINK_RE.sub(" ", text).strip()

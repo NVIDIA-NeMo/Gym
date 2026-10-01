@@ -224,9 +224,21 @@ class TestRowContract:
             assert row["dataset_name"] == "chemreason_bench"
             assert row["split"] == "test"
 
-    def test_lm_rows_request_nothing_special(self, stub_fetch, tmp_path):
-        """top_logprobs alone empties every completion; see prepare.py's note."""
+    def test_lm_rows_ask_for_token_probabilities(self, stub_fetch, tmp_path):
+        """Upstream decides an lm row from token mass, so the row must request it.
+
+        Both keys are required: `top_logprobs` alone is inert, because vLLM computes
+        `logprobs = top_logprobs if logprobs else None`. They travel on
+        `metadata.extra_body` since the Responses model forbids unknown fields.
+        """
         for row in _prepare(tmp_path, protocol="lm"):
+            extra = json.loads(row["responses_create_params"]["metadata"]["extra_body"])
+            assert extra["logprobs"] is True
+            assert extra["top_logprobs"] >= 2
+
+    def test_gen_rows_ask_for_nothing_extra(self, stub_fetch, tmp_path):
+        """Only the lm protocol reads probabilities; gen rows must stay untouched."""
+        for row in _prepare(tmp_path, protocol="gen"):
             assert "responses_create_params" not in row
 
     def test_pinned_revision_is_a_full_sha(self):

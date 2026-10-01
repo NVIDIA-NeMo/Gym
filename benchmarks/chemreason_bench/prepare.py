@@ -96,11 +96,20 @@ ORDERING_KEY = "predicted_order"
 DUAL_PROTOCOL_TASKS = ("step_validation", "condition_validation", "contrastive_choice")
 EXPECTED_LM_ROWS = sum(EXPECTED_BY_TASK[t] for t in DUAL_PROTOCOL_TASKS)
 
-# Empty, deliberately. `logprobs: true` is not a Responses API field and sends every lm row to
-# the failure sidecar; `top_logprobs` alone returns an EMPTY completion truncated at
-# max_output_tokens. Neither helps anyway -- responses_converter discards logprobs before any
-# verifier sees them. See the README's "Known gap".
-LM_RESPONSES_CREATE_PARAMS: Dict[str, Any] = {}
+# Upstream decides an `lm` row from token probabilities, so the row has to ask for them.
+# `logprobs` is not a Responses API field -- that model is `extra="forbid"`, so putting it here
+# rejects every lm row -- and `top_logprobs` alone is inert: vLLM computes
+# `logprobs = top_logprobs if logprobs else None`, so without the chat-level boolean nothing
+# comes back. The supported channel is the model server's `extra_body`, which vllm_model merges
+# per request from `metadata["extra_body"]` and which survives because Gym never sets `logprobs`
+# itself.
+#
+# Upstream sums over the WHOLE vocabulary where an API shows only the top-k, so mass outside the
+# window is lost. 20 is vLLM's default ceiling (`--max-logprobs`); raising it to 1000 moved every
+# lm metric by <=0.5 on both models, so the window is not a material departure.
+LM_RESPONSES_CREATE_PARAMS: Dict[str, Any] = {
+    "metadata": {"extra_body": json.dumps({"logprobs": True, "top_logprobs": 20})}
+}
 
 
 def _dumps(obj: Any) -> str:

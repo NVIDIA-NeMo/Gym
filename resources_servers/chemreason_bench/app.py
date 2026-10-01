@@ -74,7 +74,12 @@ class ChemReasonBenchVerifyResponse(ChemReasonBenchVerifyRequest, BaseVerifyResp
 
 
 def _first_output_logprobs(response: Any) -> Any:
-    """Per-token logprobs of the first output text part, or None (currently always None)."""
+    """Per-token logprobs of the first output text part, or None.
+
+    Populated only when the row asked for them: `lm` rows carry
+    ``metadata.extra_body`` switching vLLM's chat-level ``logprobs`` on, and the
+    converter carries them back onto the output text.
+    """
     for item in getattr(response, "output", None) or []:
         for part in getattr(item, "content", None) or []:
             logprobs = getattr(part, "logprobs", None)
@@ -131,7 +136,9 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
                 return ChemReasonBenchVerifyResponse(
                     **payload, reward=0.0, status="no_lm_protocol", harness_failure=True, mask_sample=True
                 )
-            prediction = to_prediction_lm(task_type, body.response.output_text, _first_output_logprobs(body.response))
+            prediction = to_prediction_lm(
+                task_type, body.response.output_text, _first_output_logprobs(body.response), options
+            )
             status = prediction.pop("status")
         else:
             raw = body.response.output_text or ""
