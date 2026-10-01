@@ -284,11 +284,11 @@ GLM-4.5-Air-Base). Check the `root` in `/v1/models`, then probe
 SWE-bench Pro are `/app`. The wrong one produces a syntactically perfect command
 against a path that does not exist.
 
-**Some servers cap `stop` at four strings.** The backticks wire sends five by
-default, and Gemma-4's endpoint rejects the request outright (HTTP 400, "List
-should have at most 4 items"), which fails the rollout. Set `stop` explicitly;
-`\nAssistant (tool call):` is the one to drop, since a backticks transcript
-never contains it.
+**Some servers cap `stop` at four strings.** Gemma-4's endpoint rejects a
+fifth outright (HTTP 400, "List should have at most 4 items"), which fails the
+rollout. The backticks default is four: it leaves out `\nAssistant (tool
+call):`, which a backticks transcript never contains. Keep any override within
+four.
 
 **Run DeepSWE's K=32 in chunks.** `gym eval run` holds every rollout in memory
 and ends by sending all of them to the agent server for aggregate metrics. One

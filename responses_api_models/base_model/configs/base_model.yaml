@@ -28,9 +28,9 @@ policy_model:
       # that reads as model weakness rather than misconfiguration.
       # steer: "..."
 
-      # The OpenAI spec caps `stop` at FOUR entries and some servers enforce it,
-      # 400ing the whole request. Drop "\nAssistant (tool call):" first -- it is
-      # unreachable on a tool-free wire.
+      # The wire's default stop list fits the OpenAI cap of four entries, which
+      # some servers enforce by 400ing the whole request. Override it only to
+      # change where a turn ends.
       # stop: ["\nTool Result:", "\nUser:", "\nSystem:", "\nAssistant:"]
 
       # The reference bridge's values. 0.6 was its one sampling lever that moved

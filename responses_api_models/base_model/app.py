@@ -61,13 +61,16 @@ from nemo_gym.openai_utils import (
 
 
 # Turn separators. The transcript emits exactly one newline before each role
-# marker, so these match a turn boundary and nothing else.
+# marker, so these match a turn boundary and nothing else. Only the backticks
+# wire sends them, and its transcript never contains "\nAssistant (tool call):"
+# (only a message with tool_calls renders that), so that marker is left out:
+# the OpenAI spec caps `stop` at four entries, and servers that enforce the cap
+# reject a fifth with HTTP 400.
 DEFAULT_STOP = [
     "\nTool Result:",
     "\nUser:",
     "\nSystem:",
     "\nAssistant:",
-    "\nAssistant (tool call):",
 ]
 
 # mini-swe-agent backticks mode: no tools, one bash command per turn inside a

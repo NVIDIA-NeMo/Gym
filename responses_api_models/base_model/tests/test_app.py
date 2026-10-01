@@ -105,6 +105,24 @@ class TestWireConstants:
         assert all(entry.startswith("\n") for entry in BM.DEFAULT_STOP)
         assert "\nUser:" in BM.DEFAULT_STOP and "\nAssistant:" in BM.DEFAULT_STOP
 
+    def test_backticks_stop_list_fits_the_openai_cap(self):
+        # Servers that enforce the cap 400 every request with a fifth entry.
+        assert len(BM.WIRE_DEFAULTS["backticks"]["stop"]) <= 4
+
+    def test_every_dropped_marker_is_absent_from_a_backticks_transcript(self):
+        # Only a message with tool_calls renders the tool-call marker, and the
+        # backticks wire never sends one: the marker cannot end a turn there.
+        transcript = BM.render_transcript(
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "task"},
+                {"role": "assistant", "content": "THOUGHT\n```mswea_bash_command\nls\n```"},
+                {"role": "user", "content": "<returncode>0</returncode>"},
+            ]
+        )
+        assert "\nAssistant (tool call):" not in transcript
+        assert "\nAssistant (tool call):" not in BM.DEFAULT_STOP
+
 
 class TestParseBashToolCall:
     """The function-calling parser. Its one hard rule: a generation cut inside a
