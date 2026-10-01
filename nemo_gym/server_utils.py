@@ -409,6 +409,11 @@ async def request(
     This is the only place Gym talks to another server, so it is also the only place
     trace context has to be injected: every agent -> model and agent -> resources hop goes
     through here. `CLAUDE.md` bans httpx precisely to keep it that way.
+
+    ``_server_name`` is the bounded logical destination label for pool metrics: a configured
+    ``ServerClient`` server name, ``remote_agent_service`` for the remote agent's external
+    service, or ``None`` for the fallback label ``external``. It is retained across retries
+    and redirects and is not forwarded to aiohttp.
     """
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):

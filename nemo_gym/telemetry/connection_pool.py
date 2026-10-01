@@ -28,6 +28,14 @@ logger = logging.getLogger(__name__)
 
 
 class ConnectionPoolConfig(Protocol):
+    """Connector budgets and optional demand estimates for one server or rollout CLI.
+
+    Configured limits apply to one server process group before division across its
+    FastAPI workers, not the whole deployment. An explicit limit of zero is unlimited.
+    Intended concurrency is optional expected outbound demand for that same group;
+    ``None`` disables the corresponding sizing check.
+    """
+
     global_aiohttp_connector_limit: int
     global_aiohttp_connector_limit_per_host: int
     global_aiohttp_intended_concurrency: Optional[int]
@@ -35,6 +43,16 @@ class ConnectionPoolConfig(Protocol):
 
 
 class ConnectionPoolCapacity(NamedTuple):
+    """Per-process connector limits and demand after division across ``workers``.
+
+    ``workers`` is the size of one server's FastAPI process group, or one for the CLI.
+    Positive ``total`` and ``per_host`` limits are rounded down; zero means explicitly
+    unlimited. ``per_host`` is the divided configured value, before a finite ``total``
+    constrains effective per-host capacity.
+    ``intended`` and ``intended_per_host`` are expected demand rounded up per worker,
+    or ``None`` when the corresponding estimate is not configured.
+    """
+
     workers: int
     total: int
     per_host: int
