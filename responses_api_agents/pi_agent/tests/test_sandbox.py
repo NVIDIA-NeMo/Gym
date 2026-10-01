@@ -15,6 +15,7 @@ import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
+from pydantic import ValidationError
 
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -1154,6 +1155,84 @@ async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_ses
     await state.close(2)
     assert not Path(state.directory).exists()
     state.sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+async def test_close_confirms_cleanup_before_provider_cancellation(local_session):
+    state, _ = local_session
+    processes_path = Path(state.directory).parent / "children.json"
+    code = (
+        "import json,os,subprocess,sys,time; from pathlib import Path; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
+        f"Path({str(processes_path)!r}).write_text(json.dumps([os.getpid(),child.pid])); time.sleep(60)"
+    )
+    payload = {
+        "directory": state.directory,
+        "cwd": state.request.sandbox_access.workdir,
+        "command": [sys.executable, "-c", code],
+        "env": {},
+        "prompt": "",
+    }
+    state.task = asyncio.create_task(state.execute(payload, timeout=30, close_timeout=3))
+    processes = []
+    try:
+        async with asyncio.timeout(5):
+            while not processes_path.exists():
+                await asyncio.sleep(0.01)
+        processes = json.loads(processes_path.read_text())
+        processes.append(json.loads((Path(state.directory) / "runtime.json").read_text())["pid"])
+        await state.close(3)
+        assert state.closed and state.cleanup["cleanup_confirmed"] is True
+        assert all(not Path(f"/proc/{pid}").exists() for pid in processes)
+        state.sandbox.disconnect.assert_awaited_once()
+        state.sandbox.stop.assert_not_awaited()
+    finally:
+        if not state.closed:
+            for pid in processes:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        if not state.task.done():
+            state.task.cancel()
+        await asyncio.gather(state.task, return_exceptions=True)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+async def test_receipt_read_failure_does_not_signal_reused_pid(local_session):
+    state, _ = local_session
+    unrelated = await asyncio.create_subprocess_exec(sys.executable, "-c", "import time; time.sleep(60)")
+    directory = Path(state.directory)
+    (directory / "launch.claim").symlink_to("launch")
+    (directory / "runner.pid").write_text(str(unrelated.pid))
+    (directory / "cleanup.json").write_text(json.dumps({"cleanup_confirmed": True, "error": None}))
+    state.launch_started = True
+    downloads = 0
+
+    async def download(source, destination):
+        nonlocal downloads
+        downloads += 1
+        if downloads == 1:
+            raise OSError("transient receipt download failure")
+        shutil.copyfile(source, destination)
+
+    state.sandbox.download.side_effect = download
+    try:
+        await state.stop_runner(2)
+        assert state.cleanup["cleanup_confirmed"] is True
+        assert unrelated.returncode is None
+        os.kill(unrelated.pid, 0)
+    finally:
+        if unrelated.returncode is None:
+            unrelated.terminate()
+        await unrelated.wait()
+
+
+@pytest.mark.parametrize("field", ["timeout", "sandbox_install_timeout_seconds", "session_close_timeout_seconds"])
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
+def test_pi_rejects_invalid_execution_deadlines(field, value):
+    with pytest.raises(ValidationError):
+        PiAgentConfig(name="pi", host="localhost", port=1, entrypoint="app.py", **{field: value})
 
 
 @pytest.mark.parametrize("context_overflow", [False, True])
