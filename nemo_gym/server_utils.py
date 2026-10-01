@@ -1385,10 +1385,14 @@ repr(e): {repr(e)}"""
         app = server.setup_webserver()
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
+        mcp_token_routing = {}
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
-            from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+            from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
 
             maybe_auto_expose(server, app)
+            mcp_token_routing = dict(
+                mcp_token_header=TOKEN_HEADER, mcp_token_serializer=session_token_serializer(server)
+            )
         server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
@@ -1406,7 +1410,11 @@ repr(e): {repr(e)}"""
             # the worker that owns its session.
             session_cookie = server.get_session_middleware_key()
             install_session_routing(
-                app, socket_dir=session_socket_dir, session_cookie=session_cookie, secret_key=session_cookie
+                app,
+                socket_dir=session_socket_dir,
+                session_cookie=session_cookie,
+                secret_key=session_cookie,
+                **mcp_token_routing,
             )
         # Register last so cancellation wraps the complete request stack.
         server.setup_cancellation_middleware(app)
