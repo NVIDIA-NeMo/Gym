@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Native Pi borrows SandboxAccess from EnvironmentServer. The environment recipe
-# selects the benchmark; this agent config only selects the harness and model.
+# Native Pi borrows SandboxAccess from EnvironmentServer. The run configuration
+# binds the independent benchmark and agent; this config selects only the harness and model.
 pi_agent:
   responses_api_agents:
     pi_agent:

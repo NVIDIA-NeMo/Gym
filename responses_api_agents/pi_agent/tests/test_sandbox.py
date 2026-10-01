@@ -817,7 +817,7 @@ def test_defaulted_cache_zero_remains_unknown(setup):
 
 
 @pytest.mark.parametrize("benchmark", ["swebench_pro", "independent"])
-async def test_native_recipe_collects_through_environment_run(setup, monkeypatch, benchmark):
+async def test_native_configs_collect_through_environment_run(setup, monkeypatch, benchmark):
     """One native Pi config works with SWE-bench and an unrelated Resources contract."""
     from environment_servers.single_agent_turn.app import (
         SingleAgentTurnEnvironmentServer,
@@ -831,25 +831,26 @@ async def test_native_recipe_collects_through_environment_run(setup, monkeypatch
     agent, sandbox = setup
     root = Path(__file__).parents[3]
     parser = GlobalConfigDictParser()
+    config_paths = [
+        root / "responses_api_agents/pi_agent/configs/pi_native.yaml",
+        root / "environment_servers/single_agent_turn/configs/single_agent_turn.yaml",
+    ]
     if benchmark == "swebench_pro":
-        config_paths = [root / "benchmarks/swebench/pro/pi_native.yaml"]
+        config_paths.append(root / "resources_servers/swebench_pro/configs/swebench_pro.yaml")
+        resources_name = "swebench_pro_resources_server"
         taskset = "swebench_pro:smoke"
         task_data = {"instance_id": "instance"}
     else:
-        config_paths = [
-            root / "responses_api_agents/pi_agent/configs/pi_native.yaml",
-            root / "environment_servers/single_agent_turn/configs/single_agent_turn.yaml",
-        ]
+        resources_name = "workspace_resources"
         taskset = "workspace_fixture"
         task_data = {"expected_output": "done"}
     _, configs = parser.load_extra_config_paths([str(path) for path in config_paths])
     config = OmegaConf.merge(*configs)
-    if benchmark == "independent":
-        config.environment_routing_mode = "taskset"
-        config.environment_server_routes = {taskset: "single_agent_turn"}
-        environment_config = config.single_agent_turn.environment_servers.single_agent_turn
-        environment_config.resources_server.name = "workspace_resources"
-        environment_config.agent_server.name = "pi_agent"
+    config.environment_routing_mode = "taskset"
+    config.environment_server_routes = {taskset: "single_agent_turn"}
+    environment_config = config.single_agent_turn.environment_servers.single_agent_turn
+    environment_config.resources_server.name = resources_name
+    environment_config.agent_server.name = "pi_agent"
     parser._recursively_swap_keys(config)
     assert config.environment_routing_mode == "taskset"
     environment_name = config.environment_server_routes[taskset]
