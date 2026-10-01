@@ -141,7 +141,7 @@ def report_connection_pool_capacity(
         f"aggregate_total={_display_limit(cfg.global_aiohttp_connector_limit)} "
         f"aggregate_per_host={_display_limit(cfg.global_aiohttp_connector_limit_per_host)} "
         f"effective_total={_display_limit(total)} effective_per_host={_display_limit(enforced_per_host)} "
-        f"configured_per_host={_display_limit(per_host)} "
+        f"per_worker_per_host={_display_limit(per_host)} "
         f"intended_per_worker={intended} intended_per_host_per_worker={intended_per_host} "
         f"file_descriptor_soft_limit={file_descriptors} ephemeral_ports_per_destination={ephemeral_ports}. "
         "The aiohttp total limit is a scheduling limit, not a strict open-socket cap across multiple hosts."

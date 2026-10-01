@@ -633,8 +633,16 @@ class TestServerUtils:
         assert "intended per-host concurrency 2 exceeds effective per-host limit 1" in caplog.text
         assert "aggregate intended per-host concurrency 8" in caplog.text
 
+    @mark.parametrize(
+        ("workers", "effective_total", "per_worker_per_host", "intended_per_host"),
+        [(4, 16, 256, 250), (16, 4, 64, 63)],
+    )
     def test_per_host_report_and_warning_respect_the_total_clamp(
         self,
+        workers: int,
+        effective_total: int,
+        per_worker_per_host: int,
+        intended_per_host: int,
         caplog: LogCaptureFixture,
         capsys: CaptureFixture[str],
         monkeypatch: MonkeyPatch,
@@ -649,7 +657,7 @@ class TestServerUtils:
             global_aiohttp_connector_limit_per_host=1024,
             global_aiohttp_intended_concurrency_per_host=1000,
         )
-        capacity = connection_pool_capacity(cfg, workers=4)
+        capacity = connection_pool_capacity(cfg, workers=workers)
         monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: None)
         connection_pool._REPORTED_CAPACITIES.clear()
 
@@ -657,10 +665,15 @@ class TestServerUtils:
             report_connection_pool_capacity(cfg, capacity, visible=True)
 
         visible_report = capsys.readouterr().out
-        # effective_per_host is clamped to effective_total (16), not the configured 256.
-        assert "effective_per_host=16" in visible_report
-        assert "configured_per_host=256" in visible_report
-        assert "intended per-host concurrency 250 exceeds effective per-host limit 16" in caplog.text
+        # The per-worker value is distinct from both the aggregate config and total clamp.
+        assert "aggregate_per_host=1024" in visible_report
+        assert f"effective_per_host={effective_total}" in visible_report
+        assert f"per_worker_per_host={per_worker_per_host}" in visible_report
+        assert "configured_per_host=" not in visible_report
+        assert (
+            f"intended per-host concurrency {intended_per_host} exceeds effective per-host limit {effective_total}"
+            in caplog.text
+        )
 
     @mark.parametrize(("total", "workers"), [(100 * 1024, 1), (100 * 1024, 2), (0, 1), (0, 2)])
     def test_connection_pool_limit_alone_does_not_warn_against_file_descriptor_budget(
