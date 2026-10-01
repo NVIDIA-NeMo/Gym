@@ -62,7 +62,7 @@ def _drain_children(timeout: float) -> None:
 def _supervise(
     command: list[str],
     *,
-    timeout: float,
+    timeout: float | None,
     cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT,
     stop_path: Path | None = None,
 ) -> CleanupReceipt:
@@ -87,7 +87,7 @@ def _supervise(
         if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
             raise OSError(ctypes.get_errno(), "Cannot supervise sandbox tool processes")
         process = subprocess.Popen(command, start_new_session=True)
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + timeout if timeout is not None else math.inf
         while process.poll() is None and not stopping and time.monotonic() < deadline:
             time.sleep(0.05)
         if process.poll() is None:
@@ -126,7 +126,7 @@ def _positive_seconds(value: str) -> float:
 def main() -> int:
     """Run COMMAND and atomically write its cleanup receipt outside the task workdir."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--timeout", type=_positive_seconds, required=True)
+    parser.add_argument("--timeout", type=_positive_seconds)
     parser.add_argument("--cleanup-timeout", type=_positive_seconds, default=DEFAULT_CLEANUP_TIMEOUT)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--stop-file", type=Path)

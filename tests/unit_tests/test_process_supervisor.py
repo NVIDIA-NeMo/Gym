@@ -39,7 +39,9 @@ def test_supervisor_rejects_invalid_deadlines(tmp_path: Path, timeout: str) -> N
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc are required")
-@pytest.mark.parametrize("ending", ["normal", "crash", "timeout", "cancel", "grace"])
+@pytest.mark.parametrize(
+    "ending", ["normal", "crash", "timeout", "cancel", "grace", "normal-no-deadline", "cancel-no-deadline"]
+)
 def test_supervisor_reaps_detached_tools_and_preserves_term_grace(tmp_path: Path, ending: str) -> None:
     uploaded = tmp_path / "process_supervisor.py"
     shutil.copyfile(SUPERVISOR, uploaded)
@@ -59,13 +61,14 @@ def test_supervisor_reaps_detached_tools_and_preserves_term_grace(tmp_path: Path
         "    time.sleep(60)\n"
     )
     timeout = 0.8 if ending in ("timeout", "grace") else 10
+    deadline_args = [] if ending.endswith("-no-deadline") else ["--timeout", str(timeout)]
+    ending = ending.removesuffix("-no-deadline")
     process = subprocess.Popen(
         [
             sys.executable,
             "-I",
             str(uploaded),
-            "--timeout",
-            str(timeout),
+            *deadline_args,
             "--cleanup-timeout",
             "0.5",
             "--receipt",
