@@ -193,6 +193,17 @@ def test_collation_routes_declared_taskset_without_rewriting_shared_source(tmp_p
             "mode": "train_preparation" if benchmark else "example_validation",
             "output_dirpath": str(output),
             "should_download": False,
+            "environment_server_routes": {"swe:test": "swe-environment"},
+            "agent": {"responses_api_agents": {"test": {"entrypoint": "app.py"}}},
+            "swe-environment": {
+                "environment_servers": {
+                    "single_agent_turn": {
+                        "entrypoint": "app.py",
+                        "agent_server": {"type": "responses_api_agents", "name": "agent"},
+                        "resources_server": {"type": "resources_servers", "name": "native"},
+                    }
+                }
+            },
         }
     )
     with pytest.warns(DeprecationWarning, match="stripped legacy agent_ref"):
@@ -244,6 +255,17 @@ def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, expl
                 "mode": "example_validation",
                 "output_dirpath": str(output),
                 "task_data_validation": "off",
+                "environment_server_routes": {"tasks": "environment"},
+                "agent": {"responses_api_agents": {"test": {"entrypoint": "app.py"}}},
+                "environment": {
+                    "environment_servers": {
+                        "single_agent_turn": {
+                            "entrypoint": "app.py",
+                            "agent_server": {"type": "responses_api_agents", "name": "agent"},
+                            "resources_server": {"type": "resources_servers", "name": "resources"},
+                        }
+                    }
+                },
             }
         )
     )

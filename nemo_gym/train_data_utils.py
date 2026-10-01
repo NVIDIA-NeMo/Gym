@@ -49,6 +49,7 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
     get_global_config_dict,
+    resolve_dataset_agent,
 )
 from nemo_gym.hf_utils import (
     download_hf_dataset_as_jsonl,
@@ -450,6 +451,16 @@ class TrainDataProcessor(BaseModel):
             in_scope_datasets = [d for d in agent_config.datasets if d.type in in_scope_dataset_types]
             if not in_scope_datasets:
                 continue
+
+            # Validate native routing before conversion removes the declaring instance and agent pin.
+            for dataset in in_scope_datasets:
+                if dataset.taskset is not None:
+                    resolve_dataset_agent(
+                        global_config_dict,
+                        agent_config.name,
+                        pin=dataset.agent if isinstance(dataset, BenchmarkDatasetConfig) else None,
+                        taskset=dataset.taskset,
+                    )
 
             inner_config = agent_config.get_inner_run_server_config()
             inner_config.datasets = in_scope_datasets
