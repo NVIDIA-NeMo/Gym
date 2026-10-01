@@ -14,12 +14,34 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 
 VF_ENV_ID = "automationbench_env"
 TOOLSET = "api"
+
+
+def _load_environment():
+    """Import this benchmark's env, installing its package if Gym's venv lacks it.
+
+    Gym does not depend on `automation-bench`, so the harness venv running
+    `gym eval prepare` usually cannot import it. `benchmarks/ruler` installs its
+    own prepare-time packages the same way.
+    """
+    try:
+        from automationbench_env import load_environment
+    except ImportError:
+        package = Path(__file__).parent
+        subprocess.run(["uv", "pip", "install", "--python", sys.executable, str(package)], check=True)
+        # A non-editable install lands straight in site-packages; only the cache
+        # has to be cleared for this process to see it.
+        importlib.invalidate_caches()
+        from automationbench_env import load_environment
+    return load_environment
 
 
 def prepare(
@@ -34,14 +56,7 @@ def prepare(
     requiring the returned path to equal the dataset's `jsonl_fpath`, so this is
     the entry point the benchmark config points at. `main` is the CLI wrapper.
     """
-    try:
-        import verifiers as vf  # noqa: F401
-        from automationbench_env import load_environment
-    except ImportError as exc:  # pragma: no cover
-        raise SystemExit(
-            "automationbench_env is not installed. Install this environment first:\n"
-            "    uv pip install -e benchmarks/automationbench"
-        ) from exc
+    load_environment = _load_environment()
 
     env = load_environment(domains=domains, max_turns=max_turns, toolset=TOOLSET)
     dataset = env.dataset
