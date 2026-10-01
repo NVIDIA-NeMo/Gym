@@ -22,7 +22,6 @@ binaries:
   sha256: d4557b4061b64ee9ea6104a71d0a8bc2fc8ee44e4f8150a91e97d4f912a2fb93  # pragma: allowlist secret (public source/artifact checksum)
 upstream: https://github.com/anomalyco/opencode
 upstream_tag: v1.17.11
-source_patch: assistant-message-id.patch
 channel: gym-correlation
 scope: Classic runner; saved assistant-message ID header, including compaction summaries;
   title calls have no assistant ID.
