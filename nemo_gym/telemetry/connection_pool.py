@@ -221,7 +221,14 @@ def _connector_queue_constraint(connector: Any) -> str:
 
 
 class QueueTimedTCPConnector(TCPConnector):
-    """Record waits without imposing aiohttp TraceConfig overhead on every request."""
+    """TCPConnector that measures how long connections wait for a free pool slot.
+
+    Every `connect()` call increments `connect_total` for the current destination.
+    Each queued acquisition records one `queue_duration_ms` sample.
+    The sample is labelled with the limit that was binding when the wait started.
+    The wait is timed by overriding aiohttp's private `_wait_for_available_connection`.
+    `test_queue_wait_override_matches_aiohttp_signature` fails if aiohttp changes that method.
+    """
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)

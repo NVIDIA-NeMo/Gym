@@ -234,7 +234,7 @@ def record_http_connection_pool_queue_duration(
     _record_histogram(
         HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT,
         "ms",
-        "Time an outbound HTTP request waited for an aiohttp pooled connection.",
+        "Time one queued connection acquisition waited for an aiohttp pool slot.",
         duration_ms,
         {
             HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE: queue_constraint,

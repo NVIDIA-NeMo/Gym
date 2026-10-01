@@ -145,7 +145,7 @@ across redirects. The resource attribute `nemo.gym.server.name` identifies the G
 recording the metric; they are not the same.
 
 When metrics export is active at client construction, Gym uses `QueueTimedTCPConnector` to count
-connection attempts and measure queue waits. Otherwise, Gym uses aiohttp’s `TCPConnector` directly
+connection attempts and measure queue waits. Otherwise, Gym uses aiohttp's `TCPConnector` directly
 without collecting these metrics.
 
 ### Reverse Proxy Headers

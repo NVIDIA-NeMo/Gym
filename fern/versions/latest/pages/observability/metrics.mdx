@@ -29,7 +29,7 @@ would disagree the first time one dropped a sample.
 | `gym.verify.success_rate` | Gauge | fraction | Cumulative fraction of verifications that completed. See below. |
 | `gym.servers.active` | Gauge | count | Number of servers the orchestrator started. |
 | `gym.http.connection_pool.queue_duration_ms` | Histogram | ms | Time one queued connection acquisition waited for an aiohttp pool slot. |
-| `gym.http.connection_pool.connect_total` | Observable counter | count | All outbound aiohttp connection acquisitions. |
+| `gym.http.connection_pool.connect_total` | Observable counter | count | All outbound aiohttp connection attempts (`connect()` calls), including attempts that later fail or are abandoned. |
 | `gym.server.memory.usage` | Gauge | bytes | Current RSS or PSS for one managed server and its descendants. |
 | `gym.server.memory.sampled_peak` | Gauge | bytes | Largest value observed by the sampler for one managed server and its descendants. |
 | `gym.server.processes` | Gauge | count | Processes currently attributed to one managed server. |
