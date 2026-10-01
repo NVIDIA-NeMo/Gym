@@ -150,44 +150,6 @@ evaluate; the gap does not suppress evidence of hollow turns. `model_call_last_f
   unobserved even if the trajectory contains an unowned list of model calls.
 </Note>
 
-### Final Top-Level Model Call
-
-`model_call_last_failed` checks only invocations with no `parent_invocation_id` and an explicit terminal status
-(`completed` or `failed`). It binds their own turn and invocation references; a later call outside the root invocation
-cannot hide a top-level failure. Earlier failed calls remain in error statistics but do not trigger this check.
-
-"Last" means the call with the latest request start observed by the model server (`started_at`). For multiple calls,
-every owned call needs a finite start timestamp and exactly one call must have the latest start. Calls may overlap:
-an earlier request finishing later does not change which call is last. Completion timestamps, capture append order,
-and reference order do not affect the selection. A single exactly bound call needs no ordering comparison.
-
-Model-server start order can differ from harness dispatch order for concurrent requests. Background or cleanup
-requests owned by the same root invocation participate in this ordering too.
-
-Missing root ownership, unfinished or unknown invocation status, incomplete capture, unresolved or conflicting
-references, missing or nonfinite start timestamps, and a tie for the latest start make the check unobserved. When multiple
-top-level invocations exist, each is checked independently: a known final failure still produces a finding even if another root
-is unobserved. A failed subagent alone does not trigger this check.
-
-This check establishes that the last model call failed, not that the task answer was wrong. Other health checks still
-apply, and a harness can finish through tools or another fallback after its last model call.
-
-Reports now emit `model_call_last_failed` instead of `model_call_failed`. Existing ignore configurations using
-`model_call_failed` are accepted as an alias for the new check; historical reports are not rewritten. Trajectories
-without explicit finished root invocations now report this check as unobserved.
-
-### Explicit Context-Overflow Rejections
-
-The missing-token, zero-completion-token, and runaway-generation checks skip calls that explicitly record
-`upstream_attempted: true`, `upstream_status_code: 400`, and `context_length_exceeded` in either
-`error_category` or `local_response_reason`. The vLLM adapter records this category both when forwarding the 400
-and when replacing it with an HTTP 200. These requests were rejected; missing generation output is expected.
-
-The error still contributes to diagnostic counts and, when it is the root's final call, to `model_call_last_failed`.
-A generic timeout, another HTTP 400, an empty response, or `finish_reason: length` alone does not establish this
-exemption. Successful generations retain their existing quality checks. Rollout token reconciliation remains
-unobserved if any bound call lacks token counts; the exemption does not invent token totals.
-
 ### Length-Limited Responses
 
 `model_call_runaway_generation` needs one provider-independent definition of an empty saved response. The check recognizes
