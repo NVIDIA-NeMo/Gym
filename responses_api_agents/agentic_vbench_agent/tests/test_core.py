@@ -56,3 +56,14 @@ def test_dataset_keeps_verbatim_prompt_and_no_media():
     assert "prompt" not in rows[0]["verifier_metadata"]
     with pytest.raises(ValueError):
         core.dataset_rows({}, "typo")
+
+
+def test_multiple_families_and_overlap_rejection():
+    tasks = {family: {"task_id": family + "1", "family": family, "prompt": "prompt"} for family in core.FAMILIES}
+    tasks = {task["task_id"]: task for task in tasks.values()}
+    rows = core.dataset_rows(tasks, "agentic_vbench_repair assembly sequencing")
+    assert {row["verifier_metadata"]["family"] for row in rows} == {"repair", "assembly", "sequencing"}
+    with pytest.raises(ValueError, match="overlaps"):
+        core.dataset_rows(tasks, "repair repair1")
+    with pytest.raises(ValueError, match="empty"):
+        core.dataset_rows(tasks, " ")
