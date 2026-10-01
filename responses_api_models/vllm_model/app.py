@@ -21,7 +21,7 @@ import os
 from copy import deepcopy
 from threading import Lock
 from time import monotonic, time, time_ns
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union, get_args
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request, Response
@@ -31,6 +31,7 @@ from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
     SimpleResponsesAPIModel,
+    start_model_execution,
 )
 from nemo_gym.openai_utils import (
     REQUIRED_TOKEN_METADATA_FIELDS,
@@ -157,6 +158,26 @@ def _append_transport_io(event: Dict[str, Any]) -> None:
         LOG.exception("Failed to append vLLM transport log to %s", path)
 
 
+ReasoningFieldMode = Literal["both", "reasoning", "reasoning_content"]
+
+
+def _default_reasoning_field() -> str:
+    # Environment fallback for launchers that select the mode without a config
+    # override; an explicit ``reasoning_field`` in config takes precedence.
+    value = os.environ.get("NEMO_GYM_REASONING_FIELD", "").strip() or "both"
+    if value not in get_args(ReasoningFieldMode):
+        raise ValueError(f"NEMO_GYM_REASONING_FIELD must be one of {get_args(ReasoningFieldMode)}, got {value!r}")
+    return value
+
+
+def _set_reasoning(message_dict: dict[str, Any], reasoning: str, mode: ReasoningFieldMode) -> None:
+    """Attach reasoning under the key(s) selected by ``mode``."""
+    if mode in ("both", "reasoning_content"):
+        message_dict["reasoning_content"] = reasoning
+    if mode in ("both", "reasoning"):
+        message_dict["reasoning"] = reasoning
+
+
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
     api_key: str
@@ -168,6 +189,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
+    # Which key(s) carry reasoning on an outgoing assistant message. "both" keeps
+    # the historical behaviour: vLLM < 0.16.0 reads `reasoning_content`, >= 0.16.0
+    # reads `reasoning`, and most servers ignore the one they do not know. Some
+    # OpenAI-compatible frontends alias the two keys and reject the pair
+    # (`400 duplicate field 'reasoning'`).
+    # Unset falls back to the NEMO_GYM_REASONING_FIELD environment variable, then "both".
+    reasoning_field: ReasoningFieldMode = Field(default_factory=_default_reasoning_field, validate_default=True)
     # Keep reconstructed assistant history byte-for-byte in ``content`` for
     # models whose validated direct-vLLM contract includes <think> tags.
     # Response parsing remains controlled independently by
@@ -188,6 +216,14 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     is_responses_native: bool = False
 
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+    # Whether a request's own top-level ``chat_template_kwargs`` is merged over the
+    # configured baseline (below per-request metadata overrides). Off by default:
+    # agents such as Stirrup attach ``enable_thinking`` on every call, so
+    # forwarding it changes the policy's generation regime relative to results
+    # collected without it. When off, the request field is dropped and a warning is
+    # logged once. Chat path only: with ``use_completions_api`` the request field
+    # is always dropped. Opt in deliberately and re-baseline with a same-config run.
+    forward_request_chat_template_kwargs: bool = False
 
     # When True, if the last input message is an assistant message, forward it to vLLM as a
     # prefix to continue (continue_final_message=True, add_generation_prompt=False) instead of
@@ -295,6 +331,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         "required_prefix_token_ids",
     )
     _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
+    _warned_request_chat_template_kwargs_dropped: bool = PrivateAttr(default=False)
 
     def setup_exception_middleware(self, app) -> None:
         @app.middleware("http")
@@ -476,7 +513,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._apply_sampling_overrides(body_dict)
 
         client = self._resolve_client(request)
-        response_dict = await client.create_response(**body_dict)
+        execution = start_model_execution(request, upstream_attempted=True)
+        try:
+            response_dict = await client.create_response(**body_dict)
+        except ClientResponseError as error:
+            execution.update(response_source="upstream", upstream_status_code=error.status)
+            raise
+        execution["response_source"] = "upstream"
 
         return NeMoGymResponse.model_validate(response_dict)
 
@@ -530,6 +573,18 @@ class VLLMModel(SimpleResponsesAPIModel):
             encoded = base64.b64encode(f.read()).decode("ascii")
         return f"data:audio/{mime};base64,{encoded}"
 
+    def _warn_request_chat_template_kwargs_dropped(self, reason: str) -> None:
+        """Log once per server that a request's top-level ``chat_template_kwargs`` was dropped."""
+        if self._warned_request_chat_template_kwargs_dropped:
+            return
+        self._warned_request_chat_template_kwargs_dropped = True
+        LOG.warning(
+            "NeMo Gym server `%s`: dropping the request's top-level chat_template_kwargs (%s). "
+            "Configured and metadata.chat_template_kwargs still apply. Logged once per server.",
+            self.config.name,
+            reason,
+        )
+
     @staticmethod
     def _strip_hosted_only_tool_fields(body_dict: Dict[str, Any]) -> None:
         """Remove OpenAI-hosted-only fields from function tool definitions.
@@ -573,6 +628,16 @@ class VLLMModel(SimpleResponsesAPIModel):
         chat_template_kwargs = {}
         if self.config.chat_template_kwargs:
             chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
+
+        # Precedence: config baseline -> direct request field -> metadata override.
+        # The request field is always popped so it never reaches the engine
+        # unmerged; it is applied only when forwarding is enabled.
+        request_chat_template_kwargs = body_dict.pop("chat_template_kwargs", None)
+        if request_chat_template_kwargs:
+            if self.config.forward_request_chat_template_kwargs:
+                chat_template_kwargs.update(request_chat_template_kwargs)
+            else:
+                self._warn_request_chat_template_kwargs_dropped("forward_request_chat_template_kwargs is false")
 
         metadata = body_dict.get("metadata") or {}
 
@@ -623,11 +688,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                     reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(content)
                     message_dict["content"] = remaining_content
                     if reasoning_matches and self.config.uses_interleaved_reasoning:
-                        message_dict["reasoning_content"] = reasoning_matches[0]
-
-                        # TODO when NeMo RL migrates to vLLM>=0.16.0, remove the reasoning_content support above.
-                        # Starting with vLLM 0.16.0, the `reasoning_content` field has been deprecated in favor of just `reasoning`
-                        message_dict["reasoning"] = reasoning_matches[0]
+                        # TODO when NeMo RL migrates to vLLM>=0.16.0, drop reasoning_content.
+                        # From vLLM 0.16.0 `reasoning_content` is deprecated in favor of `reasoning`.
+                        _set_reasoning(message_dict, reasoning_matches[0], self.config.reasoning_field)
                 elif isinstance(content, list):
                     reasoning_content = None
                     for content_item_dict in content:
@@ -641,9 +704,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                         # Even though we set the reasoning content already here, we still loop through all the content item dicts for the assert above.
                         content_item_dict["text"] = remaining_content
                         if reasoning_matches and self.config.uses_interleaved_reasoning:
-                            message_dict["reasoning_content"] = reasoning_matches[0]
                             # See the TODO wrt reasoning_content above
-                            message_dict["reasoning"] = reasoning_matches[0]
+                            _set_reasoning(message_dict, reasoning_matches[0], self.config.reasoning_field)
                 elif not content:
                     # No content or content None is a no-op
                     pass
@@ -855,11 +917,13 @@ class VLLMModel(SimpleResponsesAPIModel):
             _session_id = request.session.get(SESSION_ID_KEY)
             if _session_id:
                 body_dict["conversation_params"] = {"conversation_id": str(_session_id)}
+        execution = start_model_execution(request, upstream_attempted=False)
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "content_filter"
+                execution.update(response_source="local", local_response_reason="empty_assistant")
                 return res
 
         transport_io_enabled = bool(os.environ.get("NEMO_GYM_VLLM_TRANSPORT_LOG", "").strip())
@@ -887,9 +951,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                 }
             )
 
+        execution["upstream_attempted"] = True
         try:
             chat_completion_dict = await client.create_chat_completion(**body_dict)
         except ClientResponseError as e:
+            execution.update(response_source="upstream", upstream_status_code=e.status)
             if transport_io_enabled:
                 finished_ns = time_ns()
                 _append_transport_io(
@@ -928,6 +994,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
+                execution.update(response_source="local", local_response_reason="context_length_exceeded")
                 return res
             else:
                 raise e
@@ -949,6 +1016,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 )
             raise
 
+        execution["response_source"] = "upstream"
         if transport_io_enabled:
             finished_ns = time_ns()
             _append_transport_io(
@@ -1216,6 +1284,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._strip_hosted_only_tool_fields(body_dict)
         messages = body_dict.get("messages", []) or []
         metadata = body_dict.get("metadata", {}) or {}
+        if body_dict.get("chat_template_kwargs"):
+            self._warn_request_chat_template_kwargs_dropped("use_completions_api is true")
 
         if not self.config.render_chat_template and body_dict.get("tools"):
             raise ValueError(
@@ -1244,9 +1314,11 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         client = self._resolve_client(request)
 
+        execution = start_model_execution(request, upstream_attempted=True)
         try:
             completion_dict = await client.create_completion(**completion_body)
         except ClientResponseError as e:
+            execution.update(response_source="upstream", upstream_status_code=e.status)
             result_content_str = e.response_content.decode()
             is_out_of_context_length = e.status == 400 and (
                 "context length" in result_content_str or "max_tokens" in result_content_str
@@ -1257,9 +1329,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
+                execution.update(response_source="local", local_response_reason="context_length_exceeded")
                 return res
             raise
 
+        execution["response_source"] = "upstream"
         if self.config.return_token_id_information:
             choice_dict = completion_dict["choices"][0]
             if choice_dict.get("prompt_token_ids") is None:
@@ -1359,8 +1433,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         tools = body_dict.get("tools") or None
         self._validate_text_only_messages(messages)
 
-        # Mirror the precedence rules in _preprocess_chat_completion_create_params:
-        # global config baseline, per-request metadata overrides on top.
+        # Global config baseline, per-request metadata overrides on top. Unlike the
+        # chat path, a request's top-level chat_template_kwargs is never merged here.
         chat_template_kwargs: Dict[str, Any] = {}
         if self.config.chat_template_kwargs:
             chat_template_kwargs.update(deepcopy(self.config.chat_template_kwargs))

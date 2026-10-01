@@ -20,6 +20,7 @@ overrides = [
     { name = "torchaudio", marker = "sys_platform == 'never'" },
     { name = "torchcodec", marker = "sys_platform == 'never'" },
     { name = "torchvision", marker = "sys_platform == 'never'" },
+    { name = "wcwidth", marker = "sys_platform == 'never'" },
 ]
 excludes = [
     "alembic",
@@ -38,7 +39,6 @@ excludes = [
     "skops",
     "sqlalchemy",
     "waitress",
-    "wcwidth",
     "werkzeug",
 ]
 
@@ -2731,7 +2731,7 @@ requires-dist = [
     { name = "mlflow-skinny", specifier = ">=3.16.1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "nemo-gym", extras = ["dev", "sandbox"], marker = "extra == 'all'" },
-    { name = "nemo-lens", extras = ["sdk"], marker = "extra == 'telemetry'", git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=b85578fc2b736a1804705e537001b5f45e9c715d" },
+    { name = "nemo-lens", extras = ["sdk"], marker = "extra == 'telemetry'", git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=b0f977d414b2f89938604a0b7eaa78ee08bc8700" },
     { name = "omegaconf" },
     { name = "openai", specifier = "==2.44.0" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.15" },
@@ -2780,8 +2780,8 @@ codec = [
 
 [[package]]
 name = "nemo-lens"
-version = "0.2.0+b85578f"
-source = { git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=b85578fc2b736a1804705e537001b5f45e9c715d#b85578fc2b736a1804705e537001b5f45e9c715d" }
+version = "0.2.0+b0f977d"
+source = { git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=b0f977d414b2f89938604a0b7eaa78ee08bc8700#b0f977d414b2f89938604a0b7eaa78ee08bc8700" }
 dependencies = [
     { name = "opentelemetry-api" },
 ]
