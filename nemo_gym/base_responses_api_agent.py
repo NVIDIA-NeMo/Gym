@@ -136,6 +136,7 @@ class BaseResponsesAPIAgent(BaseServer):
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
+    routes_sessions_to_owner = True
     # Agents that implement the AgentSessionHooks methods set this to take part in partial-rollout
     # checkpoints. Other agents restart unfinished rollouts from their input.
     checkpoint_sessions_supported: ClassVar[bool] = False

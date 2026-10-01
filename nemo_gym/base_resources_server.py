@@ -249,6 +249,7 @@ class ResourcesCloseSessionResponse(BaseModel):
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
+    routes_sessions_to_owner = True
     # How this server's sessions take part in partial-rollout checkpoints. "exported" servers implement
     # the ResourcesSessionHooks methods. The default fails closed: live sessions block a checkpoint
     # until their rollouts are retired and restarted.
