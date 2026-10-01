@@ -1099,6 +1099,8 @@ _TASK_METADATA_FIELDS = (
 class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     """Generic Stirrup agent wrapper — task logic is pluggable via config."""
 
+    ray_enabled = True
+
     config: StirrupAgentWrapperConfig
     sem: Semaphore = None
     inflight: int = 0  # rollouts holding a concurrency slot right now

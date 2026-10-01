@@ -147,6 +147,7 @@ def _run_math_verify_in_subprocess(expected_answer: str, generated_answer: str, 
 
 
 class LibraryJudgeMathResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     # These judge messages are adapted from ones used in Arena Hard.
     # https://github.com/lmarena/arena-hard-auto/blob/196f6b826783b3da7310e361a805fa36f0be83f3/utils/judge_utils.py
     # They are intended to serve as example messages for an LLM judge, and have not

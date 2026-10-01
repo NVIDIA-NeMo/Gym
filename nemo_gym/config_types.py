@@ -185,6 +185,14 @@ class AlmostServerError(ConfigError, ValueError):
     `error_on_almost_servers` is set, so the run is aborted."""
 
 
+class AgentWithoutEnvironmentServerError(ConfigError, ValueError):
+    """An agent instance has no environment server."""
+
+
+class AmbiguousEnvironmentServerError(ConfigError, ValueError):
+    """Rows route by an agent that more than one environment server fronts."""
+
+
 class AgentCompositionError(ConfigError, ValueError):
     """A standalone agent config could not be composed onto the merged config's agent instances."""
 

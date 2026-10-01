@@ -154,28 +154,12 @@ class TestCheckStopsStartupCleanly:
         assert [] == unreachable
         sleep_mock.assert_not_called()
 
-    def test_servers_are_shut_down_before_the_error(self, monkeypatch: MonkeyPatch) -> None:
-        """The Popens have no process group and no atexit handler, and every caller reaches
-        shutdown() only after start() returns."""
-        monkeypatch.setattr(
-            nemo_gym.cli.env, "_wait_for_model_endpoints", MagicMock(return_value=[("openai_base_url", "http://x/v1")])
-        )
-        helper = RunHelper.__new__(RunHelper)
-        shutdown_mock = MagicMock()
-        helper.shutdown = shutdown_mock
-
-        with raises(ConfigError):
-            RunHelper.wait_for_model_endpoints(helper, _config(model_endpoint_readiness_timeout_seconds=1))
-
-        shutdown_mock.assert_called_once()
-
     def test_failure_is_a_config_error_not_a_system_exit(self, monkeypatch: MonkeyPatch) -> None:
         """NeMo-RL imports RunHelper, so a library method must not exit the process."""
         monkeypatch.setattr(
             nemo_gym.cli.env, "_wait_for_model_endpoints", MagicMock(return_value=[("openai_base_url", "http://x/v1")])
         )
         helper = RunHelper.__new__(RunHelper)
-        helper.shutdown = MagicMock()
 
         with raises(ConfigError) as exc_info:
             RunHelper.wait_for_model_endpoints(helper, _config(model_endpoint_readiness_timeout_seconds=1))

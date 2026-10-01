@@ -51,7 +51,18 @@ class ExternalCaptureHandler(Protocol):
         ...
 
     def prepare_response(self, response_payload: dict[str, Any]) -> None:
-        """Retain the worker acknowledgement and remove capture-only response fields."""
+        """Retain the worker acknowledgement and remove capture-only response fields.
+
+        Model servers must call this for every completion the worker returns,
+        even one whose acknowledgement is missing. It marks the request as
+        having received a worker completion, and ``finalize_response`` commits
+        or poisons the call only when that mark is present. Skipping it for a
+        real completion would leave the call merely uncommitted instead of
+        failing closed with ``worker_response_missing_commit_coordinates``.
+        Completions the model server synthesizes itself (the sequential
+        reasoning guard, or a backend context-limit error converted into an
+        empty completion) never pass through here, so they stay uncommitted.
+        """
         ...
 
     async def finalize_response(self, served_payload: dict[str, Any]) -> None:
@@ -119,6 +130,7 @@ class _BaseExternalCaptureHandler(ABC):
         if context is None or not context.external_staging:
             return
         context.external_commit_coords = response_payload.pop(NG_COMMIT_COORDS_FIELD, None)
+        context.external_worker_response_seen = True
         _strip_capture_transport_fields(response_payload)
 
     async def finalize_response(self, served_payload: dict[str, Any]) -> None:
@@ -137,6 +149,15 @@ class _BaseExternalCaptureHandler(ABC):
         admission = context.capture_admission
         if admission is None:
             # UNRESOLVED — the ledger already carries this call's poison row.
+            return
+        if not context.external_worker_response_seen:
+            # No worker completion reached ``prepare_response``: the model
+            # server built this response itself. The reasoning guard never
+            # calls the worker, and on context overflow the worker returns an
+            # HTTP 400 instead of a completion. Leave the call uncommitted for
+            # the middleware to record. A completion the worker did return
+            # without ``ng_commit_coords`` sets the flag and still fails
+            # closed below with ``worker_response_missing_commit_coordinates``.
             return
         try:
             await self._finalize_admitted_response(
