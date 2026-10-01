@@ -22,7 +22,8 @@ from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
-from pytest import MonkeyPatch, fixture, mark
+from pydantic import ValidationError
+from pytest import MonkeyPatch, fixture, mark, raises
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
@@ -192,11 +193,25 @@ class TestOpenCodeSandboxedAgent:
 
         assert expected_usages == actual_usages
 
-    async def test_responses_sanity(self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch) -> None:
+    @mark.parametrize("stage_ripgrep", [False, True])
+    async def test_responses_sanity(
+        self,
+        opencode_export_test_data: Dict[str, Any],
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+        stage_ripgrep: bool,
+    ) -> None:
         config = self._create_config()
+        if stage_ripgrep:
+            binary = tmp_path / "rg with spaces"
+            binary.write_bytes(b"test executable")
+            config = OpenCodeSandboxedAgentConfig.model_validate(
+                config.model_dump() | {"local_ripgrep_binary_path": str(binary)}
+            )
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
         sandbox_mock = MagicMock()
+        sandbox_mock.upload = AsyncMock()
         sandbox_mock.exec = AsyncMock(
             side_effect=[
                 SimpleNamespace(
@@ -314,6 +329,22 @@ class TestOpenCodeSandboxedAgent:
         assert expected_response == actual_response
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
         assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        if stage_ripgrep:
+            sandbox_mock.upload.assert_awaited_once_with(binary, "/tmp/nemo-gym-ripgrep-")
+            assert 'mv /tmp/nemo-gym-ripgrep- "$HOME/.opencode/bin/rg"' in command
+            assert 'chmod 0755 "$HOME/.opencode/bin/rg"' in command
+            assert command.index('"$HOME/.opencode/bin/rg" --version') < command.index("opencode run")
+            assert [call[0] for call in sandbox_mock.mock_calls[:2]] == ["upload", "exec"]
+        else:
+            sandbox_mock.upload.assert_not_awaited()
+            assert "nemo-gym-ripgrep" not in command
+
+    def test_missing_local_ripgrep_is_rejected(self, tmp_path: Path) -> None:
+        with raises(ValidationError, match="Path does not point to a file"):
+            OpenCodeSandboxedAgentConfig.model_validate(
+                self._create_config().model_dump() | {"local_ripgrep_binary_path": str(tmp_path / "missing-rg")}
+            )
 
     def test_agent_sandbox_observation_classifies_timeout_errors(self) -> None:
         server = OpenCodeSandboxedAgent(

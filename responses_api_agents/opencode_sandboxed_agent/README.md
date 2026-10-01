@@ -62,9 +62,20 @@ swebench_verified_opencode_sandboxed_agent:
       remote_opencode_install_script_path: /opt/gym-assets/opencode/1.17.11/install.sh
       remote_opencode_binary_path: /opt/gym-assets/opencode/1.17.11/opencode-linux-x64
       remote_opencode_musl_binary_path: null
+      # On the Gym agent-server host, not inside the task sandbox.
+      local_ripgrep_binary_path: /opt/gym-assets/ripgrep/15.1.0/rg
 ```
 
 The staged binary determines the installed version and must match the sandbox's
 architecture and libc. Keep `remote_opencode_musl_binary_path: null` with the upstream
 installer; the dual-binary mode requires a custom installer supporting
 `--glibc-binary` and `--musl-binary`.
+
+OpenCode's `glob` and `grep` tools also need ripgrep (`rg`). Without it, OpenCode
+tries downloading from GitHub, which fails in network-restricted sandboxes.
+Optionally set `local_ripgrep_binary_path` to a predownloaded, version-pinned
+executable on each Gym agent-server host. Match the sandbox architecture/libc
+(for Linux x86_64, the official musl build is portable) and verify its release
+checksum before use. Gym uploads it through the sandbox file API and installs it
+alongside OpenCode before execution; no sandbox internet access or root package
+installation is needed. The default is `null`, preserving existing behavior.
