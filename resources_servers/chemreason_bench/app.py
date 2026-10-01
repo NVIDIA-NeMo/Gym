@@ -138,7 +138,9 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
         else:
             raw = body.response.output_text or ""
             parsed, status = extract_json(raw)
-            prediction = to_prediction(task_type, parsed, expected_step_ids, options, raw, legend)
+            prediction = to_prediction(
+                task_type, parsed, expected_step_ids, options, raw, legend, non_object=status == "non_object_json"
+            )
         scored = M.score_row(task_type, prediction, ground_truth)
         reward = float(scored.pop("reward"))
 
@@ -160,13 +162,10 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
         gen-only dataset still scores rather than being halved.
         """
         by_key: Dict[tuple, List[Dict[str, float]]] = defaultdict(list)
-        harness_failures = 0
-        total = 0
         for task in tasks:
             for rollout in task:
-                total += 1
+                # Masked upstream of here; the aggregator reports them as coverage/masked_rollouts.
                 if rollout.get("harness_failure"):
-                    harness_failures += 1
                     continue
                 task_type = rollout.get("task_type")
                 contributions = rollout.get("contributions")
@@ -189,8 +188,6 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
             out[f"{task_type}/protocols"] = float(len(present))
 
         out["primary_overall"] = M.primary_overall(per_task) * 100.0
-        # Published as a score, not filtered silently; these rollouts also score 0.
-        out["harness_failure"] = M.safe_div(harness_failures, total)
         return out
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -203,9 +200,8 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
         for name in ("mean/input_tokens", "mean/output_tokens"):
             if name in agent_metrics:
                 key[name] = agent_metrics[name]
-        for name in ("primary_overall", "harness_failure"):
-            if name in agent_metrics:
-                key[name] = agent_metrics[name]
+        if "primary_overall" in agent_metrics:
+            key["primary_overall"] = agent_metrics["primary_overall"]
         for task_type in M.TASK_TYPES:
             name = f"{task_type}/{M.PRIMARY_METRIC_BY_TASK[task_type]}"
             if name in agent_metrics:

@@ -25,6 +25,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import ServerClient
 from resources_servers.chemreason_bench import metrics as M
 from resources_servers.chemreason_bench import response_parsing
@@ -303,18 +304,25 @@ class TestModelOutputHandling:
         with_trace = _verify(_make_server(), traced, task_type="rationalization", ground_truth=GOLD["rationalization"])
         assert with_trace.reward == pytest.approx(plain.reward)
 
-    @pytest.mark.parametrize("reply", ["YES", '{"note":"unsure"}', "[1, 2]", "{broken"])
+    @pytest.mark.parametrize("reply", ["YES", '{"note":"unsure"}', "{broken", "Sure: [1, 2]"])
     def test_unparseable_binary_reply_scores_the_0_5_default(self, reply):
-        """Every binary reply lacking `score` lands on 0.5, which is >= 0.5: positive.
-
-        Upstream's extractor returns {"_raw": answer} on every failure path, so
-        post_binary never receives a non-dict and its non-dict branch is dead. The
-        difference is not cosmetic: labelling these negative moves f1_positive on
-        both validation tasks, which are two of the six primaries.
-        """
+        """A FAILED parse is {"_raw": ...} upstream: no score, 0.5 >= 0.5, positive."""
         server = _make_server()
         assert _verify(server, reply, task_type="step_validation", ground_truth={"label": True}).reward == 1.0
         assert _verify(server, reply, task_type="step_validation", ground_truth={"label": False}).reward == 0.0
+
+    @pytest.mark.parametrize("reply", ["[1, 2]", "null", '"YES"'])
+    def test_valid_non_object_json_is_negative(self, reply):
+        """Valid JSON that is not an object reaches post_binary as a non-dict: label False.
+
+        Differential against the test above: `Sure: [1, 2]` fails to parse and
+        defaults positive; bare `[1, 2]` parses to a list and is negative.
+        """
+        server = _make_server()
+        positive = _verify(server, reply, task_type="step_validation", ground_truth={"label": True})
+        assert positive.status == "non_object_json"
+        assert positive.reward == 0.0
+        assert _verify(server, reply, task_type="step_validation", ground_truth={"label": False}).reward == 1.0
 
     def test_binary_score_below_threshold_is_negative(self):
         """The 0.5 default is a default, not a constant: a real score still decides."""
@@ -389,7 +397,7 @@ class TestMetrics:
         )
         computed = server.compute_metrics(rollouts)
         assert computed["primary_overall"] == pytest.approx(100.0)
-        assert computed["harness_failure"] == 0.0
+        assert "harness_failure" not in computed
         # Every task is represented; condition_validation carries the extra positive row.
         # Counts are keyed per protocol now that gen and lm are reduced separately.
         for task_type in M.TASK_TYPES:
@@ -419,12 +427,26 @@ class TestMetrics:
         computed = server.compute_metrics([[perfect_negative.model_dump()]])
         assert computed["condition_validation/f1_positive"] == 0.0
 
-    def test_harness_failures_are_published_not_hidden(self):
+    def test_harness_failures_are_masked_through_the_aggregator(self):
+        """Through compute_aggregate_metrics, a harness failure is excluded from the
+        score and reported as coverage -- not as a zero and not as a custom headline.
+        """
         server = _make_server()
         good = _verify(server, GOLD_REPLY["ordering"], task_type="ordering", ground_truth=GOLD["ordering"])
         bad = _verify(server, "{}")
-        computed = server.compute_metrics([[good.model_dump()], [bad.model_dump()]])
-        assert computed["harness_failure"] == pytest.approx(0.5)
+        rows = [
+            {**good.model_dump(), "_ng_task_index": 0, "_ng_rollout_index": 0},
+            {**bad.model_dump(), "_ng_task_index": 1, "_ng_rollout_index": 0},
+        ]
+        result = compute_aggregate_metrics(
+            rows, compute_metrics_fn=server.compute_metrics, get_key_metrics_fn=server.get_key_metrics
+        )
+        assert result.agent_metrics["mean/reward"] == pytest.approx(1.0)
+        assert result.agent_metrics["coverage/masked_rollouts"] == 1
+        assert result.agent_metrics["coverage/measured_rollouts"] == 1
+        assert "harness_failure" not in result.agent_metrics
+        assert "harness_failure" not in result.key_metrics
+        assert "primary_overall" in result.key_metrics
 
     def test_absent_task_scores_zero_rather_than_shrinking_the_denominator(self):
         server = _make_server()

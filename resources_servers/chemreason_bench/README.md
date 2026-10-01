@@ -109,10 +109,11 @@ as `0.5*action_em + 0.5*slot_f1`, while `eval/eval.py` and the paper both use `0
 format-error penalty. The config string is stale; code and paper agree and produced the
 published numbers.
 
-The binary tasks have one easily-inverted rule. Because the extractor returns `{"_raw": answer}`
-on *every* failure, `post_binary` never sees a non-dict: its non-dict branch is dead, and an
-unparseable reply falls through to the `0.5 >= 0.5` default and counts **positive**. Labelling
-those negative instead moves `f1_positive` on both validation tasks.
+The binary tasks have one easily-inverted rule. In the JSON evaluation path `chat_json_hf` wraps
+a *failed* parse as `{"_raw": answer}`, a dict with no score, so an unparseable reply falls
+through to the `0.5 >= 0.5` default and counts **positive**; a reply that is valid JSON but not
+an object (`[1, 2]`, `null`, `"YES"`) reaches `post_binary` as a non-dict and counts
+**negative**. Getting either half backwards moves `f1_positive` on both validation tasks.
 
 One deliberate departure, recorded rather than hidden: when a reply contains several JSON
 objects this server scores the **rightmost**, on the grounds that a later object is the

@@ -81,7 +81,14 @@ def clean_text(raw: Optional[str]) -> str:
 
 
 def extract_json(raw: Optional[str]) -> Tuple[Optional[Dict[str, Any]], str]:
-    """Return ``(object, status)``; ``object`` is None when nothing parsed."""
+    """Return ``(object, status)``; ``object`` is None when no object parsed.
+
+    Status ``non_object_json`` marks a reply that IS valid JSON but not an object
+    (``[1, 2]``, ``null``, ``"YES"``). Upstream's ``chat_json_hf`` returns such a
+    value unchanged and ``post_binary`` labels a non-dict negative, whereas a
+    failed parse becomes ``{"_raw": ...}`` and defaults positive. The two must stay
+    distinguishable.
+    """
     if not raw or not raw.strip():
         return None, "empty_output"
     text = clean_text(raw)
@@ -100,9 +107,14 @@ def extract_json(raw: Optional[str]) -> Tuple[Optional[Dict[str, Any]], str]:
             continue
         if isinstance(obj, dict):
             parsed = obj  # keep going; the rightmost valid object wins
-    if parsed is None:
+    if parsed is not None:
+        return parsed, "ok"
+    # Upstream's last candidate is the whole reply; valid non-object JSON parses here.
+    try:
+        value = json.loads(text.strip())
+    except (ValueError, RecursionError):
         return None, "no_json_found"
-    return parsed, "ok"
+    return (value, "ok") if isinstance(value, dict) else (None, "non_object_json")
 
 
 def _as_float(value: Any, default: float) -> float:
@@ -194,21 +206,18 @@ def to_prediction(
     options: Optional[List[Any]] = None,
     raw: str = "",
     legend: Optional[Dict[str, str]] = None,
+    non_object: bool = False,
 ) -> Dict[str, Any]:
     """Coerce a parsed object into the shape ``metrics.score_row`` expects.
 
-    UPSTREAM'S PARSE-FAILURE CONTRACT, which is easy to get backwards.
-    ``_extract_json_from_answer`` returns ``{"_raw": answer}`` on EVERY failure
-    path -- bad JSON, a JSON list, an exception. So the post-processors never
-    receive a non-dict, ``post_binary``'s non-dict branch is unreachable in the
-    real pipeline, and an unparseable binary reply becomes ``score=0.5`` and
-    therefore ``label=True``. An earlier version of this file ported that dead
-    branch and assigned ``label=False``, which moved both validation metrics.
+    UPSTREAM'S PARSE CONTRACT (JSON eval path, ``chat_json_hf`` -> ``post_process``):
+    a FAILED parse becomes ``{"_raw": answer}``, a dict with no score, so an
+    unparseable binary reply defaults to ``score=0.5`` -> ``label=True``. A reply
+    that parses to a NON-OBJECT (``[1, 2]``, ``null``, ``"YES"``) is returned as is
+    and ``post_binary`` labels it False. ``non_object`` carries that second case.
 
-    The same fact scopes the raw-text fallbacks: ``_raw`` exists only when
-    parsing failed, so a successfully parsed object must never be re-scanned as
-    text. ``{"predicted_order": "1 2 0"}`` scores empty upstream, not full
-    credit.
+    ``_raw`` exists only when parsing failed, so a successfully parsed object is
+    never re-scanned as text: ``{"predicted_order": "1 2 0"}`` scores empty.
     """
     no_object = not isinstance(obj, dict)
     obj = obj if isinstance(obj, dict) else {}
@@ -223,9 +232,9 @@ def to_prediction(
         return {"predicted_option_idx": post_contrastive(None if no_object else obj, options or [], recovery)}
 
     if task_type in ("step_validation", "condition_validation"):
-        # The prompt asks for `score` only; the label is derived, never requested.
-        # No special case for a failed parse: upstream hands post_binary
-        # {"_raw": ...}, a dict with no score, which is exactly the path below.
+        if non_object:
+            return {"score": 0.5, "label": False}  # post_binary's non-dict branch
+        # A failed parse is {"_raw": ...} upstream: a dict with no score, i.e. this path.
         score = obj.get("score", obj.get("prob_positive"))
         score = min(1.0, max(0.0, _as_float(score, 0.5)))
         return {"score": score, "label": bool(score >= BINARY_LABEL_THRESHOLD)}
