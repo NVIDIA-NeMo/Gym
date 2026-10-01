@@ -575,14 +575,29 @@ class TestServerUtils:
         with raises(ValueError, match="worker count must be at least 1"):
             connection_pool_capacity(GlobalAIOHTTPAsyncClientConfig(), workers)
 
-    def test_connection_pool_capacity_rejects_zero_effective_limit(self) -> None:
+    @mark.parametrize(
+        ("total", "per_host", "workers"),
+        [(3, 2, 4), (3, 1024, 4), (100 * 1024, 8, 16), (0, 8, 16), (3, 0, 4), (1, 1024, 2), (1024, 1, 2)],
+        ids=[
+            "both",
+            "total-only",
+            "per-host-only",
+            "per-host-with-unlimited-total",
+            "total-with-unlimited-per-host",
+            "total-of-one",
+            "per-host-of-one",
+        ],
+    )
+    def test_connection_pool_capacity_rejects_zero_effective_limit(
+        self, total: int, per_host: int, workers: int
+    ) -> None:
         cfg = GlobalAIOHTTPAsyncClientConfig(
-            global_aiohttp_connector_limit=3,
-            global_aiohttp_connector_limit_per_host=2,
+            global_aiohttp_connector_limit=total,
+            global_aiohttp_connector_limit_per_host=per_host,
         )
 
         with raises(ValueError, match="must remain at least 1"):
-            connection_pool_capacity(cfg, workers=4)
+            connection_pool_capacity(cfg, workers=workers)
 
     @mark.parametrize("field", ["global_aiohttp_connector_limit", "global_aiohttp_connector_limit_per_host"])
     def test_connection_pool_config_rejects_negative_limits(self, field: str) -> None:
@@ -675,11 +690,15 @@ class TestServerUtils:
             in caplog.text
         )
 
-    @mark.parametrize(("total", "workers"), [(100 * 1024, 1), (100 * 1024, 2), (0, 1), (0, 2)])
+    @mark.parametrize(
+        ("total", "workers", "effective_total"),
+        [(100 * 1024, 1, "102400"), (100 * 1024, 2, "51200"), (0, 1, "unlimited"), (0, 2, "unlimited")],
+    )
     def test_connection_pool_limit_alone_does_not_warn_against_file_descriptor_budget(
         self,
         total: int,
         workers: int,
+        effective_total: str,
         caplog: LogCaptureFixture,
         monkeypatch: MonkeyPatch,
     ) -> None:
@@ -694,9 +713,68 @@ class TestServerUtils:
         with caplog.at_level(logging.INFO, logger="nemo_gym.telemetry.connection_pool"):
             report_connection_pool_capacity(cfg, capacity)
 
-        assert f"effective_total={connection_pool._display_limit(capacity.total)}" in caplog.text
+        assert f"effective_total={effective_total} " in caplog.text
         assert "file_descriptor_soft_limit=65535" in caplog.text
         assert not any(record.levelno >= logging.WARNING for record in caplog.records)
+
+    @mark.parametrize("workers", [1, 4])
+    def test_unlimited_limits_are_reported_and_skip_demand_warnings(
+        self,
+        workers: int,
+        caplog: LogCaptureFixture,
+        capsys: CaptureFixture[str],
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=0,
+            global_aiohttp_connector_limit_per_host=0,
+            global_aiohttp_intended_concurrency=4096,
+            global_aiohttp_intended_concurrency_per_host=1024,
+        )
+        capacity = connection_pool_capacity(cfg, workers=workers)
+        connection_pool._REPORTED_CAPACITIES.clear()
+        monkeypatch.setattr(connection_pool.resource, "getrlimit", lambda _resource: (1048576, 1048576))
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: None)
+
+        with caplog.at_level(logging.INFO, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity, visible=True)
+
+        visible_report = capsys.readouterr().out
+        for field in (
+            "aggregate_total",
+            "aggregate_per_host",
+            "effective_total",
+            "effective_per_host",
+            "per_worker_per_host",
+        ):
+            assert f"{field}=unlimited " in visible_report
+        assert not any(record.levelno >= logging.WARNING for record in caplog.records)
+
+    def test_unlimited_total_still_checks_a_finite_per_host_limit(
+        self,
+        caplog: LogCaptureFixture,
+        capsys: CaptureFixture[str],
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_connector_limit=0,
+            global_aiohttp_connector_limit_per_host=8,
+            global_aiohttp_intended_concurrency=4096,
+            global_aiohttp_intended_concurrency_per_host=16,
+        )
+        capacity = connection_pool_capacity(cfg, workers=1)
+        connection_pool._REPORTED_CAPACITIES.clear()
+        monkeypatch.setattr(connection_pool.resource, "getrlimit", lambda _resource: (1048576, 1048576))
+        monkeypatch.setattr(connection_pool, "_ephemeral_port_capacity", lambda: None)
+
+        with caplog.at_level(logging.INFO, logger="nemo_gym.telemetry.connection_pool"):
+            report_connection_pool_capacity(cfg, capacity, visible=True)
+
+        visible_report = capsys.readouterr().out
+        assert "effective_total=unlimited " in visible_report
+        assert "effective_per_host=8 " in visible_report
+        assert "intended per-host concurrency 16 exceeds effective per-host limit 8" in caplog.text
+        assert "exceeds effective total limit" not in caplog.text
 
     def test_intended_concurrency_warns_with_file_descriptor_prefix(
         self, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
@@ -1519,7 +1597,7 @@ class TestRunWebserverProxyKwargs:
         self,
         monkeypatch: MonkeyPatch,
         config_dict: dict,
-        num_workers: int,
+        num_workers: int | None,
         ray_enabled: bool | None = None,
         is_worker: bool = False,
     ) -> dict:
@@ -1544,6 +1622,7 @@ class TestRunWebserverProxyKwargs:
         )
 
         captured: dict = {}
+        self.uvicorn_kwargs = captured
         monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "run", lambda **kwargs: captured.update(kwargs))
 
         server_config = BaseRunServerInstanceConfig(
@@ -1624,6 +1703,37 @@ class TestRunWebserverProxyKwargs:
     def test_enabling_without_allowlist_fails_startup(self, monkeypatch: MonkeyPatch) -> None:
         with raises(ValidationError, match="requires a non-empty uvicorn_forwarded_allow_ips"):
             self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_proxy_headers": True}, num_workers=1)
+
+    @mark.parametrize(("is_worker", "num_workers"), [(False, None), (False, 1), (False, 4), (True, 4)])
+    def test_connection_pool_report_is_printed_only_by_the_main_process(
+        self, monkeypatch: MonkeyPatch, is_worker: bool, num_workers: int | None
+    ) -> None:
+        report = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "report_connection_pool_capacity", report)
+
+        self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=num_workers, is_worker=is_worker)
+
+        if is_worker:
+            report.assert_not_called()
+        else:
+            report.assert_called_once()
+            assert report.call_args.args[1].workers == (num_workers or 1)
+            assert report.call_args.kwargs == {"visible": True}
+
+    @mark.parametrize("is_worker", [False, True])
+    def test_positive_limit_that_divides_to_zero_fails_before_uvicorn_starts(
+        self, monkeypatch: MonkeyPatch, is_worker: bool
+    ) -> None:
+        report = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "report_connection_pool_capacity", report)
+
+        with raises(ValueError, match="must remain at least 1"):
+            self._capture_uvicorn_kwargs(
+                monkeypatch, {"global_aiohttp_connector_limit_per_host": 8}, num_workers=16, is_worker=is_worker
+            )
+
+        assert self.uvicorn_kwargs == {}
+        report.assert_not_called()
 
 
 class TestHeadServerProxyKwargs:
