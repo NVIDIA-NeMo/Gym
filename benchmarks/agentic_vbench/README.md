@@ -34,10 +34,27 @@ export AGENTIC_VBENCH_MODEL_BASE_URL=http://model-host:8000/v1
 export AGENTIC_VBENCH_MODEL_ID=agentic-vbench-model
 export AGENTIC_VBENCH_DATASET=/path/outside/checkouts/inputs.jsonl
 export AGENTIC_VBENCH_CREDENTIALS_FILE=/secure/path/credentials.env
-export RAY_TMPDIR=/tmp
+export RAY_TMPDIR=/tmp/avb-ray-unique-run
+mkdir -p "$RAY_TMPDIR"
+unset RAY_ADDRESS
 
-gym eval prepare --benchmark agentic_vbench
-gym eval run --benchmark agentic_vbench --split benchmark \
+# Resolve variables before Gym converts dataset paths into Path objects.
+python - <<'PYCONFIG'
+import os
+import socket
+from pathlib import Path
+from omegaconf import OmegaConf
+config = OmegaConf.load("benchmarks/agentic_vbench/config.yaml")
+with socket.socket() as listener:
+    listener.bind(("127.0.0.1", 0))
+    config.head_server = {"host": "127.0.0.1", "port": listener.getsockname()[1]}
+output = Path(os.environ["AGENTIC_VBENCH_DATASET"]).with_suffix(".yaml")
+output.parent.mkdir(parents=True, exist_ok=True)
+OmegaConf.save(config, output, resolve=True)
+PYCONFIG
+
+gym eval prepare --config "${AGENTIC_VBENCH_DATASET%.jsonl}.yaml"
+gym eval run --config "${AGENTIC_VBENCH_DATASET%.jsonl}.yaml" --split benchmark \
   --output /path/outside/checkouts/rollouts.jsonl --concurrency 4 --num-repeats 1
 ```
 
@@ -62,7 +79,8 @@ Gym's generic `mean/reward` is task-weighted. The benchmark's leaderboard-style
 score is the equal mean of four family scores, averaged across three complete
 rollouts. Do not report a subset smoke result as the benchmark score. The Eval
 Factory companion integration validates selected IDs, emits the native TSV layout,
-and runs the existing parser/secret/aggregation audits.
+and supports the existing parser/secret/aggregation audits. Run those audits
+before reporting a benchmark comparison.
 
 This adapter does not produce model token IDs/logprobs and is intended for evaluation,
 not RL training. Raw wire captures come from the companion serving launcher's passive
