@@ -135,7 +135,10 @@ connection budgets in mind.
 
 Pool metrics require an active metrics exporter before the shared client is constructed.
 Gym server processes and the orchestrator used by `gym eval run` initialize telemetry
-automatically. Standalone `gym eval run --no-serve` and library calls to `setup_server_client()`
+automatically. When Gym telemetry is enabled and another library, such as NeMo RL, already set
+up nemo-lens in the same process, Gym reuses its providers, and pool metrics follow that library's
+metrics setting.
+Standalone `gym eval run --no-serve` and library calls to `setup_server_client()`
 do not initialize telemetry; callers must initialize it explicitly before creating the client.
 Initializing telemetry later does not replace an existing connector. Missing metrics from
 these standalone processes do not mean that no requests queued.

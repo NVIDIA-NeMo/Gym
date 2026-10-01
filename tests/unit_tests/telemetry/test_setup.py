@@ -328,6 +328,33 @@ def test_reused_lens_still_enables_gym_span_groups(lens_initialised_elsewhere):
     assert is_span_group_enabled("http_client") is True
 
 
+# The global meter provider can be set only once per process, so these tests pin what the owner
+# registered instead of depending on which earlier test set it.
+@pytest.mark.parametrize("provider_kind", ["proxy", "noop"])
+def test_reused_lens_without_metrics_keeps_pool_metrics_off(lens_initialised_elsewhere, monkeypatch, provider_kind):
+    from opentelemetry.metrics import NoOpMeterProvider
+    from opentelemetry.metrics._internal import _ProxyMeterProvider
+
+    # With metrics off, lens leaves OTel's default proxy provider in place.
+    provider = _ProxyMeterProvider() if provider_kind == "proxy" else NoOpMeterProvider()
+    monkeypatch.setattr("opentelemetry.metrics.get_meter_provider", lambda: provider)
+
+    init_telemetry(server_name="weather")
+
+    assert is_metrics_exporter_active() is False
+
+
+def test_reused_lens_with_metrics_enables_pool_metrics(lens_initialised_elsewhere, monkeypatch):
+    from opentelemetry.sdk.metrics import MeterProvider
+
+    provider = MeterProvider(shutdown_on_exit=False)
+    monkeypatch.setattr("opentelemetry.metrics.get_meter_provider", lambda: provider)
+
+    init_telemetry(server_name="weather")
+
+    assert is_metrics_exporter_active() is True
+
+
 def test_shutdown_leaves_providers_gym_does_not_own(lens_initialised_elsewhere, monkeypatch):
     """Shutting down borrowed providers would end the owning library's telemetry too."""
     handle = init_telemetry(server_name="weather")

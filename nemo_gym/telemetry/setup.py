@@ -347,6 +347,16 @@ def _build_resource_attributes(server_name: Optional[str], server_type: Optional
     return attrs
 
 
+def _sdk_meter_provider_installed() -> bool:
+    """Whether a real OpenTelemetry SDK meter provider, not a no-op or proxy, is registered."""
+    try:
+        from opentelemetry import metrics
+        from opentelemetry.sdk.metrics import MeterProvider
+    except ImportError:
+        return False
+    return isinstance(metrics.get_meter_provider(), MeterProvider)
+
+
 def init_telemetry(
     server_name: Optional[str] = None,
     server_type: Optional[str] = None,
@@ -401,6 +411,8 @@ def init_telemetry(
         # sets it only for an enabled setup, so the owner is exporting.
         if getattr(lens_handle, "_INITIALIZED", False):
             _TELEMETRY_HANDLE = TelemetryHandle(tracer=get_tracer(), meter=get_meter(), is_exporting=True)
+            # Lens registers an SDK meter provider only when the owner enabled metrics.
+            _METRICS_EXPORTING = _sdk_meter_provider_installed()
             logger.info(
                 "nemo-lens was already initialised in this process; Gym reuses its providers "
                 "and span-group spec (server=%s)",
@@ -467,10 +479,11 @@ def get_telemetry() -> Optional["TelemetryHandle"]:
 
 
 def is_metrics_exporter_active() -> bool:
-    """Whether this process initialized an exporting metrics provider.
+    """Whether this process has an active metrics exporter for Gym to record into.
 
-    Unlike :func:`is_telemetry_metrics_enabled`, this stays false until telemetry
-    setup succeeds with metrics enabled and this process selected for export.
+    True after Gym's own telemetry setup succeeds with metrics enabled, or after Gym reuses
+    providers that another library set up with metrics enabled. Unlike
+    :func:`is_telemetry_metrics_enabled`, this stays false until telemetry is set up.
     """
     return _METRICS_EXPORTING
 
