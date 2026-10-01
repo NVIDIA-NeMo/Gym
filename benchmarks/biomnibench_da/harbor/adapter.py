@@ -141,15 +141,24 @@ class HarborBOB:
         print(f"Adapted {converted} tasks to {self.output_dir}")
 
 
-def prepare() -> Path:
-    """Prepare the Harbor task tree and Gym index for ``gym eval prepare``."""
-    output_dir = Path(__file__).parents[1] / "data" / "harbor"
+def prepare(
+    *,
+    output_dir: str | Path,
+    docker_image: str,
+    data_dir: str | Path = "phylobio/BiomniBench-DA",
+    limit: int | None = None,
+    overwrite: bool = False,
+) -> Path:
+    """Prepare Harbor tasks and return their Gym JSONL index path."""
     benchmark = HarborBOB(
-        docker_image="benchmarks/biomnibench_da:latest",
+        docker_image=docker_image,
         output_dir=output_dir,
+        data_dir=data_dir,
+        limit=limit,
+        overwrite=overwrite,
     )
     benchmark.write()
-    return output_dir / "gym.jsonl"
+    return Path(benchmark.output_dir) / "gym.jsonl"
 
 
 if __name__ == "__main__":
