@@ -15,6 +15,7 @@
 import json
 import logging
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from time import perf_counter, time
 from typing import Any, List
@@ -34,6 +35,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
+    AgentToolLoopPolicy,
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
@@ -59,12 +61,22 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.tool_access import ContextualToolCallRequest, ContextualToolCallResponse, DirectHTTPToolAccess
 
 
 LOG = logging.getLogger(__name__)
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+_INTERNAL_COMPLETED_TURN_KEY = "_ng_completed_turn"
+TOOL_CALL_ID_HEADER = "X-NeMo-Gym-Tool-Call-Id"
+TURN_ID_HEADER = "X-NeMo-Gym-Turn-Id"
+
+
+def _merge_cookie_values(current: Mapping[str, str] | None, updates: Mapping[str, Any]) -> dict[str, str]:
+    """Merge aiohttp response morsels into a JSON-safe cookie mapping."""
+    merged = dict(current or {})
+    merged.update({str(name): str(getattr(value, "value", value)) for name, value in updates.items()})
+    return merged
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -91,6 +103,10 @@ class _SimpleAgentSession:
     episode_id: Any
     task_id: Any
     resources_cookies: dict[str, str]
+    tool_batch_path: str | None = None
+    tool_headers: dict[str, str] = field(default_factory=dict)
+    tool_call_context: dict[str, Any] | None = None
+    tool_loop_policy: AgentToolLoopPolicy | None = None
     trajectories: list[TrajectoryRecord] = field(default_factory=list)
 
 
@@ -119,6 +135,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             episode_id=body.episode_id,
             task_id=body.task_id,
             resources_cookies=resources_cookies,
+            tool_batch_path=direct_accesses[0].batch_path if direct_accesses else None,
+            tool_headers=dict(direct_accesses[0].headers) if direct_accesses else {},
+            tool_call_context=deepcopy(direct_accesses[0].tool_call_context) if direct_accesses else None,
+            tool_loop_policy=body.tool_loop_policy,
         )
         return AgentSeedSessionResponse(agent_session_id=body.agent_session_id)
 
@@ -163,6 +183,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
         invocation_id: str = "root",
+        tool_loop_policy: AgentToolLoopPolicy | None = None,
+        tool_batch_path: str | None = None,
+        tool_headers: Mapping[str, str] | None = None,
+        tool_call_context: Mapping[str, Any] | None = None,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         tool_records: list[TrajectoryToolCall] = []
         model_calls: list[ModelCallRef] = []
@@ -178,10 +202,28 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         step = 0
         invocation_status = "completed"
         model_server_cookies = None
+        executed_call_count = 0
+        force_synthesis = False
+        completed_transcript: list[dict[str, Any]] = []
+        completed_model_calls: list[dict[str, Any]] = []
+        semantic_turn_id = (
+            str(tool_call_context["turn_id"])
+            if tool_call_context is not None and tool_call_context.get("turn_id") is not None
+            else (tool_headers or {}).get(TURN_ID_HEADER)
+        )
+        completed_resources_context: dict[str, Any] | None = None
 
         while True:
             step += 1
-            new_body = body.model_copy(update={"input": body.input + new_outputs})
+            model_input = _model_replay_input(body.input, new_outputs, tool_loop_policy)
+            new_body = body.model_copy(update={"input": model_input})
+            final_synthesis_step = (
+                tool_loop_policy is not None
+                and tool_loop_policy.final_synthesis
+                and (force_synthesis or step == tool_loop_policy.max_model_calls)
+            )
+            if final_synthesis_step:
+                new_body = new_body.model_copy(update={"tools": [], "tool_choice": "auto"})
             if collect_trajectory:
                 turn_timestamp = time()
 
@@ -203,6 +245,40 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 ) from e
 
             output = model_response.output
+            raw_usage = model_response.usage
+            assistant_response = _assistant_response(model_response)
+            completed_model_calls.append(
+                {
+                    "response": assistant_response,
+                    "usage": (
+                        {
+                            "input_tokens": raw_usage.input_tokens,
+                            "output_tokens": raw_usage.output_tokens,
+                        }
+                        if raw_usage is not None
+                        else None
+                    ),
+                }
+            )
+            completed_transcript.append(assistant_response)
+            tool_call_cap_reached = False
+            if (
+                semantic_turn_id is None
+                and tool_loop_policy is not None
+                and tool_loop_policy.max_tool_calls is not None
+            ):
+                remaining_calls = max(tool_loop_policy.max_tool_calls - executed_call_count, 0)
+                filtered_output = []
+                for item in output:
+                    if item.type != "function_call":
+                        filtered_output.append(item)
+                    elif remaining_calls > 0:
+                        filtered_output.append(item)
+                        remaining_calls -= 1
+                    else:
+                        tool_call_cap_reached = True
+                output = filtered_output
+                model_response.output = output
             new_outputs.extend(output)
             if collect_trajectory:
                 turn_model_calls = []
@@ -244,6 +320,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
+            if final_synthesis_step and all_fn_calls:
+                invocation_status = "incomplete"
+                break
             if not all_fn_calls:
                 if not all_output_messages:
                     invocation_status = "incomplete"
@@ -272,32 +351,128 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     )
                 break
 
+            parsed_calls: list[tuple[NeMoGymResponseFunctionToolCall, dict[str, Any]]] = []
+            parse_errors: dict[str, str] = {}
             for output_function_call in all_fn_calls:
+                try:
+                    arguments = json.loads(output_function_call.arguments)
+                    parsed_calls.append(
+                        (
+                            output_function_call,
+                            arguments if isinstance(arguments, dict) or tool_call_context is None else {},
+                        )
+                    )
+                except (json.JSONDecodeError, TypeError) as error:
+                    if tool_call_context is not None:
+                        parsed_calls.append((output_function_call, {}))
+                    else:
+                        parse_errors[output_function_call.call_id] = json.dumps(
+                            {"error": f"Invalid tool call arguments: {error!r}"}
+                        )
+
+            batch_outputs: dict[str, str] = {}
+            if tool_batch_path is not None and all_fn_calls and semantic_turn_id is not None:
+                batch_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path=tool_batch_path,
+                    json={
+                        "turn_id": semantic_turn_id,
+                        "round_id": f"round-{step:06d}",
+                        "assistant_response": assistant_response,
+                    },
+                    cookies=resources_server_cookies,
+                    headers=dict(tool_headers or {}),
+                )
+                receipt = await get_response_json(batch_response)
+                if not isinstance(receipt, Mapping) or not isinstance(receipt.get("receipts"), list):
+                    raise RuntimeError("Resources semantic tool batch returned invalid receipts")
+                batch_outputs = {str(item["tool_call_id"]): str(item["payload"]) for item in receipt["receipts"]}
+                tool_call_cap_reached = bool(receipt.get("limit_reached"))
+                resources_server_cookies = _merge_cookie_values(resources_server_cookies, batch_response.cookies)
+            elif tool_batch_path is not None and len(parsed_calls) > 1:
+                batch_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path=tool_batch_path,
+                    json=[
+                        {
+                            "tool_call_id": call.call_id,
+                            "tool_name": call.name,
+                            "arguments": arguments,
+                        }
+                        for call, arguments in parsed_calls
+                    ],
+                    cookies=resources_server_cookies,
+                )
+                payloads = await get_response_json(batch_response)
+                if not isinstance(payloads, list) or len(payloads) != len(parsed_calls):
+                    raise RuntimeError("Resources tool batch returned an invalid payload list")
+                batch_outputs = {
+                    call.call_id: str(payload) for (call, _), payload in zip(parsed_calls, payloads, strict=True)
+                }
+                resources_server_cookies = _merge_cookie_values(resources_server_cookies, batch_response.cookies)
+
+            for output_function_call in all_fn_calls:
+                if semantic_turn_id is not None and output_function_call.call_id not in batch_outputs:
+                    if tool_call_context is None:
+                        continue
                 if collect_trajectory:
                     started_at = time()
                     started_monotonic = perf_counter()
-                try:
-                    parsed_arguments = json.loads(output_function_call.arguments)
-                except (json.JSONDecodeError, TypeError) as e:
-                    tool_output = json.dumps({"error": f"Invalid tool call arguments: {e!r}"})
+                if output_function_call.call_id in batch_outputs:
+                    tool_output = batch_outputs[output_function_call.call_id]
                     if collect_trajectory:
-                        error_type = type(e).__name__
+                        completed = 200 <= batch_response.status < 400
+                        tool_status = "completed" if completed else "failed"
+                        error_type = None if completed else f"http_{batch_response.status}"
+                elif output_function_call.call_id in parse_errors:
+                    tool_output = parse_errors[output_function_call.call_id]
+                    if collect_trajectory:
+                        error_type = "invalid_arguments"
                         tool_status = "failed"
                 else:
+                    parsed_arguments = next(
+                        arguments for call, arguments in parsed_calls if call.call_id == output_function_call.call_id
+                    )
                     # Resource-server errors are valid model-visible tool outputs.
+                    request_body: dict[str, Any]
+                    if tool_call_context is None:
+                        request_body = parsed_arguments
+                    else:
+                        request_body = ContextualToolCallRequest(
+                            arguments=parsed_arguments,
+                            tool_call_context=dict(tool_call_context),
+                            tool_call_id=output_function_call.call_id,
+                            round_id=f"round-{step:06d}",
+                            assistant_response=assistant_response,
+                        ).model_dump(mode="json")
                     api_response = await self.server_client.post(
                         server_name=self.config.resources_server.name,
                         url_path=f"/{output_function_call.name}",
-                        json=parsed_arguments,
+                        json=request_body,
                         cookies=resources_server_cookies,
+                        headers={
+                            **dict(tool_headers or {}),
+                            TOOL_CALL_ID_HEADER: output_function_call.call_id,
+                        },
                     )
-                    tool_output = (await api_response.content.read()).decode()
-                    resources_server_cookies = api_response.cookies
+                    resources_server_cookies = _merge_cookie_values(resources_server_cookies, api_response.cookies)
+                    if tool_call_context is None:
+                        tool_output = (await api_response.content.read()).decode()
+                    else:
+                        contextual_result = ContextualToolCallResponse.model_validate(
+                            await get_response_json(api_response)
+                        )
+                        completed_resources_context = contextual_result.tool_call_context
+                        tool_call_cap_reached = contextual_result.limit_reached
+                        if contextual_result.output is None:
+                            continue
+                        tool_output = contextual_result.output
                     if collect_trajectory:
                         completed = 200 <= api_response.status < 400
                         tool_status = "completed" if completed else "failed"
                         error_type = None if completed else f"http_{api_response.status}"
 
+                executed_call_count += 1
                 if collect_trajectory:
                     tool_records.append(
                         TrajectoryToolCall(
@@ -321,9 +496,35 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         output=tool_output,
                     )
                 )
+                completed_transcript.append(
+                    {
+                        "role": "tool",
+                        "content": tool_output,
+                        "tool_call_id": output_function_call.call_id,
+                    }
+                )
 
             if collect_trajectory and all_fn_calls:
                 turns[-1].step_count = len(tool_records)
+
+            if all_fn_calls and tool_loop_policy is not None and tool_loop_policy.mode == "single":
+                force_synthesis = tool_loop_policy.final_synthesis
+                if not force_synthesis:
+                    break
+
+            if (
+                semantic_turn_id is None
+                and tool_loop_policy is not None
+                and tool_loop_policy.max_tool_calls is not None
+                and executed_call_count >= tool_loop_policy.max_tool_calls
+            ):
+                tool_call_cap_reached = True
+            if tool_call_cap_reached and tool_loop_policy is not None:
+                force_synthesis = tool_loop_policy.final_synthesis
+
+            if tool_loop_policy is not None and step >= tool_loop_policy.max_model_calls:
+                invocation_status = "incomplete"
+                break
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
@@ -348,6 +549,17 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 tool_calls=tool_records,
                 gaps=trajectory_gaps,
             )
+        completed_turn = (
+            {
+                "transcript": completed_transcript,
+                "model_calls": completed_model_calls,
+                "resources_context": completed_resources_context,
+            }
+            if tool_loop_policy is not None
+            else None
+        )
+        if completed_turn is not None:
+            model_response = model_response.model_copy(update={_INTERNAL_COMPLETED_TURN_KEY: completed_turn})
         return model_response, trajectory, model_server_cookies, resources_server_cookies
 
     async def responses(
@@ -371,6 +583,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             rollout_id=rollout_id or "unscoped",
             collect_trajectory=collect_trajectory,
             invocation_id=f"activation-{len(session.trajectories)}" if session is not None else "root",
+            tool_loop_policy=session.tool_loop_policy if session is not None else None,
+            tool_batch_path=session.tool_batch_path if session is not None else None,
+            tool_headers=session.tool_headers if session is not None else None,
+            tool_call_context=session.tool_call_context if session is not None else None,
         )
         if session is not None:
             session.resources_cookies = dict(resources_server_cookies)
@@ -472,6 +688,106 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(response)
         return AggregateMetrics.model_validate(await get_response_json(response))
+
+
+def _assistant_response(response: NeMoGymResponse) -> dict[str, Any]:
+    reasoning: list[str] = []
+    content: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    for item in response.output:
+        if item.type == "reasoning":
+            reasoning.extend(
+                part.text for part in [*item.summary, *(item.content or [])] if getattr(part, "text", None)
+            )
+        elif item.type == "function_call":
+            tool_calls.append(
+                {
+                    "id": item.call_id,
+                    "type": "function",
+                    "function": {"name": item.name, "arguments": item.arguments},
+                }
+            )
+        elif item.type == "message" and item.role == "assistant":
+            content.extend(
+                text
+                for part in item.content
+                if (text := getattr(part, "text", None) or getattr(part, "refusal", None))
+            )
+    result: dict[str, Any] = {"role": "assistant", "content": "\n".join(content)}
+    if reasoning:
+        result["reasoning_content"] = "\n".join(reasoning)
+    if tool_calls:
+        result["tool_calls"] = tool_calls
+    return result
+
+
+def _model_replay_input(
+    base_input: list[Any],
+    outputs: list[Any],
+    policy: AgentToolLoopPolicy | None,
+) -> list[Any]:
+    combined = deepcopy([*base_input, *outputs])
+    if policy is None:
+        return combined
+    replay = [item for item in combined if policy.replay_reasoning or _replay_item_value(item, "type") != "reasoning"]
+    if not policy.project_document_tool_results:
+        return replay
+    newest: dict[str, tuple[int, int]] = {}
+    retrievals: list[tuple[int, int, dict[str, Any]]] = []
+    call_names: dict[str, str] = {}
+    current_user_turn = 0
+    for index, item in enumerate(replay):
+        item_type = _replay_item_value(item, "type")
+        if item_type == "message" and _replay_item_value(item, "role") == "user":
+            current_user_turn += 1
+            continue
+        if item_type == "function_call":
+            call_names[str(_replay_item_value(item, "call_id") or "")] = str(_replay_item_value(item, "name") or "")
+            continue
+        call_id = str(_replay_item_value(item, "call_id") or "")
+        if item_type != "function_call_output" or call_names.get(call_id) != "kb_search":
+            continue
+        try:
+            payload = json.loads(str(_replay_item_value(item, "output") or ""))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            continue
+        retrievals.append((index, current_user_turn, payload))
+        for document_index, document in enumerate(payload["results"]):
+            if isinstance(document, Mapping) and document.get("id"):
+                newest[str(document["id"])] = (index, document_index)
+    for index, document_turn, payload in retrievals:
+        documents = []
+        changed = False
+        for document_index, document in enumerate(payload["results"]):
+            if not isinstance(document, Mapping) or not document.get("id"):
+                documents.append(document)
+                continue
+            keep_body = (
+                newest[str(document["id"])] == (index, document_index) and current_user_turn - document_turn < 8
+            )
+            if keep_body:
+                documents.append(document)
+            else:
+                changed = True
+                documents.append({key: value for key, value in document.items() if key != "body"})
+        if changed:
+            replay[index] = _replace_replay_item(
+                replay[index],
+                output=json.dumps({**payload, "results": documents}, ensure_ascii=False),
+            )
+    return replay
+
+
+def _replay_item_value(item: Any, name: str) -> Any:
+    return item.get(name) if isinstance(item, Mapping) else getattr(item, name, None)
+
+
+def _replace_replay_item(item: Any, **updates: Any) -> Any:
+    if isinstance(item, Mapping):
+        return {**item, **updates}
+    return item.model_copy(update=updates)
 
 
 if __name__ == "__main__":

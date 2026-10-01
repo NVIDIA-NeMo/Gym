@@ -9,7 +9,6 @@ import pytest
 from omegaconf import OmegaConf
 
 from environments.usersim import prepare as prepare_module
-from nemo_gym.benchmarks import BenchmarkConfig
 
 
 REGISTERED_PROBES = (
@@ -30,7 +29,7 @@ REGISTERED_PROBES = (
 )
 
 
-def test_environment_config_resolves_one_resources_owned_benchmark() -> None:
+def test_environment_config_resolves_one_resources_owned_example_dataset() -> None:
     config_path = Path("environments/usersim/config.yaml")
     config = OmegaConf.merge(
         OmegaConf.load(config_path),
@@ -41,12 +40,24 @@ def test_environment_config_resolves_one_resources_owned_benchmark() -> None:
         },
     )
 
-    benchmark = BenchmarkConfig.from_initial_config_dict(config_path, config, strict=False)
+    [dataset] = config.usersim_resources.resources_servers.usersim.datasets
 
-    assert benchmark is not None
-    assert benchmark.name == "example"
-    assert benchmark.agent_name == "usersim_assistant"
-    assert benchmark.dataset.prepare_script == Path("environments/usersim/prepare.py")
+    assert dataset.name == "example"
+    assert dataset.type == "example"
+    assert dataset.agent == "usersim_assistant"
+    assert dataset.prepare_script == "environments/usersim/prepare.py"
+
+
+def test_participant_agents_use_independent_model_servers() -> None:
+    config = OmegaConf.load("resources_servers/usersim/configs/usersim.yaml")
+    raw_config = OmegaConf.to_container(config, resolve=False)
+    assert isinstance(raw_config, dict)
+
+    assert config.usersim_user.responses_api_agents.simple_agent.model_server.name == "user_model"
+    assert config.usersim_assistant.responses_api_agents.simple_agent.model_server.name == "policy_model"
+    assert raw_config["user_model"]["responses_api_models"]["vllm_model"]["base_url"] == "${user_model_base_url}"
+    assert raw_config["policy_model"]["responses_api_models"]["vllm_model"]["base_url"] == "${policy_base_url}"
+    assert raw_config["support_model"]["responses_api_models"]["vllm_model"]["base_url"] == "${support_model_base_url}"
 
 
 def test_prepare_materializes_every_registered_probe_with_usersim(

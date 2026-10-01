@@ -21,6 +21,7 @@ from fastapi import Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.base_responses_api_agent import AgentToolLoopPolicy
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -46,6 +47,7 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgentConfig,
     SimpleAgentRunRequest,
     SimpleAgentVerifyRequest,
+    _model_replay_input,
 )
 
 
@@ -449,6 +451,281 @@ class TestApp:
         [tool] = trajectory.tool_calls
         assert (tool.output, tool.status, tool.error_type) == ("bad input", "failed", "http_422")
         assert tool.started_at is not None and tool.completed_at is not None and tool.duration_ms is not None
+
+    async def test_session_policy_enforces_final_synthesis_and_tool_identity(self) -> None:
+        server, server_client = _make_agent(True)
+        response_base = {
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        model_payloads = iter(
+            [
+                response_base
+                | {
+                    "id": "tool-response",
+                    "output": [
+                        {
+                            "id": "fc-1",
+                            "call_id": "call-7",
+                            "name": "lookup",
+                            "arguments": '{"query":"x"}',
+                            "type": "function_call",
+                            "status": "completed",
+                        },
+                        {
+                            "id": "fc-2",
+                            "call_id": "call-8",
+                            "name": "lookup",
+                            "arguments": '{"query":"ignored"}',
+                            "type": "function_call",
+                            "status": "completed",
+                        },
+                    ],
+                },
+                response_base
+                | {
+                    "id": "final-response",
+                    "output": [
+                        {
+                            "id": "message-1",
+                            "content": [{"annotations": [], "text": "final", "type": "output_text"}],
+                            "role": "assistant",
+                            "status": "completed",
+                            "type": "message",
+                        }
+                    ],
+                },
+            ]
+        )
+
+        async def post(*, server_name, url_path, **kwargs):
+            if server_name == "model":
+                return _mock_response(next(model_payloads))
+            assert (server_name, url_path) == ("resources", "/runtime/tool_calls")
+            resource_response = _mock_response(payload=["first opaque payload", "second opaque payload"])
+            cookie = MagicMock()
+            cookie.value = "updated-cookie"
+            resource_response.cookies = {"resources-session": cookie}
+            return resource_response
+
+        server_client.post = AsyncMock(side_effect=post)
+        response, _, _, resource_cookies = await server._create_episode(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input="question",
+                tools=[
+                    {
+                        "type": "function",
+                        "name": "lookup",
+                        "description": "Look up a value.",
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": False,
+                    }
+                ],
+            ),
+            model_url_path="/v1/responses",
+            resources_server_cookies={},
+            collect_trajectory=True,
+            invocation_id="activation-4",
+            tool_batch_path="/runtime/tool_calls",
+            tool_loop_policy=AgentToolLoopPolicy(
+                mode="single",
+                max_model_calls=2,
+                max_tool_calls=None,
+                final_synthesis=True,
+            ),
+        )
+
+        assert [item.type for item in response.output] == [
+            "function_call",
+            "function_call",
+            "function_call_output",
+            "function_call_output",
+            "message",
+        ]
+        batch_call = server_client.post.await_args_list[1]
+        assert batch_call.kwargs["json"] == [
+            {"tool_call_id": "call-7", "tool_name": "lookup", "arguments": {"query": "x"}},
+            {"tool_call_id": "call-8", "tool_name": "lookup", "arguments": {"query": "ignored"}},
+        ]
+        assert "headers" not in batch_call.kwargs
+        assert [item.output for item in response.output if item.type == "function_call_output"] == [
+            "first opaque payload",
+            "second opaque payload",
+        ]
+        final_request = server_client.post.await_args_list[2].kwargs["json"]
+        assert final_request.tools == []
+        assert resource_cookies == {"resources-session": "updated-cookie"}
+
+    async def test_completed_turn_trace_preserves_raw_calls_usage_and_partial_receipts(self) -> None:
+        server, server_client = _make_agent(True)
+        response_base = {
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": {
+                "input_tokens": 11,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 7,
+                "output_tokens_details": {"reasoning_tokens": 2},
+                "total_tokens": 18,
+            },
+        }
+        model_payloads = iter(
+            [
+                response_base
+                | {
+                    "id": "tool-response",
+                    "output": [
+                        {
+                            "id": "reasoning-1",
+                            "summary": [{"text": "inspect both", "type": "summary_text"}],
+                            "type": "reasoning",
+                        },
+                        {
+                            "id": "fc-1",
+                            "call_id": "call-1",
+                            "name": "lookup",
+                            "arguments": '{"query":"first"}',
+                            "type": "function_call",
+                            "status": "completed",
+                        },
+                        {
+                            "id": "fc-2",
+                            "call_id": "call-2",
+                            "name": "lookup",
+                            "arguments": '{ "query" : "second" }',
+                            "type": "function_call",
+                            "status": "completed",
+                        },
+                    ],
+                },
+                response_base
+                | {
+                    "id": "final-response",
+                    "output": [
+                        {
+                            "id": "message-1",
+                            "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+                            "role": "assistant",
+                            "status": "completed",
+                            "type": "message",
+                        }
+                    ],
+                },
+            ]
+        )
+
+        async def post(*, server_name, url_path, **kwargs):
+            if server_name == "model":
+                return _mock_response(next(model_payloads))
+            assistant_response = kwargs["json"]["assistant_response"]
+            return _mock_response(
+                {
+                    "turn_id": "turn-1",
+                    "round_id": "round-000001",
+                    "receipts": [
+                        {
+                            "tool_call_id": "call-1",
+                            "tool_name": "lookup",
+                            "arguments": {"query": "first"},
+                            "raw_tool_call": assistant_response["tool_calls"][0],
+                            "payload": "plain safety payload",
+                            "turn_idx": 3,
+                            "call_idx": 0,
+                            "effect_state": {},
+                        }
+                    ],
+                    "limit_reached": True,
+                }
+            )
+
+        server_client.post = AsyncMock(side_effect=post)
+        response, _, _, _ = await server._create_episode(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input="question",
+                tools=[
+                    {
+                        "type": "function",
+                        "name": "lookup",
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": False,
+                    }
+                ],
+            ),
+            model_url_path="/v1/responses",
+            tool_loop_policy=AgentToolLoopPolicy(
+                mode="multi",
+                max_model_calls=2,
+                max_tool_calls=1,
+                final_synthesis=True,
+            ),
+            tool_batch_path="/runtime/tool_calls",
+            tool_headers={"X-NeMo-Gym-Turn-Id": "turn-1"},
+        )
+
+        batch = server_client.post.await_args_list[1].kwargs
+        calls = batch["json"]["assistant_response"]["tool_calls"]
+        assert [call["function"]["arguments"] for call in calls] == [
+            '{"query":"first"}',
+            '{ "query" : "second" }',
+        ]
+        assert [item.call_id for item in response.output if item.type == "function_call_output"] == ["call-1"]
+        trace = response.model_extra["_ng_completed_turn"]
+        assert trace["transcript"][0]["reasoning_content"] == "inspect both"
+        assert [call["usage"] for call in trace["model_calls"]] == [
+            {"input_tokens": 11, "output_tokens": 7},
+            {"input_tokens": 11, "output_tokens": 7},
+        ]
+
+    def test_finance_projection_applies_to_base_and_turn_outputs(self) -> None:
+        old_payload = json.dumps(
+            {
+                "results": [
+                    {"id": "repeated", "body": "old body", "title": "Repeated"},
+                    {"id": "expired", "body": "expired body", "title": "Expired"},
+                ]
+            }
+        )
+        new_payload = json.dumps({"results": [{"id": "repeated", "body": "new body", "title": "Repeated"}]})
+        base_input = [
+            {"type": "function_call", "call_id": "old-call", "name": "kb_search", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "old-call", "output": old_payload},
+            *[{"type": "message", "role": "user", "content": f"follow-up {index}"} for index in range(8)],
+            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "old reasoning"}]},
+        ]
+        turn_outputs = [
+            {"type": "function_call", "call_id": "new-call", "name": "kb_search", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "new-call", "output": new_payload},
+        ]
+
+        projected = _model_replay_input(
+            base_input,
+            turn_outputs,
+            AgentToolLoopPolicy(
+                mode="multi",
+                max_model_calls=3,
+                max_tool_calls=2,
+                final_synthesis=True,
+                replay_reasoning=False,
+                project_document_tool_results=True,
+            ),
+        )
+
+        old_results = json.loads(projected[1]["output"])["results"]
+        new_results = json.loads(projected[-1]["output"])["results"]
+        assert old_results == [
+            {"id": "repeated", "title": "Repeated"},
+            {"id": "expired", "title": "Expired"},
+        ]
+        assert new_results == [{"id": "repeated", "body": "new body", "title": "Repeated"}]
+        assert all(item["type"] != "reasoning" for item in projected)
 
     @pytest.mark.parametrize(("capture_enabled", "override_responses"), ((False, False), (True, False), (True, True)))
     async def test_run_preserves_self_dispatch(self, capture_enabled: bool, override_responses: bool) -> None:

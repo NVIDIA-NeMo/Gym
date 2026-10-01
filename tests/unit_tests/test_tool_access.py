@@ -5,6 +5,8 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.tool_access import (
+    ContextualToolCallRequest,
+    ContextualToolCallResponse,
     DirectHTTPToolAccess,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
@@ -48,3 +50,32 @@ def test_mcp_http_connection_requires_an_absolute_url() -> None:
 def test_tool_access_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError):
         MCPStreamableHTTPConnection(url="http://resources:8000/mcp", unknown=True)
+
+
+def test_contextual_direct_http_calls_separate_arguments_output_and_hidden_context() -> None:
+    request = ContextualToolCallRequest(
+        arguments={"query": "example"},
+        tool_call_context={"turn_id": "turn-1"},
+        tool_call_id="call-1",
+        round_id="round-1",
+        assistant_response={"role": "assistant", "tool_calls": []},
+    )
+    response = ContextualToolCallResponse(
+        output="model-visible",
+        tool_call_context={"receipts": [{"call_id": "call-1"}]},
+    )
+
+    assert request.arguments == {"query": "example"}
+    assert response.output == "model-visible"
+    assert response.tool_call_context["receipts"] == [{"call_id": "call-1"}]
+
+
+def test_direct_http_access_rejects_batch_and_context_modes_together() -> None:
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        DirectHTTPToolAccess(
+            name="tools",
+            required=True,
+            base_url="http://resources:8000",
+            batch_path="/tool_calls",
+            tool_call_context={"turn_id": "turn-1"},
+        )

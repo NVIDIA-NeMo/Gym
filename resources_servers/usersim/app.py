@@ -4,19 +4,14 @@
 """Deterministic NeMo UserSim scenario initialization backed by managed personas."""
 
 import asyncio
-import hashlib
-import json
 import logging
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import pyarrow.parquet as pq
-from fastapi import Body, FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym import WORKING_DIR
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     ResourcesCloseSessionRequest,
@@ -32,129 +27,34 @@ from nemo_gym.episode_types import (
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseReasoningItem,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.tool_access import ContextualToolCallRequest, ContextualToolCallResponse
 from resources_servers.usersim.episode_contracts import (
-    ResolvedUserSimContext,
-    UserSimSamplingRequest,
-    UserSimScenario,
     UserSimSeedResponse,
     UserSimSimulationResult,
     UserSimTaskInput,
-    UserSimTheme,
     UserSimVerification,
     UserSimVerifyRequest,
 )
+from resources_servers.usersim.response_format import responses_json_schema
 
 
-TOOL_PROBES = frozenset({"tool_calling", "safety_agentic", "financial_services"})
-THEME_DRIVEN_PROBES = frozenset({"tool_calling", "general_open_ended", "general_educational"})
-PROBE_SCORERS = {
-    "financial_services": "financial_services",
-    "health_decision_support_disclosure": "health_disclosure_concealment",
-    "health_general_disclosure": "health_disclosure_concealment",
-    "health_therapy_disclosure": "health_disclosure_concealment",
-    "health_triage_disclosure": "health_disclosure_concealment",
-    "identity_disclosure": "identity_disclosure",
-    "safety_agentic": "safety_agentic",
-    "safety_chat_pressure": "safety_chat_pressure",
-    "sov_ai_dynamic": "sov_ai_dynamic",
-    "sov_ai_facts": "sov_ai_facts",
-    "sov_ai_multilingual_parity": "sov_ai_multilingual_parity",
-    "tool_calling": "tool_use",
-}
-SUPPORTED_PROBES = frozenset(
-    {
-        "financial_services",
-        "general_educational",
-        "general_open_ended",
-        "health_decision_support_disclosure",
-        "health_general_disclosure",
-        "health_therapy_disclosure",
-        "health_triage_disclosure",
-        "identity_disclosure",
-        "safety_agentic",
-        "safety_chat_pressure",
-        "sov_ai_dynamic",
-        "sov_ai_facts",
-        "sov_ai_multilingual_parity",
-        "tool_calling",
-    }
-)
 ASSISTANT_QUALITY_AXES = ("helpfulness", "accuracy", "coherence")
 logger = logging.getLogger(__name__)
 
 
 class UserSimResourcesServerConfig(BaseResourcesServerConfig):
-    personas_cache_dir: Path = Path("~/.cache/nemo-gym/usersim/personas")
-    personas_dataset_version: str = Field("0.0.2", pattern=r"^[A-Za-z0-9._-]+$")
     usersim_revision: str = Field(
-        "2d9ec0d7c32ac800f2171b5943382a7b1eb96cbc",  # pragma: allowlist secret
+        "b3381ae021baac2a6fb314b5f08a55845243017d",  # pragma: allowlist secret
         pattern=r"^[0-9a-f]{40}$",
     )
-    personas_locales: list[str] = Field(default_factory=lambda: ["en_US"])
     tool_simulation_model: ModelServerRef | None = None
     probe_scorer_model: ModelServerRef | None = None
     model_call_timeout_seconds: float = Field(300.0, gt=0)
-    probe_mix: dict[str, float] = Field(
-        default_factory=lambda: {
-            "general_open_ended": 0.5,
-            "general_educational": 0.5,
-        }
-    )
-    probe_themes: dict[str, list[UserSimTheme]] = Field(
-        default_factory=lambda: {
-            "general_open_ended": [
-                UserSimTheme(
-                    topic="local food and dining",
-                    goal="Seek a practical recommendation about local food and dining.",
-                )
-            ],
-            "general_educational": [
-                UserSimTheme(
-                    topic="local ecology",
-                    goal="Learn about local ecology by asking focused follow-up questions.",
-                )
-            ],
-        }
-    )
-
-    @model_validator(mode="after")
-    def validate_probes(self) -> "UserSimResourcesServerConfig":
-        if not self.personas_locales:
-            raise ValueError("personas_locales must contain at least one locale")
-        invalid_locales = [locale for locale in self.personas_locales if not locale.replace("_", "").isalnum()]
-        if invalid_locales:
-            raise ValueError(f"Invalid persona locales: {invalid_locales}")
-        if len(set(self.personas_locales)) != len(self.personas_locales):
-            raise ValueError("personas_locales must not contain duplicates")
-        unknown = set(self.probe_mix) - SUPPORTED_PROBES
-        if unknown:
-            raise ValueError(f"Unsupported probe types: {sorted(unknown)}")
-        if not self.probe_mix or any(weight < 0 for weight in self.probe_mix.values()):
-            raise ValueError("probe_mix must contain non-negative weights")
-        if sum(self.probe_mix.values()) <= 0:
-            raise ValueError("probe_mix weights must sum to more than zero")
-        missing_themes = {
-            probe
-            for probe, weight in self.probe_mix.items()
-            if probe in THEME_DRIVEN_PROBES and weight > 0 and not self.probe_themes.get(probe)
-        }
-        if missing_themes:
-            raise ValueError(f"Missing themes for probe types: {sorted(missing_themes)}")
-        return self
-
-
-class PreparedPersonaDataset(BaseModel):
-    locale: str
-    personas_dataset_version: str
-    panel_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    panel_size_bytes: int = Field(ge=1)
-    panel_rows: int
-    generator: str
 
 
 class SeededUserSimEpisode(BaseModel):
@@ -163,39 +63,7 @@ class SeededUserSimEpisode(BaseModel):
     episode_id: EpisodeId
     task_id: TaskId
     seed: UserSimSeedResponse
-    runtime: Any | None = None
-
-
-def _stable_fraction(*parts: Any) -> float:
-    digest = hashlib.sha256(":".join(str(part) for part in parts).encode()).digest()
-    return int.from_bytes(digest, "big") / (1 << (8 * len(digest)))
-
-
-def _stable_index(size: int, *parts: Any) -> int:
-    digest = hashlib.sha256(":".join(str(part) for part in parts).encode()).digest()
-    return int.from_bytes(digest, "big") % size
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _persona_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
-    nested_persona = row.get("persona")
-    if isinstance(nested_persona, dict) and nested_persona:
-        return nested_persona
-    if isinstance(nested_persona, str):
-        try:
-            decoded = json.loads(nested_persona)
-        except json.JSONDecodeError:
-            decoded = None
-        if isinstance(decoded, dict) and decoded:
-            return decoded
-    return row or None
+    tool_session: Any
 
 
 def _conversation_roles(result: UserSimSimulationResult) -> set[str]:
@@ -205,58 +73,14 @@ def _conversation_roles(result: UserSimSimulationResult) -> set[str]:
     }
 
 
-def _external_probe_transcript(
-    messages: list[dict[str, Any]],
-    invocations: Sequence[Any],
-) -> list[dict[str, Any]]:
-    """Replace collapsed Assistant turns with the Agent's full tool transcript."""
-    assistant_responses = iter(invocation.response for invocation in invocations if invocation.role == "assistant")
-    transcript: list[dict[str, Any]] = []
-    for message in messages:
-        if message.get("role") != "assistant":
-            transcript.append(message)
-            continue
-        response = next(assistant_responses, None)
-        if response is None:
-            transcript.append(message)
-            continue
-        converted = _response_output_messages(response)
-        transcript.extend(converted or [message])
-    return transcript
-
-
-def _response_output_messages(response: NeMoGymResponse) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = []
-    pending_calls: list[dict[str, Any]] = []
-
-    def flush_calls() -> None:
-        if pending_calls:
-            messages.append({"role": "assistant", "content": "", "tool_calls": list(pending_calls)})
-            pending_calls.clear()
-
-    for item in response.output:
-        if isinstance(item, NeMoGymResponseFunctionToolCall):
-            pending_calls.append(
-                {
-                    "id": item.call_id,
-                    "type": "function",
-                    "function": {"name": item.name, "arguments": item.arguments},
-                }
-            )
-            continue
-        flush_calls()
-        if isinstance(item, NeMoGymResponseFunctionCallOutput):
-            messages.append(
-                {
-                    "role": "tool",
-                    "content": item.output if isinstance(item.output, str) else json.dumps(item.output),
-                    "tool_call_id": item.call_id,
-                }
-            )
-        elif isinstance(item, NeMoGymResponseOutputMessage):
-            messages.append({"role": "assistant", "content": _output_message_text(item)})
-    flush_calls()
-    return messages
+def _simulation_infrastructure_failure(result: UserSimSimulationResult) -> str | None:
+    outcome = result.simulation_outcome
+    if str(outcome.get("status", "")).lower() != "failed":
+        return None
+    attribution = str(outcome.get("failure_attribution", "")).lower()
+    if attribution in {"assistant_model", "model_under_test"}:
+        return None
+    return str(outcome.get("failure_detail") or attribution or "UserSim simulation infrastructure failed")
 
 
 class _ResourcesModelFacade:
@@ -272,17 +96,23 @@ class _ResourcesModelFacade:
         self.model_name = model.name
 
     async def acompletion(self, messages: Sequence[Any], **kwargs: Any) -> SimpleNamespace:
-        unsupported = set(kwargs) - {"max_tokens", "max_completion_tokens", "response_format"}
+        supported = {
+            "max_tokens",
+            "max_completion_tokens",
+            "parallel_tool_calls",
+            "reasoning_effort",
+            "response_format",
+            "temperature",
+            "tool_choice",
+            "tools",
+            "top_p",
+        }
+        unsupported = set(kwargs) - supported
         if unsupported:
             raise NotImplementedError(f"Unsupported UserSim support-model options: {sorted(unsupported)}")
-        max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
         try:
             async with asyncio.timeout(self.server.config.model_call_timeout_seconds):
-                return await self._completion(
-                    messages,
-                    max_tokens=max_tokens,
-                    response_format=kwargs.get("response_format"),
-                )
+                return await self._completion(messages, options=kwargs)
         except TimeoutError as error:
             raise TimeoutError(
                 f"Timed out after {self.server.config.model_call_timeout_seconds}s waiting for {self.model.name}"
@@ -292,22 +122,33 @@ class _ResourcesModelFacade:
         self,
         messages: Sequence[Any],
         *,
-        max_tokens: int | None,
-        response_format: Mapping[str, Any] | None,
+        options: Mapping[str, Any],
     ) -> SimpleNamespace:
-        params: dict[str, Any] = {"input": [_to_responses_input(message) for message in messages]}
+        params: dict[str, Any] = {
+            "input": [item for message in messages for item in _to_responses_input_items(message)]
+        }
+        max_tokens = options.get("max_tokens") or options.get("max_completion_tokens")
         if max_tokens is not None:
             params["max_output_tokens"] = max_tokens
+        for name in ("parallel_tool_calls", "temperature", "tool_choice", "top_p"):
+            if options.get(name) is not None:
+                params[name] = options[name]
+        if options.get("reasoning_effort") is not None:
+            params["reasoning"] = {"effort": options["reasoning_effort"]}
+        if options.get("tools"):
+            params["tools"] = [_to_responses_tool(tool) for tool in options["tools"]]
+        response_format = options.get("response_format")
         if response_format is not None:
             json_schema = response_format.get("json_schema")
             if response_format.get("type") != "json_schema" or not isinstance(json_schema, Mapping):
                 raise NotImplementedError(f"Unsupported response format: {response_format!r}")
+            strict = json_schema.get("strict", True)
             params["text"] = {
                 "format": {
                     "type": "json_schema",
                     "name": json_schema["name"],
-                    "schema": json_schema["schema"],
-                    "strict": json_schema.get("strict", True),
+                    "schema": responses_json_schema(json_schema["schema"], strict=strict),
+                    "strict": strict,
                 }
             }
         response = await self.server.server_client.post(
@@ -319,128 +160,36 @@ class _ResourcesModelFacade:
         gym_response = NeMoGymResponse.model_validate(await get_response_json(response))
         usage = gym_response.usage
         return SimpleNamespace(
-            message=SimpleNamespace(content=_response_text(gym_response), reasoning_content=None, tool_calls=None),
-            usage=(
-                SimpleNamespace(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
-                if usage is not None
-                else None
+            message=SimpleNamespace(
+                content=_response_text(gym_response),
+                reasoning_content=_response_reasoning(gym_response) or None,
+                tool_calls=_response_tool_calls(gym_response) or None,
             ),
+            usage=SimpleNamespace(**usage.model_dump(mode="python")) if usage is not None else None,
         )
 
 
 class UserSimResourcesServer(SimpleResourcesServer):
     """Resolve one replayable persona and general-purpose probe per episode."""
 
+    ray_enabled = False
     config: UserSimResourcesServerConfig
     session_id_to_seed: dict[str, SeededUserSimEpisode] = Field(default_factory=dict)
-    locale_to_personas: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
-    locale_to_dataset: dict[str, PreparedPersonaDataset] = Field(default_factory=dict)
-
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        for locale in self.config.personas_locales:
-            personas, dataset = self._load_prepared_panel(locale)
-            self.locale_to_personas[locale] = personas
-            self.locale_to_dataset[locale] = dataset
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
-        app.post("/{tool_name}")(self.invoke_probe_tool)
+        app.post("/{tool_name}", response_model=ContextualToolCallResponse)(self.invoke_probe_tool)
         return app
 
-    def _version_dir(self) -> Path:
-        cache_dir = self.config.personas_cache_dir.expanduser()
-        if not cache_dir.is_absolute():
-            cache_dir = WORKING_DIR / cache_dir
-        return cache_dir / self.config.personas_dataset_version
-
-    def _panel_path(self, locale: str) -> Path:
-        return self._version_dir() / "panels" / f"{locale}.parquet"
-
-    def _manifest_path(self, locale: str) -> Path:
-        return self._panel_path(locale).with_suffix(".manifest.json")
-
-    def _load_prepared_panel(self, locale: str) -> tuple[list[dict[str, Any]], PreparedPersonaDataset]:
-        panel_path = self._panel_path(locale)
-        manifest_path = self._manifest_path(locale)
-        if not panel_path.is_file() or not manifest_path.is_file():
-            raise RuntimeError(
-                f"Prepared NeMo UserSim panel for {locale!r} is missing at {panel_path}. "
-                "Run `gym eval prepare --config environments/usersim/config.yaml` before starting the "
-                "Resources Server."
-            )
-        try:
-            manifest = PreparedPersonaDataset.model_validate_json(manifest_path.read_text())
-        except Exception as exc:
-            raise RuntimeError(f"Prepared NeMo UserSim panel manifest at {manifest_path} is invalid: {exc}") from exc
-        if manifest.locale != locale or manifest.personas_dataset_version != self.config.personas_dataset_version:
-            raise RuntimeError(f"Prepared NeMo UserSim panel manifest at {manifest_path} does not match configuration")
-        if manifest.panel_size_bytes != panel_path.stat().st_size or manifest.panel_sha256 != _sha256_file(panel_path):
-            raise RuntimeError(f"Prepared NeMo UserSim panel at {panel_path} does not match its manifest")
-        try:
-            panel_rows = pq.read_table(panel_path).to_pylist()
-        except Exception as exc:
-            raise RuntimeError(f"Prepared NeMo UserSim panel at {panel_path} is not valid Parquet: {exc}") from exc
-        personas = [persona for row in panel_rows if (persona := _persona_from_row(row)) is not None]
-        if not personas or len(personas) != manifest.panel_rows:
-            raise RuntimeError(f"Prepared NeMo UserSim panel at {panel_path} contains invalid persona rows")
-        logger.info("Loaded prepared NeMo UserSim panel at %s", panel_path)
-        return personas, manifest
-
-    def _load_personas(self, locale: str) -> list[dict[str, Any]]:
-        personas = self.locale_to_personas.get(locale)
-        if personas is None:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Locale {locale!r} was not initialized; configured locales: {self.config.personas_locales}",
-            )
-        return personas
-
-    def _select_probe(self, sampling: UserSimSamplingRequest) -> str:
-        if sampling.probe_type is not None:
-            if sampling.probe_type not in SUPPORTED_PROBES:
-                raise HTTPException(status_code=422, detail=f"Unsupported probe type: {sampling.probe_type!r}")
-            return sampling.probe_type
-        threshold = _stable_fraction(sampling.seed, sampling.locale, "probe")
-        total = sum(self.config.probe_mix.values())
-        cumulative = 0.0
-        for probe, weight in self.config.probe_mix.items():
-            cumulative += weight / total
-            if threshold < cumulative:
-                return probe
-        return next(reversed(self.config.probe_mix))
-
-    def _resolve_seed(self, sampling: UserSimSamplingRequest, resources_session_id: str) -> UserSimSeedResponse:
-        personas = self._load_personas(sampling.locale)
-        dataset = self.locale_to_dataset[sampling.locale]
-        persona = personas[_stable_index(len(personas), sampling.seed, sampling.locale, "persona")]
-        probe_type = self._select_probe(sampling)
-        themes = self.config.probe_themes.get(probe_type) or [
-            UserSimTheme(
-                topic=probe_type.replace("_", " "),
-                goal=f"Run the {probe_type} UserSim probe.",
-            )
-        ]
-        theme = themes[_stable_index(len(themes), sampling.seed, sampling.locale, probe_type, "theme")]
+    def _resolve_seed(self, task: UserSimTaskInput, resources_session_id: str) -> UserSimSeedResponse:
+        provenance = task.resolved_row.get("usersim_provenance")
+        if not isinstance(provenance, Mapping) or provenance.get("code_sha") != self.config.usersim_revision:
+            raise HTTPException(status_code=422, detail="Resolved row does not match the configured UserSim revision")
+        if not task.resolved_row.get("trajectory_id"):
+            raise HTTPException(status_code=422, detail="Resolved row is missing UserSim trajectory identity")
         return UserSimSeedResponse(
             resources_session_id=resources_session_id,
-            scenario=UserSimScenario(
-                locale=sampling.locale,
-                persona=persona,
-                probe_type=probe_type,
-                theme={
-                    "type": theme.topic,
-                    "description": theme.goal,
-                },
-                goal=theme.goal,
-            ),
-            usersim_context=ResolvedUserSimContext(
-                locale=sampling.locale,
-                seed=sampling.seed,
-                personas_dataset_version=dataset.personas_dataset_version,
-                personas_panel_sha256=dataset.panel_sha256,
-                usersim_revision=self.config.usersim_revision,
-            ),
+            resolved_row=task.resolved_row,
         )
 
     def _seeded_episode(self, request: Request) -> SeededUserSimEpisode:
@@ -459,37 +208,24 @@ class UserSimResourcesServer(SimpleResourcesServer):
         except ValidationError as error:
             raise HTTPException(status_code=422, detail=error.errors()) from error
         session_id = request.session[SESSION_ID_KEY]
-        result = self._resolve_seed(task.sampling, body.resources_session_id)
-        result = result.model_copy(
-            update={"scenario": result.scenario.model_copy(update={"probe_data": task.probe_data})}
-        )
-        runtime = None
-        if result.scenario.probe_type in TOOL_PROBES:
-            runtime = self._create_probe_runtime(result.scenario, task)
-            scenario = result.scenario
-            if scenario.probe_type == "tool_calling":
-                scenario = scenario.model_copy(
-                    update={"probe_data": {**scenario.probe_data, "tools": runtime.assistant_tools}}
-                )
-            result = result.model_copy(update={"scenario": scenario, "assistant_tools": runtime.assistant_tools})
+        result = self._resolve_seed(task, body.resources_session_id)
+        tool_session = self._create_tool_session(result.resolved_row)
+        result = result.model_copy(update={"assistant_tools": tool_session.assistant_tools})
         self.session_id_to_seed[session_id] = SeededUserSimEpisode(
             episode_id=body.episode_id,
             task_id=body.task_id,
             seed=result,
-            runtime=runtime,
+            tool_session=tool_session,
         )
         return result
 
-    def _create_probe_runtime(
+    def _create_tool_session(
         self,
-        scenario: UserSimScenario,
-        task: UserSimTaskInput,
+        resolved_row: dict[str, Any],
     ) -> Any:
-        from usersim.engine.config import ConversationSimulatorConfig
-        from usersim.engine.core.behavioral import compute_behavioral_profile, get_conversation_language
-        from usersim.engine.core.episode_runtime import ProbeEpisodeRuntime
+        from usersim.engine.external import ProbeToolSession
 
-        if scenario.probe_type == "tool_calling" and self.config.tool_simulation_model is None:
+        if resolved_row.get("probe_type") == "tool_calling" and self.config.tool_simulation_model is None:
             raise ValueError("tool_calling requires resources tool_simulation_model configuration")
         models = {}
         if self.config.tool_simulation_model is not None:
@@ -497,90 +233,14 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 self,
                 self.config.tool_simulation_model,
             )
-        if self.config.probe_scorer_model is not None:
-            models["judge_model"] = _ResourcesModelFacade(
-                self,
-                self.config.probe_scorer_model,
-            )
-        data = {
-            **task.probe_data,
-            "persona": scenario.persona,
-            "probe_type": scenario.probe_type,
-            "theme": scenario.theme,
-        }
-        config = ConversationSimulatorConfig(
-            name="gym_probe_episode_runtime",
-            locale=scenario.locale,
-            random_seed=task.sampling.seed,
-            tools_column="tools" if scenario.probe_type == "tool_calling" else None,
-            finance_retrieval_mode="golden",
-        )
-        return ProbeEpisodeRuntime(
-            probe_type=scenario.probe_type,
-            persona=scenario.persona,
-            locale=scenario.locale,
-            language=get_conversation_language(scenario.locale),
-            models=models,
-            config=config,
-            data=data,
-            profile=compute_behavioral_profile(scenario.persona),
-        )
+        return ProbeToolSession.from_resolved_row(resolved_row, models=models)
 
-    async def _score_native_result(
-        self,
-        seeded: SeededUserSimEpisode,
-        native_result: UserSimSimulationResult,
-    ) -> tuple[str | None, dict[str, Any] | None, bool]:
-        scenario = seeded.seed.scenario
-        scorer_name = PROBE_SCORERS.get(scenario.probe_type)
-        if (
-            scorer_name == "health_disclosure_concealment"
-            and scenario.probe_data.get("probe_variant", "default") != "guarded"
-        ):
-            return None, None, True
-        if scorer_name is None:
-            return None, None, True
-
-        result_extras = (await seeded.runtime.evidence())["result_extras"] if seeded.runtime is not None else {}
-        trajectory = {
-            **native_result.model_dump(mode="python"),
-            **result_extras,
-            "locale": scenario.locale,
-            "persona": scenario.persona,
-            "probe_type": scenario.probe_type,
-        }
-        if seeded.runtime is not None:
-            scorer_models = {alias: model for alias, model in seeded.runtime.models.items() if alias == "judge_model"}
-        elif self.config.probe_scorer_model is not None:
-            scorer_models = {
-                "judge_model": _ResourcesModelFacade(
-                    self,
-                    self.config.probe_scorer_model,
-                )
-            }
-        else:
-            scorer_models = {}
-
-        try:
-            from usersim.engine.evaluator.scorers import get_scorer
-
-            scores = await get_scorer(scorer_name)(trajectory, scorer_models)
-        except Exception as error:
-            logger.exception("Native UserSim scorer %s failed", scorer_name)
-            scores = {
-                "status_proposal": False,
-                "error": f"{type(error).__name__}: {error}",
-            }
-        passed = scores.get("status_proposal") is True and not scores.get("error")
-        return scorer_name, scores, passed
-
-    async def _evaluate_assistant_quality(
+    async def _evaluate_native_result(
         self,
         seeded: SeededUserSimEpisode,
         native_result: UserSimSimulationResult,
     ) -> tuple[dict[str, Any], dict[str, float], float | None]:
-        from usersim.engine.core.behavioral import get_conversation_language
-        from usersim.engine.evaluator.runtime import TrajectoryEvaluatorRuntime
+        from usersim.engine.external import TrajectoryEvaluatorRuntime
         from usersim.taxonomy.eval_cell import normalize_axis_score, score_from_eval_cell
 
         if self.config.probe_scorer_model is None:
@@ -595,23 +255,28 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 None,
             )
 
-        model = (
-            seeded.runtime.models["judge_model"]
-            if seeded.runtime is not None and "judge_model" in seeded.runtime.models
-            else _ResourcesModelFacade(self, self.config.probe_scorer_model)
-        )
+        model = _ResourcesModelFacade(self, self.config.probe_scorer_model)
         evaluator = TrajectoryEvaluatorRuntime(models={"judge_model": model})
-        scenario = seeded.seed.scenario
-        evaluation = await evaluator.evaluate(
-            {
-                **native_result.model_dump(mode="python"),
-                "persona": scenario.persona,
-                "probe_family": scenario.probe_type,
-                "probe_variant": scenario.probe_data.get("probe_variant"),
-                "locale": scenario.locale,
-                "conversation_language": get_conversation_language(scenario.locale),
-            }
-        )
+        try:
+            evaluation = await evaluator.evaluate(
+                {
+                    **native_result.model_dump(mode="python"),
+                    **seeded.seed.resolved_row,
+                }
+            )
+        except Exception as error:
+            logger.exception("Native UserSim trajectory evaluator failed")
+            return (
+                {
+                    "envelope": {"axes": [], "scorers": []},
+                    "axes": {},
+                    "scorers": {},
+                    "skipped": True,
+                    "skipped_reason": f"{type(error).__name__}: {error}",
+                },
+                {},
+                None,
+            )
         normalized_scores: dict[str, float] = {}
         for axis in evaluation.get("envelope", {}).get("axes", []):
             score = score_from_eval_cell(evaluation, axis)
@@ -630,20 +295,30 @@ class UserSimResourcesServer(SimpleResourcesServer):
         self,
         request: Request,
         tool_name: str,
-        body: dict[str, Any] = Body(),
-    ) -> Any:
-        """Simulate one tool selected for the request's seeded episode."""
+        body: ContextualToolCallRequest,
+    ) -> ContextualToolCallResponse:
+        """Execute one normal named Resources tool call through UserSim."""
         seeded = self._seeded_episode(request)
-        if seeded.runtime is None:
-            raise HTTPException(status_code=404, detail="This episode does not expose probe tools")
         try:
-            payload = await seeded.runtime.simulate_tool_call(tool_name, body)
-        except ValueError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        try:
-            return json.loads(payload)
-        except json.JSONDecodeError:
-            return {"result": payload}
+            from usersim.engine.external import ProbeToolCallRequest
+
+            result = await seeded.tool_session.execute_call(
+                ProbeToolCallRequest(
+                    context=body.tool_call_context,
+                    assistant_response=body.assistant_response,
+                    tool_call_id=body.tool_call_id,
+                    tool_name=tool_name,
+                    arguments=body.arguments,
+                    round_id=body.round_id,
+                )
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return ContextualToolCallResponse(
+            output=result.payload,
+            tool_call_context=result.evidence.to_dict(),
+            limit_reached=result.limit_reached,
+        )
 
     async def verify(
         self,
@@ -655,33 +330,56 @@ class UserSimResourcesServer(SimpleResourcesServer):
         if (
             body.episode_id != seeded.episode_id
             or body.task_id != seeded.task_id
-            or verification_input.usersim_context != seeded.seed.usersim_context
-            or verification_input.scenario != seeded.seed.scenario
+            or verification_input.resolved_row != seeded.seed.resolved_row
         ):
             raise HTTPException(
                 status_code=409,
                 detail="Verified NeMo UserSim resolved episode does not match the seeded session",
             )
         native_result = verification_input.usersim_result
-        if seeded.runtime is not None:
-            transcript = _external_probe_transcript(
-                verification_input.usersim_result.conversation_messages,
-                verification_input.invocations,
-            )
-            native_result = UserSimSimulationResult.model_validate(await seeded.runtime.finalize(transcript))
-        native_scorer_name, native_scores, native_scorer_pass = await self._score_native_result(
+        assistant_eval, normalized_axis_scores, assistant_quality = await self._evaluate_native_result(
             seeded,
             native_result,
         )
-        assistant_eval, normalized_axis_scores, assistant_quality = await self._evaluate_assistant_quality(
-            seeded,
-            native_result,
+        scorer_names = assistant_eval.get("envelope", {}).get("scorers", [])
+        native_scorer_name = scorer_names[0] if scorer_names else None
+        native_scores = (
+            assistant_eval.get("scorers", {}).get(native_scorer_name) if native_scorer_name is not None else None
+        )
+        native_scorer_pass = native_scorer_name is None or (
+            isinstance(native_scores, Mapping)
+            and native_scores.get("status_proposal") is True
+            and not native_scores.get("error")
         )
         participants_completed = {"user", "assistant"} <= _conversation_roles(native_result)
         scenario_completed = native_result.conversation_status and participants_completed and native_scorer_pass
+        simulation_failure = _simulation_infrastructure_failure(native_result)
+        scorer_failure = None
+        if native_scorer_name is not None:
+            if not isinstance(native_scores, Mapping):
+                scorer_failure = f"Native UserSim scorer {native_scorer_name!r} returned no result"
+            elif native_scores.get("error"):
+                scorer_failure = str(native_scores["error"])
+        evaluator_failure = (
+            str(
+                assistant_eval.get("skipped_reason")
+                or "trajectory evaluator did not produce every required quality axis"
+            )
+            if assistant_quality is None
+            else None
+        )
+        failure_reason = simulation_failure or scorer_failure or evaluator_failure
+        mask_sample = failure_reason is not None
         reward = assistant_quality if scenario_completed and assistant_quality is not None else 0.0
         return UserSimVerification(
             reward=reward,
+            mask_sample=mask_sample,
+            failure_kind=(
+                "judge_failed"
+                if scorer_failure is not None or evaluator_failure is not None
+                else ("usersim:simulation_failed" if simulation_failure is not None else None)
+            ),
+            failure_reason=failure_reason,
             reward_components={
                 "participants_completed": float(participants_completed),
                 "native_conversation_status": float(native_result.conversation_status),
@@ -696,8 +394,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
             verifier_data={
                 "invocations": [invocation.model_dump(mode="json") for invocation in verification_input.invocations],
                 "episode_interaction_protocol": verification_input.episode_interaction_protocol,
-                "scenario": verification_input.scenario.model_dump(mode="json"),
-                "usersim_context": verification_input.usersim_context.model_dump(mode="json"),
+                "resolved_row": verification_input.resolved_row,
                 "usersim_result": native_result.model_dump(mode="json"),
                 "native_scorer_name": native_scorer_name,
                 "native_scores": native_scores,
@@ -716,11 +413,12 @@ class UserSimResourcesServer(SimpleResourcesServer):
         seeded = self._seeded_episode(request)
         if body.resources_session_id != seeded.seed.resources_session_id or body.episode_id != seeded.episode_id:
             raise HTTPException(status_code=409, detail="Resources session does not match the active episode")
+        await seeded.tool_session.close()
         del self.session_id_to_seed[session_id]
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
 
-def _to_responses_input(message: Any) -> dict[str, Any]:
+def _to_responses_input_items(message: Any) -> list[dict[str, Any]]:
     if hasattr(message, "model_dump"):
         value = message.model_dump(mode="json", exclude_none=True)
     elif isinstance(message, Mapping):
@@ -728,7 +426,55 @@ def _to_responses_input(message: Any) -> dict[str, Any]:
     else:
         value = {"role": getattr(message, "role"), "content": getattr(message, "content", "")}
     role = getattr(value.get("role"), "value", value.get("role"))
-    return {"type": "message", "role": role, "content": value.get("content", "")}
+    if role == "tool":
+        return [
+            {
+                "type": "function_call_output",
+                "call_id": value["tool_call_id"],
+                "output": value.get("content", ""),
+            }
+        ]
+    if role == "assistant" and value.get("tool_calls"):
+        items = []
+        if value.get("content"):
+            items.append({"type": "message", "role": role, "content": value["content"]})
+        for call in value["tool_calls"]:
+            call = call.model_dump(mode="json", exclude_none=True) if hasattr(call, "model_dump") else dict(call)
+            function = call.get("function")
+            if isinstance(function, Mapping):
+                name = function["name"]
+                arguments = function.get("arguments", "{}")
+            elif call.get("name"):
+                name = call["name"]
+                arguments = call.get("arguments_json", call.get("arguments", "{}"))
+            else:
+                raise ValueError("Assistant tool call must contain a function mapping")
+            items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call["id"],
+                    "name": name,
+                    "arguments": arguments,
+                }
+            )
+        return items
+    return [{"type": "message", "role": role, "content": value.get("content", "")}]
+
+
+def _to_responses_tool(tool: Any) -> dict[str, Any]:
+    value = tool.model_dump(mode="json", exclude_none=True) if hasattr(tool, "model_dump") else dict(tool)
+    function = value.get("function")
+    if isinstance(function, Mapping):
+        value = dict(function)
+    if not value.get("name"):
+        raise ValueError(f"Invalid UserSim function tool schema: {value!r}")
+    return {
+        "type": "function",
+        "name": value["name"],
+        "description": value.get("description"),
+        "parameters": value.get("parameters", {}),
+        "strict": value.get("strict", False),
+    }
 
 
 def _output_message_text(message: NeMoGymResponseOutputMessage) -> str:
@@ -747,6 +493,28 @@ def _response_text(response: NeMoGymResponse) -> str:
         if isinstance(item, NeMoGymResponseOutputMessage)
         if (text := _output_message_text(item))
     )
+
+
+def _response_reasoning(response: NeMoGymResponse) -> str:
+    return "\n".join(
+        part.text
+        for item in response.output
+        if isinstance(item, NeMoGymResponseReasoningItem)
+        for part in [*item.summary, *(item.content or [])]
+        if getattr(part, "text", None)
+    )
+
+
+def _response_tool_calls(response: NeMoGymResponse) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": item.call_id,
+            "type": "function",
+            "function": {"name": item.name, "arguments": item.arguments},
+        }
+        for item in response.output
+        if isinstance(item, NeMoGymResponseFunctionToolCall)
+    ]
 
 
 if __name__ == "__main__":

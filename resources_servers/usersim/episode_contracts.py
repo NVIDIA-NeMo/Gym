@@ -21,87 +21,145 @@ UserSimAgentRole = Literal["user", "assistant", "judge", "summary"]
 USERSIM_EPISODE_PROTOCOL = "usersim.ConversationLoop"
 
 
-class UserSimScenario(BaseModel):
-    """One fully resolved UserSim scenario."""
-
-    model_config = ConfigDict(extra="allow")
-
-    persona: dict[str, Any]
-    probe_type: str = "general_open_ended"
-    theme: dict[str, Any] | str
-    goal: str = ""
-    locale: str = "en_US"
-    probe_data: dict[str, Any] = Field(default_factory=dict)
-
-
-class UserSimTheme(BaseModel):
-    """One selectable theme used to construct a scenario."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    topic: str = Field(min_length=1)
-    goal: str = Field(min_length=1)
-
-
-class UserSimSamplingRequest(BaseModel):
-    """Dataset-owned inputs used to select one replayable scenario."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    locale: str = Field("en_US", pattern=r"^[A-Za-z0-9_]+$")
-    seed: int
-    probe_type: str | None = None
-
-
-class UserSimProtocolConfig(BaseModel):
-    """Run-wide subset of ``ConversationSimulatorConfig`` owned by the Environment Server."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    max_query_attempts: int = Field(3, ge=1)
-    max_assistant_attempts: int = Field(1, ge=1)
-    enforce_user_language: bool = True
-    user_language_min_script_compliance: float = Field(0.6, ge=0, le=1)
-    user_language_min_letters: int = Field(8, ge=0)
-    incremental_disclosure_ratio: float = Field(0.6, ge=0, le=1)
-    persona_grounding_ratio: float = Field(1, ge=0, le=1)
-    context_compression: bool = True
-    compression_window: int = Field(1, ge=1)
-    store_reasoning: bool = True
-    random_seed: int | None = None
-    verbosity: int = Field(1, ge=0, le=2)
-
-
 class UserSimTaskInput(BaseModel):
-    """Durable input loaded from one UserSim task row."""
+    """Fully resolved, provenance-pinned input loaded from one prepared task row."""
 
     model_config = ConfigDict(extra="forbid")
 
-    sampling: UserSimSamplingRequest
-    probe_data: dict[str, Any] = Field(default_factory=dict)
+    resolved_row: dict[str, Any]
     responses_create_params: dict[UserSimAgentRole, NeMoGymResponseCreateParamsNonStreaming] = Field(
         default_factory=dict
     )
 
 
-class ResolvedUserSimContext(BaseModel):
-    """Selection provenance required to replay a resolved scenario."""
+class UserSimSeedResponse(ResourcesSeedSessionResponse):
+    """Return resources-session identity plus the unchanged resolved row."""
+
+    resolved_row: dict[str, Any]
+    assistant_tools: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ActivationUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+
+
+class ActivationRequest(BaseModel):
+    """One non-assistant model activation requested by ConversationRuntime."""
 
     model_config = ConfigDict(extra="forbid")
 
-    locale: str
-    seed: int
-    personas_dataset_version: str
-    personas_panel_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    usersim_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
+    activation_id: str = Field(min_length=1)
+    role: Literal["user", "judge", "summary"]
+    model_alias: str = Field(min_length=1)
+    messages: list[dict[str, Any]]
+    parameters: dict[str, Any]
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    tools_enabled: bool = False
+    continues_turn: bool = False
 
 
-class UserSimSeedResponse(ResourcesSeedSessionResponse):
-    """Return resources-session identity plus the resolved scenario."""
+class ActivationResult(BaseModel):
+    """One externally executed non-assistant result."""
 
-    scenario: UserSimScenario
-    usersim_context: ResolvedUserSimContext
-    assistant_tools: list[dict[str, Any]] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
+
+    activation_id: str = Field(min_length=1)
+    response: dict[str, Any]
+    usage: ActivationUsage | None = None
+
+
+class AssistantLoopPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["none", "single", "multi"]
+    max_model_calls: int = Field(ge=1)
+    max_tool_calls: int | None = Field(default=None, ge=0)
+    final_synthesis: bool
+    replay_reasoning: bool = False
+    project_document_tool_results: bool = False
+
+
+class ToolTurnContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str = Field(min_length=1)
+    first_tool_turn_idx: int = Field(ge=0)
+    max_tool_calls: int | None = Field(default=None, ge=0)
+    state_snapshot: dict[str, Any]
+
+
+class AssistantTurnRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str = Field(min_length=1)
+    role: Literal["assistant"] = "assistant"
+    model_alias: Literal["assistant_model"] = "assistant_model"
+    messages: list[dict[str, Any]]
+    parameters: dict[str, Any]
+    tools: list[dict[str, Any]]
+    loop_policy: AssistantLoopPolicy
+    tool_context: ToolTurnContext
+
+
+class AssistantModelCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    response: dict[str, Any]
+    usage: ActivationUsage | None = None
+
+
+class ToolCallReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_call_id: str
+    tool_name: str
+    arguments: dict[str, Any]
+    raw_tool_call: dict[str, Any]
+    payload: str
+    turn_idx: int = Field(ge=0)
+    call_idx: int = Field(ge=0)
+    effect_state: dict[str, Any]
+
+
+class ToolRoundReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str
+    round_id: str
+    receipts: list[ToolCallReceipt]
+    limit_reached: bool = False
+
+
+class CompletedTurnEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str
+    rounds: list[ToolRoundReceipt]
+    final_effect_state: dict[str, Any]
+
+    @classmethod
+    def from_unexecuted_turn(cls, context: ToolTurnContext) -> "CompletedTurnEvidence":
+        """Build evidence for an Assistant turn that made no Resources calls."""
+        return cls(
+            turn_id=context.turn_id,
+            rounds=[],
+            final_effect_state={
+                "metadata": context.state_snapshot.get("metadata", {}),
+                "outcome": context.state_snapshot.get("outcome", {}),
+            },
+        )
+
+
+class CompletedAssistantTurn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str
+    transcript: list[dict[str, Any]]
+    model_calls: list[AssistantModelCall]
+    evidence: CompletedTurnEvidence
 
 
 class UserSimSimulationResult(BaseModel):
@@ -127,6 +185,18 @@ class UserSimSimulationResult(BaseModel):
         return json.loads(value) if isinstance(value, str) else value
 
 
+class UserSimEpisodeLifecycleComplete(BaseModel):
+    """Terminal event from the Resources-owned native lifecycle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    complete: Literal[True] = True
+    result: UserSimSimulationResult
+
+
+UserSimLifecycleEvent = ActivationRequest | AssistantTurnRequest | UserSimEpisodeLifecycleComplete
+
+
 class UserSimInvocation(BaseModel):
     """One ordered UserSim participant-Agent or support-model activation."""
 
@@ -146,8 +216,7 @@ class UserSimVerificationInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    scenario: UserSimScenario
-    usersim_context: ResolvedUserSimContext
+    resolved_row: dict[str, Any]
     usersim_result: UserSimSimulationResult
     invocations: list[UserSimInvocation]
     episode_interaction_protocol: str = USERSIM_EPISODE_PROTOCOL
@@ -163,6 +232,9 @@ class UserSimVerification(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reward: float
+    mask_sample: bool = False
+    failure_kind: str | None = None
+    failure_reason: str | None = None
     reward_components: dict[str, float]
     scenario_completed: bool
     verifier_data: dict[str, Any] = Field(default_factory=dict)

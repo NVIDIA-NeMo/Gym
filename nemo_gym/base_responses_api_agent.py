@@ -15,7 +15,7 @@
 from abc import abstractmethod
 from collections.abc import Mapping
 from functools import wraps
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from warnings import warn
 
 from fastapi import Body, FastAPI, Request
@@ -54,6 +54,19 @@ from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.tool_access import ToolAccess
 
 
+class AgentToolLoopPolicy(BaseModel):
+    """Optional episode-scoped policy for an Agent-owned model/tool loop."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["none", "single", "multi"]
+    max_model_calls: int = Field(ge=1)
+    max_tool_calls: int | None = Field(default=None, ge=0)
+    final_synthesis: bool
+    replay_reasoning: bool = False
+    project_document_tool_results: bool = False
+
+
 class AgentSeedSessionRequest(BaseModel):
     """Idempotently initialize agent-server state under a caller-assigned identifier."""
 
@@ -64,6 +77,7 @@ class AgentSeedSessionRequest(BaseModel):
     task_id: TaskId
     tool_accesses: list[ToolAccess] = Field(default_factory=list)
     sandbox_access: SandboxAccess | None = None
+    tool_loop_policy: AgentToolLoopPolicy | None = None
 
     @field_validator("tool_accesses")
     @classmethod
