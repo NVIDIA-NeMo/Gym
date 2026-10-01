@@ -223,6 +223,21 @@ and a 1000-token logprob window.
 | step_completion | 5.27 | — | 5.30 | — |
 | rationalization | 24.33 | — | 24.19 | — |
 
+**Per-task composition of Primary-Overall.** Each task's score is the mean of its `gen` and
+`lm` columns above (the three single-protocol tasks are their `gen` value); Primary-Overall is
+the unweighted mean of the six. `paper` is the composite the paper's appendix tables publish;
+Llama is shown under the paper's double-BOS condition.
+
+| task | Qwen2.5-7B | paper | Llama-3.1-8B | paper | Phi-3-mini-4k | paper |
+|---|---|---|---|---|---|---|
+| ordering | 78.70 | 78.74 | 73.15 | 73.14 | 79.76 | 79.83 |
+| contrastive_choice | 64.25 | 64.53 | 61.70 | 61.98 | 55.20 | 55.15 |
+| step_validation | 71.97 | 72.23 | 57.62 | 58.18 | 44.99 | 44.72 |
+| condition_validation | 82.83 | 82.95 | 71.16 | 71.30 | 51.76 | 51.86 |
+| step_completion | 7.10 | 7.25 | 9.48 | 9.22 | 5.27 | 5.30 |
+| rationalization | 18.05 | 17.96 | 22.99 | 22.87 | 24.33 | 24.19 |
+| **Primary-Overall** | **53.82** | **53.94** | **49.35** | **49.45** | **43.55** | **43.51** |
+
 Under each model's own condition every cell is within ~1 point of the published row, and
 Phi-3's collapsed `lm` validation scores reproduce too: they are a property of that model, not
 of the harness.
