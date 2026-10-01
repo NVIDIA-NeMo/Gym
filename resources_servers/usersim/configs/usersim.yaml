@@ -2,10 +2,25 @@ environment_routing_mode: taskset
 environment_server_routes:
   "usersim:example": usersim_environment
 
-support_model_base_url: ${policy_base_url}
-support_model_api_key: ${policy_api_key}
-support_model_name: ${policy_model_name}
+user_model_base_url: ???
+user_model_api_key: ???
+user_model_name: ???
+user_model_uses_reasoning_parser: false
+
+support_model_base_url: ???
+support_model_api_key: ???
+support_model_name: ???
 support_model_uses_reasoning_parser: false
+
+user_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${user_model_base_url}
+      api_key: ${user_model_api_key}
+      model: ${user_model_name}
+      uses_reasoning_parser: ${oc.select:user_model_uses_reasoning_parser,false}
+      return_token_id_information: false
 
 policy_model:
   responses_api_models:
@@ -33,18 +48,14 @@ usersim_resources:
       entrypoint: app.py
       domain: agent
       verified: false
-      description: Deterministic NeMo UserSim persona, probe runtime, and verification.
-      personas_cache_dir: ~/.cache/nemo-gym/usersim/personas
-      personas_dataset_version: 0.0.2
-      usersim_revision: 2d9ec0d7c32ac800f2171b5943382a7b1eb96cbc  # pragma: allowlist secret
+      description: Canonical NeMo UserSim probe runtime and verification.
+      usersim_revision: b3381ae021baac2a6fb314b5f08a55845243017d  # pragma: allowlist secret
       tool_simulation_model:
         type: responses_api_models
         name: support_model
       probe_scorer_model:
         type: responses_api_models
         name: support_model
-      personas_locales:
-      - en_US
       datasets:
         - name: example
           type: example
@@ -57,7 +68,7 @@ usersim_user:
       entrypoint: app.py
       model_server:
         type: responses_api_models
-        name: policy_model
+        name: user_model
       resources_server:
         type: resources_servers
         name: usersim_resources
@@ -96,19 +107,5 @@ usersim_environment:
         name: usersim_resources
       resources_tool_transports:
         - direct_http
-      max_turns: 6
       default_episode_timeout_seconds: 1800
       cleanup_timeout_seconds: 180
-      protocol_config:
-        max_query_attempts: 3
-        max_assistant_attempts: 1
-        enforce_user_language: true
-        user_language_min_script_compliance: 0.6
-        user_language_min_letters: 8
-        incremental_disclosure_ratio: 0.6
-        persona_grounding_ratio: 1.0
-        context_compression: true
-        compression_window: 1
-        store_reasoning: true
-        random_seed: 42
-        verbosity: 1

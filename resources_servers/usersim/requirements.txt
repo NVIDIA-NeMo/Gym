@@ -1,5 +1,5 @@
 -e ../../
 
 # Temporary source install while UserSim is private. This commit is from
-# ffrujeri/probe-episode-runtime and provides ProbeEpisodeRuntime.
-nemo-usersim @ git+ssh://git@github.com/NVIDIA-NeMo/UserSim.git@2d9ec0d7c32ac800f2171b5943382a7b1eb96cbc
+# ffrujeri/probe-episode-runtime-v2 and provides the canonical episode and evaluator runtimes.
+nemo-usersim @ git+ssh://git@github.com/NVIDIA-NeMo/UserSim.git@b3381ae021baac2a6fb314b5f08a55845243017d

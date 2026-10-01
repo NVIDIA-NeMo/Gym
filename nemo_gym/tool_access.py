@@ -3,9 +3,9 @@
 
 """Agent-visible tool access contracts."""
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, model_validator
 
 
 class DirectHTTPToolAccess(BaseModel):
@@ -19,6 +19,36 @@ class DirectHTTPToolAccess(BaseModel):
     base_url: AnyHttpUrl
     cookies: dict[str, str] = Field(default_factory=dict)
     headers: dict[str, str] = Field(default_factory=dict)
+    batch_path: str | None = Field(default=None, pattern=r"^/")
+    tool_call_context: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_execution_mode(self) -> "DirectHTTPToolAccess":
+        if self.batch_path is not None and self.tool_call_context is not None:
+            raise ValueError("batch_path and tool_call_context are mutually exclusive")
+        return self
+
+
+class ContextualToolCallRequest(BaseModel):
+    """Normal tool arguments plus hidden model-round context for Resources."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    arguments: dict[str, Any]
+    tool_call_context: dict[str, Any]
+    tool_call_id: str = Field(min_length=1)
+    round_id: str = Field(min_length=1)
+    assistant_response: dict[str, Any]
+
+
+class ContextualToolCallResponse(BaseModel):
+    """Separate the model-visible output from hidden Resources context."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    output: str | None
+    tool_call_context: dict[str, Any]
+    limit_reached: bool = False
 
 
 class MCPStreamableHTTPConnection(BaseModel):

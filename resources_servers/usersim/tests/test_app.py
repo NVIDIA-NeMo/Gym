@@ -1,154 +1,88 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import hashlib
-import json
-from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.server_utils import ServerClient
-from resources_servers.usersim.app import (
-    PROBE_SCORERS,
-    SUPPORTED_PROBES,
-    UserSimResourcesServer,
-    UserSimResourcesServerConfig,
-)
-from resources_servers.usersim.episode_contracts import UserSimTaskInput
+from resources_servers.usersim.app import UserSimResourcesServer, UserSimResourcesServerConfig
 
 
-_ORIGINAL_EVALUATE_ASSISTANT_QUALITY = UserSimResourcesServer._evaluate_assistant_quality
-
-PERSONAS = [
-    {
-        "first_name": "Morgan",
-        "last_name": "Lee",
-        "age": 42,
-        "occupation": "building_inspector",
-        "persona": "Morgan is a practical and detail-oriented building inspector.",
-    },
-    {
-        "first_name": "Avery",
-        "last_name": "Patel",
-        "age": 31,
-        "occupation": "teacher",
-        "persona": "Avery is a patient teacher who enjoys explaining unfamiliar topics.",
-    },
-]
-EXAMPLES_PATH = Path(__file__).parents[1] / "data" / "example.jsonl"
+USERSIM_REVISION = "b3381ae021baac2a6fb314b5f08a55845243017d"  # pragma: allowlist secret
 
 
-@pytest.fixture(autouse=True)
-def _stub_assistant_quality(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def evaluate_quality(*_args, **_kwargs):
-        scores = {"helpfulness": 1.0, "accuracy": 1.0, "coherence": 1.0}
-        return (
-            {
-                "envelope": {"axes": list(scores)},
-                "axes": {},
-                "scorers": {},
-                "skipped": False,
-                "skipped_reason": None,
-            },
-            scores,
-            1.0,
-        )
-
-    monkeypatch.setattr(UserSimResourcesServer, "_evaluate_assistant_quality", evaluate_quality)
-
-
-def _write_parquet(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pylist(PERSONAS), path)
-
-
-def _panel_path(cache_dir: Path) -> Path:
-    return cache_dir / "0.0.2" / "panels" / "en_US.parquet"
-
-
-def _write_personas(cache_dir: Path) -> None:
-    panel_path = _panel_path(cache_dir)
-    _write_parquet(panel_path)
-    manifest = {
+def _resolved_row(probe_type: str = "safety_agentic") -> dict:
+    return {
+        "probe_type": probe_type,
+        "probe_family": probe_type,
+        "probe_variant": "default",
+        "persona": {"first_name": "Morgan", "age": 42},
         "locale": "en_US",
-        "personas_dataset_version": "0.0.2",
-        "panel_sha256": hashlib.sha256(panel_path.read_bytes()).hexdigest(),
-        "panel_size_bytes": panel_path.stat().st_size,
-        "panel_rows": len(PERSONAS),
-        "generator": "usersim panel",
+        "conversation_language": "English",
+        "trajectory_id": f"usersim-{probe_type}",
+        "usersim_provenance": {"code_sha": USERSIM_REVISION},
+        "usersim_config": {"random_seed": 42},
     }
-    panel_path.with_suffix(".manifest.json").write_text(json.dumps(manifest))
 
 
-def _app(
-    cache_dir: Path,
-    *,
-    educational_only: bool = False,
-    with_probe_scorer_model: bool = False,
-) -> FastAPI:
+def _seed_body(row: dict | None = None) -> dict:
+    return {
+        "resources_session_id": "resources-session-0",
+        "episode_id": {"rollout_id": "0-0", "attempt": 0},
+        "task_id": {"taskset": "usersim:example", "task_id": "0"},
+        "task_data": {"resolved_row": row or _resolved_row()},
+    }
+
+
+def _tool_session(*, tools: bool = False) -> MagicMock:
+    assistant_tools = (
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "safe_action",
+                    "description": "Perform an action.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        if tools
+        else []
+    )
+    session = MagicMock()
+    session.assistant_tools = assistant_tools
+    session.close = AsyncMock()
+    return session
+
+
+def _app(*, with_scorer_model: bool = False) -> UserSimResourcesServer:
     config = UserSimResourcesServerConfig(
         host="127.0.0.1",
         port=12345,
         entrypoint="app.py",
         name="usersim",
-        personas_cache_dir=cache_dir,
         probe_scorer_model=(
-            {"type": "responses_api_models", "name": "support_model"} if with_probe_scorer_model else None
+            ModelServerRef(type="responses_api_models", name="support") if with_scorer_model else None
         ),
-        probe_mix=(
-            {"general_open_ended": 0.0, "general_educational": 1.0}
-            if educational_only
-            else {"general_open_ended": 0.5, "general_educational": 0.5}
-        ),
-        probe_themes={
-            "general_open_ended": [
-                {
-                    "topic": "local food",
-                    "goal": "Seek a practical recommendation about local food.",
-                }
-            ],
-            "general_educational": [
-                {
-                    "topic": "local ecology",
-                    "goal": "Learn about local ecology through focused questions.",
-                }
-            ],
-        },
     )
-    return UserSimResourcesServer(
-        config=config,
-        server_client=MagicMock(spec=ServerClient),
-    ).setup_webserver()
+    return UserSimResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
-def _seed_body(*, seed: int, probe_type: str | None = None) -> dict:
-    sampling = {"locale": "en_US", "seed": seed}
-    if probe_type is not None:
-        sampling["probe_type"] = probe_type
-    return {
-        "resources_session_id": "resources-session-0",
-        "episode_id": {"rollout_id": "0-0", "attempt": 0},
-        "task_id": {"taskset": "usersim:example", "task_id": "0"},
-        "task_data": {"sampling": sampling},
-    }
-
-
-def _verify_body(seed_result: dict) -> dict:
+def _verify_body(row: dict | None = None) -> dict:
+    resolved_row = row or _resolved_row()
     return {
         "episode_id": {"rollout_id": "0-0", "attempt": 0},
         "task_id": {"taskset": "usersim:example", "task_id": "0"},
         "verification_input": {
-            "scenario": seed_result["scenario"],
-            "usersim_context": seed_result["usersim_context"],
+            "resolved_row": resolved_row,
             "usersim_result": {
                 "conversation_messages": [
-                    {"role": "user", "content": "Teach me about local ecology."},
-                    {"role": "assistant", "content": "Here is an explanation."},
+                    {"role": "user", "content": "Can you help?"},
+                    {"role": "assistant", "content": "Yes."},
                 ],
                 "conversation_status": True,
                 "simulation_outcome": {"status": "completed"},
@@ -159,354 +93,146 @@ def _verify_body(seed_result: dict) -> dict:
     }
 
 
-def test_seed_session_resolves_replayable_scenario(tmp_path: Path) -> None:
-    _write_personas(tmp_path)
-    with TestClient(_app(tmp_path)) as client:
-        first = client.post("/seed_session", json=_seed_body(seed=7, probe_type="general_open_ended"))
-        second = client.post("/seed_session", json=_seed_body(seed=7, probe_type="general_open_ended"))
-
-    assert first.status_code == 200
-    assert first.json()["usersim_context"] == second.json()["usersim_context"]
-    assert first.json()["usersim_context"]["personas_dataset_version"] == "0.0.2"
-    assert len(first.json()["usersim_context"]["personas_panel_sha256"]) == 64
-    assert first.json()["usersim_context"]["usersim_revision"] == (
-        "2d9ec0d7c32ac800f2171b5943382a7b1eb96cbc"  # pragma: allowlist secret
-    )
-    scenario = first.json()["scenario"]
-    assert scenario["persona"]["first_name"] in {"Morgan", "Avery"}
-    assert scenario["probe_type"] == "general_open_ended"
-    assert scenario["goal"] == "Seek a practical recommendation about local food."
-    assert "personas_dataset_version" not in scenario
-
-
-def test_probe_mix_deterministically_selects_enabled_probe(tmp_path: Path) -> None:
-    _write_personas(tmp_path)
-    with TestClient(_app(tmp_path, educational_only=True)) as client:
-        response = client.post("/seed_session", json=_seed_body(seed=19))
-
-    assert response.status_code == 200
-    assert response.json()["scenario"]["probe_type"] == "general_educational"
-    assert response.json()["scenario"]["theme"]["type"] == "local ecology"
-
-
-def test_examples_cover_every_supported_probe() -> None:
-    rows = [json.loads(line) for line in EXAMPLES_PATH.read_text().splitlines()]
-    tasks = [UserSimTaskInput.model_validate(row["task_input"]) for row in rows]
-
-    assert {task.sampling.probe_type for task in tasks} == SUPPORTED_PROBES
-    assert len({row["task_id"]["task_id"] for row in rows}) == len(rows)
-    tool_calling = next(task for task in tasks if task.sampling.probe_type == "tool_calling")
-    assert tool_calling.probe_data["tools"][0]["function"]["name"] == "get_weather"
-
-
-def test_supported_probes_match_pinned_usersim_registry() -> None:
-    pytest.importorskip("usersim.engine.generator")
-    from usersim.engine.core.probes import known_probes
-
-    assert set(known_probes()) == SUPPORTED_PROBES
-
-
-def test_probe_scorers_cover_every_probe_with_a_dedicated_scorer() -> None:
-    assert set(PROBE_SCORERS) == SUPPORTED_PROBES - {"general_open_ended", "general_educational"}
-
-
-def test_persona_derived_probe_does_not_require_a_theme() -> None:
-    config = UserSimResourcesServerConfig(
-        host="127.0.0.1",
-        port=12345,
-        entrypoint="app.py",
-        name="usersim",
-        probe_mix={"sov_ai_facts": 1.0},
-        probe_themes={},
-    )
-
-    assert config.probe_mix == {"sov_ai_facts": 1.0}
-
-
-def test_sessions_keep_independent_resolved_contexts(tmp_path: Path) -> None:
-    _write_personas(tmp_path)
-    app = _app(tmp_path)
-    with TestClient(app) as first, TestClient(app) as second:
-        first_seed = first.post(
-            "/seed_session",
-            json=_seed_body(seed=1, probe_type="general_open_ended"),
-        ).json()
-        second_seed = second.post(
-            "/seed_session",
-            json=_seed_body(seed=2, probe_type="general_educational"),
-        ).json()
-
-    assert first_seed["usersim_context"]["seed"] != second_seed["usersim_context"]["seed"]
-    assert first_seed["scenario"]["probe_type"] == "general_open_ended"
-    assert second_seed["scenario"]["probe_type"] == "general_educational"
-
-
-def test_probe_tools_are_scoped_to_seeded_session(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Runtime:
-        assistant_tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "safe_action",
-                    "description": "Perform a simulated action.",
-                    "parameters": {"type": "object", "properties": {}},
-                },
+def _assistant_eval(*, scorer_pass: bool = True) -> dict:
+    return {
+        "envelope": {
+            "axes": ["helpfulness", "accuracy", "coherence"],
+            "scorers": ["safety_agentic"],
+        },
+        "axes": {
+            "helpfulness": {"judge_model": {"score": 5, "reasoning": "Helpful."}},
+            "accuracy": {"judge_model": {"score": 4, "reasoning": "Accurate."}},
+            "coherence": {"judge_model": {"score": 3, "reasoning": "Coherent."}},
+        },
+        "scorers": {
+            "safety_agentic": {
+                "status_proposal": scorer_pass,
             }
-        ]
-
-        async def simulate_tool_call(self, name, body):
-            if name != "safe_action":
-                raise ValueError(f"Tool {name!r} is not available")
-            return json.dumps({"session_seed": body["seed"]})
-
-    monkeypatch.setattr(
-        UserSimResourcesServer,
-        "_create_probe_runtime",
-        lambda *_args, **_kwargs: Runtime(),
-    )
-    _write_personas(tmp_path)
-    app = _app(tmp_path)
-    with TestClient(app) as first, TestClient(app) as second:
-        first_seed = first.post(
-            "/seed_session",
-            json=_seed_body(seed=1, probe_type="safety_agentic"),
-        )
-        second_seed = second.post(
-            "/seed_session",
-            json=_seed_body(seed=2, probe_type="safety_agentic"),
-        )
-        first_result = first.post("/safe_action", json={"seed": 1})
-        second_result = second.post("/safe_action", json={"seed": 2})
-        rejected = first.post("/other_action", json={})
-
-    assert first_seed.json()["assistant_tools"][0]["function"]["name"] == "safe_action"
-    assert second_seed.status_code == 200
-    assert first_result.json() == {"session_seed": 1}
-    assert second_result.json() == {"session_seed": 2}
-    assert rejected.status_code == 404
-
-
-def test_native_safety_probe_exposes_and_simulates_selected_tools(tmp_path: Path) -> None:
-    pytest.importorskip("usersim.engine.core.episode_runtime")
-    _write_personas(tmp_path)
-    with TestClient(_app(tmp_path)) as client:
-        seed = client.post(
-            "/seed_session",
-            json=_seed_body(seed=42, probe_type="safety_agentic"),
-        )
-        tool_name = seed.json()["assistant_tools"][0]["function"]["name"]
-        result = client.post(f"/{tool_name}", json={})
-        verified = client.post("/verify", json=_verify_body(seed.json()))
-
-    assert seed.status_code == 200
-    assert result.status_code == 200
-    assert isinstance(result.json(), dict)
-    assert verified.status_code == 200
-    assert verified.json()["native_usersim_result"]["num_tool_calls"] == 1
-    assert verified.json()["verifier_data"]["native_scores"] is not None
-
-
-def test_startup_loads_prepared_panel_and_validates_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_personas(tmp_path)
-    _app(tmp_path)
-
-    monkeypatch.setattr(
-        "resources_servers.usersim.app._sha256_file",
-        lambda *_args, **_kwargs: "a" * 64,
-    )
-    with pytest.raises(RuntimeError, match="does not match its manifest"):
-        _app(tmp_path)
-
-
-def test_missing_pinned_dataset_fails_during_initialization(tmp_path: Path) -> None:
-    with pytest.raises(RuntimeError, match="gym eval prepare --config environments/usersim/config.yaml"):
-        _app(tmp_path)
-
-
-def test_seed_session_rejects_locale_not_initialized_at_startup(tmp_path: Path) -> None:
-    _write_personas(tmp_path)
-    body = _seed_body(seed=7)
-    body["task_data"]["sampling"]["locale"] = "pt_BR"
-    with TestClient(_app(tmp_path)) as client:
-        response = client.post("/seed_session", json=body)
-
-    assert response.status_code == 422
-    assert "was not initialized" in response.json()["detail"]
-
-
-def test_verify_records_context_and_requires_both_participants(tmp_path: Path) -> None:
-    _write_personas(tmp_path)
-    with TestClient(_app(tmp_path)) as client:
-        seed_result = client.post("/seed_session", json=_seed_body(seed=7)).json()
-        verified = client.post("/verify", json=_verify_body(seed_result)).json()
-        incomplete_body = _verify_body(seed_result)
-        incomplete_body["verification_input"]["usersim_result"]["conversation_messages"] = [
-            {"role": "user", "content": "Teach me about local ecology."}
-        ]
-        incomplete = client.post("/verify", json=incomplete_body).json()
-
-    assert verified["reward"] == 1.0
-    assert verified["scenario_completed"] is True
-    assert verified["verifier_data"]["usersim_context"]["seed"] == 7
-    assert incomplete["reward"] == 0.0
-    assert incomplete["scenario_completed"] is False
-
-
-def test_verify_uses_usersim_assistant_quality_as_reward(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    evaluator = pytest.importorskip("usersim.engine.evaluator.runtime")
-
-    async def evaluate_quality(*_args, **_kwargs):
-        return {
-            "envelope": {"axes": ["helpfulness", "accuracy", "coherence", "safety"]},
-            "axes": {
-                "helpfulness": {"judge_model": {"score": 5, "reasoning": "Helpful."}},
-                "accuracy": {"judge_model": {"score": 4, "reasoning": "Accurate."}},
-                "coherence": {"judge_model": {"score": 3, "reasoning": "Coherent."}},
-                "safety": {"judge_model": {"score": 5, "reasoning": "Safe."}},
-            },
-            "scorers": {},
-            "skipped": False,
-            "skipped_reason": None,
-        }
-
-    monkeypatch.setattr(UserSimResourcesServer, "_evaluate_assistant_quality", _ORIGINAL_EVALUATE_ASSISTANT_QUALITY)
-    monkeypatch.setattr(evaluator.TrajectoryEvaluatorRuntime, "evaluate", evaluate_quality)
-    _write_personas(tmp_path)
-    with TestClient(_app(tmp_path, with_probe_scorer_model=True)) as client:
-        seed = client.post("/seed_session", json=_seed_body(seed=7)).json()
-        verified = client.post("/verify", json=_verify_body(seed)).json()
-
-    assert verified["reward"] == pytest.approx(0.8)
-    assert verified["reward_components"]["assistant_quality"] == pytest.approx(0.8)
-    assert verified["reward_components"]["quality.helpfulness"] == 1.0
-    assert verified["reward_components"]["quality.accuracy"] == 0.8
-    assert verified["reward_components"]["quality.coherence"] == 0.6
-    assert verified["verifier_data"]["assistant_eval"]["skipped"] is False
-    assert verified["verifier_data"]["normalized_axis_scores"]["safety"] == 1.0
-
-
-@pytest.mark.parametrize(
-    ("status_proposal", "error", "expected_reward"),
-    [(True, None, 1.0), (False, None, 0.0), (True, "judge failed", 0.0)],
-)
-def test_verify_applies_native_scorer_to_non_tool_probe(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    status_proposal: bool,
-    error: str | None,
-    expected_reward: float,
-) -> None:
-    scorers = pytest.importorskip("usersim.engine.evaluator.scorers")
-    calls: list[tuple[str, dict, dict]] = []
-
-    def fake_get_scorer(name: str):
-        async def score(trajectory: dict, models: dict) -> dict:
-            calls.append((name, trajectory, models))
-            return {"status_proposal": status_proposal, "error": error}
-
-        return score
-
-    monkeypatch.setattr(scorers, "get_scorer", fake_get_scorer)
-    _write_personas(tmp_path)
-    with TestClient(_app(tmp_path)) as client:
-        seed = client.post(
-            "/seed_session",
-            json=_seed_body(seed=7, probe_type="safety_chat_pressure"),
-        ).json()
-        verified = client.post("/verify", json=_verify_body(seed)).json()
-
-    assert calls[0][0] == "safety_chat_pressure"
-    assert calls[0][1]["probe_type"] == "safety_chat_pressure"
-    assert calls[0][2] == {}
-    assert verified["reward"] == expected_reward
-    assert verified["reward_components"]["native_scorer_applied"] == 1.0
-    assert verified["verifier_data"]["native_scorer_name"] == "safety_chat_pressure"
-    assert verified["verifier_data"]["native_scores"]["error"] == error
-
-
-def test_verify_skips_concealment_scorer_for_default_health_variant(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    scorers = pytest.importorskip("usersim.engine.evaluator.scorers")
-    monkeypatch.setattr(
-        scorers,
-        "get_scorer",
-        lambda _name: pytest.fail("default health variant has no concealment ground truth"),
-    )
-    _write_personas(tmp_path)
-    seed_body = _seed_body(seed=7, probe_type="health_general_disclosure")
-    seed_body["task_data"]["probe_data"] = {"probe_variant": "default"}
-    with TestClient(_app(tmp_path)) as client:
-        seed = client.post("/seed_session", json=seed_body).json()
-        verified = client.post("/verify", json=_verify_body(seed)).json()
-
-    assert verified["reward"] == 1.0
-    assert verified["reward_components"]["native_scorer_applied"] == 0.0
-    assert verified["verifier_data"]["native_scorer_name"] is None
-    assert verified["verifier_data"]["native_scores"] is None
-
-
-def test_verify_translates_native_scorer_exception_to_failed_evidence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    scorers = pytest.importorskip("usersim.engine.evaluator.scorers")
-
-    def fake_get_scorer(_name: str):
-        async def score(_trajectory: dict, _models: dict) -> dict:
-            raise RuntimeError("scorer unavailable")
-
-        return score
-
-    monkeypatch.setattr(scorers, "get_scorer", fake_get_scorer)
-    _write_personas(tmp_path)
-    with TestClient(_app(tmp_path)) as client:
-        seed = client.post(
-            "/seed_session",
-            json=_seed_body(seed=7, probe_type="sov_ai_facts"),
-        ).json()
-        verified = client.post("/verify", json=_verify_body(seed)).json()
-
-    assert verified["reward"] == 0.0
-    assert verified["verifier_data"]["native_scores"] == {
-        "status_proposal": False,
-        "error": "RuntimeError: scorer unavailable",
+        },
+        "skipped": False,
+        "skipped_reason": None,
     }
 
 
-def test_verify_rejects_context_from_another_seeded_episode(tmp_path: Path) -> None:
-    _write_personas(tmp_path)
-    with TestClient(_app(tmp_path)) as client:
-        seed_result = client.post("/seed_session", json=_seed_body(seed=7)).json()
-        verify_body = _verify_body(seed_result)
-        verify_body["verification_input"]["usersim_context"]["seed"] = 8
-        response = client.post("/verify", json=verify_body)
+def test_resources_constructs_runtime_only_from_unchanged_resolved_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _resolved_row()
+    tool_session = _tool_session()
+    from_resolved_row = MagicMock(return_value=tool_session)
+    monkeypatch.setattr(
+        "usersim.engine.external.ProbeToolSession.from_resolved_row",
+        from_resolved_row,
+    )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == "Verified NeMo UserSim resolved episode does not match the seeded session"
+    with TestClient(_app().setup_webserver()) as client:
+        response = client.post("/seed_session", json=_seed_body(row))
+
+    assert response.status_code == 200
+    assert response.json()["resolved_row"] == row
+    from_resolved_row.assert_called_once()
+    assert from_resolved_row.call_args.args == (row,)
+    assert set(from_resolved_row.call_args.kwargs) == {"models"}
 
 
-def test_seed_session_rejects_non_sampling_task_fields(tmp_path: Path) -> None:
-    _write_personas(tmp_path)
-    body = _seed_body(seed=7)
-    body["task_data"]["responses_create_params"] = {"input": []}
-    with TestClient(_app(tmp_path)) as client:
-        response = client.post("/seed_session", json=body)
+def test_seed_rejects_wrong_revision_before_runtime_construction() -> None:
+    row = _resolved_row()
+    row["usersim_provenance"]["code_sha"] = "a" * 40
+
+    with TestClient(_app().setup_webserver()) as client:
+        response = client.post("/seed_session", json=_seed_body(row))
 
     assert response.status_code == 422
+    assert response.json()["detail"] == "Resolved row does not match the configured UserSim revision"
 
 
-def test_close_session_releases_seeded_state(tmp_path: Path) -> None:
-    _write_personas(tmp_path)
-    with TestClient(_app(tmp_path)) as client:
-        seed = client.post("/seed_session", json=_seed_body(seed=7)).json()
+def test_named_tool_route_separates_plain_output_from_hidden_native_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _tool_session(tools=True)
+    evidence = {
+        "turn_id": "turn-1",
+        "rounds": [
+            {
+                "turn_id": "turn-1",
+                "round_id": "round-1",
+                "receipts": [
+                    {
+                        "tool_call_id": "call-1",
+                        "tool_name": "safe_action",
+                        "arguments": {"value": "one"},
+                        "raw_tool_call": {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "safe_action", "arguments": '{"value":"one"}'},
+                        },
+                        "payload": "plain safety payload",
+                        "turn_idx": 4,
+                        "call_idx": 0,
+                        "effect_state": {},
+                    }
+                ],
+                "limit_reached": False,
+            }
+        ],
+        "final_effect_state": {"metadata": {}, "outcome": {}},
+    }
+    session.execute_call = AsyncMock(
+        return_value=SimpleNamespace(
+            payload="plain safety payload",
+            evidence=SimpleNamespace(to_dict=lambda: evidence),
+            limit_reached=False,
+        )
+    )
+    monkeypatch.setattr(UserSimResourcesServer, "_create_tool_session", lambda *_args, **_kwargs: session)
+
+    assistant_response = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "safe_action", "arguments": '{"value":"one"}'},
+            }
+        ],
+    }
+    request_body = {
+        "arguments": {"value": "one"},
+        "tool_call_context": {
+            "turn_id": "turn-1",
+            "first_tool_turn_idx": 4,
+            "max_tool_calls": 2,
+            "state_snapshot": {"messages": [], "metadata": {}, "outcome": {}},
+        },
+        "tool_call_id": "call-1",
+        "round_id": "round-1",
+        "assistant_response": assistant_response,
+    }
+    with TestClient(_app().setup_webserver()) as client:
+        assert client.post("/seed_session", json=_seed_body()).status_code == 200
+        result = client.post("/safe_action", json=request_body)
+        old_runtime_route = client.post("/runtime/tool_calls", json={})
+
+    assert result.status_code == 200
+    assert result.json() == {
+        "output": "plain safety payload",
+        "tool_call_context": evidence,
+        "limit_reached": False,
+    }
+    assert old_runtime_route.status_code == 404
+    native_request = session.execute_call.await_args.args[0]
+    assert native_request.tool_name == "safe_action"
+    assert native_request.arguments == {"value": "one"}
+    assert native_request.assistant_response == assistant_response
+
+
+def test_close_session_closes_owned_tool_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _tool_session()
+    monkeypatch.setattr(UserSimResourcesServer, "_create_tool_session", lambda *_args, **_kwargs: session)
+
+    with TestClient(_app().setup_webserver()) as client:
+        seed = client.post("/seed_session", json=_seed_body()).json()
         closed = client.post(
             "/close_session",
             json={
@@ -514,7 +240,76 @@ def test_close_session_releases_seeded_state(tmp_path: Path) -> None:
                 "episode_id": {"rollout_id": "0-0", "attempt": 0},
             },
         )
-        with pytest.raises(RuntimeError, match="No active NeMo UserSim scenario"):
-            client.post("/verify", json=_verify_body(seed))
 
     assert closed.status_code == 200
+    session.close.assert_awaited_once()
+
+
+def test_verify_uses_one_native_evaluator_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _tool_session()
+    runtime = SimpleNamespace(evaluate=AsyncMock(return_value=_assistant_eval()))
+    runtime_type = MagicMock(return_value=runtime)
+    monkeypatch.setattr(UserSimResourcesServer, "_create_tool_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr("usersim.engine.external.TrajectoryEvaluatorRuntime", runtime_type)
+
+    with TestClient(_app(with_scorer_model=True).setup_webserver()) as client:
+        assert client.post("/seed_session", json=_seed_body()).status_code == 200
+        verified = client.post("/verify", json=_verify_body())
+
+    assert verified.status_code == 200
+    result = verified.json()
+    assert result["reward"] == pytest.approx(0.8)
+    assert result["mask_sample"] is False
+    assert result["scenario_completed"] is True
+    assert result["reward_components"] == {
+        "participants_completed": 1.0,
+        "native_conversation_status": 1.0,
+        "native_scorer_applied": 1.0,
+        "native_scorer_pass": 1.0,
+        "trajectory_evaluator_applied": 1.0,
+        "assistant_quality": pytest.approx(0.8),
+        "quality.helpfulness": 1.0,
+        "quality.accuracy": 0.8,
+        "quality.coherence": 0.6,
+    }
+    assert result["verifier_data"]["native_scorer_name"] == "safety_agentic"
+    assert result["verifier_data"]["native_scores"] == {"status_proposal": True}
+    assert result["verifier_data"]["assistant_eval"] == _assistant_eval()
+    runtime.evaluate.assert_awaited_once()
+    evaluated_row = runtime.evaluate.await_args.args[0]
+    assert evaluated_row["probe_type"] == "safety_agentic"
+    assert evaluated_row["conversation_status"] is True
+
+
+def test_verify_treats_native_scorer_rejection_as_policy_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _tool_session()
+    runtime = SimpleNamespace(evaluate=AsyncMock(return_value=_assistant_eval(scorer_pass=False)))
+    monkeypatch.setattr(UserSimResourcesServer, "_create_tool_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr("usersim.engine.external.TrajectoryEvaluatorRuntime", MagicMock(return_value=runtime))
+
+    with TestClient(_app(with_scorer_model=True).setup_webserver()) as client:
+        assert client.post("/seed_session", json=_seed_body()).status_code == 200
+        verified = client.post("/verify", json=_verify_body())
+
+    assert verified.status_code == 200
+    assert verified.json()["reward"] == 0.0
+    assert verified.json()["mask_sample"] is False
+    assert verified.json()["scenario_completed"] is False
+
+
+def test_verify_converts_native_evaluator_exception_to_masked_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _tool_session()
+    runtime = SimpleNamespace(evaluate=AsyncMock(side_effect=ValueError("judge payload was invalid")))
+    monkeypatch.setattr(UserSimResourcesServer, "_create_tool_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr("usersim.engine.external.TrajectoryEvaluatorRuntime", MagicMock(return_value=runtime))
+
+    with TestClient(_app(with_scorer_model=True).setup_webserver()) as client:
+        assert client.post("/seed_session", json=_seed_body()).status_code == 200
+        verified = client.post("/verify", json=_verify_body())
+
+    assert verified.status_code == 200
+    result = verified.json()
+    assert result["reward"] == 0.0
+    assert result["mask_sample"] is True
+    assert result["failure_kind"] == "judge_failed"
+    assert result["failure_reason"] == "ValueError: judge payload was invalid"
