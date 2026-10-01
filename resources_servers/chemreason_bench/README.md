@@ -149,6 +149,16 @@ Model-free checks only; no model is involved in any number here.
   upstream's `eval/eval.py` agree on all six primary metrics and on Primary-Overall
   (0.988983) to six decimal places. Repeated with replies delivered bare, `<think>`-wrapped
   and fenced, and across both protocols: unchanged.
+- **Model output replayed through upstream.** All 21,918 generated answers from the three
+  reproduction runs below (`gen` rows of Qwen2.5-7B, Llama-3.1-8B and Phi-3-mini-4k) were fed
+  through upstream's parsing tail and `post_*` functions and scored by upstream's `eval/eval.py`,
+  and the same text through this scorer. Every per-task primary metric and Primary-Overall agree
+  to two decimals, 18 of 18 cells. 50 rows (0.23%) differ in the prediction record without moving
+  any score: 49 are `step_completion` actions outside the allowed set, which upstream blanks to
+  `""` where this port keeps the string (neither matches gold); 1 is a three-object contrastive
+  reply, where upstream's first-`{`-to-last-`}` span fails to parse and its raw scan takes the
+  first option mentioned while the rightmost-object rule above reads the last -- gold was a
+  fourth option, so both are wrong.
 - **Gold cannot reach 100 on `step_completion`.** This is an upstream data property the port
   reproduces exactly, not a defect here: 460 of 1,483 rows have empty gold slots and
   `slot_f1({}, {})` is 0 by construction, 2 rows use slot keys outside the schema (`reagents`,
