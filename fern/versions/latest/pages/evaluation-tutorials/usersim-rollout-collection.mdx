@@ -1,0 +1,288 @@
+---
+title: "Run Multi-turn User Simulation with NeMo UserSim"
+description: "Evaluate an assistant through realistic multi-turn conversations with simulated users."
+position: 4
+---
+
+# Run Multi-turn User Simulation with NeMo UserSim
+
+Use this tutorial when you want to evaluate an assistant through realistic multi-turn conversations instead of
+independent, single-turn prompts. NeMo UserSim creates synthetic users with varied backgrounds and goals, while
+NeMo Gym runs their conversations with your assistant at scale and records the results for evaluation.
+
+By the end of this tutorial, you will:
+
+1. Materialize canonical UserSim episode inputs.
+2. Run one multi-turn conversation against your model endpoint.
+3. Inspect the conversation, score, and underlying model calls.
+4. Optionally expand the run across 14 included evaluation scenarios.
+
+## Understand the workflow
+
+At a conceptual level, a UserSim rollout has four stages:
+
+1. **Resolve episode inputs:** UserSim's canonical sampler resolves persona, probe, theme, toolset, locale,
+   configuration, trajectory identity, and provenance. A **probe** tests a behavior such as answering
+   educational questions, using tools, or maintaining safety boundaries.
+2. **Wrap Gym tasks:** Gym places each unchanged UserSim row in a task envelope without resampling it.
+3. **Hold a conversation:** A simulated user and the assistant exchange messages over multiple dialogue rounds.
+   UserSim decides when the user's goal has been met or the conversation should stop.
+4. **Verify the result:** Gym stores the complete episode and UserSim's probe-specific evidence and score.
+
+In this tutorial, a **task** specifies what to simulate, and an **episode** is one attempt to run that task. The
+included UserSim environment contains an example suite with one task for each of UserSim's 14 first-party
+probes. The suite demonstrates and tests the integration.
+
+<Note>
+To run the tutorial, you only need to configure a model endpoint and run the preparation and evaluation
+commands. You do not need to understand the internal two-Agent topology or support-model routing. The optional
+architecture section later on explains it for readers who want to customize models, roles, or observability.
+</Note>
+
+<Info>
+The UserSim integration is under active development. It currently installs UserSim revision
+`b3381ae021baac2a6fb314b5f08a55845243017d` from GitHub over SSH. The installation host needs access to
+[NVIDIA-NeMo/UserSim](https://github.com/NVIDIA-NeMo/UserSim).
+</Info>
+
+## Prerequisites
+
+Install NeMo Gym and activate its environment as described in [Installation](/get-started/installation):
+
+```bash
+source .venv/bin/activate
+```
+
+Preparation runs the pinned UserSim revision in a preparation-only isolated environment. Runtime servers
+install the same revision into their own environments. Neither step modifies the Gym environment.
+
+Configure the User, Assistant policy, and structured-output support models in a local repository-root
+`env.yaml`:
+
+```yaml
+user_model_base_url: https://your-user-model-endpoint.example.com/v1
+user_model_api_key: ${oc.env:USER_MODEL_API_KEY}
+user_model_name: your-user-simulation-model
+
+policy_base_url: https://your-policy-endpoint.example.com/v1
+policy_api_key: ${oc.env:POLICY_API_KEY}
+policy_model_name: your-policy-model
+
+support_model_base_url: https://your-support-endpoint.example.com/v1
+support_model_api_key: ${oc.env:SUPPORT_MODEL_API_KEY}
+support_model_name: your-structured-output-model
+```
+
+Export the referenced secrets without committing them:
+
+```bash
+export USER_MODEL_API_KEY="<your-api-key>"
+export POLICY_API_KEY="<your-api-key>"
+export SUPPORT_MODEL_API_KEY="<your-api-key>"
+```
+
+The User Agent uses `user_model`, the Assistant Agent uses `policy_model`, and Judge, Summary, probe scoring,
+and tool-result simulation use `support_model`. These are three independently started Model Servers. Their
+upstream URLs may still match when one provider serves multiple roles, but separate settings let you evaluate
+an Assistant policy against a fixed user-simulation model. A support model that reliably honors JSON-schema
+response formats avoids coupling structured evaluation to participant-model reasoning behavior.
+
+## Prepare resolved inputs
+
+Run preparation once before starting the servers:
+
+```bash
+gym eval prepare --config environments/usersim/config.yaml
+```
+
+Preparation calls `usersim.engine.external.materialize_episode_inputs(...)` in the isolated environment and
+writes `environments/usersim/data/example.jsonl`. It produces one deterministic row for every registered
+probe. UserSim—not Gym—owns all sampled content and provenance.
+
+The equivalent UserSim CLI contract for one selected probe is:
+
+```bash
+usersim simulate \
+  --locale en_US \
+  --num-rows 1 \
+  --probe-mix tool_calling=1 \
+  --random-seed 42 \
+  --materialize-inputs \
+  --out episode-inputs.jsonl
+```
+
+Inspect the prepared inputs:
+
+```bash
+wc -l environments/usersim/data/example.jsonl
+jq '.task_input.resolved_row | {
+  probe_type, trajectory_id, usersim_provenance, usersim_config
+}' environments/usersim/data/example.jsonl
+```
+
+## Collect one rollout
+
+`--environment usersim --split example` selects the included 14-task example suite described above. Start
+with only the first task and one repeat:
+
+```bash
+mkdir -p results/usersim/model-calls
+capture_dir="$(pwd)/results/usersim/model-calls"
+
+gym eval run \
+  --environment usersim \
+  --split example \
+  --output results/usersim/rollouts.jsonl \
+  --limit 1 \
+  --num-repeats 1 \
+  +user_model_uses_reasoning_parser=false \
+  +policy_uses_reasoning_parser=true \
+  +support_model_uses_reasoning_parser=false \
+  ++observability_enabled=true \
+  ++model_call_capture_dir="${capture_dir}"
+```
+
+`gym eval run` starts the required Environment, Resources, Agent, and Model Servers for this command. Increase
+the limit only after the smoke rollout completes. UserSim's materialized row owns outer-turn configuration.
+A tool probe can make several model calls inside one Assistant activation before returning its final
+user-visible reply.
+The three reasoning-parser flags describe what each upstream endpoint returns, not the endpoint's role. Set a
+flag to `true` only when that endpoint returns reasoning fields that require parsing.
+
+## Understand the two-Agent topology (optional)
+
+You can run the workflow without knowing this architecture. It becomes relevant when you want to assign
+different models to roles, customize Agent behavior, or interpret low-level invocation traces.
+
+The Environment Server routes typed activation requests for two participant roles:
+
+- The **User Agent** produces the simulated user's messages.
+- The **Assistant Agent** produces the system-under-test responses and receives probe-specific tool access.
+
+The Environment Server reconstructs UserSim's `ConversationRuntime` from the prepared row. That runtime owns
+the outer episode lifecycle and requests each User, Assistant, Judge, or Summary activation. The Environment
+routes participant activations through the matching Agent Server and support activations directly to the
+support Model Server.
+
+Resources independently reconstructs a `ProbeToolSession` from the same immutable row. For `tool_calling`,
+`safety_agentic`, and `financial_services`, it owns the probe's tool schemas, effects, mutable state, semantic
+turn/call indices, and completed evidence. The Environment delegates one complete Assistant turn to the
+Assistant Agent. The Agent then autonomously executes every model → named Resources tool endpoint → model
+step and returns the complete turn transcript with hidden Resources evidence. The Environment submits that
+`CompletedAssistantTurn` to `ConversationRuntime`; it does not orchestrate the inner model/tool steps.
+Resources returns simulated payloads as opaque text, so plain-text mocks are not JSON-wrapped or retried.
+There are no UserSim-specific turn lifecycle endpoints: tool calls use the normal `POST /{tool_name}`
+Resources flow. The contextual metadata needed for native indices and evidence travels out of band from the
+model-visible tool payload. This completed-turn tool protocol currently uses the configured `direct_http`
+transport.
+
+The **Judge** and **Summary** support aliases are model calls rather than Agents. Native non-tool conversations
+can invoke them for semantic checks and optional context processing; Resources-owned verification, probe
+scoring, and tool-result synthesis also use `support_model`. This tutorial requires explicit policy and support
+endpoint settings. They may contain the same values only when that upstream model supports both conversational
+reasoning and strict structured output; the Gym aliases remain distinct.
+
+Persisted Environment-owned invocations use the semantic `user`, `assistant`, `judge`, and `summary` roles as
+applicable. The Resources Server separately owns the episode-scoped `ProbeToolSession`, tool-result synthesis,
+and final verification. Its `probe_scorer_model` also references `support_model`.
+
+Prepared task rows can provide optional per-role request defaults through `responses_create_params`. The
+Environment Server supplies the current conversation as each activation's Responses API `input`; the task
+does not contain a prebuilt transcript.
+
+## Inspect the collected contracts
+
+First inspect the persisted top-level shape and the materialized input:
+
+```bash
+jq 'keys' results/usersim/rollouts.jsonl
+jq . results/usersim/rollouts_materialized_inputs.jsonl
+```
+
+A successful UserSim episode stores its protocol output and verification directly on the rollout row. Inspect
+them separately:
+
+```bash
+jq '{
+  task_id: ._ng_task_id,
+  protocol: .episode_interaction_protocol,
+  verification,
+  usersim_result
+}' results/usersim/rollouts.jsonl
+```
+
+The scalar reward is UserSim's `assistant_quality`: the mean of normalized
+helpfulness, accuracy, and coherence scores from its trajectory evaluator.
+`reward_components` also contains every applicable normalized quality axis.
+Resources calls UserSim's hosted `TrajectoryEvaluatorRuntime` once, so the
+full native `assistant_eval` cell contains both applicable probe-scorer output
+and quality-axis judge reasoning. That cell is retained under
+`verification.verifier_data`. A conversation must complete with both
+participants, and any probe-specific scorer must pass, before its quality
+score becomes the Gym reward.
+
+Check `verification.mask_sample` before aggregating rewards. User-simulation,
+judge, or infrastructure failures are masked because they do not measure the
+Assistant policy. A completed Assistant failure remains unmasked.
+
+The ordered invocation ledger is the Environment Server's trajectory contract:
+
+```bash
+jq '.invocations[] | {
+  sequence,
+  role,
+  request,
+  response,
+  observations,
+  state_after,
+  termination_reason
+}' results/usersim/rollouts.jsonl
+```
+
+`role` is one of `user`, `assistant`, `judge`, or `summary`. Internal UserSim model aliases and an
+agent-versus-model executor label are intentionally not exposed. The `request` and `response` fields preserve
+the exact Responses API exchange for each Environment-owned activation.
+
+<Note>
+The final rollout is an episode response, not one flattened Assistant transcript. The invocation ledger records
+Environment-owned activations. Resources-owned tool-result synthesis and probe-specific verification calls
+remain in probe or verification evidence rather than appearing as Environment Agent activations.
+</Note>
+
+The raw model-call capture shows Agent-internal policy steps that can outnumber Environment invocations:
+
+```bash
+find "${capture_dir}" -type f -maxdepth 3 -print
+jq '.ng_model_call_capture, .ng_trajectory' results/usersim/rollouts.jsonl
+```
+
+Use these layers for different questions:
+
+- `result.usersim_result`: UserSim's native conversation and outcome.
+- `result.verification`: assistant-quality reward, normalized axes, and native scorer evidence.
+- `result.invocations`: ordered, role-attributed Environment activations.
+- `ng_model_call_capture`: underlying model calls, token usage, latency, and tool-call evidence.
+- `ng_trajectory`: normalized Gym observability when the participating Agent provides it.
+
+The concrete Pydantic contracts are defined in
+[`resources_servers/usersim/episode_contracts.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/usersim/episode_contracts.py).
+
+## Run more probes
+
+After inspecting the smoke rollout, remove `--limit 1` to run the 14 prepared examples:
+
+```bash
+gym eval run \
+  --environment usersim \
+  --split example \
+  --output results/usersim/all-probes.jsonl \
+  --num-repeats 1 \
+  +policy_uses_reasoning_parser=true \
+  +support_model_uses_reasoning_parser=false \
+  ++observability_enabled=true \
+  ++model_call_capture_dir="${capture_dir}"
+```
+
+The `tool_calling`, `safety_agentic`, and `financial_services` probes expose episode-scoped simulated tools to
+the Assistant Agent. The Resources Server verifies their tool evidence and dispatches the probe's native
+UserSim scorer when one applies.
