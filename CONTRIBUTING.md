@@ -340,3 +340,19 @@ dispatch, with no change detection:
 - **Wheel install test** — builds the wheel, installs it in a fresh venv against a mock inference endpoint, and runs `ng_help`, `ng_dump_config`, `ng_init_resources_server`, `ng_run`, and `ng_collect_rollouts` end-to-end.
 - **Slack notification** — reports failures for eligible `main` or release refs;
   a manually dispatched run may disable notification.
+
+## Pull-request reviews
+
+Comment `/review` on a pull request for the formal review service. Use
+`/review mode=strict` for deeper analysis, or add `model=claude` to select a
+Claude reviewer instead of the default Codex reviewer. `/review help` lists
+all options. The retired `/claude review` and `/claude strict-review` commands
+only reply with migration instructions; they do not run or automatically
+request a review.
+
+The repository policy lives in `.agents/skills/pr-review/SKILL.md`. The review service
+must load this rubric from protected `main`, not the pull-request branch.
+Before deploying this migration, publish the rubric, register its repository
+profile, and verify a Ready plugin snapshot containing it. Until those
+prerequisites are verified, do not rely on the redirect as evidence that the
+repository-specific review policy is active.
