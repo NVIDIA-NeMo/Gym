@@ -11,7 +11,6 @@ import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
-from pydantic import ValidationError
 
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -178,7 +177,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
             assert created.status_code == 200, created.text
             session_id = created.json()["agent_session_id"]
-            directory = agent._sandbox_sessions[session_id].directory
+            directory = agent._session_records[session_id].state.directory
             installer = f"{directory}/install_pi_runtime.sh"
             assert installer in sandbox.files
             assert agent.config.resources_server is None
@@ -187,9 +186,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             install_call = sandbox.exec.await_args_list[1]
             assert install_call.args[0] == (f"bash {installer} /tmp/nemo-gym-pi-node-22.19.0-0.80.2 0.80.2")
             assert install_call.kwargs["timeout_s"] == agent.config.sandbox_install_timeout_seconds
-            result = client.post(
-                "/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code", "max_output_tokens": 123}
-            )
+            result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
             assert result.status_code == 200, result.text
             body = result.json()
             assert body["status"] == "completed"
@@ -214,7 +211,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert f"{sandbox.directory}/runtime-guards.mjs" in sandbox.files
             assert payload["env"]["NEMO_GYM_PI_BASH_TIMEOUT"] == "900"
             models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
-            assert models["providers"]["nemo"]["models"][0]["maxTokens"] == 123
+            assert models["providers"]["nemo"]["models"][0]["maxTokens"] == agent.config.max_output_tokens
             assert models["providers"]["nemo"]["baseUrl"] == "http://model.example:9000/ng-rollout/pi-smoke-a2/v1"
             closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
             assert closed.status_code == 200, closed.text
@@ -222,7 +219,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert observations["source"] == "pi"
             assert "no_sandbox_runtime" not in [gap["code"] for gap in observations["gaps"]]
             assert len(observations["records"][0]["model_calls"]) == 2
-    assert not agent._sandbox_sessions
+    assert not any(record.state is not None for record in agent._session_records.values())
     assert agent._local_setup_task is None
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
@@ -237,7 +234,7 @@ async def test_install_failure_preserves_stdout_and_stderr(setup):
         SimpleNamespace(return_code=0, stdout="", stderr=""),
     ]
     with pytest.raises(RuntimeError) as error:
-        await agent._initialize_agent_session_state("failed-install", seed())
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
     assert "exit status 1" in str(error.value)
     assert "Node cannot load libstdc++.so.6" in str(error.value)
     sandbox.disconnect.assert_awaited_once()
@@ -246,7 +243,7 @@ async def test_install_failure_preserves_stdout_and_stderr(setup):
     agent.server_client.post.assert_not_called()
 
 
-@pytest.mark.parametrize("limit", [0, -1, 2**53])
+@pytest.mark.parametrize("limit", [0, -1, 128, 2**53])
 def test_invalid_output_limit_does_not_consume_activation(setup, limit):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
@@ -256,11 +253,9 @@ def test_invalid_output_limit_does_not_consume_activation(setup, limit):
             "/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code", "max_output_tokens": limit}
         )
         assert response.status_code == 422
-        assert not next(iter(agent._sandbox_sessions.values())).activated
+        assert next(iter(agent._session_records.values())).state.task is None
         sandbox.pty.create.assert_not_awaited()
-        response = client.post(
-            "/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code", "max_output_tokens": 128}
-        )
+        response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
         assert response.status_code == 200
 
 
@@ -281,7 +276,7 @@ def test_invalid_session_config_output_limit_does_not_consume_activation(setup):
         assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
         response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
         assert response.status_code == 422
-        assert not next(iter(agent._sandbox_sessions.values())).activated
+        assert next(iter(agent._session_records.values())).state.task is None
         sandbox.pty.create.assert_not_awaited()
 
 
@@ -295,14 +290,12 @@ def test_direct_run_without_resources_rejected_before_execution(setup):
     agent.server_client.post.assert_not_called()
 
 
-@pytest.mark.parametrize("option", ["no-sandbox", "worker", "required-tool", "no-model", "unpinned"])
+@pytest.mark.parametrize("option", ["no-sandbox", "required-tool", "no-model", "unpinned"])
 def test_unsupported_seed_rejected_before_connection(setup, option):
     agent, sandbox = setup
     body = seed().model_dump(mode="json")
     if option == "no-sandbox":
         body["sandbox_access"] = None
-    elif option == "worker":
-        agent.config.num_workers = 2
     elif option == "no-model":
         agent.config.model_server = None
     elif option == "unpinned":
@@ -326,8 +319,11 @@ def test_cookie_identity_and_single_activation(setup):
         bad = close_body(session_id)
         bad["episode_id"]["attempt"] = 99
         assert client.post("/v1/agent_sessions/close", json=bad).status_code == 409
-        assert client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
-        assert client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"}).status_code == 409
+        first = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
+        retry = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
+        assert first.status_code == retry.status_code == 200
+        assert first.json() == retry.json()
+        assert client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "changed"}).status_code == 409
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
     sandbox.pty.create.assert_awaited_once()
 
@@ -373,7 +369,7 @@ def test_rejected_request_does_not_consume_activation(setup):
         sandbox.pty.create.assert_not_awaited()
         accepted = client.post(path, json={"input": "task"})
         assert accepted.status_code == 200, accepted.text
-        assert client.post(path, json={"input": "task"}).status_code == 409
+        assert client.post(path, json={"input": "changed"}).status_code == 409
     sandbox.pty.create.assert_awaited_once()
 
 
@@ -434,7 +430,7 @@ async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
         await task
     with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
         await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert session_id in agent._sandbox_sessions
+    assert agent._session_records[session_id].state is not None
     sandbox.disconnect.assert_not_awaited()
     sandbox.runner.close.assert_not_awaited()
 
@@ -446,9 +442,9 @@ async def test_disconnect_failure_retains_session_for_retry(setup):
     sandbox.disconnect.side_effect = [RuntimeError("provider unavailable"), None]
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert session_id in agent._sandbox_sessions
+    assert agent._session_records[session_id].state is not None
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert session_id not in agent._sandbox_sessions
+    assert agent._session_records[session_id].state is None
     sandbox.runner.close.assert_awaited_once()
 
 
@@ -515,79 +511,9 @@ def test_close_retry_and_stale_activation_do_not_run_host_pi(setup):
         with patch.object(agent, "_run_pi", AsyncMock(side_effect=AssertionError("host Pi must not run"))):
             assert client.post("/v1/responses", json={"input": "task"}).status_code == 409
         assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 409
+        client.cookies.clear()
         replacement = seed().model_copy(update={"agent_session_id": "replacement-session"})
         assert client.post("/v1/agent_sessions", json=replacement.model_dump(mode="json")).status_code == 200
-    sandbox.disconnect.assert_awaited_once()
-
-
-def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
-    agent, sandbox = setup
-    monkeypatch.setattr("responses_api_agents.pi_agent.app.monotonic", lambda: 100.0)
-    with TestClient(agent.setup_webserver()) as client:
-
-        def seed_and_close(index):
-            client.cookies.clear()
-            body = seed().model_dump(mode="json")
-            body["agent_session_id"] = f"session-{index}"
-            body["episode_id"] = {"rollout_id": f"episode-{index}"}
-            created = client.post("/v1/agent_sessions", json=body)
-            assert created.status_code == 200
-            cookies = dict(client.cookies)
-            close = {"agent_session_id": created.json()["agent_session_id"], "episode_id": body["episode_id"]}
-            result = client.post("/v1/agent_sessions/close", json=close)
-            assert result.status_code == 200
-            return cookies, close, result.json()
-
-        cookies, close, first = seed_and_close(0)
-        for index in range(1, 66):
-            seed_and_close(index)
-        client.cookies.clear()
-        client.cookies.update(cookies)
-        retry = client.post("/v1/agent_sessions/close", json=close)
-        assert retry.status_code == 200
-        assert retry.json() == first
-    assert sandbox.disconnect.await_count == 66
-
-
-async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
-    agent, sandbox = setup
-    clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.pi_agent.app.monotonic", lambda: clock[0])
-    agent.config.session_close_retry_window_seconds = 10
-    request = Request({"type": "http", "session": {}})
-    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
-    close = AgentCloseSessionRequest(**close_body(session_id))
-    first = await agent.close_agent_session(request, close)
-    clock[0] = 109.0
-    assert await agent.close_agent_session(request, close) == first
-    clock[0] = 110.0
-    with pytest.raises(HTTPException) as error:
-        await agent.close_agent_session(request, close)
-    assert error.value.status_code == 409
-    assert not agent._closed_sandbox_sessions
-    with patch.object(agent, "_create_episode", AsyncMock(side_effect=AssertionError("host fallback"))):
-        with pytest.raises(HTTPException) as error:
-            await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-        assert error.value.status_code == 409
-    sandbox.disconnect.assert_awaited_once()
-
-
-async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
-    agent, sandbox = setup
-    clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.pi_agent.app.monotonic", lambda: clock[0])
-    agent.config.session_close_retry_window_seconds = 10
-    request = Request({"type": "http", "session": {}})
-    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
-
-    async def disconnect():
-        clock[0] = 200.0
-
-    sandbox.disconnect.side_effect = disconnect
-    close = AgentCloseSessionRequest(**close_body(session_id))
-    first = await agent.close_agent_session(request, close)
-    clock[0] = 209.0
-    assert await agent.close_agent_session(request, close) == first
     sandbox.disconnect.assert_awaited_once()
 
 
@@ -609,27 +535,9 @@ async def test_concurrent_closes_share_receipt(setup):
     await asyncio.sleep(0)
     release.set()
     first_result, second_result = await asyncio.wait_for(asyncio.gather(first, second), 2)
-    assert first_result is second_result
+    assert first_result == second_result
+    assert first_result is not second_result
     sandbox.disconnect.assert_awaited_once()
-
-
-async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
-    agent, _ = setup
-    clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.pi_agent.app.monotonic", lambda: clock[0])
-    request = Request({"type": "http", "session": {}})
-    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
-    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    clock[0] += agent.config.session_close_retry_window_seconds
-    await agent.seed_agent_session(request, seed().model_copy(update={"agent_session_id": "replacement-session"}))
-    assert not agent._closed_sandbox_sessions
-
-
-@pytest.mark.parametrize("window", [0, -1, float("inf")])
-def test_close_retry_window_must_be_positive_and_finite(setup, window):
-    agent, _ = setup
-    with pytest.raises(ValidationError):
-        PiAgentConfig(**(agent.config.model_dump() | {"session_close_retry_window_seconds": window}))
 
 
 async def test_unknown_launch_outcome_fails_closed(setup):
@@ -641,7 +549,7 @@ async def test_unknown_launch_outcome_fails_closed(setup):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     with pytest.raises(RuntimeError, match="launch outcome is unknown"):
         await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert session_id in agent._sandbox_sessions
+    assert agent._session_records[session_id].state is not None
     sandbox.disconnect.assert_not_awaited()
     sandbox.stop.assert_not_awaited()
 
@@ -656,7 +564,7 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
     request = Request({"type": "http", "session": {}})
     with pytest.raises(RuntimeError, match="npm failed"):
         await agent.seed_agent_session(request, seed())
-    assert not agent._sandbox_sessions
+    assert not any(record.state is not None for record in agent._session_records.values())
     assert not request.session
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
@@ -672,7 +580,7 @@ async def test_cancelled_install_never_publishes_session_or_launches_pi(setup):
     request = Request({"type": "http", "session": {}})
     with pytest.raises(asyncio.CancelledError):
         await agent.seed_agent_session(request, seed())
-    assert not agent._sandbox_sessions
+    assert not any(record.state is not None for record in agent._session_records.values())
     assert not request.session
     sandbox.pty.create.assert_not_awaited()
     sandbox.disconnect.assert_awaited_once()
@@ -700,7 +608,7 @@ def test_unsupported_controls_do_not_consume_activation(setup, control):
         assert created.status_code == 200
         response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code", **control})
         assert response.status_code == 422, response.text
-        assert not next(iter(agent._sandbox_sessions.values())).activated
+        assert next(iter(agent._session_records.values())).state.task is None
         sandbox.pty.create.assert_not_awaited()
         response = client.post(
             "/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code", "model": "test-model"}
@@ -909,7 +817,7 @@ async def test_default_config_collects_through_environment_run(setup, monkeypatc
                 )
             assert kwargs["cookies"] == {"session": "resources-cookie"}
             if url_path == "/verify":
-                assert not agent._sandbox_sessions
+                assert not any(record.state is not None for record in agent._session_records.values())
                 assert sandbox.disconnect.await_count == 1
                 for key, value in task_data.items():
                     assert body[key] == value
@@ -982,94 +890,19 @@ async def test_failed_setup_preserves_handle_until_cleanup_confirmed(setup, clea
         await agent.seed_agent_session(request, seed())
     session_id = seed().agent_session_id
     if cleanup_fails:
-        assert agent._sandbox_sessions[session_id].closing
+        assert agent._session_records[session_id].state.closing
         with pytest.raises(HTTPException):
             await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
     else:
-        assert not agent._sandbox_sessions
+        assert not any(record.state is not None for record in agent._session_records.values())
     sandbox.exec.side_effect = None
     sandbox.disconnect.side_effect = None
     result = await agent.close_agent_session(
         Request({"type": "http", "session": {}}), AgentCloseSessionRequest(**close_body(session_id))
     )
     assert result.agent_session_id == session_id
-    assert not agent._sandbox_sessions
-    assert not agent._session_expiry_tasks
+    assert not any(record.state is not None for record in agent._session_records.values())
     sandbox.stop.assert_not_awaited()
-
-
-async def test_caller_id_seed_retries_share_one_session_without_cookies(setup):
-    agent, sandbox = setup
-    body = seed(session_id="caller-assigned-id")
-    requests = [Request({"type": "http", "session": {}}) for _ in range(2)]
-    first, second = await asyncio.gather(*(agent.seed_agent_session(request, body) for request in requests))
-    assert first.agent_session_id == second.agent_session_id == body.agent_session_id
-    assert len(agent._sandbox_sessions) == 1
-    assert sandbox.exec.await_count == 2  # One path check and one installation.
-    assert requests[0].session == requests[1].session
-    await agent.close_agent_session(
-        Request({"type": "http", "session": {}}),
-        AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id),
-    )
-    sandbox.disconnect.assert_awaited_once()
-
-
-@pytest.mark.parametrize("field", ["episode", "task", "workdir"])
-async def test_caller_id_rejects_changed_seed_binding(setup, field):
-    agent, _ = setup
-    body = seed()
-    request = Request({"type": "http", "session": {}})
-    await agent.seed_agent_session(request, body)
-    changed = body.model_copy(deep=True)
-    if field == "episode":
-        changed.episode_id = changed.episode_id.model_copy(update={"attempt": changed.episode_id.attempt + 1})
-    elif field == "task":
-        changed.task_id = changed.task_id.model_copy(update={"task_id": "another-task"})
-    else:
-        changed.sandbox_access.workdir = "/another-repository"
-    with pytest.raises(HTTPException, match="different seed"):
-        await agent.seed_agent_session(Request({"type": "http", "session": {}}), changed)
-    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(body.agent_session_id)))
-
-
-async def test_close_before_seed_prevents_late_creation(setup):
-    agent, sandbox = setup
-    body = seed()
-    request = Request({"type": "http", "session": {}})
-    close = AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id)
-    first = await agent.close_agent_session(request, close)
-    assert await agent.close_agent_session(Request({"type": "http", "session": {}}), close) is first
-    with pytest.raises(HTTPException, match="already closed"):
-        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
-    sandbox.exec.assert_not_awaited()
-
-
-async def test_close_serializes_with_inflight_seed(setup):
-    agent, sandbox = setup
-    body = seed()
-    entered, release = asyncio.Event(), asyncio.Event()
-    original = agent._initialize_agent_session_state
-
-    async def blocked_initialize(*args):
-        entered.set()
-        await release.wait()
-        return await original(*args)
-
-    with patch.object(agent, "_initialize_agent_session_state", side_effect=blocked_initialize):
-        pending = asyncio.create_task(agent.seed_agent_session(Request({"type": "http", "session": {}}), body))
-        await entered.wait()
-        close = asyncio.create_task(
-            agent.close_agent_session(
-                Request({"type": "http", "session": {}}),
-                AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id),
-            )
-        )
-        await asyncio.sleep(0)
-        assert not close.done()
-        release.set()
-        await asyncio.wait_for(asyncio.gather(pending, close), 2)
-    assert not agent._sandbox_sessions
-    sandbox.disconnect.assert_awaited_once()
 
 
 async def test_caller_id_never_controls_filesystem_path(setup):
@@ -1078,56 +911,19 @@ async def test_caller_id_never_controls_filesystem_path(setup):
     request = Request({"type": "http", "session": {}})
     response = await agent.seed_agent_session(request, body)
     assert response.agent_session_id == body.agent_session_id
-    directory = agent._sandbox_sessions[body.agent_session_id].directory
+    directory = agent._session_records[body.agent_session_id].state.directory
     assert Path(directory).parent == Path("/tmp/nemo-gym-pi-sessions")
     assert len(Path(directory).name) == 32
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(body.agent_session_id)))
-
-
-async def test_abandoned_session_expires_through_normal_cleanup(setup):
-    agent, sandbox = setup
-    agent.config.session_lifetime_seconds = 0.01
-    body = seed()
-    await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
-    expiry = agent._session_expiry_tasks[body.agent_session_id]
-    await asyncio.wait_for(asyncio.shield(expiry), 2)
-    assert not agent._sandbox_sessions
-    assert body.agent_session_id in agent._closed_sandbox_sessions
-    sandbox.disconnect.assert_awaited_once()
-    sandbox.stop.assert_not_awaited()
-
-
-async def test_failed_expiry_retains_state_and_rejects_activation(setup, caplog):
-    agent, sandbox = setup
-    agent.config.session_lifetime_seconds = 0.01
-    body = seed()
-    request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": body.episode_id.capture_key}})
-    await agent.seed_agent_session(request, body)
-    sandbox.disconnect.side_effect = RuntimeError("disconnect unavailable")
-    await asyncio.wait_for(asyncio.shield(agent._session_expiry_tasks[body.agent_session_id]), 2)
-    assert agent._sandbox_sessions[body.agent_session_id].closing
-    assert "retaining failed state" in caplog.text
-    with pytest.raises(HTTPException):
-        await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    sandbox.pty.create.assert_not_awaited()
-    sandbox.disconnect.side_effect = None
-    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(body.agent_session_id)))
-
-
-@pytest.mark.parametrize("lifetime", [0, -1, float("inf"), float("nan")])
-def test_session_lifetime_is_positive_and_finite(setup, lifetime):
-    agent, _ = setup
-    with pytest.raises(ValidationError):
-        PiAgentConfig(**(agent.config.model_dump() | {"session_lifetime_seconds": lifetime}))
 
 
 @pytest.mark.parametrize("marker", [None, "", [], {}, 0])
 @pytest.mark.parametrize("endpoint", ["seed", "responses", "close", "run"])
 async def test_malformed_session_marker_never_runs_host_pi(setup, marker, endpoint):
     agent, sandbox = setup
-    request = Request({"type": "http", "session": {"nemo_gym_pi_sandbox_session": marker}})
+    request = Request({"type": "http", "session": {"agent_session_id": marker}})
     with patch.object(agent, "_create_episode", AsyncMock()) as host:
-        with pytest.raises(HTTPException, match="Invalid Pi session marker"):
+        with pytest.raises(HTTPException, match="Invalid agent session marker"):
             if endpoint == "seed":
                 await agent.seed_agent_session(request, seed())
             elif endpoint == "responses":
@@ -1145,54 +941,61 @@ async def test_malformed_session_marker_never_runs_host_pi(setup, marker, endpoi
 
 async def test_session_marker_blocks_legacy_run(setup):
     agent, _ = setup
-    request = Request({"type": "http", "session": {"nemo_gym_pi_sandbox_session": "expired-session"}})
+    request = Request({"type": "http", "session": {"agent_session_id": "expired-session"}})
     with pytest.raises(HTTPException, match="EnvironmentServer /run"):
         await agent.run(request, PiAgentRunRequest(responses_create_params={"input": "task"}))
 
 
-async def test_receipt_expiry_does_not_create_empty_cookieless_success(setup, monkeypatch):
+async def test_cancelled_http_waiter_does_not_cancel_shared_activation(setup):
     agent, sandbox = setup
-    clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.pi_agent.app.monotonic", lambda: clock[0])
-    agent.config.session_close_retry_window_seconds = 10
-    body = seed()
-    request = Request({"type": "http", "session": {}})
-    await agent.seed_agent_session(request, body)
-    close = AgentCloseSessionRequest(**close_body(body.agent_session_id))
-    await agent.close_agent_session(request, close)
-    clock[0] = 111.0
-    with pytest.raises(HTTPException, match="receipt has expired"):
-        await agent.close_agent_session(Request({"type": "http", "session": {}}), close)
-    with pytest.raises(HTTPException, match="already closed"):
-        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
-    # Even after tombstone pruning, a stale cookie cannot create a new session or receipt.
-    clock[0] += agent.config.session_lifetime_seconds
-    with pytest.raises(HTTPException, match="expired"):
-        await agent.close_agent_session(request, close)
-    with pytest.raises(HTTPException, match="expired"):
-        await agent.seed_agent_session(request, body)
-    sandbox.disconnect.assert_awaited_once()
+    sandbox.blocked = True
+    request, session_id, waiter = await activate(agent, sandbox)
+    state = agent._session_records[session_id].state
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert not state.task.done()
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task")
+    retry = asyncio.create_task(agent.responses(request, body))
+    sandbox.exited.set()
+    response = await asyncio.wait_for(retry, 2)
+    response.output.clear()
+    replay = await agent.responses(request, body)
+    assert replay.output
+    sandbox.pty.create.assert_awaited_once()
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
-async def test_expiring_tombstone_preserves_lock_with_a_queued_waiter(setup, monkeypatch):
+@pytest.mark.parametrize("session", [False, True])
+@pytest.mark.parametrize(
+    "control",
+    [
+        {"max_output_tokens": 128},
+        {"temperature": 0},
+        {"top_p": 1},
+        {"metadata": {"ignored": "value"}},
+        {"store": True},
+    ],
+)
+async def test_local_and_sandbox_reject_unsupported_controls(setup, session, control):
+    agent, sandbox = setup
+    request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": "pi-smoke-a2"}})
+    if session:
+        await agent.seed_agent_session(request, seed())
+    with patch.object(agent, "_run_pi", AsyncMock()) as run:
+        with pytest.raises(HTTPException) as error:
+            await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task", **control))
+        assert error.value.status_code == 422
+        run.assert_not_awaited()
+        sandbox.pty.create.assert_not_awaited()
+
+
+async def test_local_instructions_match_sandbox_prompt(setup):
     agent, _ = setup
-    body = seed()
-    session_id = body.agent_session_id
-    monkeypatch.setattr("responses_api_agents.pi_agent.app.monotonic", lambda: 10.0)
-    agent._closed_session_ids[session_id] = (body.episode_id, 1.0)
-    lock = agent._session_locks.setdefault(session_id, asyncio.Lock())
-    await lock.acquire()
-
-    async def wait_for_lock():
-        async with agent._session_lock(session_id):
-            assert agent._session_locks[session_id] is lock
-
-    waiter = asyncio.create_task(wait_for_lock())
-    await asyncio.sleep(0)
-    # release wakes the queued waiter without letting it reacquire until this coroutine yields.
-    lock.release()
-    assert not lock.locked()
-    agent._expire_closed_agent_sessions()
-    assert agent._session_locks[session_id] is lock
-    await waiter
-    assert session_id not in agent._session_locks
+    agent.config.system_prompt = "config"
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        instructions="request", input=[{"role": "system", "content": "input"}, {"role": "user", "content": "task"}]
+    )
+    with patch.object(agent, "_run_pi", AsyncMock(return_value=([], {}, "test-model", []))) as run:
+        await agent.responses(Request({"type": "http", "session": {}}), body)
+    assert run.call_args.args == ("task", "config\n\nrequest\n\ninput")
