@@ -139,7 +139,7 @@ roles:
       NCCL_MNNVL_ENABLE: '1'
       NCCL_CUMEM_ENABLE: '1'
       UCX_PROTO_INFO: y
-      UCX_LOG_LEVEL: err
+      UCX_LOG_LEVEL: error
       SGLANG_DISABLE_USAGE_REPORT: '1'
       HF_HOME: /tmp/nemotron35-hf
       HF_HUB_CACHE: /tmp/nemotron35-hf/hub
@@ -202,7 +202,7 @@ roles:
       NCCL_MNNVL_ENABLE: '1'
       NCCL_CUMEM_ENABLE: '1'
       UCX_PROTO_INFO: y
-      UCX_LOG_LEVEL: info
+      UCX_LOG_LEVEL: error
       SGLANG_DISABLE_USAGE_REPORT: '1'
       HF_HOME: /tmp/nemotron35-hf
       HF_HUB_CACHE: /tmp/nemotron35-hf/hub
