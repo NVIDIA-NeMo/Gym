@@ -343,7 +343,7 @@ def test_cookie_identity_and_single_activation(setup):
     sandbox.launch.assert_awaited_once()
 
 
-@pytest.mark.parametrize("reason,expected", [("error", "failed"), ("aborted", "failed"), ("length", "incomplete")])
+@pytest.mark.parametrize("reason,expected", [("aborted", "incomplete"), ("length", "incomplete")])
 def test_failed_or_partial_pi_output_is_preserved(setup, reason, expected):
     agent, sandbox = setup
     sandbox.events = events(stop_reason=reason)
@@ -643,9 +643,7 @@ def sandbox_event_response(agent, sandbox, recorded_events):
     return response.json(), closed.json()["agent_observations"]
 
 
-@pytest.mark.parametrize(
-    "final_stop, expected", [("stop", "completed"), ("length", "incomplete"), ("error", "failed")]
-)
+@pytest.mark.parametrize("final_stop, expected", [("stop", "completed"), ("length", "incomplete")])
 def test_retry_uses_terminal_assistant_outcome(setup, final_stop, expected):
     agent, sandbox = setup
     initial = {
@@ -1123,3 +1121,28 @@ async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_ses
     await state.close(2)
     assert not Path(state.directory).exists()
     state.sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("context_overflow", [False, True])
+async def test_provider_failure_is_not_gradable_but_context_limit_preserves_patch(setup, context_overflow):
+    agent, sandbox = setup
+    recorded = [json.loads(line)[1] for line in events(stop_reason="error").splitlines()]
+    recorded.insert(-2, {"type": "ng_pi_outcome", "context_overflow": context_overflow})
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
+    request, session_id, task = await activate(agent, sandbox)
+    if context_overflow:
+        response = await task
+        assert response.status == "incomplete"
+        assert response.error is None
+        assert response.output[-1].content[0].text == "Fixed"
+    else:
+        with pytest.raises(RuntimeError, match="Pi agent failed: model error"):
+            await task
+        # The shared activation replays the failure instead of running the harness again.
+        with pytest.raises(RuntimeError, match="Pi agent failed: model error"):
+            await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert len(close.agent_observations.records[0].model_calls) == 2
+    assert close.agent_observations.records[0].status == ("incomplete" if context_overflow else "failed")
+    sandbox.launch.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()

@@ -149,8 +149,9 @@ detail, not a separate endpoint or a setup step users must run.
 ## Results and limits
 
 Responses retain thinking text, tool calls/results, and Pi-reported usage, including cached
-input tokens. A failed or timed-out invocation preserves partial output. Successful agent
-close is required before the benchmark decides whether partial work earns reward.
+input tokens. Model limits and timeouts preserve gradable partial work after successful agent close.
+Provider/API and runtime failures propagate as execution failures and do not enter verification;
+they must not be reported as incorrect solutions. Close still returns captured observations.
 Pi does not set reward or masking policy.
 
 Response metadata includes `harness_execution: sandbox`, hostname, supervisor PID, and
