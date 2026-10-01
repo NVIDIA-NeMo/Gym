@@ -16,10 +16,10 @@ from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ContextCompactionObservation,
     TrajectoryRecord,
+    join_assistant_message_calls,
     join_model_call_observations,
 )
 from responses_api_agents.opencode_agent.app import _parse_opencode_session
-from responses_api_agents.opencode_agent.observability import associate_opencode_message_calls
 from responses_api_agents.opencode_agent.tests.test_app import _session_db
 from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
 
@@ -83,7 +83,7 @@ def _ids(owner):
 
 
 def _message_gaps(bundle):
-    return [gap for gap in bundle.gaps if gap.code.startswith("opencode_message_call_")]
+    return [gap for gap in bundle.gaps if gap.code.startswith("assistant_message_call_")]
 
 
 def test_capture_merge_links_retries_child_turns_and_compaction_by_ids(tmp_path, parse):
@@ -157,15 +157,15 @@ def test_missing_pre_stream_turn_keeps_failed_call_invocation_owned(tmp_path, pa
     assert call.response_metadata.error_category == error_category
     assert record["ng_model_call_capture"]["calls"][0]["error_category"] == error_category
     assert [(gap.code, gap.invocation_id, gap.detail) for gap in _message_gaps(bundle)] == [
-        ("opencode_message_call_unmatched", "root", "m0:failed")
+        ("assistant_message_call_unmatched", "root", "m0:failed")
     ]
 
 
 @pytest.mark.parametrize(
     "model_ref,expected_gap",
     [
-        ({"type": "responses_api_models", "name": "other"}, "opencode_message_call_unmatched"),
-        (None, "opencode_message_call_unmatched"),
+        ({"type": "responses_api_models", "name": "other"}, "assistant_message_call_unmatched"),
+        (None, "assistant_message_call_unmatched"),
     ],
 )
 def test_wrong_or_missing_model_scope_never_links_turn(tmp_path, parse, model_ref, expected_gap):
@@ -195,7 +195,7 @@ def test_wrong_rollout_identity_never_links_turn(tmp_path, parse):
 
     assert canonical.turns[0].model_calls == []
     assert _ids(canonical.invocations[0]) == ["call"]
-    assert [gap.code for gap in _message_gaps(bundle)] == ["opencode_message_call_rollout_mismatch"]
+    assert [gap.code for gap in _message_gaps(bundle)] == ["assistant_message_call_rollout_mismatch"]
     assert "producer_trajectory_identity_mismatch" in {gap.code for gap in canonical.gaps}
 
 
@@ -214,7 +214,7 @@ def test_ambiguous_identity_never_links_turn(tmp_path, parse, duplicate):
     projected = TrajectoryRecord.model_validate(record["ng_trajectory"])
 
     assert all(not turn.model_calls for turn in projected.turns)
-    assert [gap.code for gap in _message_gaps(bundle)] == ["opencode_message_call_ambiguous"]
+    assert [gap.code for gap in _message_gaps(bundle)] == ["assistant_message_call_ambiguous"]
     assert len(record["ng_model_call_capture"]["calls"]) == (2 if duplicate == "capture" else 1)
 
 
@@ -243,8 +243,8 @@ def test_association_is_idempotent_and_does_not_mutate_inputs(tmp_path, parse):
     observations = join_model_call_observations(observations, calls)
     before = deepcopy((observations, trajectory, calls))
 
-    first = associate_opencode_message_calls(observations, trajectory, calls)
-    second = associate_opencode_message_calls(*first, calls)
+    first = join_assistant_message_calls(observations, trajectory, calls)
+    second = join_assistant_message_calls(*first, calls)
 
     assert first == second
     assert (observations, trajectory, calls) == before
@@ -283,7 +283,7 @@ def test_compaction_parent_membership_is_scoped_to_session_and_preserves_all_sum
     assert _ids(compaction) == ["first", "second"]
     assert "compaction_summary_ambiguous" in {gap.code for gap in bundle.gaps}
     assert [(gap.code, gap.invocation_id, gap.detail) for gap in _message_gaps(bundle)] == [
-        ("opencode_message_call_unmatched", "child", "m3:foreign")
+        ("assistant_message_call_unmatched", "child", "m3:foreign")
     ]
     child = next(item for item in canonical.invocations if item.invocation_id == "child")
     assert _ids(child) == ["foreign"]
@@ -306,14 +306,12 @@ def test_message_join_failure_preserves_invocation_ownership(tmp_path, parse, mo
         def fail_association(*_args, **_kwargs):
             raise RuntimeError("message association failed")
 
-        monkeypatch.setattr(
-            "responses_api_agents.opencode_agent.observability.associate_opencode_message_calls", fail_association
-        )
+        monkeypatch.setattr("nemo_gym.base_responses_api_model.join_assistant_message_calls", fail_association)
 
     merge_model_call_capture_into_record(record, [store.root], include_payloads=True)
 
     bundle = AgentObservationBundle.model_validate(record["ng_agent_observations"])
-    assert [gap.code for gap in _message_gaps(bundle)] == ["opencode_message_call_join_failed"]
+    assert [gap.code for gap in _message_gaps(bundle)] == ["assistant_message_call_join_failed"]
     canonical = _build_trajectory_record(ROW, record)
     assert _ids(canonical.invocations[0]) == ["captured"]
     assert len(canonical.model_calls) == 1
@@ -322,3 +320,46 @@ def test_message_join_failure_preserves_invocation_ownership(tmp_path, parse, mo
     assert "agent_observation_join_failed" not in {gap.code for gap in canonical.gaps}
     if failure == "invalid_trajectory":
         assert "producer_trajectory_invalid" in {gap.code for gap in canonical.gaps}
+
+
+@pytest.mark.parametrize("agent", ["opencode_agent", "opencode_sandboxed_agent"])
+def test_recipe_captures_shipped_binary_header_and_links_message(tmp_path, parse, agent):
+    from pathlib import Path
+
+    import yaml
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, install_model_call_capture
+
+    recipe = Path(__file__).resolve().parents[3] / "responses_api_agents" / agent / "configs" / f"{agent}.yaml"
+    config = ModelCallCaptureConfig.model_validate(
+        {
+            **yaml.safe_load(recipe.read_text()),
+            "observability_enabled": True,
+            "model_call_capture_dir": tmp_path / "capture",
+        }
+    )
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def respond():
+        return {"choices": []}
+
+    install_model_call_capture(app, config, model_server_name="policy")
+    with TestClient(app) as client:
+        assert (
+            client.post(
+                "/ng-rollout/0-0/v1/chat/completions",
+                json={},
+                headers={"X-Session-Id": "root", "X-OpenCode-Assistant-Message-Id": "m0"},
+            ).status_code
+            == 200
+        )
+    store = CaptureStore(tmp_path / "capture")
+    [call] = read_model_call_records(store, "0-0")
+    assert call.client_assistant_message_id == "m0"
+    observations, trajectory = _observations(parse, _session_db(tmp_path, [_policy()]))
+    _, bundle, joined = _merge(store, observations, trajectory)
+    assert _ids(joined.turns[0]) == [call.model_call_id]
+    assert not _message_gaps(bundle)

@@ -114,6 +114,7 @@ JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
+MODEL_CALL_CAPTURE_ASSISTANT_MESSAGE_HEADER_KEY_NAME = "model_call_capture_assistant_message_header"
 # Run-wide training-token capture settings.
 # See ``nemo_gym/token_id_capture/config.py``.
 TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
@@ -158,6 +159,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     QUERY_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+    MODEL_CALL_CAPTURE_ASSISTANT_MESSAGE_HEADER_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,
