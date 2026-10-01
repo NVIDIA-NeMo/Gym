@@ -25,8 +25,12 @@ private socket unchanged, and its reply is streamed back unchanged. If the owner
 worker exited and was replaced, or the server was restarted), the request gets an explicit 410 instead of
 silently running against empty state.
 
-The owner lives in the cookie rather than in a central session table, so creating or ending a session
-costs no extra round trip, and nothing grows with the number of sessions a server has served.
+Clients that reach a resources server's tools over MCP send no cookies. They send the signed MCP session
+token minted at ``/seed_session`` (see ``nemo_gym.mcp_auto_exposure``), which carries the same worker ID, so
+the router reads the owner from the token on the MCP path, and on any request without a session cookie.
+
+The owner lives in the cookie or token rather than in a central session table, so creating or ending a
+session costs no extra round trip, and nothing grows with the number of sessions a server has served.
 """
 
 import asyncio
@@ -86,21 +90,34 @@ def worker_socket_path(socket_dir: str, worker_id: str) -> str:
     return os.path.join(socket_dir, f"{worker_id}.sock")
 
 
-def session_owner(scope: Scope, *, session_cookie: str, signer: itsdangerous.TimestampSigner) -> Optional[str]:
-    """Return the worker ID stamped in the request's session cookie, or None if there is no valid one.
+def _valid_owner(claims: Any) -> Optional[str]:
+    owner = claims.get(SESSION_OWNER_KEY) if isinstance(claims, dict) else None
+    return owner if isinstance(owner, str) and _WORKER_ID_PATTERN.fullmatch(owner) else None
 
-    Decoded exactly as Starlette's SessionMiddleware decodes it. A cookie it would reject (missing, badly
-    signed, or expired) starts a fresh session, which belongs to whichever worker handles the request.
+
+def session_owner(cookie: str, *, signer: itsdangerous.TimestampSigner) -> Optional[str]:
+    """Return the worker ID stamped in a session cookie, or None if there is no valid one.
+
+    Decoded exactly as Starlette's SessionMiddleware decodes it. A cookie it would reject (badly signed or
+    expired) starts a fresh session, which belongs to whichever worker handles the request.
     """
-    cookie = HTTPConnection(scope).cookies.get(session_cookie)
-    if cookie is None:
-        return None
     try:
-        session = json.loads(b64decode(signer.unsign(cookie.encode("utf-8"), max_age=_SESSION_MAX_AGE_SECONDS)))
+        return _valid_owner(
+            json.loads(b64decode(signer.unsign(cookie.encode("utf-8"), max_age=_SESSION_MAX_AGE_SECONDS)))
+        )
     except (itsdangerous.BadSignature, ValueError):
         return None
-    owner = session.get(SESSION_OWNER_KEY) if isinstance(session, dict) else None
-    return owner if isinstance(owner, str) and _WORKER_ID_PATTERN.fullmatch(owner) else None
+
+
+def mcp_token_owner(token: str, *, serializer: itsdangerous.URLSafeSerializer) -> Optional[str]:
+    """Return the worker ID in an MCP session token, or None for a token without one or with a bad signature.
+
+    A rejected token is handled locally, where the MCP endpoint's own token check refuses it as before.
+    """
+    try:
+        return _valid_owner(serializer.loads(token))
+    except itsdangerous.BadSignature:
+        return None
 
 
 class SessionRoutingMiddleware:
@@ -121,6 +138,9 @@ class SessionRoutingMiddleware:
         session_cookie: str,
         secret_key: str,
         clients: dict[str, ClientSession],
+        mcp_token_header: Optional[str] = None,
+        mcp_token_serializer: Optional[itsdangerous.URLSafeSerializer] = None,
+        mcp_path: str = "/mcp",
     ) -> None:
         self.app = app
         self.worker_id = worker_id
@@ -129,17 +149,32 @@ class SessionRoutingMiddleware:
         self.signer = itsdangerous.TimestampSigner(secret_key)
         # One connection pool per owner socket, kept for the life of this worker and closed at its shutdown.
         self.clients = clients
+        self.mcp_token_header = mcp_token_header
+        self.mcp_token_serializer = mcp_token_serializer
+        self.mcp_path = mcp_path
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get(_FORWARDED_SCOPE_KEY):
             # Forwarded requests are always handled here, so a request is forwarded at most once.
             await self.app(scope, receive, send)
             return
-        owner = session_owner(scope, session_cookie=self.session_cookie, signer=self.signer)
+        owner = self._owner(HTTPConnection(scope))
         if owner is None or owner == self.worker_id:
             await self.app(scope, receive, send)
             return
         await self._forward(owner, scope, receive, send)
+
+    def _owner(self, connection: HTTPConnection) -> Optional[str]:
+        cookie = connection.cookies.get(self.session_cookie)
+        token = connection.headers.get(self.mcp_token_header) if self.mcp_token_serializer is not None else None
+        path = connection.scope["path"]
+        is_mcp = path == self.mcp_path or path.startswith(self.mcp_path + "/")
+        # MCP tool calls name their session by the token, never by a cookie.
+        if token is not None and (is_mcp or cookie is None):
+            return mcp_token_owner(token, serializer=self.mcp_token_serializer)
+        if cookie is not None:
+            return session_owner(cookie, signer=self.signer)
+        return None
 
     def _client(self, owner: str) -> ClientSession:
         client = self.clients.get(owner)
@@ -271,12 +306,21 @@ async def serve_private_socket(app: ASGIApp, path: str) -> AsyncIterator[None]:
             pass
 
 
-def install_session_routing(app: FastAPI, *, socket_dir: str, session_cookie: str, secret_key: str) -> str:
+def install_session_routing(
+    app: FastAPI,
+    *,
+    socket_dir: str,
+    session_cookie: str,
+    secret_key: str,
+    mcp_token_header: Optional[str] = None,
+    mcp_token_serializer: Optional[itsdangerous.URLSafeSerializer] = None,
+) -> str:
     """Route this worker's requests by session owner, and serve forwarded requests on a private socket.
 
     Call once the app's middleware is otherwise in place: the router must sit outside SessionMiddleware.
-    New sessions are stamped with the returned worker ID by the session-ID middleware, which reads it from
-    ``app.state.nemo_gym_session_owner``.
+    New sessions, and MCP session tokens, are stamped with the returned worker ID, read from
+    ``app.state.nemo_gym_session_owner``. Pass the MCP token header and serializer for a server that
+    exposes its tools over MCP.
     """
     worker_id = uuid4().hex
     app.state.nemo_gym_session_owner = worker_id
@@ -288,6 +332,8 @@ def install_session_routing(app: FastAPI, *, socket_dir: str, session_cookie: st
         session_cookie=session_cookie,
         secret_key=secret_key,
         clients=clients,
+        mcp_token_header=mcp_token_header,
+        mcp_token_serializer=mcp_token_serializer,
     )
     original_lifespan = app.router.lifespan_context
 

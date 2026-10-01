@@ -33,6 +33,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig, SimpleResourcesServer
+from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.session_routing import (
     SESSION_OWNER_KEY,
@@ -73,20 +74,30 @@ class SessionStateServer(SimpleResourcesServer):
         pass
 
 
-def _server(label: str) -> SessionStateServer:
-    config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="state")
+def _server(label: str, *, mcp: bool) -> SessionStateServer:
+    config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="state", expose_tools_over_mcp=mcp)
     return SessionStateServer(config=config, server_client=MagicMock(spec=ServerClient), label=label)
 
 
 class Worker:
-    def __init__(self, label: str, socket_dir: Optional[str]) -> None:
-        self.server = _server(label)
+    def __init__(self, label: str, socket_dir: Optional[str], *, mcp: bool = False) -> None:
+        self.server = _server(label, mcp=mcp)
         self.app = self.server.setup_webserver()
+        mcp_routing = {}
+        if mcp:
+            maybe_auto_expose(self.server, self.app)
+            mcp_routing = dict(
+                mcp_token_header=TOKEN_HEADER, mcp_token_serializer=session_token_serializer(self.server)
+            )
         self.cookie_name = self.server.get_session_middleware_key()
         self.worker_id: Optional[str] = None
         if socket_dir is not None:
             self.worker_id = install_session_routing(
-                self.app, socket_dir=socket_dir, session_cookie=self.cookie_name, secret_key=self.cookie_name
+                self.app,
+                socket_dir=socket_dir,
+                session_cookie=self.cookie_name,
+                secret_key=self.cookie_name,
+                **mcp_routing,
             )
         self.client = TestClient(self.app)
 
@@ -108,6 +119,30 @@ def workers(socket_dir: str) -> Iterator[tuple[Worker, Worker]]:
     a, b = Worker("a", socket_dir), Worker("b", socket_dir)
     with a.client, b.client:
         yield a, b
+
+
+@pytest.fixture
+def mcp_workers(socket_dir: str) -> Iterator[tuple[Worker, Worker]]:
+    a, b = Worker("a", socket_dir, mcp=True), Worker("b", socket_dir, mcp=True)
+    with a.client, b.client:
+        yield a, b
+
+
+def _mcp_call(client: TestClient, name: str, arguments: dict, token: str) -> dict:
+    """A tools/call as a CLI harness sends it: the session token header, and no cookies."""
+    client.cookies.clear()
+    response = client.post(
+        "/mcp",
+        headers={"accept": "application/json, text/event-stream", TOKEN_HEADER: token},
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["result"]
+
+
+def _mcp_payload(result: dict) -> dict:
+    assert result.get("isError") is not True, result
+    return json.loads(result["content"][0]["text"])
 
 
 def _set_cookies(response, name: str) -> list[str]:
@@ -214,6 +249,43 @@ class TestSessionRouting:
 
         assert not any(m.cls is SessionRoutingMiddleware for m in single.app.user_middleware)
         assert SESSION_OWNER_KEY not in single.session(response.cookies[single.cookie_name])
+
+
+class TestMCPSessionRouting:
+    def test_an_mcp_call_with_a_token_from_another_worker_is_forwarded_there(self, mcp_workers) -> None:
+        a, b = mcp_workers
+        token = a.client.post("/seed_session", json={}).json()["mcp"]["headers"][TOKEN_HEADER]
+        assert session_token_serializer(a.server).loads(token)[SESSION_OWNER_KEY] == a.worker_id
+
+        assert _mcp_payload(_mcp_call(b.client, "store", {"value": 5}, token)) == {"worker": "a"}
+        assert _mcp_payload(_mcp_call(b.client, "take", {}, token)) == {"worker": "a", "value": 5}
+        assert a.server.store == {} and b.server.store == {}
+
+    def test_an_mcp_token_without_an_owner_is_handled_locally(self, mcp_workers) -> None:
+        a, b = mcp_workers
+        # A token minted before this change, or by a single-worker server.
+        token = session_token_serializer(a.server).dumps({"sid": "s", "tools": None})
+
+        assert _mcp_payload(_mcp_call(b.client, "store", {"value": 5}, token)) == {"worker": "b"}
+        assert b.server.store == {"s": 5}
+
+    def test_a_badly_signed_mcp_token_is_handled_locally_and_refused(self, mcp_workers) -> None:
+        a, b = mcp_workers
+        forged = itsdangerous.URLSafeSerializer("another secret", salt="x").dumps(
+            {"sid": "s", "tools": None, SESSION_OWNER_KEY: a.worker_id}
+        )
+
+        result = _mcp_call(b.client, "store", {"value": 5}, forged)
+
+        assert result["isError"] is True and "Invalid Gym MCP session token" in result["content"][0]["text"]
+        assert a.server.store == {} and b.server.store == {}
+
+    def test_a_single_worker_mcp_token_has_no_owner(self) -> None:
+        single = Worker("single", socket_dir=None, mcp=True)
+        with single.client:
+            token = single.client.post("/seed_session", json={}).json()["mcp"]["headers"][TOKEN_HEADER]
+
+        assert SESSION_OWNER_KEY not in session_token_serializer(single.server).loads(token)
 
 
 def _socket_of(worker: Worker) -> str:

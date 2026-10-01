@@ -119,6 +119,7 @@ class Deployment:
                 verified=False,
                 description="counter",
                 num_workers=WORKERS,
+                expose_tools_over_mcp=True,
             ),
             "agent": _server(
                 "responses_api_agents",
@@ -294,6 +295,42 @@ def test_state_stored_at_seed_is_found_at_verify(deployment: Deployment) -> None
     owners = {_owner(cookies) for _, cookies in results}
     # Sessions were spread over several workers, so most verifies landed on a worker that did not seed them.
     assert len(owners) > 1
+
+
+MCP_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
+
+
+async def _mcp_call(client: aiohttp.ClientSession, url: str, token: str, name: str, arguments: dict) -> dict:
+    response = await client.post(
+        f"{url}/mcp",
+        headers={"accept": "application/json, text/event-stream", MCP_TOKEN_HEADER: token},
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
+    )
+    assert response.status == 200, await response.text()
+    result = (await response.json())["result"]
+    assert result.get("isError") is not True, result
+    return json.loads(result["content"][0]["text"])
+
+
+def test_mcp_clients_without_cookies_reach_their_session(deployment: Deployment) -> None:
+    """A CLI harness in a sandbox sends only the MCP session token, never the Gym session cookie."""
+    url = deployment.url("resources")
+
+    async def run_all() -> list[int]:
+        async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as client:
+
+            async def one(index: int) -> int:
+                seed = await _post(client, f"{url}/seed_session", {"initial_count": index}, {})
+                token = (await seed.json())["mcp"]["headers"][MCP_TOKEN_HEADER]
+                await _mcp_call(client, url, token, "increment_counter", {"count": 1})
+                await _mcp_call(client, url, token, "increment_counter", {"count": 2})
+                count = (await _mcp_call(client, url, token, "get_counter_value", {}))["count"]
+                return int(count == index + 3)
+
+            return await asyncio.gather(*(one(index) for index in range(EPISODES)))
+
+    correct = asyncio.run(run_all())
+    assert Counter(correct) == Counter({1: EPISODES})
 
 
 def test_session_of_an_exited_worker_gets_an_explicit_error(deployment: Deployment) -> None:
