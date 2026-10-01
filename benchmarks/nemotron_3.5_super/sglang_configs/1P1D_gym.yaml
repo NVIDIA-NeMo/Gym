@@ -187,6 +187,7 @@ roles:
       tp-size: 4
       trust-remote-code: true
       weight-loader-drop-cache-after-load: true
+      log-level-http: warning
       # TODO @bxyu-nvidia: Remove
       # log-level: debug
       # log-requests: true
@@ -254,6 +255,7 @@ roles:
       tp-size: 4
       trust-remote-code: true
       weight-loader-drop-cache-after-load: true
+      log-level-http: warning
       # TODO @bxyu-nvidia: Remove
       # log-level: debug
       # log-requests: true
