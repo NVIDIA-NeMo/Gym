@@ -1,0 +1,61 @@
+diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
+index a99f8acff2..2233eebd93 100644
+--- a/packages/opencode/src/session/llm.ts
++++ b/packages/opencode/src/session/llm.ts
+@@ -20,7 +20,7 @@ import { Permission } from "@/permission"
+ import { EventV2Bridge } from "@/event-v2-bridge"
+ import { EventV2 } from "@opencode-ai/core/event"
+ import { Wildcard } from "@/util/wildcard"
+-import { SessionID } from "@/session/schema"
++import { MessageID, SessionID } from "@/session/schema"
+ import { Auth } from "@/auth"
+ import { EffectBridge } from "@/effect/bridge"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+@@ -35,6 +35,7 @@ export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
+ export type StreamInput = {
+   user: SessionV1.User
+   sessionID: string
++  assistantMessageID?: MessageID
+   parentSessionID?: string
+   model: Provider.Model
+   agent: Agent.Info
+diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/src/session/llm/request.ts
+index e000d6ca49..af25039ea4 100644
+--- a/packages/opencode/src/session/llm/request.ts
++++ b/packages/opencode/src/session/llm/request.ts
+@@ -14,12 +14,14 @@ import { Effect, Record } from "effect"
+ import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
+ import type { Plugin } from "@/plugin"
+ import { mergeDeep } from "remeda"
++import type { MessageID } from "../schema"
+ 
+ const USER_AGENT = `opencode/${InstallationVersion}`
+ 
+ type PrepareInput = {
+   readonly user: SessionV1.User
+   readonly sessionID: string
++  readonly assistantMessageID?: MessageID
+   readonly parentSessionID?: string
+   readonly model: Provider.Model
+   readonly agent: Agent.Info
+@@ -201,6 +203,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
+       ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+       ...input.model.headers,
+       ...headers,
++      ...(input.assistantMessageID ? { "X-OpenCode-Assistant-Message-Id": input.assistantMessageID } : {}),
+     },
+   }
+ })
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index 9f8530929c..93735d147b 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -651,7 +651,7 @@ const layer = Layer.effect(
+             ctx.currentText = undefined
+             ctx.reasoningMap = {}
+             yield* status.set(ctx.sessionID, { type: "busy" })
+-            const stream = llm.stream(streamInput)
++            const stream = llm.stream({ ...streamInput, assistantMessageID: ctx.assistantMessage.id })
+ 
+             yield* stream.pipe(
+               Stream.tap((event) => handleEvent(event)),

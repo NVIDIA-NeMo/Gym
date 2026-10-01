@@ -1,36 +1,42 @@
+# Cached OpenCode builds: 1.18.26 plus saved assistant-message ID headers.
+# Build provenance and checksums: opencode-correlation/manifest.yaml.
 config_paths:
 - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 swebench_verified_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
-      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
-      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install_cached_opencode.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/glovisotto/opencode/opencode-linux-x64-1.18.26-gym-correlation.1
+      remote_opencode_musl_binary_path: /mnt/s3-data/data/glovisotto/opencode/opencode-linux-x64-musl-1.18.26-gym-correlation.1
 
 swebench_multilingual_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
-      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
-      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install_cached_opencode.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/glovisotto/opencode/opencode-linux-x64-1.18.26-gym-correlation.1
+      remote_opencode_musl_binary_path: /mnt/s3-data/data/glovisotto/opencode/opencode-linux-x64-musl-1.18.26-gym-correlation.1
 
 deepswe_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
-      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
-      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install_cached_opencode.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/glovisotto/opencode/opencode-linux-x64-1.18.26-gym-correlation.1
+      remote_opencode_musl_binary_path: /mnt/s3-data/data/glovisotto/opencode/opencode-linux-x64-musl-1.18.26-gym-correlation.1
 
 swebench_pro_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install_cached_opencode.sh
-      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
-      remote_opencode_musl_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64-musl-v1.17.11
+      remote_opencode_binary_path: /mnt/s3-data/data/glovisotto/opencode/opencode-linux-x64-1.18.26-gym-correlation.1
+      remote_opencode_musl_binary_path: /mnt/s3-data/data/glovisotto/opencode/opencode-linux-x64-musl-1.18.26-gym-correlation.1
 
 terminal_bench_2_1_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
-      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
-      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install_cached_opencode.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/glovisotto/opencode/opencode-linux-x64-1.18.26-gym-correlation.1
+      remote_opencode_musl_binary_path: /mnt/s3-data/data/glovisotto/opencode/opencode-linux-x64-musl-1.18.26-gym-correlation.1
 terminal_bench_2_1_opencode_resources_server:
   resources_servers:
     terminal_bench_2_1:
