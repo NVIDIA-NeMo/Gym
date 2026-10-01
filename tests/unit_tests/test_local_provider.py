@@ -70,15 +70,20 @@ async def test_timeout_kills_the_whole_process_tree(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("shell_waits", [True, False])
-async def test_cancellation_kills_the_whole_process_tree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell_waits: bool
+@pytest.mark.parametrize("interruption", ["cancellation", "timeout"])
+async def test_interrupted_command_kills_the_whole_process_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell_waits: bool, interruption: str
 ) -> None:
-    processes: list[asyncio.subprocess.Process] = []
+    started = asyncio.Event()
     create_subprocess_exec = asyncio.create_subprocess_exec
 
     async def record_process(*args, **kwargs) -> asyncio.subprocess.Process:
         process = await create_subprocess_exec(*args, **kwargs)
-        processes.append(process)
+        # Start the provider's timeout only after the child is ready and, when
+        # requested, the shell has exited while the child still holds its pipes.
+        while not (tmp_path / "ready").exists() or (not shell_waits and process.returncode is None):
+            await asyncio.sleep(0.01)
+        started.set()
         return process
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", record_process)
@@ -86,24 +91,27 @@ async def test_cancellation_kills_the_whole_process_tree(
     await sandbox.start(SandboxSpec(workdir=str(tmp_path)))
     async with sandbox:
         command = "(touch ready && while [ ! -e release ]; do sleep 0.01; done; touch survived) &"
-        task = asyncio.create_task(sandbox.exec(command + (" wait" if shell_waits else "")))
+        task = asyncio.create_task(
+            sandbox.exec(
+                command + (" wait" if shell_waits else ""), timeout_s=0.2 if interruption == "timeout" else None
+            )
+        )
         try:
-            async with asyncio.timeout(5):
-                while (
-                    not (tmp_path / "ready").exists()
-                    or not processes
-                    or (not shell_waits and processes[0].returncode is None)
-                ):
-                    await asyncio.sleep(0.01)
+            await asyncio.wait_for(started.wait(), timeout=5)
 
             assert not task.done(), "The child must still hold the command's output pipes open."
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(task, timeout=10)
+            if interruption == "cancellation":
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=10)
+            else:
+                result = await asyncio.wait_for(task, timeout=10)
+                assert result.return_code == 125 and result.error_type == "timeout"
+                assert result.stdout is None and result.stderr == "local command timed out after 0.2s"
 
             (tmp_path / "release").touch()
             await asyncio.sleep(2)
-            assert not (tmp_path / "survived").exists(), "backgrounded child outlived the cancelled command"
+            assert not (tmp_path / "survived").exists(), f"backgrounded child outlived {interruption}"
         finally:
             (tmp_path / "release").touch()
             task.cancel()
