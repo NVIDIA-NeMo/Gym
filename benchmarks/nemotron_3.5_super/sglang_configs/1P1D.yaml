@@ -21,7 +21,6 @@
 # Defaults: SWE-bench Verified/OpenCode, 128 concurrent rollouts, and the
 # benchmark config's repeat count (currently 3). Select another Gym config with:
 #   --set benchmark.env.GYM_CONFIG=benchmarks/swebench/pro/opencode.yaml
-# Adjust concurrency with --set 'benchmark.env.NUM_SAMPLES_IN_PARALLEL="256"'.
 # Pass QoS with --set sbatch_directives.qos=your-qos.
 # Gym artifacts persist under <SRT job log directory>/gym/<EXPERIMENT_NAME>/.
 # EXPORT_TO_CSV uses the existing full-suite exporter; enable it only for a
@@ -73,7 +72,6 @@ benchmark:
   stream_output: true
   env:
     GYM_CONFIG: benchmarks/swebench/verified/opencode.yaml
-    NUM_SAMPLES_IN_PARALLEL: '128'
     POLICY_MODEL_NAME: &served_model_name nemotron-3.5-super-ga-mtp-boosted
     EXPERIMENT_NAME: sglang-1p1d-gym
     EXPORT_TO_CSV: '0'
