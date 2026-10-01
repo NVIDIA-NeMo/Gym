@@ -16,12 +16,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from pydantic import JsonValue
-
 from nemo_gym._checkpoint.control import (
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
+    JsonPayload,
     PrepareReport,
     next_attempt,
 )
@@ -34,7 +33,7 @@ class EpisodeRecord(CheckpointRecord):
     """One episode at its latest boundary."""
 
     task_digest: str
-    boundary: dict[str, JsonValue]
+    boundary: JsonPayload
 
 
 def task_digest(task: Any) -> str:

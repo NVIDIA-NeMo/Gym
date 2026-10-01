@@ -38,11 +38,12 @@ from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar, Optional
+from typing import Annotated, Any, ClassVar, Optional
 
+import orjson
 from fastapi import APIRouter, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, PlainValidator, model_validator
 
 from nemo_gym._checkpoint.errors import (
     CheckpointConflictError,
@@ -108,12 +109,44 @@ class RetireRequest(CheckpointRequest):
     episode_ids: list[EpisodeId] = Field(min_length=1)
 
 
+def _check_json(value: Any) -> Any:
+    """Accept only what JSON can carry, as ``JsonValue`` would, without walking the value in Python.
+
+    ``orjson`` rejects non-string keys and non-JSON types natively. Its output is discarded: records are written
+    with the standard ``json`` module, which round-trips NaN and infinities exactly.
+    """
+    try:
+        orjson.dumps(value)
+    except TypeError as error:
+        raise ValueError(f"checkpoint payload is not JSON: {error}") from error
+    return value
+
+
+#: Opaque, server-owned state inside a record (a session's environment, an agent's boundary). It is checked once
+#: for JSON-ness and otherwise passed through as is: the server's own restore hook validates its meaning, and a
+#: deep pydantic validation and dump of large states cost more than the rest of a commit or restore.
+JsonPayload = Annotated[Any, PlainValidator(_check_json)]
+
+
 class CheckpointRecord(BaseModel):
     """Base of every participant record: each record belongs to one episode attempt."""
 
     model_config = ConfigDict(extra="forbid")
 
     episode_id: EpisodeId
+
+    def to_json_record(self) -> dict[str, Any]:
+        """The record as written to the store. ``JsonPayload`` fields go out as they are, without a copy."""
+        payload_fields = {
+            name for name, field in type(self).model_fields.items() if _check_json in _validators(field.metadata)
+        }
+        record = self.model_dump(mode="json", exclude=payload_fields)
+        record.update({name: getattr(self, name) for name in payload_fields})
+        return record
+
+
+def _validators(metadata: list[Any]) -> list[Any]:
+    return [getattr(item, "func", None) for item in metadata]
 
 
 MAX_REPORTED_BLOCKERS = 100
@@ -422,7 +455,7 @@ class ParticipantController:
                 kind=self.participant.kind,
                 instance=self.instance_name,
                 checkpoint_id=request.checkpoint_id,
-                records=[record.model_dump(mode="json") for record in records],
+                records=[record.to_json_record() for record in records],
             )
             # A write that outlives the deadline fails this call; a retry returns the same manifest.
             with checkpoint_span("gym.checkpoint.write") as span:

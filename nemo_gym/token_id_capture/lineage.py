@@ -952,24 +952,29 @@ class FileLineageStore(IncrementalLineageStore):
         self.import_rows_many({rollout_id: rows})
 
     def import_rows_many(self, ledgers: Mapping[str, list[dict]]) -> None:
-        """Install several rollouts' ledgers; each file is synced, and the directory once at the end."""
+        """Install several rollouts' ledgers from a checkpoint, then sync the directory once.
+
+        The files are not synced one by one: the checkpoint they come from is the durable copy, and importing it
+        again is a no-op for ledgers that match, so a crash during or after the import only repeats it. A later
+        append to a ledger syncs its file, imported rows included.
+        """
+        present = {entry.name for entry in os.scandir(self._ledger_root)} if self._ledger_root.exists() else set()
         installed = []
         for rollout_id, rows in ledgers.items():
             with self._locked(rollout_id):
-                existing = self._read(rollout_id)
-                if existing == rows:
-                    continue
-                if existing:
-                    raise ValueError(f"lineage ledger for {rollout_id} already holds different rows")
                 path = self._ledger_path(rollout_id)
+                if path.name in present:
+                    existing = self._read(rollout_id)
+                    if existing == rows:
+                        continue
+                    if existing:
+                        raise ValueError(f"lineage ledger for {rollout_id} already holds different rows")
                 payload = b"".join(
                     json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows
                 )
                 temporary = path.with_name(f".{path.name}.import")
                 with temporary.open("wb") as handle:
                     handle.write(payload)
-                    handle.flush()
-                    os.fsync(handle.fileno())
                 os.replace(temporary, path)
                 self._ledger_cache.pop(rollout_id, None)
                 installed.append(rollout_id)

@@ -33,7 +33,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import BaseModel, ConfigDict
 
 from nemo_gym._checkpoint.control import (
     AttemptFence,
@@ -41,6 +41,7 @@ from nemo_gym._checkpoint.control import (
     CheckpointRecord,
     CheckpointRequest,
     ControlError,
+    JsonPayload,
     PrepareReport,
     next_attempt,
 )
@@ -101,7 +102,7 @@ class ModelRecord(CheckpointRecord):
     and the next attempt's manifest carries the whole continued lineage.
     """
 
-    rows: list[dict[str, JsonValue]]
+    rows: JsonPayload
     generation_cuts: list[GenerationCutRecord] = []
 
 

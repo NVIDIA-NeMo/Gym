@@ -34,6 +34,7 @@ from nemo_gym._checkpoint.control import (
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
+    JsonPayload,
     PrepareReport,
     next_attempt,
 )
@@ -49,10 +50,10 @@ class AgentSessionRecord(CheckpointRecord):
     """One agent session at a committed boundary."""
 
     session_key: str
-    session: dict[str, JsonValue]
-    boundary: Optional[dict[str, JsonValue]] = None
+    session: JsonPayload
+    boundary: Optional[JsonPayload] = None
     # A legacy /run episode's own boundary (which protocol step is next); None for native sessions.
-    episode: Optional[dict[str, JsonValue]] = None
+    episode: Optional[JsonPayload] = None
 
 
 class LegacyRun:

@@ -29,6 +29,7 @@ from nemo_gym._checkpoint.control import (
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
+    JsonPayload,
     PrepareReport,
     next_attempt,
 )
@@ -52,7 +53,7 @@ class ResourcesAdmissionClosedError(ControlError):
 
 class ResourcesSessionRecord(CheckpointRecord):
     session_id: str
-    state: JsonValue
+    state: JsonPayload
 
 
 class ResourcesSessionHooks(Protocol):
