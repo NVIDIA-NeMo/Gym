@@ -81,7 +81,7 @@ def run(params: dict) -> dict:
             process = subprocess.Popen(
                 params["command"],
                 cwd=params["cwd"],
-                env=dict(os.environ) | params["env"],
+                env={**os.environ, **params["env"]},
                 stdin=stdin,
                 stdout=subprocess.PIPE,
                 stderr=stderr,

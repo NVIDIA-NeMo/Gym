@@ -465,6 +465,7 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     pi_version: Optional[str] = None
     mcp_servers: dict[str, PiMCPServerConfig] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0)
+    sandbox_bash_timeout_seconds: int = Field(default=900, gt=0)
     session_close_timeout_seconds: float = Field(default=60, gt=0)
     session_lifetime_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
     session_close_retry_window_seconds: float = Field(
@@ -642,7 +643,12 @@ class PiAgent(SimpleResponsesAPIAgent):
                 timeout_s=self.config.sandbox_install_timeout_seconds,
             )
             if installed.return_code != 0:
-                raise RuntimeError(installed.stderr or installed.stdout or "Pi sandbox installation failed")
+                # Background execution puts the installer log in stdout and may
+                # leave only a generic "exit status 1" in stderr. Preserve both.
+                details = "\n".join(part for part in (installed.stderr, installed.stdout) if part)
+                raise RuntimeError(
+                    f"Pi sandbox installation failed (exit {installed.return_code}): {details[-16000:]}"
+                )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
         except BaseException:
             try:
@@ -783,9 +789,14 @@ class PiAgent(SimpleResponsesAPIAgent):
         if body.max_output_tokens is not None:
             models["providers"]["nemo"]["models"][0]["maxTokens"] = body.max_output_tokens
         await state.upload_json("home/.pi/agent/models.json", models)
+        await state.upload_json("home/.pi/agent/settings.json", self._build_settings_config())
         output_limit_extension = "output-limit.mjs"
         await state.sandbox.upload(
             Path(__file__).with_name(output_limit_extension), f"{state.directory}/{output_limit_extension}"
+        )
+        runtime_guards_extension = "runtime-guards.mjs"
+        await state.sandbox.upload(
+            Path(__file__).with_name(runtime_guards_extension), f"{state.directory}/{runtime_guards_extension}"
         )
         command = [
             f"{state.runtime}/node/bin/node",
@@ -801,6 +812,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             "--no-extensions",
             "--extension",
             f"{state.directory}/{output_limit_extension}",
+            "--extension",
+            f"{state.directory}/{runtime_guards_extension}",
             "--no-skills",
             "--no-prompt-templates",
             "--no-themes",
@@ -819,6 +832,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 "PI_CODING_AGENT_DIR": f"{state.directory}/home/.pi/agent",
                 "PI_SKIP_VERSION_CHECK": "1",
                 "PI_TELEMETRY": "0",
+                "NEMO_GYM_PI_BASH_TIMEOUT": str(self.config.sandbox_bash_timeout_seconds),
             },
             "timeout": self.config.timeout,
             "cleanup_timeout": self.config.session_close_timeout_seconds / 3,
@@ -949,6 +963,12 @@ class PiAgent(SimpleResponsesAPIAgent):
     def _effective_model(self) -> str:
         return f"nemo/{self.config.model}" if self.config.model_server else self.config.model
 
+    def _build_settings_config(self) -> dict[str, Any]:
+        # Gym buffers completions before replaying SSE. Pi's default five-minute
+        # HTTP idle limit can otherwise retry a model call still generating.
+        timeout_ms = self.config.timeout * 1000
+        return {"httpIdleTimeoutMs": timeout_ms, "retry": {"provider": {"timeoutMs": timeout_ms}}}
+
     def _build_models_config(self, rollout_id: Optional[str] = None) -> dict[str, Any]:
         config = copy.deepcopy(self.config.models_config)
         if self.config.model_server is None:
@@ -1000,9 +1020,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         models_config = self._build_models_config(rollout_id)
         if models_config:
             (home / ".pi" / "agent" / "models.json").write_text(json.dumps(models_config, indent=2))
-        (home / ".pi" / "agent" / "settings.json").write_text(
-            json.dumps({"compaction": {"enabled": self.config.auto_compaction}})
-        )
+        (home / ".pi" / "agent" / "settings.json").write_text(json.dumps(self._build_settings_config()))
         env = self._env(home)
 
         cmd = [*self.config.command_parts, "--print", "--mode", "json", "--no-session"]
