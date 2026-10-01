@@ -396,7 +396,8 @@ def init_telemetry(
         import nemo_gym.telemetry.span_groups  # noqa: F401
 
         # nemo-lens raises on a second setup_telemetry in one process. Its init flag is
-        # private, but it is the only signal that another library owns the providers.
+        # private, but it is the only signal that another library owns the providers. Lens
+        # sets it only for an enabled setup, so the owner is exporting.
         if getattr(lens_handle, "_INITIALIZED", False):
             _TELEMETRY_HANDLE = TelemetryHandle(tracer=get_tracer(), meter=get_meter(), is_exporting=True)
             logger.info(
