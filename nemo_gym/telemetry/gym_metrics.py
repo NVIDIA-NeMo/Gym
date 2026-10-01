@@ -36,6 +36,20 @@ default stops at ten seconds and a sandbox start routinely takes a minute.
 Retrying is provider-internal, so each provider that retries records it from its own loop.
 
 All four carry ``nemo.gym.sandbox.provider``.
+
+Partial-rollout checkpoints
+---------------------------
+``gym.checkpoint.operation_duration_ms`` (histogram): one participant's control operation (``prepare``,
+``commit``, ``restore``, ``resume``, ``retire``) or one controller coordination call, by operation, participant
+kind (``controller`` for coordination), and outcome.
+
+``gym.checkpoint.records_total`` / ``gym.checkpoint.bytes_total`` (counters): records and bytes a participant
+wrote at commit or read at restore, by operation and kind.
+
+``gym.checkpoint.events_total`` (counter): things that change a checkpoint's outcome without failing a call,
+by event: ``lease_expired`` (a participant resumed on its own, aborting the checkpoint), ``prepare_not_ready``
+(a prepare reached its deadline with blockers), ``refused`` (a request refused for a checkpoint, with its error
+code), and ``generation_cut`` (one in-flight call's cut, with its disposition).
 """
 
 import logging
@@ -51,6 +65,10 @@ SANDBOX_ACTIVE_INSTRUMENT = "gym.sandbox.active"
 SANDBOX_STARTUP_INSTRUMENT = "gym.sandbox.startup_duration_ms"
 SANDBOX_EXEC_INSTRUMENT = "gym.sandbox.exec_duration_ms"
 SANDBOX_CREATE_RETRY_INSTRUMENT = "gym.sandbox.create_retry_total"
+CHECKPOINT_OPERATION_INSTRUMENT = "gym.checkpoint.operation_duration_ms"
+CHECKPOINT_RECORDS_INSTRUMENT = "gym.checkpoint.records_total"
+CHECKPOINT_BYTES_INSTRUMENT = "gym.checkpoint.bytes_total"
+CHECKPOINT_EVENTS_INSTRUMENT = "gym.checkpoint.events_total"
 
 #: Milliseconds. Provisioning a remote sandbox takes tens of seconds and a long command can run
 #: for minutes; the SDK's default boundaries end at 10 s and would put most of both in +Inf.
@@ -184,6 +202,42 @@ def record_sandbox_create_retry(*, provider: str) -> None:
         SANDBOX_CREATE_RETRY_INSTRUMENT,
         "Sandbox-create attempts a provider retried.",
         {SANDBOX_PROVIDER_ATTRIBUTE: provider},
+    )
+
+
+#: Milliseconds. Most operations take milliseconds; commit and restore at tens of thousands of rollouts take seconds.
+CHECKPOINT_DURATION_BOUNDARIES_MS: tuple[float, ...] = (1, 5, 10, 50, 100, 500, 1_000, 5_000, 10_000, 30_000, 120_000)
+
+
+def record_checkpoint_operation(duration_ms: float, *, operation: str, kind: str, outcome: str) -> None:
+    """Record one checkpoint operation's wall-clock, by operation, participant kind, and outcome."""
+    _record_histogram(
+        CHECKPOINT_OPERATION_INSTRUMENT,
+        "ms",
+        "Wall-clock time of one partial-rollout checkpoint operation.",
+        duration_ms,
+        {"nemo.gym.checkpoint.operation": operation, "nemo.gym.checkpoint.participant_kind": kind, "outcome": outcome},
+        boundaries=CHECKPOINT_DURATION_BOUNDARIES_MS,
+    )
+
+
+def record_checkpoint_volume(*, operation: str, kind: str, records: int, size_bytes: int) -> None:
+    """Count the records and bytes a participant wrote at commit or read at restore."""
+    attributes = {"nemo.gym.checkpoint.operation": operation, "nemo.gym.checkpoint.participant_kind": kind}
+    _record_counter(CHECKPOINT_RECORDS_INSTRUMENT, "Checkpoint records written or read.", attributes, records)
+    _record_counter(CHECKPOINT_BYTES_INSTRUMENT, "Checkpoint record bytes written or read.", attributes, size_bytes)
+
+
+def record_checkpoint_event(event: str, amount: int = 1, **attributes: str) -> None:
+    """Count a checkpoint event (``lease_expired``, ``prepare_not_ready``, ``refused``, ``generation_cut``)."""
+    _record_counter(
+        CHECKPOINT_EVENTS_INSTRUMENT,
+        "Events that change a partial-rollout checkpoint's outcome without failing a call.",
+        {
+            "nemo.gym.checkpoint.event": event,
+            **{f"nemo.gym.checkpoint.{name}": value for name, value in attributes.items()},
+        },
+        amount,
     )
 
 

@@ -32,13 +32,16 @@ restored state, and the controller restarts those rollouts from their inputs.
 import asyncio
 import logging
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
 import orjson
 
 from nemo_gym._checkpoint.control import CHECKPOINT_ROUTE_PREFIX, next_attempt
+from nemo_gym._checkpoint.telemetry import OperationSpan, checkpoint_span
+from nemo_gym._checkpoint.telemetry import operation as checkpoint_operation
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.server_utils import ServerClient
 
@@ -134,14 +137,20 @@ async def discover(client: ServerClient, *, auth_token: str) -> Participants:
 
 async def prepare(participants: Participants, checkpoint_id: str, *, deadline_ts: float) -> PrepareResult:
     """Prepare every participant in order, stopping at the first stage that is not ready by the deadline."""
-    replies: dict[str, dict[str, Any]] = {}
-    body = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts}
-    for kind in PREPARE_ORDER:
-        stage = await _fan_out(participants, participants.of_kind(kind), "prepare", body, deadline_ts)
-        replies.update(stage)
-        if any(reply["phase"] != "prepared" for reply in stage.values()):
-            return PrepareResult(prepared=False, replies=replies)
-    return PrepareResult(prepared=True, replies=replies)
+    with _coordinating("prepare", checkpoint_id, participants) as span:
+        replies: dict[str, dict[str, Any]] = {}
+        body = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts}
+        for kind in PREPARE_ORDER:
+            members = participants.of_kind(kind)
+            with checkpoint_span(f"gym.checkpoint.coordinate.prepare.{kind}") as stage_span:
+                stage_span.set(participants=len(members))
+                stage = await _fan_out(participants, members, "prepare", body, deadline_ts)
+            replies.update(stage)
+            if any(reply["phase"] != "prepared" for reply in stage.values()):
+                span.set(prepared=False, stopped_at=kind)
+                return PrepareResult(prepared=False, replies=replies)
+        span.set(prepared=True)
+        return PrepareResult(prepared=True, replies=replies)
 
 
 async def renew(participants: Participants, checkpoint_id: str, *, deadline_ts: float) -> None:
@@ -150,7 +159,8 @@ async def renew(participants: Participants, checkpoint_id: str, *, deadline_ts: 
     Call it when publishing a checkpoint takes longer than the lease of the last control call.
     """
     body = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts}
-    await _fan_out(participants, participants.members, "renew", body, deadline_ts)
+    with _coordinating("renew", checkpoint_id, participants):
+        await _fan_out(participants, participants.members, "renew", body, deadline_ts)
 
 
 async def retire(
@@ -163,7 +173,9 @@ async def retire(
         "episode_ids": [episode_id.model_dump(mode="json") for episode_id in episode_ids],
     }
     if body["episode_ids"]:
-        await _fan_out(participants, participants.members, "retire", body, deadline_ts)
+        with _coordinating("retire", checkpoint_id, participants) as span:
+            span.set(episodes=len(body["episode_ids"]))
+            await _fan_out(participants, participants.members, "retire", body, deadline_ts)
 
 
 async def commit(
@@ -181,7 +193,9 @@ async def commit(
         "checkpoint_dir": checkpoint_dir,
         "episode_ids": [episode_id.model_dump(mode="json") for episode_id in episode_ids],
     }
-    return await _fan_out(participants, participants.members, "commit", body, deadline_ts)
+    with _coordinating("commit", checkpoint_id, participants) as span:
+        span.set(episodes=len(body["episode_ids"]))
+        return await _fan_out(participants, participants.members, "commit", body, deadline_ts)
 
 
 async def restore(
@@ -206,7 +220,9 @@ async def restore(
         "episode_ids": [episode_id.model_dump(mode="json") for episode_id in episode_ids],
     }
     try:
-        return await _fan_out(participants, participants.members, "restore", body, deadline_ts)
+        with _coordinating("restore", checkpoint_id, participants) as span:
+            span.set(episodes=len(episode_ids))
+            return await _fan_out(participants, participants.members, "restore", body, deadline_ts)
     except CoordinationError:
         LOGGER.warning("checkpoint %s restore failed; discarding the restored state everywhere", checkpoint_id)
         cleanup_deadline = max(deadline_ts, time.time() + 30)
@@ -221,6 +237,15 @@ async def resume(participants: Participants, checkpoint_id: str, *, deadline_ts:
     """Release every participant in reverse order. This also aborts a checkpoint that was not published."""
     body = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts}
     failures: dict[str, str] = {}
+    with _coordinating("resume", checkpoint_id, participants):
+        await _resume_in_order(participants, body, deadline_ts, failures)
+    if failures:
+        raise CoordinationError("resume", failures)
+
+
+async def _resume_in_order(
+    participants: Participants, body: dict[str, Any], deadline_ts: float, failures: dict[str, str]
+) -> None:
     for kind in reversed(PREPARE_ORDER):
         try:
             await _fan_out(participants, participants.of_kind(kind), "resume", body, deadline_ts)
@@ -228,8 +253,15 @@ async def resume(participants: Participants, checkpoint_id: str, *, deadline_ts:
             # Keep releasing the other stages; a participant that cannot be reached resumes on its own
             # when its lease expires.
             failures.update(error.failures)
-    if failures:
-        raise CoordinationError("resume", failures)
+
+
+@contextmanager
+def _coordinating(operation_name: str, checkpoint_id: str, participants: Participants) -> Iterator[OperationSpan]:
+    with checkpoint_operation(
+        f"coordinate.{operation_name}", kind="controller", instance="coordination", checkpoint_id=checkpoint_id
+    ) as span:
+        span.set(participants=len(participants.members))
+        yield span
 
 
 async def _fan_out(
