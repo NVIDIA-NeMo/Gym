@@ -14,7 +14,7 @@
 # limitations under the License.
 """Probe executables and emit manifests without starting serving/GPU workers.
 
-Pass a resolved Gym YAML from `gym env resolve`, or one LocalVLLMModel config.
+Pass an original Gym YAML or one complete LocalVLLMModel config.
 This runs bounded --version/--help probes, not model loading or inference.
 """
 
@@ -22,8 +22,9 @@ import argparse
 import asyncio
 from pathlib import Path
 
-import yaml
+from omegaconf import OmegaConf
 
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from responses_api_models.local_vllm_model.app import LocalVLLMModelConfig
 from responses_api_models.local_vllm_model.pd_launcher import VLLMPDLauncher
 from responses_api_models.local_vllm_model.router_launcher import VLLMRouterLauncher
@@ -68,17 +69,46 @@ async def plan(config: LocalVLLMModelConfig, vllm_port: int, router_port: int) -
     return manifests
 
 
+def load_config(path: Path, name: str, overrides: list[str]) -> LocalVLLMModelConfig:
+    """Compose original configs in memory; diagnostic secret-masked YAML is not executable."""
+    data = OmegaConf.load(path)
+    if name in data or "config_paths" in data:
+        data = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    {"config_paths": [str(path)]}, OmegaConf.from_dotlist(overrides)
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )[name]["responses_api_models"]["local_vllm_model"]
+    else:
+        data = OmegaConf.merge(data, OmegaConf.from_dotlist(overrides))
+    data = OmegaConf.to_container(data, resolve=True)
+
+    def is_redacted(value):
+        if isinstance(value, dict):
+            return any(is_redacted(v) for v in value.values())
+        if isinstance(value, list):
+            return any(is_redacted(v) for v in value)
+        return value == "****"
+
+    if is_redacted(data):
+        raise ValueError("Cannot plan from redacted config; pass the original YAML and --override values instead")
+    data.setdefault("name", name)
+    return LocalVLLMModelConfig.model_validate(data)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--name", default="policy_model")
+    parser.add_argument("--override", action="append", default=[], help="Config key=value override; repeatable")
     parser.add_argument("--vllm-port", type=int, default=8000)
     parser.add_argument("--router-port", type=int, default=8001)
     args = parser.parse_args()
-    data = yaml.safe_load(args.config.read_text())
-    if args.name in data:
-        data = data[args.name]["responses_api_models"]["local_vllm_model"]
-    config = LocalVLLMModelConfig.model_validate(data)
+    config = load_config(args.config, args.name, args.override)
     for manifest in asyncio.run(
         plan(
             config,

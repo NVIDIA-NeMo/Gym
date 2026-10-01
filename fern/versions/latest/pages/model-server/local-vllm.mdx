@@ -144,6 +144,13 @@ native DP. The vLLM runtime must honor this header (the target is vLLM 0.28.0).
 Proxies inherit the same routing metadata. With a router, Gym forwards the
 episode as `X-Session-ID` and does **not** independently select a DP rank.
 
+Direct native-DP requests have a total HTTP deadline of **600 seconds**,
+configured by `routing_timeout_seconds` on the local model config. This covers
+the entire request, including streaming; it is separate from startup and
+readiness timeouts. With a managed router, `router.inference_timeout_seconds`
+(also 600 seconds by default) supplies this deadline. Timed-out requests are
+not automatically replayed.
+
 For per-rank acceptance or monitoring, set `show_vllm_engine_stats: true`.
 In the tested vLLM runtime, disabling engine statistics also removes the
 per-engine Prometheus counters; the HTTP `/metrics` route alone does not prove
@@ -452,11 +459,14 @@ are changed; choose listener ranges outside the node's ephemeral range.
 
 ### Dry-run manifests
 
-Use a resolved Gym YAML (`gym env resolve`) or a complete local model config:
+Pass the original Gym YAML, with overrides as needed, or a complete local model
+config. The planner composes Gym configs in memory and supplies the selected
+server's `name`:
 
 ```bash
 python -m responses_api_models.local_vllm_model.plan \
-  --config resolved.yaml --name policy_model \
+  --config responses_api_models/local_vllm_model/configs/subprocess.yaml \
+  --name policy_model --override policy_model_name=Qwen/Qwen3-0.6B \
   --vllm-port 8000 --router-port 8001
 ```
 
@@ -464,6 +474,14 @@ This validates config/visibility, executes bounded version/help probes in the
 external runtimes, and prints paths to redacted manifests. It does not load a
 model, start serving processes, claim GPU resources, or prove readiness. Explicit
 ports in the config take precedence over the CLI planning ports.
+
+`--override key=value` can be repeated and uses full Gym config paths for a
+composed config, or model-field paths for a standalone model config. The planner
+does not implicitly load `env.yaml`; include any required config explicitly via
+`config_paths` or use environment interpolations in your YAML. `gym env resolve`
+remains a secret-masked diagnostic command: its `****` values cannot be used as
+executable config. The planner rejects those values rather than guessing their
+original types or disabling diagnostic secret masking.
 
 See the [validation guide](/main/contribute/local-vllm-validation)
 for the P2D2 reproduction commands and hardware qualification requirements.

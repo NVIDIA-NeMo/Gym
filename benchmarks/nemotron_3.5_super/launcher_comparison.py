@@ -398,15 +398,22 @@ def main() -> None:
         cpus_per_node=int(os.environ.get("SLURM_CPUS_ON_NODE", 32)),
     )
     parity = check_parity(config, recipe, hosts, args.output)
+    plan = deployment_plan(config, hosts, args.output, "metrics")
+    endpoints = {}
+    endpoint_groups = {}
+    for i, node in enumerate(plan["nodes"]):
+        for rank in node["ranks"]:
+            # Keep original names for single-replica nodes/report compatibility.
+            name = f"node{i}" if len(node["ranks"]) == 1 else f"node{i}_replica{rank['local_rank']}"
+            port = parse_flags(rank["argv"][2:])["port"]
+            endpoints[name] = f"http://{node['address']}:{port}/metrics"
+            endpoint_groups.setdefault(node["role"], []).append(name)
     metrics_config = {
         "inference_metrics": {
             "enabled": True,
-            "endpoints": {f"node{i}": f"http://{ip}:8001/metrics" for i, (_, ip) in enumerate(hosts)},
+            "endpoints": endpoints,
             "router_endpoints": {"main": f"http://{hosts[0][1]}:{config.router.metrics_port}/metrics"},
-            "endpoint_groups": {
-                "prefill": [f"node{i}" for i in range(config.groups["prefill"].nodes)],
-                "decode": [f"node{i}" for i in range(config.groups["prefill"].nodes, len(hosts))],
-            },
+            "endpoint_groups": endpoint_groups,
             "require_wandb": os.environ.get("WANDB_MODE") != "disabled",
         }
     }

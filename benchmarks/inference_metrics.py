@@ -34,6 +34,7 @@ from nemo_gym.server_utils import request
 
 
 logger = logging.getLogger(__name__)
+MOONCAKE_STORAGE_GAUGES = {"master_allocated_bytes", "master_total_capacity_bytes"}
 
 
 class InferenceMetricsConfig(BaseModel, extra="forbid"):
@@ -42,6 +43,7 @@ class InferenceMetricsConfig(BaseModel, extra="forbid"):
     enabled: bool = False
     endpoints: dict[str, HttpUrl] = Field(default_factory=dict, description="Replica name to full /metrics URL.")
     router_endpoints: dict[str, HttpUrl] = Field(default_factory=dict, description="Router name to /metrics URL.")
+    mooncake_endpoint: HttpUrl | None = Field(default=None, description="Single Mooncake master /metrics URL.")
     output_path: Path
     endpoint_groups: dict[str, list[str]] = Field(default_factory=dict)
     require_wandb: bool = True
@@ -57,11 +59,13 @@ class InferenceMetricsConfig(BaseModel, extra="forbid"):
 
     @model_validator(mode="after")
     def validate_enabled(self) -> "InferenceMetricsConfig":
-        if self.enabled and not (self.endpoints or self.router_endpoints):
+        if self.enabled and not (self.endpoints or self.router_endpoints or self.mooncake_endpoint):
             raise ValueError("Enabled inference_metrics requires endpoints")
         if self.endpoints.keys() & self.router_endpoints.keys():
             raise ValueError("Replica and router endpoint names must be distinct")
         names = [*self.endpoints, *self.router_endpoints]
+        if self.mooncake_endpoint is not None and "mooncake" in names:
+            raise ValueError("The mooncake replica name is reserved for mooncake_endpoint")
         if any(not name or not all(c.isalnum() or c in "_-" for c in name) for name in names):
             raise ValueError(
                 "Inference metrics replica names must contain only letters, numbers, underscores or hyphens"
@@ -100,11 +104,18 @@ class InferenceMetricsCollector:
             if family.type not in {"gauge", "counter", "histogram"}:
                 continue
             for sample in family.samples:
+                is_mooncake_storage = (
+                    replica == "mooncake" and family.type == "gauge" and sample.name in MOONCAKE_STORAGE_GAUGES
+                )
                 if (
-                    not sample.name.startswith(("vllm:", "vllm_router_"))
+                    (not sample.name.startswith(("vllm:", "vllm_router_")) and not is_mooncake_storage)
                     or (self.config.metrics is not None and sample.name not in self.config.metrics)
                     or not math.isfinite(sample.value)
                 ):
+                    continue
+                if is_mooncake_storage:
+                    # Match the external baseline's master-only storage series.
+                    result[f"mooncake/total/{sample.name.removeprefix('master_')}"] = sample.value
                     continue
                 namespace = "router" if sample.name.startswith("vllm_router_") else "vllm"
                 name = sample.name.removeprefix("vllm_router_").removeprefix("vllm:")
@@ -139,6 +150,10 @@ class InferenceMetricsCollector:
         for key in incomplete_rates:
             result.pop(key, None)
         self.add_derived_metrics(result, f"vllm/{replica}/")
+        allocated = result.get("mooncake/total/allocated_bytes")
+        capacity = result.get("mooncake/total/total_capacity_bytes")
+        if allocated is not None and allocated >= 0 and capacity is not None and capacity > 0:
+            result["mooncake/total/kv_cache_usage_perc"] = allocated / capacity
         return result
 
     @staticmethod
@@ -188,6 +203,8 @@ class InferenceMetricsCollector:
     async def sample(self, *, require_all: bool = False) -> None:
         """Scrape all endpoints; startup must establish every promised connection."""
         endpoints = [*self.config.endpoints.items(), *self.config.router_endpoints.items()]
+        if self.config.mooncake_endpoint is not None:
+            endpoints.append(("mooncake", self.config.mooncake_endpoint))
         snapshots = dict(
             zip(
                 (name for name, _ in endpoints),

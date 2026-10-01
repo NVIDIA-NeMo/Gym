@@ -203,7 +203,7 @@ index fb75901..b1d8076 100644
 
 diff --git a/src/policies/session_balanced.rs b/src/policies/session_balanced.rs
 new file mode 100644
-index 0000000..fa4cdeb
+index 0000000..a82ef66
 --- /dev/null
 +++ b/src/policies/session_balanced.rs
 @@ -0,0 +1,117 @@
@@ -325,7 +325,7 @@ index 0000000..fa4cdeb
 +    }
 +}
 diff --git a/src/routers/http/router.rs b/src/routers/http/router.rs
-index e8e1259..67c5976 100644
+index e8e1259..b617239 100644
 --- a/src/routers/http/router.rs
 +++ b/src/routers/http/router.rs
 @@ -31,6 +31,24 @@ use std::time::{Duration, Instant};
@@ -435,8 +435,12 @@ index e8e1259..67c5976 100644
          // Add authorization if configured
          if let Some(ref key) = self.api_key {
              request_builder = request_builder.header("Authorization", format!("Bearer {}", key));
-@@ -1752,8 +1789,14 @@ impl RouterTrait for Router {
+@@ -1750,10 +1787,18 @@ impl RouterTrait for Router {
+         {
+             Ok(response) => {
                  let status = response.status();
++                // Match typed routing: client errors are not worker failures.
++                worker.record_outcome(status.is_success() || status.is_client_error());
                  let headers = response.headers().clone();
 
 -                // Stream the response body
@@ -452,6 +456,26 @@ index e8e1259..67c5976 100644
                  let mut response_builder = Response::builder().status(status.as_u16());
 
                  for (name, value) in headers.iter() {
+@@ -1771,11 +1816,14 @@ impl RouterTrait for Router {
+                         .into_response(),
+                 }
+             }
+-            Err(e) => (
+-                StatusCode::BAD_GATEWAY,
+-                format!("Backend request failed: {}", e),
+-            )
+-                .into_response(),
++            Err(e) => {
++                worker.record_outcome(false);
++                (
++                    StatusCode::BAD_GATEWAY,
++                    format!("Backend request failed: {}", e),
++                )
++                    .into_response()
++            }
+         }
+     }
+ }
 diff --git a/src/routers/http/vllm_pd_router.rs b/src/routers/http/vllm_pd_router.rs
 index 52012c6..18a37a4 100644
 --- a/src/routers/http/vllm_pd_router.rs

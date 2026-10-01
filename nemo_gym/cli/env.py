@@ -382,6 +382,22 @@ class RunHelper:  # pragma: no cover
     _telemetry_metrics_enabled: bool
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+        # Entry points may call start before entering their own cleanup region.
+        # Own partial startup here, including Ctrl-C after a child was spawned.
+        self._processes = {}
+        self._owned_process_groups = {}
+        self._head_server = None
+        self._head_server_thread = None
+        try:
+            self._start(global_config_dict_parser_config)
+        except BaseException:
+            try:
+                self.shutdown()
+            except Exception as cleanup_error:
+                print(f"Startup cleanup failed: {cleanup_error}", file=sys.stderr)
+            raise
+
+    def _start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
         # Fail fast before starting Ray if nothing is configured to run (covers env run and the
@@ -703,8 +719,10 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
         self._processes = dict()
         self._owned_process_groups = dict()
 
-        self._head_server.should_exit = True
-        self._head_server_thread.join()
+        if getattr(self, "_head_server", None) is not None:
+            self._head_server.should_exit = True
+        if getattr(self, "_head_server_thread", None) is not None:
+            self._head_server_thread.join()
 
         self._head_server = None
         self._head_server_thread = None

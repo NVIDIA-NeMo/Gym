@@ -118,6 +118,8 @@ Results are saved under
 - `rollouts.timings.jsonl`: completion times from rollout collection start.
 - `provenance.json` and `setting-parity.json`: source hashes and serving settings.
 - `controller.log`, `eval.log`, and `cluster/`: process and worker diagnostics.
+- `rollouts.inference-metrics.jsonl`: parsed per-worker/router samples and aggregates.
+- `rollouts.inference-metrics.prometheus.jsonl.gz`: timestamped raw Prometheus responses.
 
 For a saved baseline, set `BASELINE_JSONL` when submitting, or compare two
 completed runs directly:
@@ -136,10 +138,15 @@ completion times. Missing samples remain missing. Different allocations and
 stochastic generation limit conclusions from a single comparison.
 
 <Note>
-This entrypoint currently keeps results local and disables W&B upload. It does
-not persist a complete vLLM/router Prometheus history. Worker log statistics
-are partial observations; full TTFT, inter-token latency, and router performance
-comparisons require a separate collector during the run.
+This entrypoint enables W&B metrics upload, defaulting to entity `nvidia` and
+project `$USER-gym-eval`; override `WANDB_ENTITY` and `WANDB_PROJECT` as needed.
+`upload_rollouts=false` disables rollout tables, not metrics. `WANDB_MODE=offline`
+retains W&B data locally for later sync; `WANDB_MODE=disabled` disables W&B upload
+while preserving local metric sidecars. Every planned replica and the router
+are sampled. Raw and parsed histories persist locally, with scrape failures
+marked by `inference/scrape_up/<replica>=0`; failed scrapes cannot be reconstructed.
+The external baseline's optional `mooncake_endpoint` is also supported, using
+the master's storage gauges under `mooncake/total/*`.
 </Note>
 
 ## Qualify hardware in increasing scope

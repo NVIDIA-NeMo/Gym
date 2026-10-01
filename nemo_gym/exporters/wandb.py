@@ -58,7 +58,7 @@ class WandbExporter(BaseExporter):
         if (self.global_config_dict.get("inference_metrics") or {}).get("enabled"):
             self.run.define_metric("progress/*", step_metric="progress/completion_pct")
             self.run.define_metric("inference/elapsed_seconds")
-            for namespace in ("vllm", "router", "inference"):
+            for namespace in ("vllm", "router", "mooncake", "inference"):
                 self.run.define_metric(f"{namespace}/*", step_metric="inference/elapsed_seconds")
 
     def teardown(self) -> None:

@@ -166,7 +166,11 @@ class VLLMRouterLauncher(VLLMSubprocessLauncher):
             ):
                 value = getattr(self.config, knob)
                 if value is not None:
-                    args[knob.replace("_", "-")] = value
+                    flag = knob.replace("_", "-")
+                    # The Python CLI spells this differently from the Rust binary.
+                    if knob == "eviction_interval" and "--eviction-interval-secs" in help_text:
+                        flag = "eviction-interval-secs"
+                    args[flag] = value
             if strict:
                 args.update(
                     {
