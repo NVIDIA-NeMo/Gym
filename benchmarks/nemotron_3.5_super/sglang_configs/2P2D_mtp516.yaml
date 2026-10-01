@@ -235,8 +235,8 @@ roles:
       speculative-algorithm: EAGLE
       speculative-draft-model-path: /model
       speculative-eagle-topk: 1
-      speculative-num-draft-tokens: 5
-      speculative-num-steps: 3
+      speculative-num-draft-tokens: 6
+      speculative-num-steps: 5
       tokenizer-worker-num: 4
       tool-call-parser: qwen3_coder
       tp-size: 8
