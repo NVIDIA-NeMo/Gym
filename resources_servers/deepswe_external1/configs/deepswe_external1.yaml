@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Resources server for prepared DeepSWE task packages.
+# Resources server for self-contained DeepSWE task rows.
 # This base config also supports golden- and null-patch validation without an agent.
 deepswe_external1_resources_server:
   resources_servers:
@@ -11,8 +11,6 @@ deepswe_external1_resources_server:
       domain: coding
       verified: false
 
-      tasks_dir: resources_servers/deepswe_external1/data/cache/tasks
-      expected_task_count: 5
       is_verifying_golden_patch: false
       is_verifying_null_patch: false
       task_cpu_multiplier: 2.0

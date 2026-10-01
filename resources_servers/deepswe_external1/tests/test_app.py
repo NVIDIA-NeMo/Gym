@@ -19,29 +19,27 @@ from resources_servers.deepswe_external1.app import (
     DeepsweExternal1SeedSessionRequest,
     DeepsweExternal1VerifyRequest,
 )
+from resources_servers.deepswe_external1.inline_task import InlineTask
 from resources_servers.deepswe_external1.prepare_examples import task_row
-from resources_servers.deepswe_external1.task_store import PreparedTask
 
 
-def make_server(task: PreparedTask, *, mode: str = "golden") -> DeepsweExternal1ResourcesServer:
+def make_server(task: InlineTask, *, mode: str = "golden") -> DeepsweExternal1ResourcesServer:
     config = DeepsweExternal1ResourcesServerConfig(
         host="127.0.0.1",
         port=8000,
         entrypoint="app.py",
         name="test",
-        tasks_dir=task.task_dir.parent,
-        expected_task_count=1,
         is_verifying_golden_patch=mode == "golden",
         is_verifying_null_patch=mode == "null",
         sandbox_provider="sandbox",
         sandbox_config={},
-        logs_dir=task.task_dir.parent.parent / "logs",
+        logs_dir=Path.cwd() / "logs",
     )
     return DeepsweExternal1ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
-def body(task: PreparedTask) -> DeepsweExternal1VerifyRequest:
-    return DeepsweExternal1VerifyRequest(**task_row(task), response=_empty_response())
+def body(task: InlineTask) -> DeepsweExternal1VerifyRequest:
+    return DeepsweExternal1VerifyRequest(**task_row(task.data, "original instruction\n"), response=_empty_response())
 
 
 def request() -> Request:
@@ -63,7 +61,7 @@ def sandbox(sandbox_id: str, events: list[str]) -> AsyncMock:
 @pytest.mark.parametrize("mode", ["golden", "null", "agent"])
 @pytest.mark.parametrize("include_patch", [None, False])
 async def test_entire_lifecycle_uses_distinct_sandboxes(
-    task: PreparedTask, mode: str, include_patch: bool | None
+    task: InlineTask, mode: str, include_patch: bool | None
 ) -> None:
     server = make_server(task, mode=mode)
     if include_patch is not None:
@@ -71,8 +69,14 @@ async def test_entire_lifecycle_uses_distinct_sandboxes(
     events = []
     agent, verifier = sandbox("A", events), sandbox("B", events)
 
-    async def create(_task: PreparedTask, *, phase: str) -> AsyncMock:
+    async def create(_task: InlineTask, *, phase: str, files=None) -> AsyncMock:
         events.append("create-" + phase)
+        if phase == "verifier":
+            assert files == task.data.files.verification_files(b"" if mode == "null" else b"committed patch")
+            assert not any(path.startswith("/solution/") for path in files)
+        else:
+            assert files == (task.data.files.solution_files() if mode == "golden" else {})
+            assert not any(path.startswith("/tests/") for path in files)
         return agent if phase == "agent" else verifier
 
     server._create_sandbox = AsyncMock(side_effect=create)
@@ -96,8 +100,8 @@ async def test_entire_lifecycle_uses_distinct_sandboxes(
     server._run_verifier = AsyncMock(side_effect=grade)
     if mode == "agent":
         server._agent_sessions["session"] = AgentSandboxSession(
-            task_id=task.definition.task_id,
-            image=task.definition.image,
+            task_id=task.data.task_id,
+            image=task.data.image,
             sandbox=agent,
             sandbox_handle="A",
             sandbox_descriptor={"sandbox_id": "A"},
@@ -106,6 +110,7 @@ async def test_entire_lifecycle_uses_distinct_sandboxes(
     assert result.evaluation_completed and not result.mask_sample
     assert result.agent_sandbox_id == "A" and result.verifier_sandbox_id == "B"
     assert result.validation_mode == mode and result.cleanup_errors == []
+    assert "files" not in result.model_dump() and "task_fingerprint" not in result.model_dump()
     assert events.index("collect-A") < events.index("stop-A") < events.index("create-verifier")
     assert events[-2:] == ["grade-B", "stop-B"]
     assert server._execute_golden.await_count == (mode == "golden")
@@ -117,14 +122,14 @@ async def test_entire_lifecycle_uses_distinct_sandboxes(
 
 
 @pytest.mark.asyncio
-async def test_verification_does_not_impose_an_eight_request_limit(task: PreparedTask) -> None:
+async def test_verification_does_not_impose_an_eight_request_limit(task: InlineTask) -> None:
     server = make_server(task, mode="null")
     all_started = asyncio.Event()
     release = asyncio.Event()
     started = 0
     sandboxes = []
 
-    async def create(_task: PreparedTask, *, phase: str) -> AsyncMock:
+    async def create(_task: InlineTask, *, phase: str, files=None) -> AsyncMock:
         box = sandbox(f"{phase}-{len(sandboxes)}", [])
         sandboxes.append(box)
         return box
@@ -159,7 +164,7 @@ async def test_verification_does_not_impose_an_eight_request_limit(task: Prepare
 @pytest.mark.parametrize(
     "failure", ["golden", "collection", "empty", "verifier_setup", "verifier", "same_id", "agent_cleanup"]
 )
-async def test_failures_are_masked_and_owned_sandboxes_are_released(task: PreparedTask, failure: str) -> None:
+async def test_failures_are_masked_and_owned_sandboxes_are_released(task: InlineTask, failure: str) -> None:
     server = make_server(task)
     events = []
     agent = sandbox("A", events)
@@ -190,28 +195,14 @@ async def test_failures_are_masked_and_owned_sandboxes_are_released(task: Prepar
 
 
 @pytest.mark.asyncio
-async def test_invalid_task_closes_seeded_session(task: PreparedTask) -> None:
-    server = make_server(task, mode="agent")
-    agent = sandbox("A", [])
-    server._agent_sessions["session"] = AgentSandboxSession(
-        task.definition.task_id, task.definition.image, agent, "A", {}
-    )
-    changed = body(task).model_copy(update={"task_fingerprint": "0" * 64})
-    with pytest.raises(ValueError, match="fingerprint"):
-        await server.verify(request(), changed)
-    agent.stop.assert_awaited_once()
-    assert not server._agent_sessions
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("mismatch", ["absent", "task", "image", "handle"])
-async def test_agent_requires_matching_seeded_session(task: PreparedTask, mismatch: str) -> None:
+async def test_agent_requires_matching_seeded_session(task: InlineTask, mismatch: str) -> None:
     server = make_server(task, mode="agent")
     agent = sandbox("A", [])
     if mismatch != "absent":
         server._agent_sessions["session"] = AgentSandboxSession(
-            "wrong" if mismatch == "task" else task.definition.task_id,
-            "wrong" if mismatch == "image" else task.definition.image,
+            "wrong" if mismatch == "task" else task.data.task_id,
+            "wrong" if mismatch == "image" else task.data.image,
             agent,
             "A",
             {},
@@ -225,12 +216,10 @@ async def test_agent_requires_matching_seeded_session(task: PreparedTask, mismat
 
 
 @pytest.mark.asyncio
-async def test_shutdown_releases_unfinished_sessions(task: PreparedTask) -> None:
+async def test_shutdown_releases_unfinished_sessions(task: InlineTask) -> None:
     server = make_server(task, mode="agent")
     agent = sandbox("A", [])
-    server._agent_sessions["session"] = AgentSandboxSession(
-        task.definition.task_id, task.definition.image, agent, "A", {}
-    )
+    server._agent_sessions["session"] = AgentSandboxSession(task.data.task_id, task.data.image, agent, "A", {})
     app = server.setup_webserver()
     async with app.router.lifespan_context(app):
         agent.stop.assert_not_awaited()
@@ -238,7 +227,7 @@ async def test_shutdown_releases_unfinished_sessions(task: PreparedTask) -> None
     assert not server._agent_sessions
 
 
-def test_network_and_validation_modes(task: PreparedTask) -> None:
+def test_network_and_validation_modes(task: InlineTask) -> None:
     server = make_server(task)
     assert server._provider_options(phase="agent")["network_policy"] == {"defaultAction": "deny", "egress": []}
     assert "network_policy" not in server._provider_options(phase="verifier")
@@ -250,17 +239,19 @@ def test_network_and_validation_modes(task: PreparedTask) -> None:
 
 
 @pytest.mark.asyncio
-async def test_null_mode_cannot_seed(task: PreparedTask) -> None:
+async def test_null_mode_cannot_seed(task: InlineTask) -> None:
     server = make_server(task, mode="null")
-    with pytest.raises(RuntimeError, match="null-validation"):
-        await server.seed_session(request(), DeepsweExternal1SeedSessionRequest(**task_row(task)))
+    with pytest.raises(RuntimeError, match="golden/null-validation"):
+        await server.seed_session(
+            request(), DeepsweExternal1SeedSessionRequest(**task_row(task.data, "original instruction\n"))
+        )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["agent", "verifier"])
 @pytest.mark.parametrize("setup_fails", [False, True])
 async def test_sandbox_spec_and_native_setup(
-    task: PreparedTask, monkeypatch: pytest.MonkeyPatch, phase: str, setup_fails: bool
+    task: InlineTask, monkeypatch: pytest.MonkeyPatch, phase: str, setup_fails: bool
 ) -> None:
     server = make_server(task)
     server.config.task_cpu_multiplier = 2
@@ -282,13 +273,13 @@ async def test_sandbox_spec_and_native_setup(
     monkeypatch.setattr(module, "resolve_provider_metadata", lambda name, config: {"owner": "test"})
     if setup_fails:
         with pytest.raises(RuntimeError, match=f"{phase} image setup failed"):
-            await server._create_sandbox(task, phase=phase)
+            await server._create_sandbox(task, phase=phase, files={"/tests/file": "test data"})
     else:
-        assert await server._create_sandbox(task, phase=phase) is box
+        assert await server._create_sandbox(task, phase=phase, files={"/tests/file": "test data"}) is box
     constructor.assert_called_once_with({"provider": "sandbox"})
     spec = specs[0]
-    assert spec.image == (task.definition.image if phase == "agent" else task.definition.verifier_image)
-    assert spec.workdir == "/app" and spec.files == {}
+    assert spec.image == (task.data.image if phase == "agent" else task.data.verifier_image)
+    assert spec.workdir == "/app" and spec.files == {"/tests/file": "test data"}
     assert spec.resources.cpu == 2 and spec.resources.memory_mib == 1536
     assert spec.ttl_s == 3600 and spec.ready_timeout_s == 60
     assert spec.env == {"EXPLICIT": "yes"}
@@ -298,12 +289,12 @@ async def test_sandbox_spec_and_native_setup(
         assert "network_policy" not in spec.provider_options
     assert spec.metadata == {
         "owner": "test",
-        "task": task.definition.task_id,
+        "task": task.data.task_id,
         "phase": phase,
         "nemo_gym_agent": "test",
     }
     command = box.exec.await_args_list[0].args[0]
-    assert "git rev-parse --show-toplevel" in command and task.definition.base_commit in command
+    assert "git rev-parse --show-toplevel" in command and task.data.base_commit in command
     assert ("user.email" in command) == (phase == "agent")
     assert "command -v python3" not in command
     assert box.exec.await_args_list[0].kwargs == {"timeout_s": 60}
@@ -319,7 +310,7 @@ async def test_sandbox_spec_and_native_setup(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("offline", [False, True])
 @pytest.mark.parametrize("exit_code", [0, 1, 124])
-async def test_verifier_python_setup_policy_and_failures(task: PreparedTask, offline: bool, exit_code: int) -> None:
+async def test_verifier_python_setup_policy_and_failures(task: InlineTask, offline: bool, exit_code: int) -> None:
     server = make_server(task)
     server.config.enforce_verifier_no_network = offline
     box = AsyncMock()
@@ -336,50 +327,39 @@ async def test_verifier_python_setup_policy_and_failures(task: PreparedTask, off
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [None, "mkdir", "solution"])
+@pytest.mark.parametrize("exit_code", [0, 2])
 async def test_golden_executes_original_script_and_records_exit(
-    task: PreparedTask, tmp_path: Path, failure: str | None
+    task: InlineTask, tmp_path: Path, exit_code: int
 ) -> None:
     server = make_server(task)
     box = AsyncMock()
-    box.exec.side_effect = [
-        SimpleNamespace(return_code=int(failure == "mkdir"), stdout="", stderr=""),
-        SimpleNamespace(return_code=2 if failure == "solution" else 0, stdout="solution output", stderr="diagnostic"),
-    ]
+    box.exec.return_value = SimpleNamespace(return_code=exit_code, stdout="solution output", stderr="diagnostic")
     logs = tmp_path / "golden"
-    if failure:
-        with pytest.raises(RuntimeError, match="solution directory" if failure == "mkdir" else "exit code 2"):
+    if exit_code:
+        with pytest.raises(RuntimeError, match="exit code 2"):
             await server._execute_golden(box, task, logs)
     else:
         await server._execute_golden(box, task, logs)
-    if failure == "mkdir":
-        box.upload.assert_not_awaited()
-        assert not logs.exists()
-    else:
-        assert box.upload.await_count == 2
-        assert [call.args[1] for call in box.upload.await_args_list] == [
-            "/solution/solve.sh",
-            "/solution/solution.patch",
-        ]
-        box.exec.assert_awaited_with(
-            "bash /solution/solve.sh", cwd="/app", timeout_s=task.definition.solution_timeout_sec
-        )
-        assert (logs / "golden.log").read_text() == "solution outputdiagnostic"
+    box.upload.assert_not_awaited()
+    box.exec.assert_awaited_once_with("bash /solution/solve.sh", cwd="/app", timeout_s=task.data.solution_timeout_sec)
+    assert (logs / "golden.log").read_text() == "solution outputdiagnostic"
 
 
 @pytest.mark.asyncio
-async def test_seed_session_preserves_descriptor(task: PreparedTask) -> None:
+async def test_seed_session_preserves_descriptor(task: InlineTask) -> None:
     server = make_server(task, mode="agent")
     box = sandbox("A", [])
     box.serialize.return_value = {"sandbox_id": "A", "workdir": "/app"}
     server._create_sandbox = AsyncMock(return_value=box)
-    seeded = await server.seed_session(request(), DeepsweExternal1SeedSessionRequest(**task_row(task)))
+    seeded = await server.seed_session(
+        request(), DeepsweExternal1SeedSessionRequest(**task_row(task.data, "original instruction\n"))
+    )
     assert seeded.sandbox_descriptor == {"sandbox_id": "A", "workdir": "/app"}
     assert server._agent_sessions["session"].sandbox is box
 
 
 @pytest.mark.asyncio
-async def test_verifier_cleanup_error_does_not_replace_completed_grade(task: PreparedTask) -> None:
+async def test_verifier_cleanup_error_does_not_replace_completed_grade(task: InlineTask) -> None:
     server = make_server(task)
     agent, verifier = sandbox("A", []), sandbox("B", [])
     verifier.stop.side_effect = RuntimeError("delete unavailable")
@@ -390,3 +370,23 @@ async def test_verifier_cleanup_error_does_not_replace_completed_grade(task: Pre
     result = await server.verify(request(), body(task))
     assert result.evaluation_completed and result.reward == 1 and not result.mask_sample
     assert result.cleanup_errors == ["verifier"]
+
+
+@pytest.mark.asyncio
+async def test_stage_only_sets_modes_and_does_not_use_local_files(task: InlineTask) -> None:
+    server = make_server(task)
+    box = AsyncMock()
+    box.exec.return_value = SimpleNamespace(return_code=0, stderr="")
+    await server._stage_verifier(box, task, b"candidate")
+    box.exec.assert_awaited_once_with("chmod 0755 /tests/test.sh /tests/grader.py", timeout_s=60)
+    box.upload.assert_not_awaited()
+    box.exec.return_value.return_code = 1
+    with pytest.raises(RuntimeError, match="executable"):
+        await server._stage_verifier(box, task, b"candidate")
+
+
+def test_server_has_no_filesystem_task_store_or_store_configuration(task: InlineTask) -> None:
+    server = make_server(task)
+    assert not hasattr(server, "_task_store")
+    assert "tasks_dir" not in type(server.config).model_fields
+    assert "expected_task_count" not in type(server.config).model_fields

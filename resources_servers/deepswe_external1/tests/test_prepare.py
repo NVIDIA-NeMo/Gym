@@ -3,8 +3,8 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
-import pytest
 import yaml
 from pydantic import TypeAdapter
 from pytest import MonkeyPatch
@@ -12,70 +12,59 @@ from pytest import MonkeyPatch
 import resources_servers.deepswe_external1.prepare_examples as module
 from nemo_gym.config_types import DatasetConfig
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.task_data import TaskDataValidator
+from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
 from nemo_gym.train_data_utils import TrainDataProcessor
+from resources_servers.deepswe_external1.inline_task import InlineTask
 from resources_servers.deepswe_external1.task_data import TaskData
-from resources_servers.deepswe_external1.task_store import PreparedTask
 
 
-def test_public_preparation_keeps_original_prompt_and_separates_assets(
-    task: PreparedTask, tmp_path: Path, monkeypatch: MonkeyPatch
+def test_public_preparation_keeps_original_bytes_outside_prompt(
+    task: InlineTask, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
+    source = tmp_path / "source"
+    original = source / "tasks" / task.data.task_id
+    original.mkdir(parents=True)
+    instruction = "Original prompt with canary and CRLF\r\n"
+    (original / "instruction.md").write_bytes(instruction.encode())
+    for field, path in module.FILE_PATHS.items():
+        target = original / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(getattr(task.data.files, field).encode())
     task.config.metadata["repository_url"] = "https://github.com/example/project"
-    monkeypatch.setattr(module, "EXAMPLE_TASK_IDS", (task.definition.task_id,))
+    monkeypatch.setattr(module, "EXAMPLE_TASK_IDS", (task.data.task_id,))
     monkeypatch.setattr(module, "ensure_source", lambda source, allow_download: source)
 
     class Store:
-        def __init__(self, path: Path) -> None:
-            assert path.name == "tasks"
+        def __init__(self, path):
+            assert path == source / "tasks"
 
-        def get(self, task_id: str) -> PreparedTask:
-            assert task_id == task.definition.task_id
-            return task
+        def get(self, task_id):
+            assert task_id == task.data.task_id
+            return SimpleNamespace(config=task.config, task_dir=original)
 
     monkeypatch.setattr(module, "DeepSWETaskStore", Store)
     output = tmp_path / "public/example.jsonl"
-    output.parent.mkdir()
-    metrics_path = output.parent / "example_metrics.json"
-    existing_metrics = '{"Number of examples": 1, "Number of turns": {"Average": 1.0}}\n'
-    metrics_path.write_text(existing_metrics)
-    rows = module.prepare_examples(
-        source_dir=tmp_path / "source", tasks_dir=tmp_path / "cache/tasks", output_path=output, allow_download=False
-    )
+    rows = module.prepare_examples(source_dir=source, output_path=output, allow_download=False)
     assert json.loads(output.read_text()) == rows[0]
-    assert rows[0]["responses_create_params"]["input"][0]["content"] == task.instruction
+    assert rows[0]["responses_create_params"]["input"] == [{"role": "user", "content": instruction}]
+    assert rows[0]["files"] == task.data.files.model_dump()
     assert rows[0]["public_source"]["revision"] == module.DEEPSWE_SOURCE_REVISION
     assert rows[0]["public_source"]["upstream_project"] == "https://github.com/example/project"
-    assert metrics_path.read_text() == existing_metrics
-    cache = tmp_path / "cache/tasks" / task.definition.task_id
-    assert (cache / "solution/solve.sh").read_bytes() == task.asset_path("solution/solve.sh").read_bytes()
-    assert set(rows[0]) == {
-        "task_id",
-        "image",
-        "task_fingerprint",
-        "responses_create_params",
-        "verifier_metadata",
-        "public_source",
-    }
+    assert set(output.parent.iterdir()) == {output}
     validator = TaskDataValidator(
         server_name="deepswe_external1", adapter=TypeAdapter(TaskData), dataset_fpath=str(output)
     )
     validator.validate_row(0, rows[0])
     assert validator.report.clean and not validator.report.unknown_keys
+    assert load_task_data_schema(module.PACKAGE_DIR) is not None
 
 
-def test_public_cli_and_row_schema(task: PreparedTask, tmp_path: Path, monkeypatch: MonkeyPatch, capsys) -> None:
-    row = module.task_row(task)
-    validated = TaskData.model_validate(row)
-    assert validated.task_id == task.definition.task_id
-    assert validated.task_fingerprint == task.definition.fingerprint()
-    with pytest.raises(ValueError):
-        TaskData.model_validate(row | {"task_fingerprint": "invalid"})
+def test_public_cli_no_longer_materializes_task_packages(tmp_path, monkeypatch, capsys):
     calls = []
 
     def prepare(**kwargs):
         calls.append(kwargs)
-        return [row]
+        return [{}]
 
     monkeypatch.setattr(module, "prepare_examples", prepare)
     monkeypatch.setattr(
@@ -84,8 +73,6 @@ def test_public_cli_and_row_schema(task: PreparedTask, tmp_path: Path, monkeypat
             "prepare_examples",
             "--source-dir",
             str(tmp_path / "source"),
-            "--tasks-dir",
-            str(tmp_path / "tasks"),
             "--output",
             str(tmp_path / "example.jsonl"),
             "--no-download",
@@ -95,7 +82,6 @@ def test_public_cli_and_row_schema(task: PreparedTask, tmp_path: Path, monkeypat
     assert calls == [
         {
             "source_dir": tmp_path / "source",
-            "tasks_dir": tmp_path / "tasks",
             "output_path": tmp_path / "example.jsonl",
             "allow_download": False,
         }
@@ -133,4 +119,5 @@ def test_committed_rollouts_match_public_examples() -> None:
         assert not row.get("mask_sample") and not row.get("failure_kind")
         assert row["reward"] in (0.0, 1.0)
         assert row["rollout_provenance"]["num_repeats"] == 1
+        assert row["rollout_provenance"]["row_format_migration"]["runtime_rerun"] is False
         assert any(item["type"] == "function_call" for item in row["response"]["output"])

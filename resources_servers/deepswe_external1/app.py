@@ -17,25 +17,30 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from pydantic import Field, model_validator
 
-from nemo_gym.base_resources_server import SimpleResourcesServer
+from nemo_gym.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseVerifyRequest,
+    ReverifyMode,
+    SimpleResourcesServer,
+)
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.failure_kinds import VERIFIER_ERROR
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.app import (
+    AgentSandboxSession,
     DeepSWEResourcesServer,
-    DeepSWEResourcesServerConfig,
-    DeepSWESeedSessionRequest,
     DeepSWESeedSessionResponse,
-    DeepSWEVerifyRequest,
     DeepSWEVerifyResponse,
     VerifierResult,
     _resolve_repo_path,
-    _resolve_task,
 )
 from resources_servers.deepswe.task_store import task_sandbox_resources
-from resources_servers.deepswe_external1.task_store import PreparedTask, PreparedTaskStore
+from resources_servers.deepswe_external1.inline_task import InlineTask
+from resources_servers.deepswe_external1.task_data import TaskData
 
 
 logger = logging.getLogger(__name__)
@@ -73,9 +78,19 @@ python3 --version
 """
 
 
-class DeepsweExternal1ResourcesServerConfig(DeepSWEResourcesServerConfig):
+class DeepsweExternal1ResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE = ReverifyMode.UNSUPPORTED
+
+    is_verifying_golden_patch: bool = False
+    task_cpu_multiplier: float = Field(default=2.0, gt=0)
+    task_memory_multiplier: float = Field(default=2.0, gt=0)
+    sandbox_provider: str
+    sandbox_config: dict[str, Any]
+    enforce_agent_no_network: bool = True
+    sandbox_model_server: ModelServerRef | None = None
     logs_dir: Path = Path("resources_servers/deepswe_external1/logs")
     clear_verifier_logs: Literal[False] = False
+    include_model_patch_in_response: bool = True
     is_verifying_null_patch: bool = False
     enforce_verifier_no_network: bool = False
 
@@ -86,17 +101,16 @@ class DeepsweExternal1ResourcesServerConfig(DeepSWEResourcesServerConfig):
         return self
 
 
-class DeepsweExternal1SeedSessionRequest(DeepSWESeedSessionRequest):
-    task_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+class DeepsweExternal1SeedSessionRequest(TaskData, BaseSeedSessionRequest):
+    pass
 
 
-class DeepsweExternal1VerifyRequest(DeepSWEVerifyRequest):
-    task_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+class DeepsweExternal1VerifyRequest(TaskData, BaseVerifyRequest):
+    sandbox_handle: str | None = None
 
 
 class DeepsweExternal1VerifyResponse(DeepSWEVerifyResponse):
     validation_mode: Literal["agent", "golden", "null"]
-    task_fingerprint: str
     agent_sandbox_id: str | None = None
     verifier_sandbox_id: str | None = None
     golden_execution_time_s: float = 0.0
@@ -105,15 +119,12 @@ class DeepsweExternal1VerifyResponse(DeepSWEVerifyResponse):
 
 
 class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
-    """Reuse DeepSWE staging/grading with validated, independently prepared tasks."""
+    """Reuse DeepSWE collection/grading with self-contained task rows."""
 
     config: DeepsweExternal1ResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
         SimpleResourcesServer.model_post_init(self, context)
-        self._task_store = PreparedTaskStore(
-            _resolve_repo_path(self.config.tasks_dir), expected_task_count=self.config.expected_task_count
-        )
         self._agent_sessions = {}
 
     def setup_webserver(self) -> FastAPI:
@@ -134,22 +145,17 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
         app.router.lifespan_context = lifespan
         return app
 
-    def _checked_task(self, body: DeepsweExternal1SeedSessionRequest | DeepsweExternal1VerifyRequest) -> PreparedTask:
-        task = _resolve_task(body, self._task_store)
-        if not isinstance(task, PreparedTask) or body.task_fingerprint != task.definition.fingerprint():
-            raise ValueError("Request does not match the prepared task fingerprint")
-        task.validate_assets()
-        return task
-
     def _provider_options(self, *, phase: str) -> dict[str, Any]:
         options = super()._provider_options(phase=phase)
         if phase != "agent" and self.config.enforce_verifier_no_network:
             options["network_policy"] = {"defaultAction": "deny", "egress": []}
         return options
 
-    async def _create_sandbox(self, task: PreparedTask, *, phase: str) -> AsyncSandbox:
+    async def _create_sandbox(
+        self, task: InlineTask, *, phase: str, files: dict[str, str] | None = None
+    ) -> AsyncSandbox:
         global_config = get_global_config_dict()
-        definition = task.definition
+        definition = task.data
         agent = phase == "agent"
         phase_limits = definition.agent if agent else definition.verifier
         resources = task_sandbox_resources(task, phase=phase)
@@ -162,7 +168,7 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             env=phase_limits.env | dict(self.config.sandbox_config.get("env", {})),
-            files={},
+            files=files or {},
             metadata=resolve_provider_metadata(self.config.sandbox_provider, global_config)
             | dict(self.config.sandbox_config.get("metadata", {}))
             | {"task": definition.task_id[:63].rstrip("._-"), "phase": phase, "nemo_gym_agent": self.config.name},
@@ -194,7 +200,7 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
         return sandbox
 
     async def _ensure_verifier_python(self, sandbox: AsyncSandbox) -> None:
-        # Run only in fresh B, before staging any candidate code or held-out tests.
+        # Run only in fresh B, before executing tests or applying the candidate patch.
         # Never relax an explicitly requested no-network policy to install packages.
         allow_install = int(not self.config.enforce_verifier_no_network)
         result = await sandbox.exec(
@@ -220,19 +226,27 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
     async def seed_session(
         self, request: Request, body: DeepsweExternal1SeedSessionRequest
     ) -> DeepSWESeedSessionResponse:
-        self._checked_task(body)
-        if self.config.is_verifying_null_patch:
-            raise RuntimeError("seed_session is unavailable in null-validation mode")
-        return await super().seed_session(request, body)
+        if self.config.is_verifying_golden_patch or self.config.is_verifying_null_patch:
+            raise RuntimeError("seed_session is unavailable in golden/null-validation mode")
+        session_id = str(request.session[SESSION_ID_KEY])
+        previous = self._agent_sessions.pop(session_id, None)
+        if previous is not None:
+            await self._stop_sandbox(previous.sandbox, task_id=previous.task_id, phase="replaced-agent")
+        sandbox = await self._create_sandbox(InlineTask(body), phase="agent")
+        try:
+            descriptor = dict(await sandbox.serialize())
+            handle = descriptor["sandbox_id"]
+            self._agent_sessions[session_id] = AgentSandboxSession(
+                body.task_id, body.image, sandbox, handle, descriptor
+            )
+            return DeepSWESeedSessionResponse(sandbox_handle=handle, sandbox_descriptor=descriptor)
+        except Exception:
+            await self._stop_sandbox(sandbox, task_id=body.task_id, phase="failed-agent-seed")
+            raise
 
-    async def _execute_golden(self, sandbox: AsyncSandbox, task: PreparedTask, log_dir: Path) -> None:
-        result = await sandbox.exec("mkdir -p /solution", timeout_s=60)
-        if result.return_code != 0:
-            raise RuntimeError("Could not create the golden solution directory")
-        for filename in ("solve.sh", "solution.patch"):
-            await sandbox.upload(task.asset_path(f"solution/{filename}"), f"/solution/{filename}")
+    async def _execute_golden(self, sandbox: AsyncSandbox, task: InlineTask, log_dir: Path) -> None:
         result = await sandbox.exec(
-            "bash /solution/solve.sh", cwd=task.definition.workdir, timeout_s=task.definition.solution_timeout_sec
+            "bash /solution/solve.sh", cwd=task.data.workdir, timeout_s=task.data.solution_timeout_sec
         )
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / "golden.log").write_text((result.stdout or "") + (result.stderr or ""), encoding="utf-8")
@@ -240,24 +254,23 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
             raise RuntimeError(f"Golden solution failed with exit code {result.return_code}")
 
     async def verify(self, request: Request, body: DeepsweExternal1VerifyRequest) -> DeepsweExternal1VerifyResponse:
-        try:
-            task = self._checked_task(body)
-        except Exception:
-            session = self._agent_sessions.pop(str(request.session.get(SESSION_ID_KEY, "")), None)
-            if session is not None:
-                await self._stop_sandbox(session.sandbox, task_id=session.task_id, phase="invalid-verification")
-            raise
-        return await self._verify_task(request, body, task)
+        return await self._verify_task(request, body, InlineTask(body))
+
+    async def _stage_verifier(self, sandbox: AsyncSandbox, task: InlineTask, model_patch: bytes) -> None:
+        # Files were supplied through SandboxSpec.files at B's creation, like Swemer.
+        result = await sandbox.exec("chmod 0755 /tests/test.sh /tests/grader.py", timeout_s=60)
+        if result.return_code != 0:
+            raise RuntimeError(f"Failed to make DeepSWE verifier executable: {result.stderr or ''}")
 
     async def _verify_task(
-        self, request: Request, body: DeepsweExternal1VerifyRequest, task: PreparedTask
+        self, request: Request, body: DeepsweExternal1VerifyRequest, task: InlineTask
     ) -> DeepsweExternal1VerifyResponse:
         mode: Literal["agent", "golden", "null"] = "agent"
         if self.config.is_verifying_golden_patch:
             mode = "golden"
         elif self.config.is_verifying_null_patch:
             mode = "null"
-        task_id = task.definition.task_id
+        task_id = task.data.task_id
         session_id = str(request.session.get(SESSION_ID_KEY, "validation"))
         # Session IDs are untrusted path components; each attempt gets its own generated log directory.
         log_dir = _resolve_repo_path(self.config.logs_dir) / task_id / uuid4().hex
@@ -276,12 +289,14 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
                     raise RuntimeError("No seeded agent sandbox exists for this session")
                 agent_sandbox = session.sandbox
                 agent_id = session.sandbox_handle
-                if session.task_id != task_id or session.image != task.definition.image:
+                if session.task_id != task_id or session.image != task.data.image:
                     raise RuntimeError("Seeded session task/image does not match verification")
                 if body.sandbox_handle is not None and body.sandbox_handle != agent_id:
                     raise RuntimeError("Sandbox handle does not match the seeded session")
             else:
-                agent_sandbox = await self._create_sandbox(task, phase="agent")
+                agent_sandbox = await self._create_sandbox(
+                    task, phase="agent", files=task.data.files.solution_files() if mode == "golden" else {}
+                )
                 agent_id = str((await agent_sandbox.serialize())["sandbox_id"])
 
             try:
@@ -294,7 +309,7 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
                 started = monotonic()
                 model_patch = await self._collect_model_patch(agent_sandbox, task)
                 collect_time = monotonic() - started
-                if mode == "golden" and task.asset_path("solution/solution.patch").stat().st_size and not model_patch:
+                if mode == "golden" and task.data.files.solution_patch and not model_patch:
                     raise RuntimeError("Golden solution produced no committed patch")
                 log_dir.mkdir(parents=True, exist_ok=True)
                 (log_dir / "model.patch").write_bytes(model_patch)
@@ -310,7 +325,9 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
 
             failure_stage = "verifier_setup"
             started = monotonic()
-            verifier_sandbox = await self._create_sandbox(task, phase="verifier")
+            verifier_sandbox = await self._create_sandbox(
+                task, phase="verifier", files=task.data.files.verification_files(model_patch)
+            )
             verifier_id = str((await verifier_sandbox.serialize())["sandbox_id"])
             if verifier_id == agent_id:
                 raise RuntimeError("Provider reused the agent sandbox as the verifier")
@@ -335,12 +352,11 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
                     cleanup_errors.append("verifier")
 
         response = DeepsweExternal1VerifyResponse.model_validate(
-            body.model_dump()
+            body.model_dump(include={"responses_create_params", "response", "image", "sandbox_handle"})
             | result.model_dump()
             | {
                 "task_id": task_id,
                 "validation_mode": mode,
-                "task_fingerprint": task.definition.fingerprint(),
                 "agent_sandbox_id": agent_id,
                 "verifier_sandbox_id": verifier_id,
                 "golden_execution_time_s": golden_time,

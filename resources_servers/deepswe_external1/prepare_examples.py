@@ -1,27 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare five public DeepSWE examples and their gitignored verifier packages."""
+"""Regenerate five self-contained public DeepSWE example rows."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import shutil
-import tempfile
 from pathlib import Path
 
 from resources_servers.deepswe.prepare import DEEPSWE_REPOSITORY, ensure_source
 from resources_servers.deepswe.task_schema import resolve_effective_verifier_env_config
 from resources_servers.deepswe.task_store import DEEPSWE_SOURCE_REVISION, DeepSWETaskStore
-from resources_servers.deepswe_external1.task_store import (
-    ASSET_PATHS,
-    AssetDigest,
-    PhaseLimits,
-    PreparedTask,
-    TaskDefinition,
-)
+from resources_servers.deepswe_external1.task_data import PhaseLimits, TaskData, TaskFiles
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -32,61 +23,29 @@ EXAMPLE_TASK_IDS = (
     "adaptix-name-mapping-aliases",
     "aiomonitor-task-snapshots-diff",
 )
+FILE_PATHS = {
+    "test_script": "tests/test.sh",
+    "test_patch": "tests/test.patch",
+    "grader": "tests/grader.py",
+    "grader_config": "tests/config.json",
+    "solve_script": "solution/solve.sh",
+    "solution_patch": "solution/solution.patch",
+}
 
 
-def describe_assets(source_dir: Path) -> dict[str, AssetDigest]:
-    """Hash only the seven declared control-plane assets, never repository trees."""
-    if source_dir.is_symlink():
-        raise ValueError("Task source directory must not be a symlink")
-    source_dir = source_dir.resolve(strict=True)
-    result = {}
-    for name in ASSET_PATHS:
-        path = source_dir / name
-        # Check only within the resolved source root, avoiding redundant remote-filesystem
-        # stats for every ancestor on every asset in a large corpus.
-        if path.is_symlink() or path.parent.is_symlink() or not path.is_file():
-            raise ValueError(f"Task asset must be a regular, non-symlink file: {name}")
-        result[name] = AssetDigest(
-            sha256=hashlib.sha256(path.read_bytes()).hexdigest(), mode=path.stat().st_mode & 0o777
-        )
-    return result
+def read_task_files(source_dir: Path) -> TaskFiles:
+    """Read original UTF-8 bytes without normalizing line endings."""
+    return TaskFiles(**{field: (source_dir / path).read_bytes().decode("utf-8") for field, path in FILE_PATHS.items()})
 
 
-def materialize_task(source_dir: Path, tasks_dir: Path, definition: TaskDefinition) -> PreparedTask:
-    """Create a checksummed package, refusing to replace a different existing one."""
-    tasks_dir.mkdir(parents=True, exist_ok=True)
-    destination = tasks_dir / definition.task_id
-    if destination.exists():
-        prepared = PreparedTask(destination)
-        if prepared.definition != definition:
-            raise ValueError(f"Refusing to overwrite different prepared task: {definition.task_id}")
-        return prepared
-    with tempfile.TemporaryDirectory(prefix=".prepare-", dir=tasks_dir.parent) as temporary:
-        staging = Path(temporary) / definition.task_id
-        for name in ASSET_PATHS:
-            target = staging / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_dir / name, target)
-        (staging / "task.json").write_text(definition.model_dump_json(indent=2) + "\n", encoding="utf-8")
-        PreparedTask(staging)
-        staging.rename(destination)
-    return PreparedTask(destination)
-
-
-def task_row(task: PreparedTask) -> dict[str, object]:
-    """Build a row without exposing solution or verifier contents to the agent."""
-    return {
-        "task_id": task.definition.task_id,
-        "image": task.definition.image,
-        "task_fingerprint": task.definition.fingerprint(),
-        "responses_create_params": {"input": [{"role": "user", "content": task.instruction}]},
-        "verifier_metadata": {"task_id": task.definition.task_id},
+def task_row(data: TaskData, instruction: str) -> dict[str, object]:
+    """Keep held-out file contents out of the model's input messages."""
+    return data.model_dump(mode="json", exclude_none=True) | {
+        "responses_create_params": {"input": [{"role": "user", "content": instruction}]},
     }
 
 
-def prepare_examples(
-    *, source_dir: Path, tasks_dir: Path, output_path: Path, allow_download: bool = True
-) -> list[dict[str, object]]:
+def prepare_examples(*, source_dir: Path, output_path: Path, allow_download: bool = True) -> list[dict[str, object]]:
     """Use the public benchmark's pinned source and original versioned images."""
     source = ensure_source(source_dir, allow_download=allow_download)
     original = DeepSWETaskStore(source / "tasks")
@@ -97,7 +56,7 @@ def prepare_examples(
         verifier = resolve_effective_verifier_env_config(task.config, None)
         if verifier is None:
             raise ValueError("Public example requires a separate verifier")
-        definition = TaskDefinition(
+        data = TaskData(
             task_id=task_id,
             image=agent.docker_image,
             verifier_image=agent.docker_image,
@@ -116,18 +75,16 @@ def prepare_examples(
                 timeout_sec=task.config.verifier.timeout_sec,
                 env=verifier.env | task.config.verifier.env,
             ),
-            assets=describe_assets(task.task_dir),
+            files=read_task_files(task.task_dir),
+            public_source={
+                "repository": DEEPSWE_REPOSITORY,
+                "revision": DEEPSWE_SOURCE_REVISION,
+                "task_path": f"tasks/{task_id}",
+                "license": "Apache-2.0",
+                "upstream_project": task.config.metadata["repository_url"],
+            },
         )
-        prepared = materialize_task(task.task_dir, tasks_dir, definition)
-        row = task_row(prepared)
-        row["public_source"] = {
-            "repository": DEEPSWE_REPOSITORY,
-            "revision": DEEPSWE_SOURCE_REVISION,
-            "task_path": f"tasks/{task_id}",
-            "license": "Apache-2.0",
-            "upstream_project": task.config.metadata["repository_url"],
-        }
-        rows.append(row)
+        rows.append(task_row(data, (task.task_dir / "instruction.md").read_bytes().decode("utf-8")))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
     return rows
@@ -136,13 +93,11 @@ def prepare_examples(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dir", type=Path, default=PACKAGE_DIR / "data/cache/source")
-    parser.add_argument("--tasks-dir", type=Path, default=PACKAGE_DIR / "data/cache/tasks")
     parser.add_argument("--output", type=Path, default=PACKAGE_DIR / "data/example.jsonl")
     parser.add_argument("--no-download", action="store_true")
     args = parser.parse_args()
     rows = prepare_examples(
         source_dir=args.source_dir,
-        tasks_dir=args.tasks_dir,
         output_path=args.output,
         allow_download=not args.no_download,
     )

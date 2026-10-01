@@ -1,17 +1,19 @@
 # DeepSWE external tasks
 
 DeepSWE-style coding tasks with an agent sandbox and a fresh verifier sandbox.
-The server reuses Gym's DeepSWE verifier staging and reward handling; the official
-DeepSWE benchmark remains unchanged.
+The server reuses Gym's DeepSWE patch collection, verifier execution and reward
+handling; the official DeepSWE benchmark remains unchanged. Each JSONL row contains
+the prompt, image references, resource limits, base commit, and all test/solution
+file contents. No shared task directory or startup preparation is required.
 
 ## Public examples
 
 The five examples come from [DeepSWE](https://github.com/datacurve-ai/deep-swe),
 pinned to revision `435ee89ec2f2e2289f33b0da4f992f0b7b7266b9`.
-Prepare their checksummed task packages before starting the server:
+The committed rows are ready to use. To regenerate them from pinned public source,
+optionally run `python -m resources_servers.deepswe_external1.prepare_examples`.
 
 ```bash
-python -m resources_servers.deepswe_external1.prepare_examples
 gym dataset collate \
   --config resources_servers/deepswe_external1/configs/deepswe_external1.yaml \
   --output-dir resources_servers/deepswe_external1/data/cache/collated \
@@ -39,13 +41,16 @@ attempt per example (three passes, two genuine failures). It retains the source
 task input and unchanged Gym-converted model/tool output, not raw per-turn model
 requests. Each row records the runtime commit and exported prompt quoting;
 operational logs, sandbox handles and the reconstructed system header are omitted.
-Those recorded runs used verifier network blocking and omitted patch text from
-verification responses, and predate the Python bootstrap below. The defaults
-now match upstream DeepSWE.
+Those recorded runs predate this JSONL packaging change and the Python bootstrap
+below; they are historical evidence, not new validation of this refactor. Their
+task fields were migrated without changing model/tool output or rewards. They used
+verifier network blocking and omitted patch text from verification responses;
+the current defaults match upstream DeepSWE.
 
-For other prepared packages, override `tasks_dir` and `expected_task_count`, and
-collect against their matching JSONL. Keep local training data and asset caches
-uncommitted.
+For another dataset, supply rows matching `task_data.py`. Keep local training data
+uncommitted. Rows are trusted controller inputs: grading files live in `files`,
+not `responses_create_params.input`, and are not shown to the agent. There is no
+task store, file-checksum manifest or legacy fingerprint-only row loader.
 
 ## Verification contract
 
@@ -58,7 +63,8 @@ changes are not transferred. There is no additional filename/cache exclusion lis
 Only the patch crosses from agent to verifier. Trusted test files are staged
 separately in the fresh verifier; its original grader applies the patch and held-out
 tests. Each verifier image must provide Git and writable grading directories.
-Before staging tests or candidate code, B checks for Python and, if missing,
+File contents are provisioned through `SandboxSpec.files`, like other SWE servers.
+Before running tests or applying the candidate patch, B checks for Python and, if missing,
 installs `python3` as root through its OS package manager (APT, APK, microdnf,
 DNF or Yum), with a five-minute setup timeout. Existing Python is reused; neither
 the agent sandbox nor the published image is modified. Installation requires
