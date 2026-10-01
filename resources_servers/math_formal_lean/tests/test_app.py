@@ -16,6 +16,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -37,6 +38,14 @@ from resources_servers.math_formal_lean.app import (
 
 
 class TestMathFormalLeanApp:
+    def test_checkpoint_seed_advertises_replayable_stateless_verification(self, server):
+        server.server_client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "test"}}
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post("/seed_session", json={"responses_create_params": {"input": "proof"}})
+        assert response.status_code == 200
+        assert response.headers["x-ng-checkpoint-verify"] == "replay"
+        assert server.checkpoint_mode == "stateless"
+
     @pytest.fixture
     def config(self) -> MathFormalLeanResourcesServerConfig:
         return MathFormalLeanResourcesServerConfig(

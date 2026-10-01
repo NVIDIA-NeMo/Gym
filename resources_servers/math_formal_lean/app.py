@@ -381,6 +381,9 @@ class MathFormalLeanVerifyResponse(BaseVerifyResponse):
 
 class MathFormalLeanResourcesServer(SimpleResourcesServer):
     ray_enabled = False
+    # Each verification compiles only the proof supplied by that request.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: MathFormalLeanResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
