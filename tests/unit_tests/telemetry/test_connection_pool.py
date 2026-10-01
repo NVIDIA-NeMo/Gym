@@ -490,8 +490,8 @@ async def test_queued_timeout_and_retry_record_separate_attempts(collected_metri
             assert await asyncio.wait_for(queued.get(), timeout=1) == "total"
             assert await asyncio.wait_for(queued.get(), timeout=1) == "total"
             release.set()
-            await waiting
-            await occupying
+            await asyncio.wait_for(waiting, timeout=5)
+            await asyncio.wait_for(occupying, timeout=5)
         finally:
             release.set()
             await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
@@ -539,9 +539,9 @@ async def test_cancelled_queue_wait_is_recorded(collected_metrics, monkeypatch):
             await asyncio.wait_for(queued.wait(), timeout=1)
             waiting.cancel()
             with pytest.raises(asyncio.CancelledError):
-                await waiting
+                await asyncio.wait_for(waiting, timeout=5)
             release.set()
-            await occupying
+            await asyncio.wait_for(occupying, timeout=5)
         finally:
             release.set()
             await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
@@ -551,22 +551,32 @@ async def test_cancelled_queue_wait_is_recorded(collected_metrics, monkeypatch):
 
 
 async def test_metric_failure_does_not_change_response(collected_metrics, monkeypatch):
+    recorder_calls = []
+
     async def delayed(_request):
         await asyncio.sleep(0.03)
         return web.json_response({"ok": True})
 
-    monkeypatch.setattr(
-        connection_pool,
-        "record_http_connection_pool_queue_duration",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("metrics failed")),
-    )
+    def failing_recorder(*_args, **kwargs):
+        recorder_calls.append(kwargs["attempt_outcome"])
+        raise RuntimeError("metrics failed")
+
+    monkeypatch.setattr(connection_pool, "record_http_connection_pool_queue_duration", failing_recorder)
     async with _serve(delayed) as url, _client(monkeypatch, limit=1, limit_per_host=1):
-        await asyncio.gather(_get(url), _get(url))
+        # One attempt per request, so an escaped recorder error fails the request instead of being retried.
+        await asyncio.wait_for(
+            asyncio.gather(_get(url, _max_connection_retries=1), _get(url, _max_connection_retries=1)), timeout=5
+        )
+
+    assert recorder_calls == ["ok"]
+    (connect_point,) = collected_metrics()[CONNECT_TOTAL]
+    assert connect_point.value == 2
 
 
-def test_queue_wait_override_matches_aiohttp_signature():
-    base = inspect.signature(TCPConnector._wait_for_available_connection)
-    override = inspect.signature(connection_pool.QueueTimedTCPConnector._wait_for_available_connection)
+@pytest.mark.parametrize("method", ["connect", "_wait_for_available_connection"])
+def test_connector_overrides_match_aiohttp_signatures(method):
+    base = inspect.signature(getattr(TCPConnector, method))
+    override = inspect.signature(getattr(connection_pool.QueueTimedTCPConnector, method))
     assert [(name, parameter.kind, parameter.default) for name, parameter in base.parameters.items()] == [
         (name, parameter.kind, parameter.default) for name, parameter in override.parameters.items()
     ]

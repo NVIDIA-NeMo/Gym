@@ -285,7 +285,13 @@ async def test_lazy_client_initialization_failure_is_inside_the_client_span(
     )
 
     with pytest.raises(ValueError, match="must remain at least 1"):
-        await server_utils.request("GET", "http://127.0.0.1/work", _server_name="policy_model")
+        # Bound the call so a validation regression that reaches the network fails instead of retrying forever.
+        await asyncio.wait_for(
+            server_utils.request(
+                "GET", "http://127.0.0.1/work", _max_connection_retries=1, _server_name="policy_model"
+            ),
+            timeout=5,
+        )
 
     assert server_utils._GLOBAL_AIOHTTP_CLIENT is None
     assert connection_pool._SERVER_NAME.get() == "external"
