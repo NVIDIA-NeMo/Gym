@@ -1443,3 +1443,64 @@ class TestHeadServerProxyKwargs:
 
         assert kwargs["proxy_headers"] is True
         assert kwargs["forwarded_allow_ips"] == ["10.0.0.1"]
+
+
+@mark.parametrize("header", [None, b"X-Other-Harness-Reply"])
+def test_model_header_comes_from_its_harness_property(monkeypatch, header):
+    import sys
+    from types import ModuleType
+
+    harness = ModuleType("responses_api_agents.test_header_harness")
+    harness._assistant_message_header = header
+    plain = ModuleType("responses_api_agents.test_plain_harness")
+    monkeypatch.setitem(sys.modules, harness.__name__, harness)
+    monkeypatch.setitem(sys.modules, plain.__name__, plain)
+    client = ServerClient(
+        head_server_config={"host": "localhost", "port": 0},
+        global_config_dict=OmegaConf.create(
+            {
+                "first": {
+                    "responses_api_agents": {
+                        "test_header_harness": {
+                            "model_server": {"type": "responses_api_models", "name": "first_model"},
+                        }
+                    }
+                },
+                "second": {
+                    "responses_api_agents": {
+                        "test_plain_harness": {
+                            "model_server": {"type": "responses_api_models", "name": "second_model"},
+                        }
+                    }
+                },
+                "observability_enabled": True,
+            }
+        ),
+    )
+    assert client.assistant_message_header("first_model") == (header.lower() if header else None)
+    assert client.assistant_message_header("second_model") is None
+    assert client.assistant_message_header("unused_model") is None
+
+
+def test_shared_model_rejects_conflicting_harness_headers(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    config = {}
+    for index, header in enumerate((b"x-one-reply", b"x-two-reply")):
+        name = f"test_header_{index}"
+        harness = ModuleType(f"responses_api_agents.{name}")
+        harness._assistant_message_header = header
+        monkeypatch.setitem(sys.modules, harness.__name__, harness)
+        config[name] = {
+            "responses_api_agents": {
+                name: {
+                    "model_server": {"type": "responses_api_models", "name": "policy"},
+                }
+            }
+        }
+    client = ServerClient(
+        head_server_config={"host": "localhost", "port": 0}, global_config_dict=OmegaConf.create(config)
+    )
+    with raises(ValueError, match="different assistant headers"):
+        client.assistant_message_header("policy")
