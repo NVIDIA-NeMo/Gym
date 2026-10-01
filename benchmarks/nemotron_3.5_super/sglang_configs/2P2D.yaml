@@ -213,7 +213,7 @@ roles:
       skip-server-warmup: true
       attention-backend: trtllm_mha
       context-length: 262144
-      cuda-graph-max-bs-decode: 1280  # (1 + 4) * 256
+      cuda-graph-max-bs-decode: 256
       disaggregation-decode-extra-slots: 0
       disaggregation-transfer-backend: nixl
       dtype: bfloat16
