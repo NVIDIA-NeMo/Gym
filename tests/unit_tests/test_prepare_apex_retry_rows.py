@@ -67,6 +67,32 @@ def test_archiving_is_capped_per_rollout_and_idempotent(tmp_path: Path) -> None:
     assert len(_read(startup_archive_path_for(output))) == 2
 
 
+def test_repeated_startup_failures_reusing_an_attempt_index_still_reach_the_cap(tmp_path: Path) -> None:
+    output = tmp_path / "rollouts.jsonl"
+    # Gym reuses attempt index 0 every time the sidecar was emptied, so each resume writes "the same" attempt.
+    for resume in range(5):
+        _write(
+            failure_path_for(output),
+            _read(failure_path_for(output)) + [_failure("a", 0, 0, error=STARTUP_ERROR + str(resume))],
+        )
+        archive_world_startup_failures(output, max_archived=3)
+
+    assert len(_read(startup_archive_path_for(output))) == 3
+    # Past the cap the failures stay in the sidecar as normal attempts, so the rollout can finally run out of retries.
+    assert [row["apex_error"][-1] for row in _read(failure_path_for(output))] == ["3", "4"]
+
+
+def test_identical_row_left_in_both_files_by_an_interrupted_run_is_not_counted_twice(tmp_path: Path) -> None:
+    output = tmp_path / "rollouts.jsonl"
+    failure = _failure("a", 0, 0)
+    _write(startup_archive_path_for(output), [failure])
+    _write(failure_path_for(output), [failure])
+
+    assert archive_world_startup_failures(output) == 0
+    assert _read(failure_path_for(output)) == []
+    assert _read(startup_archive_path_for(output)) == [failure]
+
+
 def test_no_sidecar_is_a_no_op(tmp_path: Path) -> None:
     output = tmp_path / "rollouts.jsonl"
 

@@ -90,33 +90,45 @@ def _rollout_identity(row: dict[str, Any]) -> tuple[Any, int]:
     return row.get("task_id"), int(row.get("_ng_rollout_index", 0))
 
 
+def _row_fingerprint(row: dict[str, Any]) -> str:
+    return json.dumps(row, sort_keys=True, ensure_ascii=False)
+
+
 def archive_world_startup_failures(output: Path, max_archived: int = DEFAULT_MAX_ARCHIVED_STARTUP_FAILURES) -> int:
     """Move world-startup failures out of the sidecar so they do not use up retry attempts.
 
     Up to ``max_archived`` startup failures per rollout are moved to ``<stem>_startup_failures.jsonl``; later ones
-    stay in the sidecar and count as normal attempts. Returns the number of rows archived. The archive is written
-    before the sidecar, and an archived attempt that is still in the sidecar is not archived twice.
+    stay in the sidecar and count as normal attempts. Returns the number of rows archived.
+
+    Once a failure leaves the sidecar, Gym reuses its ``_ng_attempt_index`` for the next attempt, so repeated
+    startup failures of one rollout share an attempt identity. They are therefore counted per rollout and only
+    an identical row (left in both files by an interrupted run) is treated as already archived.
     """
 
     failure_path = failure_path_for(output)
     failure_rows = _read_rows(failure_path)
     archive_path = startup_archive_path_for(output)
     archived_rows = _read_rows(archive_path)
-    archived_attempts = {_attempt_identity(row) for row in archived_rows}
+    archived_fingerprints = {_row_fingerprint(row) for row in archived_rows}
     archived_per_rollout = Counter(_rollout_identity(row) for row in archived_rows)
 
-    kept_rows, moved_rows = [], []
+    kept_rows, moved_rows, changed = [], [], False
     for row in failure_rows:
-        if _attempt_identity(row) in archived_attempts:
-            continue
-        rollout = _rollout_identity(row)
-        if is_world_startup_failure(row) and archived_per_rollout[rollout] < max_archived:
-            archived_per_rollout[rollout] += 1
-            moved_rows.append(row)
-        else:
-            kept_rows.append(row)
+        if is_world_startup_failure(row):
+            fingerprint = _row_fingerprint(row)
+            if fingerprint in archived_fingerprints:
+                changed = True
+                continue
+            rollout = _rollout_identity(row)
+            if archived_per_rollout[rollout] < max_archived:
+                archived_per_rollout[rollout] += 1
+                archived_fingerprints.add(fingerprint)
+                moved_rows.append(row)
+                changed = True
+                continue
+        kept_rows.append(row)
 
-    if len(kept_rows) != len(failure_rows):
+    if changed:
         _replace_rows(archive_path, archived_rows + moved_rows)
         _replace_rows(failure_path, kept_rows)
     return len(moved_rows)
