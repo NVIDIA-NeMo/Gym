@@ -820,13 +820,15 @@ class TestNativeTasksetBenchmark:
             }
         )
 
-    def test_discover_prepare_collate_and_dispatch(self, config, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("pin", [None, "agent"])
+    def test_discover_prepare_collate_and_dispatch(self, config, tmp_path, monkeypatch, pin):
         import json
 
         from nemo_gym.benchmarks import BenchmarkConfig
         from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
         from nemo_gym.train_data_utils import TrainDataProcessor
 
+        config.resources.resources_servers.impl.datasets[0].agent = pin
         benchmark = BenchmarkConfig.from_initial_config_dict(
             path=tmp_path / "config.yaml",
             initial_config_dict=config,
@@ -859,6 +861,38 @@ class TestNativeTasksetBenchmark:
         assert loaded["_ng_environment_server"] == "environment"
         assert loaded["task_input"]["task_data"]["answer"] == "expected"
         assert source.read_bytes() == original
+
+    @pytest.mark.parametrize(
+        "conflict, message",
+        [("agent", "pins agent 'other_agent'"), ("resources", "must bind declaring resources server")],
+    )
+    def test_collation_rejects_conflicting_route_before_writing(self, config, tmp_path, conflict, message):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.train_data_utils import TrainDataProcessor
+
+        source = tmp_path / "source.jsonl"
+        source.write_text('{"responses_create_params": {"input": "fix it"}}\n')
+        original = source.read_bytes()
+        if conflict == "agent":
+            config.other_agent = config.agent
+            config.resources.resources_servers.impl.datasets[0].agent = "other_agent"
+        else:
+            config.other_resources = config.resources
+            config.other_resources.resources_servers.impl.datasets = []
+            config.environment.environment_servers.single_agent_turn.resources_server.name = "other_resources"
+        output = tmp_path / "collated"
+        output.mkdir()
+        collated = output / "benchmark.jsonl"
+        collated.write_text("existing artifact\n")
+        config.update({"mode": "train_preparation", "output_dirpath": str(output)})
+
+        with pytest.raises(ConfigError, match=message):
+            TrainDataProcessor().run(config)
+
+        assert source.read_bytes() == original
+        assert collated.read_text() == "existing artifact\n"
+        assert not (tmp_path / "source_prepare.jsonl").exists()
+        assert not (tmp_path / "source_metrics.json").exists()
 
     @pytest.mark.parametrize("pin", [None, "agent"])
     def test_native_route_accepts_matching_pin(self, config, pin):
