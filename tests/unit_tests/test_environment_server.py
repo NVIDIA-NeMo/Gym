@@ -323,3 +323,27 @@ def test_anyio_level_cancellation_waits_for_cleanup() -> None:
 
     anyio.run(run)
     assert cleanup_finished.is_set()
+
+
+@pytest.mark.parametrize("classified", [False, True])
+def test_failure_metadata_survives_the_environment_http_boundary(classified: bool) -> None:
+    class FailureEnvironmentServer(_EnvironmentServer):
+        async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
+            return self.failure_response(
+                request,
+                EpisodeFailure(
+                    message="Judge unavailable",
+                    terminal=False,
+                    failure_kind="judge_failed" if classified else None,
+                    stage="verification" if classified else None,
+                ),
+            )
+
+    server = FailureEnvironmentServer(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
+    response = TestClient(server.setup_webserver()).post("/run", json=_request().model_dump(mode="json"))
+    assert response.status_code == 200
+    expected = {"message": "Judge unavailable", "terminal": False}
+    if classified:
+        expected.update(failure_kind="judge_failed", stage="verification")
+    assert response.json()["failure"] == expected
+    assert response.json()["result"] is None

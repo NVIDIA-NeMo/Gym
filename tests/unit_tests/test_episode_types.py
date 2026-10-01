@@ -64,3 +64,47 @@ def test_task_id_contains_only_logical_identity() -> None:
     }
     with pytest.raises(ValidationError, match="revision"):
         TaskId(taskset="swebench_pro:test", task_id="instance-1", revision="v1")
+
+
+def test_existing_failure_payload_remains_readable_by_strict_clients() -> None:
+    class ExistingFailure(BaseModel):
+        model_config = {"extra": "forbid"}
+        message: str
+        terminal: bool
+
+    original = ExistingFailure(message="Lost resources session", terminal=False)
+    current = EpisodeFailure.model_validate_json(original.model_dump_json())
+    assert current.failure_kind is None and current.stage is None
+    assert ExistingFailure.model_validate_json(current.model_dump_json()) == original
+
+
+@pytest.mark.parametrize("stage", ["seed", "agent", "verification", "cleanup"])
+def test_single_agent_protocol_inherits_shared_failure_metadata(stage: str) -> None:
+    from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure
+
+    failure = SingleAgentTurnFailure(
+        message="Participant unavailable",
+        terminal=False,
+        failure_kind="transport_unreachable",
+        stage=stage,
+    )
+    saved = failure.model_dump(mode="json", exclude={"partial_response"})
+    shared = EpisodeFailure.model_validate(saved)
+    assert shared.stage == stage and shared.failure_kind == "transport_unreachable"
+    assert shared.terminal is False
+
+
+def test_shared_failure_kind_accepts_extensions_and_warns_on_legacy_names(caplog) -> None:
+    custom = EpisodeFailure(message="Custom failure", terminal=True, failure_kind="example:tool_crashed")
+    assert custom.failure_kind == "example:tool_crashed"
+    assert not caplog.records
+
+    legacy = EpisodeFailure(message="Legacy failure", terminal=False, failure_kind="legacy_contract_test_error")
+    assert legacy.failure_kind == "legacy_contract_test_error"
+    assert "unregistered failure_kind" in caplog.text
+
+
+def test_unknown_execution_stage_is_optional_but_stage_aliases_are_rejected() -> None:
+    assert EpisodeFailure(message="Lost reply", terminal=False, failure_kind="transport_timeout").stage is None
+    with pytest.raises(ValidationError, match="stage"):
+        EpisodeFailure(message="Failed scoring", terminal=False, stage="verifier")
