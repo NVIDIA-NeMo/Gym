@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+agentic_vbench_agent:
+  responses_api_agents:
+    agentic_vbench_agent:
+      entrypoint: app.py
+      benchmark_root: ${oc.env:AGENTIC_VBENCH_ROOT}
+      evalkit_root: ${oc.env:AGENTIC_VBENCH_EVALKIT_ROOT}
+      output_root: ${oc.env:AGENTIC_VBENCH_OUTPUT_ROOT}
+      runtime_root: ${oc.env:AGENTIC_VBENCH_RUNTIME_ROOT}
+      model_base_url: ${oc.env:AGENTIC_VBENCH_MODEL_BASE_URL}
+      model_id: ${oc.env:AGENTIC_VBENCH_MODEL_ID}
+      credentials_file: ${oc.env:AGENTIC_VBENCH_CREDENTIALS_FILE,null}
+      concurrency: 2
+      datasets:
+        - name: agentic_vbench
+          type: benchmark
+          jsonl_fpath: ${oc.env:AGENTIC_VBENCH_DATASET,benchmarks/agentic_vbench/data/agentic_vbench_benchmark.jsonl}
+          prepare_script: benchmarks/agentic_vbench/prepare.py
+          num_repeats: 1
+
+agentic_vbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: agentic_vbench_agent
