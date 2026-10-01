@@ -593,7 +593,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             )
             prepared = await sandbox.exec(
                 "command -v python3 >/dev/null 2>&1 || "
-                "{ echo 'Native OpenClaw requires Python >=3.9 in the task image' >&2; exit 1; }; "
+                "{ echo 'Native OpenClaw requires Python >=3.8 in the task image' >&2; exit 1; }; "
                 f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.openclaw')}",
                 timeout_s=30,
             )

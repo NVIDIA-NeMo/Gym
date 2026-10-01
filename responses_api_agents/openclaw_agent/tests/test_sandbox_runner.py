@@ -4,6 +4,7 @@
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -88,6 +89,49 @@ def test_spawn_error_is_not_success(tmp_path):
     summary = result(tmp_path, process)
     assert summary["cleanup_confirmed"] is True
     assert summary["return_code"] != 0
+
+
+@pytest.mark.skipif(shutil.which("python3.8") is None, reason="Python 3.8 is not installed")
+def test_python38_preserves_environment_and_reaps_detached_child(tmp_path: Path) -> None:
+    python = shutil.which("python3.8")
+    code = (
+        "import json,os,pathlib,subprocess,sys; "
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
+        "pathlib.Path('child.pid').write_text(str(p.pid)); "
+        "print(json.dumps([os.environ['OPENCLAW_TEST_INHERITED'],os.environ['OPENCLAW_TEST_OVERRIDE']]))"
+    )
+    request = {
+        "directory": str(tmp_path),
+        "command": [python, "-c", code],
+        "cwd": str(tmp_path),
+        "env": {"OPENCLAW_TEST_OVERRIDE": "new"},
+        "timeout": 3,
+        "cleanup_timeout": 2,
+        "prompt": "task input",
+    }
+    path = tmp_path / "input.json"
+    path.write_text(json.dumps(request))
+    process = subprocess.Popen(
+        [python, "-I", str(Path(sandbox_runner.__file__)), str(path)],
+        env={**os.environ, "OPENCLAW_TEST_INHERITED": "kept", "OPENCLAW_TEST_OVERRIDE": "old"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    summary = result(tmp_path, process)
+    assert summary["cleanup_confirmed"] is True
+    assert summary["return_code"] == 0
+    assert json.loads((tmp_path / "stdout.log").read_text()) == ["kept", "new"]
+    with pytest.raises(ProcessLookupError):
+        os.kill(int((tmp_path / "child.pid").read_text()), 0)
+
+
+def test_stop_marker_prevents_process_launch(tmp_path):
+    (tmp_path / "runner.stop").touch()
+    process = launch(tmp_path, "open('should-not-exist', 'w').close()")
+    summary = result(tmp_path, process)
+    assert summary["cleanup_confirmed"] is True
+    assert summary["return_code"] != 0
+    assert not (tmp_path / "should-not-exist").exists()
 
 
 def test_sigterm_during_spawn_does_not_lose_child_handle(tmp_path):

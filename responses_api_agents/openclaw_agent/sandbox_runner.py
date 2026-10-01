@@ -81,14 +81,17 @@ def run(params: RunnerRequest) -> RunnerResult:
         stopping = True
 
     signal.signal(signal.SIGTERM, interrupt)
+    stop_file = directory / "runner.stop"
     (directory / "prompt.txt").write_text(params["prompt"])
     with (directory / "stdout.log").open("wb") as stdout, (directory / "stderr.log").open("wb") as stderr:
         try:
             enable_subreaper()
+            if stopping or stop_file.exists():
+                raise RuntimeError("OpenClaw closed before process launch")
             process = subprocess.Popen(
                 params["command"],
                 cwd=params["cwd"],
-                env=dict(os.environ) | params["env"],
+                env={**os.environ, **params["env"]},
                 stdin=subprocess.DEVNULL,
                 stdout=stdout,
                 stderr=stderr,
@@ -96,7 +99,7 @@ def run(params: RunnerRequest) -> RunnerResult:
             )
             deadline = monotonic() + params["timeout"]
             while process.poll() is None:
-                if stopping or monotonic() >= deadline:
+                if stopping or stop_file.exists() or monotonic() >= deadline:
                     timed_out = True
                     break
                 sleep(0.05)

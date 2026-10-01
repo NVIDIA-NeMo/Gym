@@ -124,15 +124,21 @@ calls the rollout-scoped Responses endpoint, closes the agent, verifies, and clo
 The model server address must be reachable from inside the task sandbox. Its `/ng-rollout/.../v1`
 route is embedded in OpenClaw's Chat Completions provider configuration to retain model-call linkage.
 
-The installer supports Linux glibc on x86_64/aarch64 and requires Python 3.9 or later for the
+The installer supports Linux glibc on x86_64/aarch64 and musl on x86_64, with Python 3.8 or later for the
 supervisor. Node 22.19.0 and OpenClaw are installed under
 `/tmp/nemo-gym-openclaw-node-22.19.0-<version>`. Node archives are checked against upstream SHA-256
 sums; the installed package version is verified before caching and when reusing a cached runtime.
 A version-scoped `flock` serializes runtime installation and cache validation across session setup
-attempts. Missing `flock`, `curl`, CA certificates, `tar`, `xz`, `sha256sum`, and `awk` are installed with `apt-get` only when
+attempts. Missing `flock`, `curl`, CA certificates, `tar`, `gzip`, `sha256sum`, and `awk` are installed with `apt-get` or `apk` only when
 running as root. Other images receive an actionable prerequisite error. Installation errors include
 the failed command, exit status, and stderr. Supporting these architectures does not establish
 validation on every task image; record the actual image digest and runtime versions with each run.
+
+The runner uses ordinary sandbox `exec`; no PTY/session API is required. Its internal deadline
+leaves time for descendant cleanup before the provider deadline. Cancellation requests a stop and
+waits for a cleanup receipt before detaching. A missing or failed receipt blocks verification.
+For old musl images, a checksum-pinned C++ runtime is extracted privately and used only by the
+private Node binary; task Node/Python and the global library search path are not replaced.
 
 Per-session HOME, config, caches, prompt, transcript, and supervisor output are isolated under
 `/tmp/nemo-gym-openclaw-sessions/`. OpenClaw reads the generated config directly without onboarding
