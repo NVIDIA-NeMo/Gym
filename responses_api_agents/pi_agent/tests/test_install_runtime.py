@@ -11,7 +11,7 @@ import pytest
 
 
 INSTALLER = Path(__file__).parents[1] / "install_pi_runtime.sh"
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Native Pi requires Linux")
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Pi requires Linux")
 
 
 @pytest.fixture
@@ -104,7 +104,7 @@ def test_missing_curl_without_bootstrap_support_explains_remedy(
         (root / "bin/apt-get").unlink()
     result = run_installer(root, env)
     assert result.returncode == 1
-    assert "Native Pi requires curl ca-certificates: preinstall these packages" in result.stderr
+    assert "Pi requires curl ca-certificates: preinstall these packages" in result.stderr
     assert not (root / "packages.log").exists()
     assert not (root / "download.log").exists()
 

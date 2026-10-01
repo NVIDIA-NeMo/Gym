@@ -426,7 +426,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 
 class PiAgentConfig(BaseResponsesAPIAgentConfig):
-    # Only the direct /run compatibility path calls Resources. Native sessions
+    # Only the direct /run compatibility path calls Resources. Sandbox sessions
     # receive SandboxAccess from EnvironmentServer instead.
     resources_server: Optional[ResourcesServerRef] = None
     model_server: Optional[ModelServerRef] = None
@@ -508,7 +508,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 if session_id not in self._sandbox_sessions and session_id not in self._closed_session_ids:
                     self._session_locks.pop(session_id, None)
 
-    def _native_session_marker(self, request: Request) -> str | None:
+    def _session_marker(self, request: Request) -> str | None:
         try:
             session = request.session
         except (AssertionError, AttributeError):
@@ -517,14 +517,14 @@ class PiAgent(SimpleResponsesAPIAgent):
             return None
         marker = session[_SANDBOX_SESSION_KEY]
         if not isinstance(marker, str) or not marker:
-            raise HTTPException(409, "Invalid native Pi session marker")
+            raise HTTPException(409, "Invalid Pi session marker")
         return marker
 
     async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
         """Borrow the Resources-owned task sandbox and install a pinned Pi runtime inside it."""
         self._expire_closed_agent_sessions()
         session_id = body.agent_session_id
-        previous = self._native_session_marker(request)
+        previous = self._session_marker(request)
         if previous != session_id and previous in self._sandbox_sessions:
             raise HTTPException(409, "Pi cookie belongs to another active session")
         if previous == session_id and session_id not in self._sandbox_sessions:
@@ -583,19 +583,19 @@ class PiAgent(SimpleResponsesAPIAgent):
         # Match Hermes: session initialization owns the sandbox runtime setup,
         # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
         if self.config.num_workers not in (None, 1):
-            raise HTTPException(422, "Native Pi sessions require num_workers=1")
+            raise HTTPException(422, "Pi sessions require num_workers=1")
         if body.sandbox_access is None or not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
-            raise HTTPException(422, "Native Pi requires direct, Resources-owned SandboxAccess")
+            raise HTTPException(422, "Pi requires direct, Resources-owned SandboxAccess")
         if not body.sandbox_access.workdir.startswith("/"):
             raise HTTPException(422, "Pi sandbox workdir must be absolute")
         if any(access.required for access in self.effective_tool_accesses(body)):
-            raise HTTPException(422, "Native Pi supports its own sandbox tools, not required HTTP/MCP tools")
+            raise HTTPException(422, "Pi supports its own sandbox tools, not required HTTP/MCP tools")
         if self.config.model_server is None:
-            raise HTTPException(422, "Native Pi requires a sandbox-reachable Gym model_server")
+            raise HTTPException(422, "Pi requires a sandbox-reachable Gym model_server")
         if not self.config.pi_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.pi_version):
-            raise HTTPException(422, "Native Pi requires an exact pi_version, for example 0.80.2")
+            raise HTTPException(422, "Pi requires an exact pi_version, for example 0.80.2")
         if self.config.command != "pi" or self.config.extra_args or self.config.env:
-            raise HTTPException(422, "Native Pi does not support command, extra_args, or env overrides")
+            raise HTTPException(422, "Pi does not support command, extra_args, or env overrides")
 
         connection = body.sandbox_access.connection
         provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
@@ -642,7 +642,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         """Confirm Pi teardown before allowing verification; never destroy the borrowed sandbox."""
         self._expire_closed_agent_sessions()
         session_id = body.agent_session_id
-        cookie = self._native_session_marker(request)
+        cookie = self._session_marker(request)
         if cookie is not None and cookie != session_id:
             raise HTTPException(409, "Pi close cookie does not match the requested session")
         async with self._session_lock(session_id):
@@ -702,7 +702,7 @@ class PiAgent(SimpleResponsesAPIAgent):
     def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         """Validate and normalize input before consuming the session's activation."""
         if body.model is not None and body.model != self.config.model:
-            raise HTTPException(422, "Native Pi model must match the configured model")
+            raise HTTPException(422, "Pi model must match the configured model")
         unsupported = (
             "include",
             "store",
@@ -728,10 +728,10 @@ class PiAgent(SimpleResponsesAPIAgent):
         values = body.model_dump(mode="json")
         for name in unsupported:
             if values.get(name) is not None:
-                raise HTTPException(422, f"Native Pi does not support request field {name}")
+                raise HTTPException(422, f"Pi does not support request field {name}")
         output_limit = body.max_output_tokens if body.max_output_tokens is not None else self.config.max_output_tokens
         if not 0 < output_limit <= 2**53 - 1:
-            raise HTTPException(422, "Native Pi max_output_tokens must be a positive JavaScript-safe integer")
+            raise HTTPException(422, "Pi max_output_tokens must be a positive JavaScript-safe integer")
         if body.tools or body.tool_choice != "auto" or not body.parallel_tool_calls or body.background:
             raise HTTPException(422, "Pi owns tool selection and execution policy")
         if (body.metadata or {}).get("chat_template_kwargs") is not None:
@@ -741,13 +741,13 @@ class PiAgent(SimpleResponsesAPIAgent):
         )
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"]):
-            raise HTTPException(422, "Native Pi accepts one text user prompt with an optional system message")
+            raise HTTPException(422, "Pi accepts one text user prompt with an optional system message")
         for item in items:
             if not isinstance(item.content, str) and any(
                 (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
                 for part in item.content
             ):
-                raise HTTPException(422, "Native Pi only supports text input")
+                raise HTTPException(422, "Pi only supports text input")
         prompt, input_system = _extract_instruction(items)
         system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
         return prompt, system
@@ -760,7 +760,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         prompt: str,
         system: str,
     ) -> NeMoGymResponse:
-        # Native sessions use only Gym's provider; do not copy credentials for
+        # Sandbox sessions use only Gym's provider; do not copy credentials for
         # unrelated direct providers from the host configuration into the sandbox.
         models = {
             "providers": {"nemo": self._build_models_config(state.seed.episode_id.capture_key)["providers"]["nemo"]}
@@ -978,7 +978,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
     ) -> tuple[list[Any], dict[str, int], str, list[tuple[float, dict[str, Any]]]]:
-        # Local callers still get automatic installation. Native sessions never
+        # Local callers still get automatic installation. Sandbox sessions never
         # enter this path, so their host does not need Pi, Node, or npm.
         if self._local_setup_task is None:
             self._local_setup_task = asyncio.create_task(asyncio.to_thread(ensure_pi, self.config.pi_version))
@@ -1143,7 +1143,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        session_id = self._native_session_marker(request)
+        session_id = self._session_marker(request)
         if session_id is not None:
             state = self._sandbox_sessions.get(session_id)
             rollout_id = request.path_params.get("rollout_id")
@@ -1174,11 +1174,11 @@ class PiAgent(SimpleResponsesAPIAgent):
         )
 
     async def run(self, request: Request, body: PiAgentRunRequest) -> PiAgentVerifyResponse:
-        if self._native_session_marker(request) is not None:
-            raise HTTPException(409, "Native Pi sessions require EnvironmentServer /run")
+        if self._session_marker(request) is not None:
+            raise HTTPException(409, "Pi sessions require EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(
-                422, "Pi /run requires resources_server; use EnvironmentServer /run for native sessions"
+                422, "Pi /run requires resources_server; use EnvironmentServer /run for sandbox sessions"
             )
         async with self.sem:
             cookies = request.cookies

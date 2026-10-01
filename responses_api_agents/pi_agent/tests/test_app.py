@@ -391,7 +391,7 @@ class TestRolloutObservability:
         assert tool.duration_ms is None
         assert any(gap.code == "tool_timing_unavailable" and gap.detail == "call-1" for gap in bundle.gaps)
 
-    def test_compaction_outcome_uses_native_status(self) -> None:
+    def test_compaction_outcome_uses_pi_status(self) -> None:
         events = [
             (1.0, {"type": "compaction_start", "reason": "manual"}),
             (2.0, {"type": "compaction_end", "reason": "manual", "result": None, "aborted": True}),
@@ -593,11 +593,14 @@ class TestConfigYaml:
         app_path = Path(__file__).resolve().parent.parent / "app.py"
         compile(app_path.read_text(), str(app_path), "exec")
 
-    def test_config_yaml_parses(self) -> None:
+    def test_default_config_uses_gym_model_server(self) -> None:
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "pi_agent.yaml"
         data = yaml.safe_load(cfg_path.read_text())
         assert "pi_agent" in data
         inner = data["pi_agent"]["responses_api_agents"]["pi_agent"]
         assert inner["entrypoint"] == "app.py"
-        assert inner["concurrency"] == 8
-        assert inner["command"] == "pi"
+        config = PiAgentConfig(name="pi_agent", host="localhost", port=8000, **{**inner, "model": "test-model"})
+        assert config.resources_server is None
+        assert config.model_server == ModelServerRef(type="responses_api_models", name="policy_model")
+        assert config.num_workers == 1
+        assert config.pi_version == "0.80.2"

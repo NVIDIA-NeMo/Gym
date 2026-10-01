@@ -12,7 +12,7 @@ node_version=22.19.0
 install_packages() {
   [ "$#" -gt 0 ] || return 0
   if [ "$(id -u)" -ne 0 ]; then
-    echo "Native Pi requires $*: preinstall these packages in the task image (automatic installation requires root)." >&2
+    echo "Pi requires $*: preinstall these packages in the task image (automatic installation requires root)." >&2
     exit 1
   fi
   if command -v apk >/dev/null 2>&1; then
@@ -21,17 +21,17 @@ install_packages() {
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
   else
-    echo "Native Pi requires $*: preinstall these packages in the task image (automatic installation requires apt-get or apk)." >&2
+    echo "Pi requires $*: preinstall these packages in the task image (automatic installation requires apt-get or apk)." >&2
     exit 1
   fi
 }
 
 test "$(uname -s)" = Linux
-python3 -c 'import sys; assert sys.version_info >= (3, 8), "Native Pi requires Python >=3.8"'
+python3 -c 'import sys; assert sys.version_info >= (3, 8), "Pi requires Python >=3.8"'
 case "$(uname -m)" in
   x86_64) arch=x64 ;;
   aarch64) arch=arm64 ;;
-  *) echo 'Native Pi supports Linux x86_64/aarch64 sandboxes only' >&2; exit 1 ;;
+  *) echo 'Pi supports Linux x86_64/aarch64 sandboxes only' >&2; exit 1 ;;
 esac
 platform="linux-${arch}"
 node_dist="https://nodejs.org/dist/v${node_version}"
@@ -39,14 +39,14 @@ if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
   :
 elif [[ "$(ldd --version 2>&1 || true)" == *musl* ]]; then
   if [ "$arch" != x64 ]; then
-    echo "Native Pi's pinned Node ${node_version} musl build supports x86_64 only" >&2
+    echo "Pi's pinned Node ${node_version} musl build supports x86_64 only" >&2
     exit 1
   fi
   platform="linux-x64-musl"
   # Same binary source used by nodejs/docker-node's Alpine images.
   node_dist="https://unofficial-builds.nodejs.org/download/release/v${node_version}"
 else
-  echo 'Native Pi requires glibc or musl; could not identify the sandbox libc' >&2
+  echo 'Pi requires glibc or musl; could not identify the sandbox libc' >&2
   exit 1
 fi
 
