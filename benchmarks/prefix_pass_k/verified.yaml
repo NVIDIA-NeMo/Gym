@@ -4,9 +4,9 @@
 # turns 1..T-1 into a fresh task container and the candidate must produce T
 # onward; scoring is the stock SWE-bench verification.
 #
-# `num_repeats` IS K. Gym reports mean reward (n_pass/K, ~greedy capability) and
-# pass@K (n_pass >= 1, ~RL headroom) from the same rollouts; their difference is
-# the diversity bonus.
+# `num_repeats` IS K. Gym reports mean reward (n_pass/K, sampled pass@1 at the
+# arm's temperature) and pass@K (n_pass >= 1, a prefix-conditioned potential
+# proxy) from the same rollouts; their difference is the diversity bonus.
 #
 # The checkpoint under test is `policy_model` from
 # responses_api_models/base_model/configs/base_model.yaml: point it at yours in

@@ -8,13 +8,16 @@ Two metrics fall out of the same K rollouts:
 
 | metric | formula | reads as |
 |---|---|---|
-| mean reward (pass@1) | `n_pass / K` | greedy capability |
-| true pass@K | `1 if n_pass >= 1` | RL headroom |
+| mean reward (sampled pass@1) | `n_pass / K` | how often one sample, at the arm's temperature (0.6 for base checkpoints), resolves the state -- not greedy accuracy |
+| pass@K | `1 if n_pass >= 1` | whether any of K samples resolves it: the prefix-conditioned potential |
 | **diversity bonus** | `pass@K - mean reward` | mass of mixed-outcome states |
 
-The diversity bonus is the point: it isolates states the model *sometimes*
-solves, which is exactly the signal policy-gradient methods train on. A state
-that always passes or always fails contributes nothing.
+pass@K is a proxy, not a measured quantity of training: it asks whether the
+model can reach a fix from this state at all, which is suggestive of the room
+sampling-based RL has to work with, but that link is not established here. The
+diversity bonus isolates states the model *sometimes* solves -- the states
+whose outcome varies across samples. A state that always passes or always
+fails has none.
 
 Built for **base checkpoints**, which have no chat template and no tool calling.
 The pieces:
