@@ -78,6 +78,63 @@ class TestMathFormalLeanApp:
             tools=[],
         )
 
+    def test_checkpoint_capability_is_stateless(self, server):
+        assert server.control_capabilities().checkpoint_mode == "stateless"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("generation", "compiler_output", "expected_reward"),
+        [
+            ("rfl", {"process_status": "completed", "stdout": "", "stderr": ""}, 1.0),
+            (
+                "wrong_tactic",
+                {"process_status": "error", "stdout": "", "stderr": "unknown tactic 'wrong_tactic'"},
+                0.0,
+            ),
+        ],
+    )
+    async def test_verification_replays_on_fresh_server(
+        self, server, config, generation, compiler_output, expected_reward
+    ):
+        request = MathFormalLeanVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="Prove two equals two"),
+            response=self._create_response(generation),
+            header="import Mathlib\n",
+            formal_statement="example : 2 = 2 := by\n",
+            turn_index=2,
+        )
+        unrelated_request = request.model_copy(
+            update={
+                "formal_statement": "example : False := by\n",
+                "response": self._create_response("wrong_tactic"),
+                "turn_index": 0,
+            }
+        )
+        server._sandbox_client.execute_lean4 = AsyncMock(
+            return_value={"process_status": "error", "stdout": "", "stderr": "unrelated proof error"}
+        )
+        await server.verify(unrelated_request)
+
+        fresh_server = MathFormalLeanResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        results = []
+        for verifier in (server, fresh_server):
+            verifier._sandbox_client.execute_lean4 = AsyncMock(return_value=compiler_output)
+            result = await verifier.verify(request)
+            verifier._sandbox_client.execute_lean4.assert_awaited_once_with(
+                code=f"import Mathlib\nexample : 2 = 2 := by\n{generation}",
+                timeout=30.0,
+            )
+            assert result.reward == expected_reward
+            assert result.turn_index == 2
+            assert result.needs_correction is (expected_reward == 0.0)
+            if result.needs_correction:
+                assert compiler_output["stderr"] in result.error_feedback
+                assert generation in result.correction_prompt
+                assert "unrelated proof error" not in result.correction_prompt
+            results.append(result.model_dump())
+
+        assert results[0] == results[1]
+
     @pytest.mark.asyncio
     async def test_verify_successful_proof(self, server):
         """Test that a successful proof compilation returns reward 1.0."""
