@@ -45,6 +45,7 @@ import os
 import shutil
 import tarfile
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Protocol, runtime_checkable
@@ -763,6 +764,7 @@ def _stream_lineage_archives(
     *,
     destination: Path | None = None,
     collect_rows: bool = False,
+    timings: dict[str, float] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Validate archives, optionally materializing members in one pass.
 
@@ -774,21 +776,28 @@ def _stream_lineage_archives(
     rows_by_capture_key: dict[str, list[dict[str, Any]]] = {}
 
     for reference in archive_references:
+        phase_started = time.perf_counter()
         path = ledger_dir / reference.name
         if not path.is_file():
             raise LedgerMismatchError(f"lineage archive {reference.name!r} is missing")
         if path.stat().st_size != reference.bytes or _file_digest(path) != reference.sha256:
             raise LedgerMismatchError(f"lineage archive {reference.name!r} is corrupted")
         expected = {member.member: member for member in members_by_archive[reference.name]}
+        if timings is not None:
+            timings["archive_validation_seconds"] += time.perf_counter() - phase_started
         if reference.members != len(expected):
             raise LedgerMismatchError(f"lineage archive {reference.name!r} member count is corrupted")
         try:
             with tarfile.open(path, mode="r:") as archive:
+                phase_started = time.perf_counter()
                 infos = archive.getmembers()
                 names = [info.name for info in infos]
                 if len(names) != len(set(names)) or set(names) != set(expected):
                     raise LedgerMismatchError(f"lineage archive {reference.name!r} has an unexpected member inventory")
+                if timings is not None:
+                    timings["tar_inventory_seconds"] += time.perf_counter() - phase_started
                 for info in infos:
+                    phase_started = time.perf_counter()
                     member = expected[info.name]
                     if not info.isfile() or info.size != member.bytes:
                         raise LedgerMismatchError(
@@ -804,16 +813,24 @@ def _stream_lineage_archives(
                         raise LedgerMismatchError(
                             f"lineage archive member {reference.name!r}/{info.name!r} is corrupted"
                         )
+                    if timings is not None:
+                        timings["member_read_validation_seconds"] += time.perf_counter() - phase_started
+                    phase_started = time.perf_counter()
                     records = _parse_lineage_payload(info.name, payload)
                     if len(records) != member.rows:
                         raise LedgerMismatchError(
                             f"lineage archive member {reference.name!r}/{info.name!r} row count is corrupted"
                         )
+                    if timings is not None:
+                        timings["lineage_parse_seconds"] += time.perf_counter() - phase_started
+                    phase_started = time.perf_counter()
                     if destination is not None:
                         target = destination / member.member
                         if not target.exists():
                             with target.open("xb") as handle:
                                 handle.write(payload)
+                    if timings is not None:
+                        timings["file_materialization_seconds"] += time.perf_counter() - phase_started
                     if collect_rows:
                         previous = rows_by_capture_key.get(member.capture_key)
                         if previous is not None and previous != records:
@@ -1183,8 +1200,33 @@ class CaptureLedgerCheckpointer:
             result["generation_cut_proof"] = manifest["generation_cut_proof"]
         return result
 
-    def restore(self, checkpoint_dir: Path) -> dict[str, Any]:
-        """Install a committed ledger into this store root and verify it."""
+    def restore(self, checkpoint_dir: Path, *, timings: dict[str, float] | None = None) -> dict[str, Any]:
+        """Install and verify a ledger; optionally collect non-overlapping phase timings.
+
+        The supplied mapping is reset for this invocation. Unattributed time
+        includes loop bookkeeping and legacy restore paths, not another phase.
+        Timings are diagnostic only and never change durability semantics.
+        """
+        restore_started = time.perf_counter()
+        if timings is not None:
+            timings.clear()
+            timings.update(
+                dict.fromkeys(
+                    (
+                        "metadata_validation_seconds",
+                        "archive_validation_seconds",
+                        "tar_inventory_seconds",
+                        "member_read_validation_seconds",
+                        "lineage_parse_seconds",
+                        "file_materialization_seconds",
+                        "namespace_inventory_seconds",
+                        "directory_publish_seconds",
+                        "receipt_reconstruction_seconds",
+                        "result_serialization_seconds",
+                    ),
+                    0.0,
+                )
+            )
         checkpoint_dir = Path(checkpoint_dir)
         ledger_dir = self._ledger_dir(checkpoint_dir)
         manifest_path = ledger_dir / LEDGER_MANIFEST_NAME
@@ -1232,6 +1274,8 @@ class CaptureLedgerCheckpointer:
                 f"live capture-ledger files do not match the checkpoint union: members={corrupted}"
             )
 
+        if timings is not None:
+            timings["metadata_validation_seconds"] = time.perf_counter() - restore_started
         rows_by_capture_key: dict[str, list[dict[str, Any]]] = {}
 
         # Legacy checkpoints retain their per-file durable copy. New archive
@@ -1262,6 +1306,7 @@ class CaptureLedgerCheckpointer:
                     current_archive_set.references,
                     current_archive_set.members_by_archive,
                     collect_rows=self.server_name is not None,
+                    timings=timings,
                 )
             else:
                 archive_sets = (
@@ -1284,8 +1329,12 @@ class CaptureLedgerCheckpointer:
                         current_archive_set.members_by_archive,
                         destination=self.store_root,
                         collect_rows=True,
+                        timings=timings,
                     )
+                    phase_started = time.perf_counter()
                     _fsync_dir(self.store_root)
+                    if timings is not None:
+                        timings["directory_publish_seconds"] += time.perf_counter() - phase_started
                 else:
                     self.store_root.parent.mkdir(parents=True, exist_ok=True)
                     staging = Path(
@@ -1303,9 +1352,11 @@ class CaptureLedgerCheckpointer:
                                 archive_set.members_by_archive,
                                 destination=staging,
                                 collect_rows=archive_set.server_name == self.server_name,
+                                timings=timings,
                             )
                             if archive_set.server_name == self.server_name:
                                 rows_by_capture_key = participant_rows
+                        phase_started = time.perf_counter()
                         staged = {path.name for path in staging.glob(f"*{_LEDGER_SUFFIX}")}
                         if staged != set(expected):
                             raise LedgerMismatchError(
@@ -1313,8 +1364,13 @@ class CaptureLedgerCheckpointer:
                                 f"missing={sorted(set(expected) - staged)!r}, "
                                 f"unexpected={sorted(staged - set(expected))!r}"
                             )
+                        if timings is not None:
+                            timings["namespace_inventory_seconds"] += time.perf_counter() - phase_started
+                        phase_started = time.perf_counter()
                         _fsync_dir(staging)
                         _publish_restore_directory(staging, self.store_root)
+                        if timings is not None:
+                            timings["directory_publish_seconds"] += time.perf_counter() - phase_started
                     finally:
                         if staging.exists():
                             shutil.rmtree(staging, ignore_errors=True)
@@ -1328,6 +1384,7 @@ class CaptureLedgerCheckpointer:
             total_rows = sum(int(meta.get("rows", 0)) for meta in manifest["rollouts"].values())
             _fsync_dir(self.store_root)
 
+        phase_started = time.perf_counter()
         restored_cut_receipts: tuple[GenerationCutReceipt, ...] = ()
         if self.server_name is not None and isinstance(manifest.get("checkpoint_id"), str):
             restored_cut_receipts = generation_cut_receipts_from_lineage(
@@ -1336,6 +1393,9 @@ class CaptureLedgerCheckpointer:
                 server_name=self.server_name,
             )
 
+        if timings is not None:
+            timings["receipt_reconstruction_seconds"] = time.perf_counter() - phase_started
+        phase_started = time.perf_counter()
         result: dict[str, Any] = {
             "rollouts": rollout_count,
             "rows": total_rows,
@@ -1347,6 +1407,11 @@ class CaptureLedgerCheckpointer:
             proof = GenerationCutCoordinatorProof.model_validate(manifest["generation_cut_proof"])
             result["generation_cut_proof"] = proof.model_dump(mode="json")
         result["storage_reference_index"] = storage_reference_index.model_dump(mode="json")
+        if timings is not None:
+            timings["result_serialization_seconds"] = time.perf_counter() - phase_started
+            total = time.perf_counter() - restore_started
+            timings["other_seconds"] = max(0.0, total - sum(timings.values()))
+            timings["total_seconds"] = total
         return result
 
 

@@ -40,7 +40,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import aiohttp
 import uvicorn
@@ -817,10 +817,14 @@ async def run_checkpoint_benchmark(
     staging_key_bytes: int,
     timeout_s: float,
     mixed_inventory: bool = False,
+    backend_factory: Callable[[str], Any] | None = None,
+    staging_keys_for_ticket: Callable[[Any, str], tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
     """Cut, journal, commit, and restore synthetic active generations."""
     if workers < 1 or cuts < 1:
         raise ValueError("workers and cuts must be positive")
+    if (backend_factory is None) != (staging_keys_for_ticket is None):
+        raise ValueError("custom backend and expected staging-key provider must be supplied together")
     checkpoint_id = f"cpu-{int(time.time())}"
     control_root = run_root / "control"
     checkpoint_dir = run_root / "checkpoint"
@@ -863,7 +867,9 @@ async def run_checkpoint_benchmark(
         for worker_index, worker_cut_count in enumerate(worker_counts):
             worker_id = f"worker-{worker_index:02d}"
             limiter = AdmissionLimiter(
-                _SyntheticCutBackend(
+                backend_factory(worker_id)
+                if backend_factory is not None
+                else _SyntheticCutBackend(
                     worker_id,
                     prefix_tokens=prefix_tokens,
                     staging_key_bytes=staging_key_bytes,
@@ -903,7 +909,11 @@ async def run_checkpoint_benchmark(
                     ticket.mark_generation_started()
                 if state == "active_prefix":
                     padding = "x" * staging_key_bytes
-                    expected_prefixes[ticket.model_call_id] = (f"prefix/{ticket.ticket_id}/{padding}",)
+                    expected_prefixes[ticket.model_call_id] = (
+                        staging_keys_for_ticket(ticket, checkpoint_id)
+                        if staging_keys_for_ticket is not None
+                        else (f"prefix/{ticket.ticket_id}/{padding}",)
+                    )
                 elif state == "pre_generation":
                     delayed_pre_generation.append((limiter, ticket))
                 elif state == "no_generation":
@@ -954,8 +964,10 @@ async def run_checkpoint_benchmark(
             await asyncio.gather(*resolver_tasks)
         prepare = await prepare_task
         prepare_seconds = time.monotonic() - prepare_started
+        print(f"checkpoint_benchmark stage=prepare completed elapsed_s={prepare_seconds:.3f}", flush=True)
 
         commit_started = time.monotonic()
+        print("checkpoint_benchmark stage=commit started", flush=True)
         commit = await client.request(
             "model_checkpoint_commit",
             {
@@ -967,13 +979,20 @@ async def run_checkpoint_benchmark(
             timeout_s=timeout_s,
         )
         commit_seconds = time.monotonic() - commit_started
+        prepare_commit_seconds = time.monotonic() - prepare_started
+        print(f"checkpoint_benchmark stage=commit completed elapsed_s={commit_seconds:.3f}", flush=True)
 
         restore_started = time.monotonic()
+        restore_timings: dict[str, float] = {}
+        print("checkpoint_benchmark stage=restore_verify started (outside checkpoint timing)", flush=True)
         restore = await asyncio.to_thread(
             CaptureLedgerCheckpointer(restored_lineage, server_name=_SERVER_NAME).restore,
             checkpoint_dir,
+            timings=restore_timings,
         )
         restore_seconds = time.monotonic() - restore_started
+        print(f"checkpoint_benchmark stage=restore_verify completed elapsed_s={restore_seconds:.3f}", flush=True)
+        print(f"checkpoint_benchmark restore_timings={json.dumps(restore_timings, sort_keys=True)}", flush=True)
 
         journal_files = sorted((control_root / "worker-checkpoint-artifacts").rglob("*.jsonl"))
         archive_files = sorted((checkpoint_dir / "model-ledger" / _SERVER_NAME).glob("lineage-part-*.tar"))
@@ -1009,7 +1028,9 @@ async def run_checkpoint_benchmark(
             "inventory_counts": dict(sorted(inventory_counts.items())),
             "prepare_seconds": prepare_seconds,
             "commit_seconds": commit_seconds,
+            "prepare_commit_seconds": prepare_commit_seconds,
             "restore_seconds": restore_seconds,
+            "restore_timings": restore_timings,
             "prepare_records": prepare["generation_cut_summary"]["records"],
             "journal_files": len(journal_files),
             "journal_bytes": sum(path.stat().st_size for path in journal_files),
