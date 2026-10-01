@@ -5,24 +5,16 @@
 
 import json
 import math
-from collections import Counter, defaultdict
+from collections import defaultdict
 from sqlite3 import Row
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.rollout_observability import (
-    AgentInvocation,
-    AgentObservationBundle,
-    ContextCompactionObservation,
-    ModelCallRef,
     ObservationGap,
     TrajectoryRecord,
     TrajectoryTurn,
 )
-
-
-if TYPE_CHECKING:
-    from nemo_gym.base_responses_api_model import ModelCallRecord
 
 
 def _object(value: Any) -> dict[str, Any]:
@@ -158,94 +150,6 @@ def append_opencode_turns(
         )
     if unavailable:
         trajectory.gaps.append(ObservationGap(code="turns_unavailable", detail=",".join(sorted(unavailable))))
-
-
-def associate_opencode_message_calls(
-    bundle: AgentObservationBundle,
-    trajectory: TrajectoryRecord | None,
-    calls: list["ModelCallRecord"],
-) -> tuple[AgentObservationBundle, TrajectoryRecord | None]:
-    """Join persisted messages to HTTP attempts using session, message and model-server IDs.
-
-    Run after invocation ownership resolution. Summary attempts belong to compactions;
-    calls without a saved message (for example title generation) stay invocation-owned.
-    No content or timing fallback is used for old binaries or missing artifacts.
-    """
-    if bundle.source != "opencode":
-        return bundle, trajectory
-    result = bundle.model_copy(
-        update={
-            "records": [
-                record.model_copy(update={"model_calls": list(record.model_calls)})
-                if isinstance(record, ContextCompactionObservation)
-                else record
-                for record in bundle.records
-            ],
-            "gaps": [gap for gap in bundle.gaps if not gap.code.startswith("opencode_message_call_")],
-        }
-    )
-    projected = (
-        trajectory.model_copy(
-            update={
-                "turns": [turn.model_copy(update={"model_calls": list(turn.model_calls)}) for turn in trajectory.turns]
-            }
-        )
-        if trajectory is not None
-        else None
-    )
-    targets: dict[tuple[str, str], list[TrajectoryTurn | ContextCompactionObservation]] = defaultdict(list)
-    for turn in projected.turns if projected is not None else []:
-        if turn.source_message_id:
-            targets[(turn.invocation_id, turn.source_message_id)].append(turn)
-    for compaction in result.records:
-        if isinstance(compaction, ContextCompactionObservation):
-            for message_id in set(compaction.source_message_ids):
-                targets[(compaction.invocation_id, message_id)].append(compaction)
-
-    call_counts = Counter(call.model_call_id for call in calls if call.model_call_id)
-    owners: dict[str, set[str]] = defaultdict(set)
-    for invocation in result.records:
-        if isinstance(invocation, AgentInvocation):
-            for ref in invocation.model_calls:
-                if ref.model_call_id:
-                    owners[ref.model_call_id].add(invocation.invocation_id)
-
-    # Recompute these links on repeated finalization, including newly ambiguous evidence.
-    attributed_ids = {call.model_call_id for call in calls if call.client_assistant_message_id and call.model_call_id}
-    for candidates in targets.values():
-        for target in candidates:
-            target.model_calls = [ref for ref in target.model_calls if ref.model_call_id not in attributed_ids]
-
-    for call in calls:
-        if not call.client_assistant_message_id:
-            continue
-        candidates = targets.get((call.client_session_id or "", call.client_assistant_message_id), [])
-        candidates = [target for target in candidates if target.source_model_ref in (None, call.model_ref)]
-        code = None
-        if len(candidates) != 1:
-            code = "ambiguous" if candidates else "unmatched"
-        elif candidates[0].source_model_ref is None or call.model_ref is None:
-            code = "scope_unavailable"
-        elif not call.model_call_id:
-            code = "identity_unavailable"
-        elif call_counts[call.model_call_id] != 1:
-            code = "ambiguous"
-        elif owners[call.model_call_id] != {call.client_session_id}:
-            code = "ownership_conflict"
-        if code is not None:
-            result.gaps.append(
-                ObservationGap(
-                    code=f"opencode_message_call_{code}",
-                    invocation_id=call.client_session_id,
-                    detail=f"{call.client_assistant_message_id}:{call.model_call_id}",
-                )
-            )
-            continue
-        candidates[0].model_calls.append(
-            ModelCallRef(model_call_id=call.model_call_id, model_ref=call.model_ref, response_id=call.response_id)
-        )
-    result.gaps = list({(gap.code, gap.invocation_id, gap.detail): gap for gap in result.gaps}.values())
-    return result, projected
 
 
 def scope_opencode_trajectory(trajectory: TrajectoryRecord, body: Any, rollout_id: str) -> TrajectoryRecord:
