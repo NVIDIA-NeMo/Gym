@@ -66,6 +66,17 @@ def _mock_response(payload=None, *, status=200, content="") -> MagicMock:
 
 
 class TestApp:
+    def test_resource_only_metadata_is_not_sent_to_policy(self) -> None:
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input="hello",
+            metadata={"baseline_response": "reference", "keep": "value"},
+        )
+
+        stripped = SimpleAgent._strip_resource_only_metadata(body)
+
+        assert stripped.metadata == {"keep": "value"}
+        assert body.metadata["baseline_response"] == "reference"
+
     def test_sanity(self) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
