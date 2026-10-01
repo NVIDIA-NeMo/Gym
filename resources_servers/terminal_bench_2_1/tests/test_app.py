@@ -74,6 +74,28 @@ class TestApp:
             call("bash /tests/test.sh", timeout_s=timeout),
         ]
 
+    async def test_reward_read_survives_download_that_replaces_file(
+        self, server: TerminalBench21ResourcesServer, tmp_path: Path
+    ) -> None:
+        # Mimic `docker cp`, which swaps in a new inode rather than writing into the existing file.
+        def replace_file(remote_path: str, local_path: str) -> None:
+            staged = tmp_path / "staged_reward.txt"
+            staged.write_text("1\n")
+            staged.replace(local_path)
+
+        server.config.is_verifying_golden_patch = True
+        sandbox = MagicMock()
+        sandbox.exec = AsyncMock(return_value=SimpleNamespace(stdout="/app\n", stderr=None, return_code=0))
+        sandbox.download = AsyncMock(side_effect=replace_file)
+        sandbox.stop = AsyncMock()
+        server._create_sandbox = AsyncMock(return_value=sandbox)
+        server._upload_folder = AsyncMock()
+
+        response = await server.verify(MagicMock(), _verify_request(tmp_path))
+
+        assert response.evaluation_completed is True
+        assert response.reward == 1.0
+
     async def test_create_sandbox_uses_start_with_setup(self, monkeypatch, tmp_path: Path) -> None:
         sandbox = AsyncMock()
         sandbox.start_with_setup = AsyncMock(return_value=sandbox)
