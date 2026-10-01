@@ -754,3 +754,124 @@ class TestAbortedAttemptIsMasked:
         result, sandbox = self._run(monkeypatch, fails)
         assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, "transport_peer_drop")
         assert sandbox.commands == ["stop"]
+
+
+class TestSandboxIsReleasedOnEveryExit:
+    """Fault injection: whatever ends an attempt, its sandbox is stopped and the session forgotten."""
+
+    def _agent(self, monkeypatch, responses, verify):
+        agent = _bare_agent(
+            resources_server=SimpleNamespace(name="rs"),
+            record_git_state=False,
+            commit_worktree=False,
+            uncommit_worktree=False,
+            offline=False,
+        )
+        stops = []
+
+        class Sandbox:
+            async def stop(self):
+                stops.append("stop")
+
+        sandbox = Sandbox()
+
+        async def connect(seed):
+            return sandbox
+
+        async def head(sb):
+            return "abc"
+
+        async def worktree_patch(sb, base):
+            return ""
+
+        class Reply:
+            cookies = {}
+
+            async def json(self):
+                return {"sandbox_handle": "sb"}
+
+        async def post(server_name, url_path, json, cookies):
+            return verify(json) if url_path == "/verify" else Reply()
+
+        async def ok(response):
+            return None
+
+        async def as_json(response):
+            return response
+
+        object.__setattr__(agent, "server_client", SimpleNamespace(post=post))
+        object.__setattr__(agent, "_connect_sandbox", connect)
+        object.__setattr__(agent, "_head", head)
+        object.__setattr__(agent, "_worktree_patch", worktree_patch)
+        object.__setattr__(agent, "responses", responses)
+        monkeypatch.setattr(AGENT, "raise_for_status", ok)
+        monkeypatch.setattr(AGENT, "get_response_json", as_json)
+        body = AGENT.PrefixPassKRunRequest.model_validate(
+            {"responses_create_params": {"input": [{"role": "user", "content": "task"}]}}
+        )
+        request = SimpleNamespace(cookies={}, session={AGENT.SESSION_ID_KEY: "s"}, state=SimpleNamespace())
+        return agent, stops, request, body
+
+    @staticmethod
+    def _response():
+        return AGENT.NeMoGymResponse(
+            id="r",
+            created_at=0,
+            model="m",
+            object="response",
+            output=[],
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=True,
+        )
+
+    def _assert_released(self, agent, stops):
+        assert stops == ["stop"]
+        assert agent._session_id_to_sandbox == {} and agent._session_id_to_stats == {}
+
+    def test_a_model_error(self, monkeypatch):
+        async def responses(request, params):
+            agent._session_id_to_stats["s"] = {"forwards": 1}
+            raise RuntimeError("model server 500")
+
+        agent, stops, request, body = self._agent(monkeypatch, responses, lambda req: req)
+        with pytest.raises(RuntimeError, match="model server 500"):
+            asyncio.run(agent.run(request, body))
+        self._assert_released(agent, stops)
+
+    def test_a_failed_verifier_request(self, monkeypatch):
+        async def responses(request, params):
+            return self._response()
+
+        def verify(req):
+            raise RuntimeError("verifier unreachable")
+
+        agent, stops, request, body = self._agent(monkeypatch, responses, verify)
+        with pytest.raises(RuntimeError, match="verifier unreachable"):
+            asyncio.run(agent.run(request, body))
+        self._assert_released(agent, stops)
+
+    def test_a_cancelled_rollout(self, monkeypatch):
+        async def responses(request, params):
+            await asyncio.sleep(3600)
+
+        agent, stops, request, body = self._agent(monkeypatch, responses, lambda req: req)
+
+        async def cancel_mid_rollout():
+            task = asyncio.ensure_future(agent.run(request, body))
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(cancel_mid_rollout())
+        self._assert_released(agent, stops)
+
+    def test_a_completed_attempt(self, monkeypatch):
+        async def responses(request, params):
+            return self._response()
+
+        agent, stops, request, body = self._agent(monkeypatch, responses, lambda req: req | {"reward": 1.0})
+        result = asyncio.run(agent.run(request, body))
+        assert result.reward == 1.0
+        self._assert_released(agent, stops)

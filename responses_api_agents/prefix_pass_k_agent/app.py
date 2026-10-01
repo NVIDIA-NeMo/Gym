@@ -31,6 +31,7 @@ must not drift is the *wire* — see `ACTION_FENCE`, `render_observation` and
 `render_tool_observation`, which mirror the captured harness exactly.
 """
 
+import asyncio
 import json
 import re
 import sys
@@ -799,6 +800,21 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
         )
 
+    async def _release(self, session_key: str, sandbox: AsyncSandbox) -> None:
+        """Forget the session and stop its sandbox.
+
+        The bookkeeping goes first, so it happens even if the stop is cancelled; the
+        stop is shielded, so a cancelled rollout still releases the sandbox rather
+        than abandoning the stop halfway. A failed stop is logged, not raised: it
+        must not replace the error that ended the attempt.
+        """
+        self._session_id_to_sandbox.pop(session_key, None)
+        self._session_id_to_stats.pop(session_key, None)
+        try:
+            await asyncio.shield(sandbox.stop())
+        except Exception:
+            print("prefix_pass_k: failed to stop sandbox", format_exc(), file=sys.stderr)
+
     async def run(self, request: Request, body: PrefixPassKRunRequest) -> PrefixPassKVerifyResponse:
         cookies = request.cookies
         session_key = request.session[SESSION_ID_KEY]
@@ -815,67 +831,66 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
 
         sandbox = await self._connect_sandbox(seed_session_result)
         self._session_id_to_sandbox[session_key] = sandbox
-        if self.config.offline:
-            await self._take_offline(sandbox)
-
-        # The starting commit, not the row's `base_commit`: task images need not
-        # sit at that hash, and the question is whether the rollout committed.
-        initial_head = await self._head(sandbox)
-
-        request._cookies = cookies
-        # The row carries the prefix; `responses` is the Responses-API surface
-        # and only receives create params, so hand it over on request state.
-        request.state._ng_prefix_pass_k_row = body.model_dump()
-
         try:
-            response = await self.responses(request, body.responses_create_params)
-        finally:
-            request.state._ng_prefix_pass_k_row = None
+            if self.config.offline:
+                await self._take_offline(sandbox)
 
-        stats = self._session_id_to_stats.setdefault(session_key, {})
-        aborted = stats.get("exec_errors", 0) > 0
-        if not aborted:
-            # Skipped on an aborted attempt: its sandbox just failed to run a command.
-            if self.config.record_git_state:
-                stats.update(await self._git_state(sandbox, initial_head))
-            # The full change set, before any grading-side git steps: re-grading the
-            # rollout later, under a different collector, needs neither model nor sandbox.
-            stats["worktree_patch"] = await self._worktree_patch(sandbox, initial_head)
-            if self.config.commit_worktree:
-                await self._commit_worktree(sandbox)
-            if self.config.uncommit_worktree:
-                # After record_git_state, so the diagnostic still shows what the model did.
-                await self._uncommit_worktree(sandbox, initial_head)
+            # The starting commit, not the row's `base_commit`: task images need not
+            # sit at that hash, and the question is whether the rollout committed.
+            initial_head = await self._head(sandbox)
 
-        verify_request = PrefixPassKVerifyRequest.model_validate(body.model_dump() | {"response": response})
-        try:
-            # Called on an aborted attempt too, so the resources server releases its sandboxes.
-            verify_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=verify_request.model_dump(),
-                cookies=cookies,
-            )
-            await raise_for_status(verify_response)
-            verify_json = await get_response_json(verify_response)
-        except Exception:
+            request._cookies = cookies
+            # The row carries the prefix; `responses` is the Responses-API surface
+            # and only receives create params, so hand it over on request state.
+            request.state._ng_prefix_pass_k_row = body.model_dump()
+
+            try:
+                response = await self.responses(request, body.responses_create_params)
+            finally:
+                request.state._ng_prefix_pass_k_row = None
+
+            stats = self._session_id_to_stats.setdefault(session_key, {})
+            aborted = stats.get("exec_errors", 0) > 0
             if not aborted:
-                raise
-            print("prefix_pass_k: verify failed on an aborted attempt", format_exc(), file=sys.stderr)
-            verify_json = verify_request.model_dump()
+                # Skipped on an aborted attempt: its sandbox just failed to run a command.
+                if self.config.record_git_state:
+                    stats.update(await self._git_state(sandbox, initial_head))
+                # The full change set, before any grading-side git steps: re-grading the
+                # rollout later, under a different collector, needs neither model nor sandbox.
+                stats["worktree_patch"] = await self._worktree_patch(sandbox, initial_head)
+                if self.config.commit_worktree:
+                    await self._commit_worktree(sandbox)
+                if self.config.uncommit_worktree:
+                    # After record_git_state, so the diagnostic still shows what the model did.
+                    await self._uncommit_worktree(sandbox, initial_head)
 
-        try:
-            await sandbox.stop()
-        except Exception:
-            print("prefix_pass_k: failed to stop sandbox", format_exc(), file=sys.stderr)
-        self._session_id_to_sandbox.pop(session_key, None)
+            verify_request = PrefixPassKVerifyRequest.model_validate(body.model_dump() | {"response": response})
+            try:
+                # Called on an aborted attempt too, so the resources server releases its sandboxes.
+                verify_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=verify_request.model_dump(),
+                    cookies=cookies,
+                )
+                await raise_for_status(verify_response)
+                verify_json = await get_response_json(verify_response)
+            except Exception:
+                if not aborted:
+                    raise
+                print("prefix_pass_k: verify failed on an aborted attempt", format_exc(), file=sys.stderr)
+                verify_json = verify_request.model_dump()
 
-        stats = self._session_id_to_stats.pop(session_key, {})
-        if aborted:
-            # The infrastructure failed, not the candidate: whatever the verifier saw is
-            # not a measurement of it, so the sample is masked out of pass@k.
-            verify_json = verify_json | {"reward": 0.0, "mask_sample": True}
-        return PrefixPassKVerifyResponse.model_validate(verify_json | stats)
+            stats = self._session_id_to_stats.pop(session_key, {})
+            if aborted:
+                # The infrastructure failed, not the candidate: whatever the verifier saw is
+                # not a measurement of it, so the sample is masked out of pass@k.
+                verify_json = verify_json | {"reward": 0.0, "mask_sample": True}
+            return PrefixPassKVerifyResponse.model_validate(verify_json | stats)
+        finally:
+            # Whatever ended the attempt -- a model or verifier error, a cancelled
+            # rollout -- the session is forgotten and its sandbox stopped.
+            await self._release(session_key, sandbox)
 
 
 if __name__ == "__main__":
