@@ -104,6 +104,26 @@ def test_saved_record_requires_explicit_run_and_delivery_evidence() -> None:
 def test_public_response_schema_keeps_the_explicit_failure_fields() -> None:
     schema = RolloutFailure.model_json_schema(mode="serialization")
     failure = schema["$defs"]["EpisodeFailure"]
+    assert schema["properties"]["schema_version"]["const"] == 1
+    properties = {
+        "RolloutFailure": set(schema["properties"]),
+        "EpisodeFailure": set(failure["properties"]),
+        "EpisodeId": set(schema["$defs"]["EpisodeId"]["properties"]),
+    }
+    assert properties == {
+        "RolloutFailure": {
+            "schema_version",
+            "episode_id",
+            "run_id",
+            "source",
+            "delivery",
+            "failure",
+            "http_status",
+            "exception_type",
+        },
+        "EpisodeFailure": {"failure_reason", "terminal", "failure_kind", "stage"},
+        "EpisodeId": {"rollout_id", "attempt"},
+    }, "Changing version-1 saved fields requires reviewing the RolloutFailure schema_version bump policy"
     assert failure["additionalProperties"] is False
     assert failure["required"] == ["failure_reason", "terminal"]
     assert failure["properties"]["failure_reason"]["maxLength"] == 2000
@@ -158,3 +178,22 @@ def test_saved_failure_http_status_bounds(http_status: int | None) -> None:
     else:
         record = RolloutFailure.model_validate(payload)
         assert RolloutFailure.model_validate_json(record.model_dump_json()).http_status == http_status
+
+
+@pytest.mark.parametrize("source", ["environment", "collector"])
+@pytest.mark.parametrize("delivery", ["not_sent", "possibly_delivered", "delivered"])
+def test_environment_failure_requires_established_delivery(source: str, delivery: str) -> None:
+    payload = {
+        "episode_id": {"rollout_id": "task-7"},
+        "run_id": "eval-1",
+        "source": source,
+        "delivery": delivery,
+        "failure": {"failure_reason": "Request failed", "terminal": False},
+    }
+    if source == "environment" and delivery != "delivered":
+        with pytest.raises(ValidationError, match="requires delivery='delivered'"):
+            RolloutFailure.model_validate_json(json.dumps(payload))
+    else:
+        record = RolloutFailure.model_validate_json(json.dumps(payload))
+        assert record.source == source and record.delivery == delivery
+        assert RolloutFailure.model_validate_json(record.model_dump_json()) == record
