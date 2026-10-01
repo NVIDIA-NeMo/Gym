@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import shlex
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,6 +11,7 @@ import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
+from nemo_gym.sandbox.process_supervisor import DEFAULT_CLEANUP_TIMEOUT
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.hermes_sandboxed_agent.app import (
     HermesSandboxedAgent,
@@ -215,6 +217,15 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
     assert "patch" not in params and "test_patch" not in params and "api_key" not in params
     command = sandbox.exec.call_args.args[0]
     assert " -I " in command
+    assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
+        "request.json",
+        "runner.py",
+        "process_supervisor.py",
+    }
+    command_args = shlex.split(command)
+    assert any(arg.endswith("/process_supervisor.py") for arg in command_args)
+    assert float(command_args[command_args.index("--timeout") + 1]) == agent.config.sandbox_timeout
+    assert sandbox.exec.call_args.kwargs["timeout_s"] > agent.config.sandbox_timeout + 3 * DEFAULT_CLEANUP_TIMEOUT
     assert sandbox.exec.call_args.kwargs["cwd"].startswith("/tmp/nemo-hermes-")
     assert metrics["hermes_finished"] and response.status == "completed"
     persisted = json.loads(uploaded.with_name("agent_result.json").read_text())

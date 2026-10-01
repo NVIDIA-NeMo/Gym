@@ -1,0 +1,73 @@
+---
+title: "Evaluate SWE-bench Pro with Hermes"
+description: "Prepare SWE-bench Pro tasks and run Hermes through the Environment Server."
+position: 4
+---
+
+# Evaluate SWE-bench Pro with Hermes
+
+Use [hermes.yaml](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/swebench/pro/hermes.yaml)
+to connect Hermes to the SWE-bench Pro Resources Server through the `single_agent_turn_legacy`
+Environment Server. The Environment Server owns session setup, agent execution, verification,
+and cleanup. Hermes performs its multi-turn model/tool loop inside the task sandbox that
+the Resources Server created. The Resources Server extracts the resulting patch and grades it in a clean sandbox.
+The adapter accepts prepared benchmark rows and uses the same session lifecycle as `single_agent_turn`;
+it does not call the agent's `/run` endpoint.
+
+## Configure the model and sandbox
+
+Run the commands below from the Gym repository root with Gym and the SWE-bench Pro
+preparation dependencies installed. Create a `model-provider.yaml` configuration that supplies:
+
+- `policy_model`: the Gym Model Server deployment used by Hermes.
+- `policy_model_name`: the served model ID, also used by Hermes by default.
+- `sandbox`: the sandbox provider and its connection credentials.
+
+To use a different model ID for Hermes, override
+`swebench_pro_hermes_agent.responses_api_agents.hermes_agent.model`.
+
+The task sandbox must be able to reach the Gym Model Server. Use a Linux sandbox with exec
+support and one Hermes agent-server worker (the default); the recipe enables
+the terminal toolset. Installing the pinned Hermes runtime also requires outbound access
+to GitHub and the Python package index unless that runtime is already present in the image.
+
+## Prepare the tasks
+
+First prepare the benchmark rows, including the pinned task images and verifier assets.
+Skip this step if you already have the prepared JSONL:
+
+```bash
+python benchmarks/swebench/pro/prepare.py
+```
+
+No separate task-conversion step is required. The standard benchmark command prepares
+and collates the rows automatically:
+
+```bash
+gym eval run --benchmark swebench/pro/hermes --config model-provider.yaml -o rollouts.jsonl
+```
+
+## Start servers and run evaluation
+
+Start the composed servers:
+
+```bash
+gym env start --config benchmarks/swebench/pro/hermes.yaml --config model-provider.yaml
+```
+
+While those servers are running, collect rollouts from another terminal using the same
+configuration. `--no-serve` does not inherit routing settings from the running head server:
+
+```bash
+gym eval run --no-serve \
+  --config benchmarks/swebench/pro/hermes.yaml --config model-provider.yaml \
+  -i benchmarks/swebench/data/swebench_pro_benchmark.jsonl -o rollouts.jsonl \
+  +agent_name=swebench_pro_hermes_agent
+```
+
+## Session limits
+
+- Each session accepts one activation, which may contain multiple model/tool turns.
+- Use `num_workers: 1`.
+- Use a Linux sandbox that can reach the Gym Model Server.
+- This integration is evaluation-only, not suitable for producing RL training data.

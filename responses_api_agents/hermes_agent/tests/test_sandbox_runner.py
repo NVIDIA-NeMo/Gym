@@ -3,16 +3,11 @@
 
 import asyncio
 import json
-import os
-import signal
 import socket
-import subprocess
-import sys
 import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import openai
@@ -28,7 +23,9 @@ from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherResourcesServer,
     ExampleMCPWeatherResourcesServerConfig,
 )
+from responses_api_agents.hermes_agent.app import HermesAgent, HermesAgentConfig
 from responses_api_agents.hermes_agent.sandbox_runner import _run, _use_model_server
+from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
 def _completion(message: dict) -> dict:
@@ -219,7 +216,20 @@ def test_required_mcp_server_that_does_not_connect_fails_before_the_model(tmp_pa
 
 
 @pytest.mark.parametrize("template_enabled", [False, True])
-def test_iteration_limit_summary_reaches_the_model_server(tmp_path, restore_process_globals, template_enabled) -> None:
+@pytest.mark.parametrize("execution", ["sandbox", "local"])
+@pytest.mark.parametrize("conflicting_override", [False, True])
+def test_iteration_limit_summary_reaches_the_model_server(
+    tmp_path, restore_process_globals, monkeypatch, caplog, template_enabled, execution, conflicting_override
+) -> None:
+    if conflicting_override:
+        original = AIAgent._build_api_kwargs
+
+        def with_override(self, messages):
+            kwargs = original(self, messages)
+            kwargs.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})["enable_thinking"] = True
+            return kwargs
+
+        monkeypatch.setattr(AIAgent, "_build_api_kwargs", with_override)
     tool_call = {
         "content": None,
         "tool_calls": [
@@ -233,20 +243,80 @@ def test_iteration_limit_summary_reaches_the_model_server(tmp_path, restore_proc
     answers = [_completion(tool_call), _completion({"content": "summary of the work"})]
 
     with _ModelServer(answers) as model_server:
-        output = _run(
-            _payload(model_server.base_url, chat_template_kwargs_enabled=template_enabled),
-            tmp_path,
-        )
+        if execution == "sandbox":
+            output = _run(
+                _payload(
+                    model_server.base_url, chat_template_kwargs_enabled=template_enabled, model_enable_thinking=False
+                ),
+                tmp_path,
+            )
+            assert output["result"]["final_response"] == "summary of the work"
+        else:
+            from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+            agent = HermesAgent(
+                config=HermesAgentConfig(
+                    host="127.0.0.1",
+                    port=0,
+                    name="hermes",
+                    entrypoint="app.py",
+                    model_server={"type": "responses_api_models", "name": "model"},
+                    resources_server={"type": "resources_servers", "name": "resources"},
+                    max_turns=1,
+                    max_tokens=128,
+                    enabled_toolsets=["terminal"],
+                    chat_template_kwargs_enabled=template_enabled,
+                ),
+                server_client=MagicMock(
+                    spec=ServerClient,
+                    global_config_dict={
+                        "model": {
+                            "responses_api_models": {
+                                "vllm_model": {
+                                    "chat_template_kwargs": {
+                                        "enable_thinking": False,
+                                    }
+                                }
+                            }
+                        }
+                    },
+                ),
+            )
+            monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args: model_server.base_url)
+            output = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="fix bug")))
+            assert output.output[-1].content[0].text == "summary of the work"
 
     assert len(model_server.requests) == 2
+    if conflicting_override:
+        assert "conflicts with Model Server enable_thinking=False" in caplog.text
     assert all(not request.get("stream") for request in model_server.requests)
     first = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(model_server.requests[0])
+    assert all("chat_template_kwargs" not in body for body in model_server.requests)
     if template_enabled:
         assert json.loads(first.metadata["chat_template_kwargs"]) == {
-            "enable_thinking": True,
             "truncate_history_thinking": False,
         }
-    assert output["result"]["final_response"] == "summary of the work"
+    # Exercise Gym's actual merge order: neither path may override a server-configured thinking mode.
+    for thinking in (False, True):
+        server = VLLMModel(
+            config=VLLMModelConfig(
+                host="127.0.0.1",
+                port=0,
+                name="model",
+                entrypoint="app.py",
+                model="policy_model",
+                base_url="http://unused/v1",
+                api_key="gym",
+                chat_template_kwargs={"enable_thinking": thinking},
+                return_token_id_information=False,
+                uses_reasoning_parser=False,
+            ),
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+        forwarded = server._preprocess_chat_completion_create_params(
+            request=None, body_dict=first.model_dump(exclude_unset=True)
+        )
+        assert forwarded["chat_template_kwargs"]["enable_thinking"] is thinking
 
 
 def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globals) -> None:
@@ -265,58 +335,3 @@ def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globa
     # Delegated children are AIAgents Hermes constructs itself; the Model Server rejects streaming.
     child = AIAgent(base_url=model_server.base_url, api_key="gym", model="m", quiet_mode=True)
     assert child.use_streaming is False
-
-
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc are required")
-@pytest.mark.parametrize("ending", ["normal", "cancel"])
-def test_supervisor_reaps_detached_tools_before_acknowledging_close(tmp_path, ending):
-    worker = (
-        "import subprocess,sys,pathlib,time,signal; "
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
-        "pathlib.Path('child.pid').write_text(str(p.pid)); " + ("time.sleep(60)" if ending == "cancel" else "pass")
-    )
-    root = str(Path(__file__).resolve().parents[3])
-    supervisor = (
-        "import sys,json,pathlib; "
-        f"sys.path.insert(0, {root!r}); "
-        "import responses_api_agents; "
-        f"responses_api_agents.__path__ = [{str(Path(root) / 'responses_api_agents')!r}]; "
-        "from responses_api_agents.hermes_agent.sandbox_runner import _supervise; "
-        "receipt=_supervise(json.loads(sys.argv[1]),cleanup_timeout=2); "
-        "pathlib.Path('cleanup.json').write_text(json.dumps(receipt))"
-    )
-    process = subprocess.Popen(
-        [sys.executable, "-c", supervisor, json.dumps([sys.executable, "-c", worker])],
-        cwd=tmp_path,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
-    try:
-        if ending == "cancel":
-            for _ in range(500):
-                if (tmp_path / "child.pid").exists():
-                    break
-                if process.poll() is not None:
-                    break
-                time.sleep(0.01)
-            assert (tmp_path / "child.pid").exists()
-            process.send_signal(signal.SIGTERM)
-        stdout, stderr = process.communicate(timeout=15)
-        assert process.returncode == 0, (stdout, stderr)
-        receipt = json.loads((tmp_path / "cleanup.json").read_text())
-        assert receipt == {"cleanup_confirmed": True, "error": None}
-        pid = int((tmp_path / "child.pid").read_text())
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=5)
-        # A failing regression must not leave the test's detached child running.
-        if (tmp_path / "child.pid").exists():
-            try:
-                os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
