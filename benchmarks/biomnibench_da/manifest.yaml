@@ -22,7 +22,7 @@ datasets:
   type: benchmark
   jsonl_fpath: benchmarks/biomnibench_da/data/harbor/gym.jsonl
   prepare_script: benchmarks/biomnibench_da/harbor/adapter.py
-  num_repeats: 1
+  num_repeats: 4
 model_server: policy_model
 canonical_split: FIXME
 lifecycle: experimental
