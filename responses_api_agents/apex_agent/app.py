@@ -69,6 +69,11 @@ _STIRRUP_REQUIREMENTS_PATH = Path(__file__).with_name("stirrup-requirements.txt"
 _GUEST_ROOT = "/app/apex-gym"
 _STIRRUP_ROOT = "/app/stirrup-runtime"
 _GUEST_PARTIAL_RESULT_PATH = "/sandbox/partial_result.json"
+# Prebuilt-world logs kept for failed rollouts; the failure message only carries their last few kilobytes.
+_GUEST_WORLD_LOGS = {
+    "environment.log": f"{_GUEST_ROOT}/output/environment.log",
+    "world_bundle.txt": "/app/logs/world_bundle.txt",
+}
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_FAILURE_TERMINAL_KEY = "_ng_failure_terminal"
 _WORLD_ID_RE = re.compile(r"^world_[0-9a-f]{32}$")
@@ -629,14 +634,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
             return None
         return recovered if isinstance(recovered, dict) else None
 
-    def _persist_ungraded_snapshots(
-        self,
-        body: ApexAgentRunRequest,
-        result: dict[str, Any],
-        initial_snapshot: bytes,
-        final_snapshot: bytes,
-    ) -> Path | None:
-        """Keep max-turn/incomplete snapshots locally without invoking grading."""
+    def _artifact_run_dir(self, body: ApexAgentRunRequest, label: str) -> Path | None:
         if not self.config.artifact_output_dir:
             return None
         root = Path(self.config.artifact_output_dir).expanduser()
@@ -645,10 +643,35 @@ class ApexAgent(SimpleResponsesAPIAgent):
         extra = body.__pydantic_extra__ or {}
         run_name = (
             f"rollout_{extra.get('_ng_rollout_index', 0)}_"
-            f"attempt_{extra.get('_ng_attempt_index', 0)}_ungraded_{uuid.uuid4().hex[:8]}"
+            f"attempt_{extra.get('_ng_attempt_index', 0)}_{label}_{uuid.uuid4().hex[:8]}"
         )
         output_dir = root.resolve() / _safe_id(body.task_id) / run_name
         output_dir.mkdir(parents=True)
+        return output_dir
+
+    async def _persist_world_logs(self, sandbox: AsyncSandbox, body: ApexAgentRunRequest) -> Path | None:
+        """Keep a failed prebuilt world's full startup logs next to the other rollout artifacts."""
+        output_dir = self._artifact_run_dir(body, "failed")
+        if output_dir is None:
+            return None
+        for name, source in _GUEST_WORLD_LOGS.items():
+            try:
+                await sandbox.download(source, output_dir / name)
+            except Exception as exc:
+                LOG.debug("Could not keep prebuilt-world log %s: %s", source, exc)
+        return output_dir
+
+    def _persist_ungraded_snapshots(
+        self,
+        body: ApexAgentRunRequest,
+        result: dict[str, Any],
+        initial_snapshot: bytes,
+        final_snapshot: bytes,
+    ) -> Path | None:
+        """Keep max-turn/incomplete snapshots locally without invoking grading."""
+        output_dir = self._artifact_run_dir(body, "ungraded")
+        if output_dir is None:
+            return None
         (output_dir / "initial_snapshot.zip").write_bytes(initial_snapshot)
         (output_dir / "final_snapshot.zip").write_bytes(final_snapshot)
         (output_dir / "rollout.json").write_text(
@@ -878,13 +901,19 @@ class ApexAgent(SimpleResponsesAPIAgent):
                                     and result["checkpoint_error"].startswith("ContextOverflowError:")
                                 ):
                                     failure_class = "context_overflow"
-                                return self._failure(
+                                world_logs_dir = (
+                                    await self._persist_world_logs(sandbox, body) if prebuilt_world else None
+                                )
+                                failure = self._failure(
                                     body,
                                     f"sandbox Stirrup rollout exited: {detail}",
                                     process.return_code,
                                     failure_class=failure_class,
                                     partial_result=result,
                                 )
+                                if world_logs_dir is not None:
+                                    failure.artifact_output_dir = str(world_logs_dir)
+                                return failure
                             await sandbox.download(f"{_GUEST_ROOT}/output/result.json", result_path)
                             await sandbox.download(f"{_GUEST_ROOT}/output/initial.zip", initial_snapshot_path)
                             await sandbox.download(f"{_GUEST_ROOT}/output/final.zip", snapshot_path)

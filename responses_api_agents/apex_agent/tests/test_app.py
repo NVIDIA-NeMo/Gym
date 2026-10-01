@@ -407,6 +407,54 @@ async def test_prebuilt_world_adds_localhost_before_startup(monkeypatch: MonkeyP
     assert "/app/apex-gym/stirrup-runtime.tar.gz" not in uploads
 
 
+async def test_failed_prebuilt_world_rows_point_at_the_saved_logs(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    agent, _ = _prebuilt_agent(tmp_path)
+    agent.config.artifact_output_dir = str(tmp_path / "saved")
+    agent._ensure_runtime_setup = AsyncMock(return_value=tmp_path / "stirrup-runtime.tar.gz")
+    agent._prepare_host_stirrup_runtime = AsyncMock(return_value=tmp_path / "runtime")
+    exec_results = [
+        MagicMock(return_code=0),
+        MagicMock(return_code=0),
+        MagicMock(return_code=0),
+        MagicMock(
+            return_code=1,
+            stderr="TimeoutError: prebuilt world gateway did not become healthy",
+            stdout=None,
+            error_type=None,
+        ),
+    ]
+
+    class FakeSandbox:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def start(self) -> None:
+            return None
+
+        async def upload(self, *_args) -> None:
+            return None
+
+        async def download(self, source: str, destination: Path) -> None:
+            if not source.endswith("environment.log"):
+                raise FileNotFoundError(source)
+            destination.write_text("full startup log")
+
+        async def exec(self, *_args, **_kwargs):
+            return exec_results.pop(0)
+
+    monkeypatch.setattr("responses_api_agents.apex_agent.app.AsyncSandbox", lambda *_args: FakeSandbox())
+
+    payload = (await agent.run(MagicMock(cookies={}), _prebuilt_body())).model_dump()
+
+    assert payload[NG_FAILURE_CLASS_KEY] == "sandbox_error"
+    saved = Path(payload["artifact_output_dir"])
+    assert saved.parent.parent == (tmp_path / "saved").resolve()
+    assert (saved / "environment.log").read_text() == "full startup log"
+
+
 async def test_host_stirrup_runtime_extracts_once(tmp_path: Path) -> None:
     agent = _agent()
     archive = tmp_path / "stirrup-runtime.tar.gz"
@@ -814,6 +862,33 @@ async def test_a_kill_mid_flight_keeps_the_checkpoint_for_the_redispatch(tmp_pat
         await agent.run(MagicMock(cookies={}), _gym_body())
 
     assert (directory / "manifest.json").is_file()
+
+
+def test_failed_prebuilt_world_logs_are_kept_in_full(tmp_path: Path) -> None:
+    agent = _agent()
+    agent.config.artifact_output_dir = str(tmp_path / "saved")
+    body = _body()
+
+    class FakeSandbox:
+        async def download(self, source: str, destination: Path) -> None:
+            if source.endswith("environment.log"):
+                destination.write_text("full startup log")
+            else:
+                raise FileNotFoundError(source)
+
+    output_dir = asyncio.run(agent._persist_world_logs(FakeSandbox(), body))
+
+    assert output_dir is not None and "_failed_" in output_dir.name
+    assert (output_dir / "environment.log").read_text() == "full startup log"
+    assert not (output_dir / "world_bundle.txt").exists()
+
+
+def test_failed_prebuilt_world_logs_need_an_artifact_dir() -> None:
+    class FailingSandbox:
+        async def download(self, source: str, destination: Path) -> None:
+            raise AssertionError("nothing should be downloaded")
+
+    assert asyncio.run(_agent()._persist_world_logs(FailingSandbox(), _body())) is None
 
 
 async def _idle_peer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
