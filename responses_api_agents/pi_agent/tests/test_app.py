@@ -95,6 +95,52 @@ class TestSanity:
 
 
 class TestLocalRuntimeSetup:
+    @pytest.mark.parametrize("timed_out, collect", [(False, True), (True, True), (True, False)])
+    async def test_local_exit_preserves_events_and_removes_workspace(self, tmp_path, timed_out, collect) -> None:
+        agent = _make_agent(
+            workspace_root=str(tmp_path),
+            timeout=1,
+            thinking="high",
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        )
+        process = MagicMock(returncode=None if timed_out else 0)
+        process.stdout, process.stderr = asyncio.StreamReader(), asyncio.StreamReader()
+        event = _msg_end("assistant", [{"type": "text", "text": "partial"}], usage={"input": 2, "output": 1})
+        process.stdout.feed_data(event.encode())
+        exited = asyncio.Event()
+
+        def finish():
+            process.returncode = -9 if timed_out else 0
+            process.stdout.feed_eof()
+            process.stderr.feed_eof()
+            exited.set()
+
+        async def communicate():
+            await exited.wait()
+            return b"", b""
+
+        process.kill.side_effect = finish
+        process.wait = AsyncMock(side_effect=exited.wait)
+        process.communicate = AsyncMock(side_effect=communicate)
+        if not timed_out:
+            finish()
+        module = "responses_api_agents.pi_agent.app"
+        with (
+            patch(f"{module}.ensure_pi"),
+            patch.object(agent, "_resolve_model_base_url", return_value="http://model.example:9000"),
+            patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn,
+        ):
+            items, usage, _, events = await agent._run_pi("task", "system rules", collect_observations=collect)
+        assert process.kill.call_count == int(timed_out)
+        assert not list(tmp_path.iterdir())
+        assert "--thinking" in spawn.call_args.args and "system rules" in spawn.call_args.args
+        assert [event for _, event in events] == ([json.loads(event)] if collect else [])
+        if timed_out:
+            assert items == [] and usage == {"input_tokens": 0, "output_tokens": 0}
+        else:
+            assert items[0].content[0].text == "partial"
+            assert usage == {"input_tokens": 2, "output_tokens": 1}
+
     def test_startup_does_not_install_host_pi(self) -> None:
         with patch("responses_api_agents.pi_agent.app.ensure_pi") as install:
             agent = PiAgent(config=_config(concurrency=4), server_client=MagicMock(spec=ServerClient))
@@ -246,9 +292,15 @@ class TestParsePiEvents:
         assert isinstance(items[2], NeMoGymResponseOutputMessage)
 
     def test_malformed_lines_skipped(self) -> None:
-        line = b"\xff\nnot-json\nnull\n[]\n" + _msg_end("assistant", [{"type": "text", "text": "ok"}]).encode()
-        items, _ = parse_pi_events(line)
+        line = (
+            b'\n\xff\nnot-json\nnull\n[]\n{"type":"message_end","message":"log"}\n'
+            b'{"type":"message_end","message":{"role":"assistant","content":null}}\n'
+            + _msg_end("assistant", [{"type": "text", "text": "ok"}], usage="unavailable").encode()
+        )
+        items, usage = parse_pi_events(line)
         assert len(items) == 1
+        assert items[0].content[0].text == "ok"
+        assert usage == {"input_tokens": 0, "output_tokens": 0}
 
 
 class TestEnv:
@@ -340,6 +392,32 @@ class TestModelServer:
 
 
 class TestRolloutObservability:
+    def test_incomplete_tool_and_compaction_events_preserve_unknowns(self) -> None:
+        events = [
+            (1.0, {"type": "compaction_end", "result": {"tokensBefore": -1}}),
+            (2.0, {"type": "tool_execution_end", "toolCallId": "orphan"}),
+            (3.0, {"type": "compaction_end"}),
+            (4.0, {"type": "compaction_start", "reason": "overflow"}),
+        ]
+        bundle = _build_pi_observations(events, "rollout-1", None, [])
+        [tool] = _records(bundle, ToolCallObservation)
+        assert tool.status == "unknown" and tool.started_at is None and tool.duration_ms is None
+        compactions = _records(bundle, ContextCompactionObservation)
+        assert [item.outcome for item in compactions] == ["completed", "unknown", "unknown"]
+        assert all(item.tokens_before is None and item.tokens_after is None for item in compactions)
+        assert all(item.summary is None and item.first_kept_item_id is None for item in compactions)
+        assert {
+            "tool_outcome_unavailable",
+            "compaction_start_unavailable",
+            "compaction_result_unavailable",
+            "compaction_tokens_before_unavailable",
+            "compaction_summary_unavailable",
+            "compaction_boundary_unavailable",
+            "compaction_tokens_after_unavailable",
+            "compaction_outcome_unavailable",
+            "compaction_after_model_call_unavailable",
+        } <= {gap.code for gap in bundle.gaps}
+
     async def test_reads_and_timestamps_json_events(self) -> None:
         stream = asyncio.StreamReader()
         stream.feed_data(b'{"type":"tool_execution_start","toolCallId":"a"}\nnot-json\n')

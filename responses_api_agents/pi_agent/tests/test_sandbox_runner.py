@@ -67,7 +67,11 @@ def result(tmp_path, process):
 
 
 def test_capture_and_stdin(tmp_path):
-    process = launch(tmp_path, "import json,sys; print(json.dumps({'type':'test', 'prompt':sys.stdin.read()}))")
+    process = launch(
+        tmp_path,
+        "import json,os,sys; os.write(1,b'\\xff\\n'); print('[]'); "
+        "sys.stdout.write(json.dumps({'type':'test', 'prompt':sys.stdin.read()}))",
+    )
     summary = result(tmp_path, process)
     assert summary["cleanup_confirmed"] is True
     assert summary["return_code"] == 0
@@ -105,7 +109,9 @@ def test_detached_descendants_are_gone_before_receipt(tmp_path, ending):
         "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
         "pathlib.Path('child.pid').write_text(str(p.pid)); " + ("time.sleep(60)" if ending != "natural" else "pass")
     )
-    process = launch(tmp_path, code, timeout=0.3 if ending == "timeout" else 3)
+    # Allow the nested interpreters to start before testing descendant cleanup,
+    # including when subprocess coverage adds interpreter startup overhead.
+    process = launch(tmp_path, code, timeout=3)
     if ending == "cancel":
         for _ in range(200):
             if (tmp_path / "child.pid").exists():
