@@ -24,13 +24,17 @@ import asyncio
 import collections
 import json
 import os
+import signal
+import subprocess
+import sys
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 import pytest
+import yaml
 from checkpoint_deployment import (
     CAPTURE_CONTROL_TOKEN,
     COUNTER_SCRIPT,
@@ -535,3 +539,101 @@ async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int) 
     assert finished.isdisjoint(exported)
     assert finished | set(exported) == set(rollout_ids)
     assert rewards == [1.0] * len(exported)
+
+
+def collector(deployment: Deployment, tmp_path: Path, **config: Any) -> subprocess.Popen:
+    """Start rollout collection over ``tmp_path/input.jsonl`` against the deployment, as a separate process."""
+    settings = {
+        "input_jsonl_fpath": str(tmp_path / "input.jsonl"),
+        "output_jsonl_fpath": str(tmp_path / "rollouts.jsonl"),
+        "checkpoint_dir": str(tmp_path / "collection-ckpt"),
+        **config,
+    }
+    log = open(tmp_path / "collector.log", "a")
+    return subprocess.Popen(
+        [sys.executable, str(Path(__file__).parent / "collect.py"), json.dumps(settings)],
+        env=os.environ | {"NEMO_GYM_CONFIG_DICT": yaml.safe_dump(deployment.config), "RAY_TMPDIR": "/tmp"},
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+
+
+def collection_input(tmp_path: Path, topology: str, rollout_id: str = "long-1") -> dict[str, Any]:
+    """Write one row and return the collection settings that route it.
+
+    ``legacy`` rows name their agent; ``native`` rows are materialized tasks routed by their taskset.
+    """
+    if topology == "native":
+        episode = weather_episode(rollout_id)
+        row = {"task_id": episode["task"]["task_id"], "task_input": episode["task"]["task_input"]}
+        row["_ng_rollout_id"] = rollout_id
+        settings = {"environment_server_routes": {"example_single_tool_call:e2e": "environment"}}
+    else:
+        row = weather_row(rollout_id) | {"agent_ref": {"type": "responses_api_agents", "name": "agent"}}
+        row.pop("_ng_attempt_index")
+        settings = {}
+    (tmp_path / "input.jsonl").write_text(json.dumps(row) + "\n")
+    return settings
+
+
+def reward_of(row: dict) -> Optional[float]:
+    """A legacy row carries its reward at the top level; a native episode record nests it in its result."""
+    if "reward" in row:
+        return row["reward"]
+    return (row.get("result") or {}).get("reward")
+
+
+async def wait_for_exit(process: subprocess.Popen, timeout: float = 120) -> int:
+    await wait_until(lambda: process.poll() is not None, timeout=timeout)
+    return process.returncode
+
+
+@pytest.mark.parametrize("topology", ["legacy", "native"])
+async def test_rollout_collection_checkpoints_on_preemption_and_continues_after_a_restart(
+    deploy, tmp_path: Path, topology: str
+) -> None:
+    """One long task: SIGTERM checkpoints it and stops collection; Gym restarts; the rerun continues it."""
+    deployment = deploy(topology)
+    deployment.backend("/_ctl/hold", {"after_calls": 1})
+    routes = collection_input(tmp_path, topology)
+
+    first = collector(deployment, tmp_path, **routes)
+    await wait_until(lambda: len(deployment.backend_calls()) == 2, timeout=120)
+    first.send_signal(signal.SIGTERM)
+    stopped = await wait_for_exit(first)
+    latest = (tmp_path / "collection-ckpt/LATEST").read_text().strip()
+    manifest = json.loads((tmp_path / "collection-ckpt" / latest / "collection.json").read_text())
+
+    # The preemption takes Gym down with it; the requeued job starts fresh servers.
+    deployment.crash_gym()
+    deployment.backend("/_ctl/release", {})
+    deployment.start_gym()
+    second = collector(deployment, tmp_path, resume_from_cache=True, **routes)
+    finished = await wait_for_exit(second, timeout=300)
+
+    rows = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
+    calls = [call["n_messages"] for call in deployment.backend_calls()]
+    assert stopped == 75, (tmp_path / "collector.log").read_text()[-2000:]
+    assert [(row["rollout_id"], row["attempt"]) for row in manifest["continued"]] == [("long-1", 0)]
+    assert finished == 0, (tmp_path / "collector.log").read_text()[-2000:]
+    assert [(reward_of(row), row["_ng_attempt_index"]) for row in rows] == [(1.0, 1)]
+    # The continued attempt regenerates only the undelivered call; the first model call is not repeated.
+    assert calls == [calls[0], calls[0] + 2, calls[0] + 2]
+
+
+async def test_a_checkpoint_on_request_lets_collection_continue(deploy, tmp_path: Path) -> None:
+    deployment = deploy("legacy")
+    deployment.backend("/_ctl/hold", {"after_calls": 1})
+    collection_input(tmp_path, "legacy")
+
+    process = collector(deployment, tmp_path)
+    await wait_until(lambda: len(deployment.backend_calls()) == 2, timeout=120)
+    process.send_signal(signal.SIGUSR1)
+    await wait_until(lambda: (tmp_path / "collection-ckpt/LATEST").exists(), timeout=60)
+    deployment.backend("/_ctl/release", {})
+    finished = await wait_for_exit(process, timeout=300)
+
+    rows = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
+    assert finished == 0, (tmp_path / "collector.log").read_text()[-2000:]
+    assert [row["reward"] for row in rows] == [1.0]
+    assert [call["n_messages"] for call in deployment.backend_calls()] == [1, 3]
