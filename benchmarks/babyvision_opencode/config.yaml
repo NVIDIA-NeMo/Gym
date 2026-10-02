@@ -1,0 +1,34 @@
+# BabyVision (388 rows) under OpenCode with a Python shell, as Python_call_gen evaluates it:
+# the same prompt, opencode 1.17.11 tools (bash/read/glob/grep/write/edit/todowrite, `read`
+# returns images), 1800 s per task and no turn cap, and a gpt-4o-mini correctness judge.
+# Data: prepare.py reads $LMUData/BabyVision.tsv (or $BABYVISION_TSV).
+config_paths:
+  - resources_servers/babyvision_opencode/configs/babyvision_opencode.yaml
+
+babyvision_opencode_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:babyvision_opencode_judge_base_url,https://inference-api.nvidia.com/v1}
+      # Default empty: `gym eval prepare` loads this config without the run's key override.
+      openai_api_key: ${oc.env:OPENAI_API_KEY,""}
+      openai_model: ${oc.select:babyvision_opencode_judge_model_name,us/azure/openai/gpt-4o-mini}
+      openai_default_headers: {}
+      max_concurrent_requests: 32
+
+babyvision_opencode:
+  resources_servers:
+    babyvision_opencode:
+      judge_model: ${oc.select:babyvision_opencode_judge_model_name,us/azure/openai/gpt-4o-mini}
+
+babyvision_opencode_agent:
+  responses_api_agents:
+    opencode_vision_agent:
+      # Each task gets its own /tmp: models write crops to fixed names such as /tmp/crop.png.
+      private_tmp: true
+      datasets:
+      - name: babyvision_opencode
+        type: benchmark
+        jsonl_fpath: benchmarks/babyvision_opencode/data/babyvision_opencode_benchmark.jsonl
+        prepare_script: benchmarks/babyvision_opencode/prepare.py
+        num_repeats: 1
