@@ -251,11 +251,27 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         assert result.summary["run"]["issues"]["model_call_failed"] == 1
 
     # Inspect the emitted records, not a reconstructed copy of the expected evidence.
-    _, conformance = inspect_bundle(
+    report_dir, conformance = inspect_bundle(
         path, output=tmp_path / "capabilities", profile="gym-p0/v1", capture_dir=capture_dir
     )
-    expected = "fulfilled"  # Provider omission is faithful evidence; health still evaluates missing usage.
+    # Known mini-SWE gap: submission exits before saving the final tool observation.
+    # Fix the native submission evidence before expecting TE-5 and the P0 gate to pass.
+    submitted = scenario != "http_error"
+    expected = "not_fulfilled" if submitted else "fulfilled"
     assert conformance["verdict"] == expected
-    for capability in ("TE-1", "TE-2", "TE-3", "TE-4", "TE-5", "TE-7", "TE-8"):
+    assert conformance["evidence"]["TE-5"]["verdict"] == expected
+    findings = json.loads((report_dir / "evidence_results.jsonl").read_text())["findings"]
+    tool_findings = {
+        (finding["assertion"], finding["location"]) for finding in findings if finding["evidence"] == "TE-5"
+    }
+    if submitted:
+        assert trajectory["tool_calls"][-1]["status"] == "incomplete"
+        assert trajectory["tool_calls"][-1]["output"] is None
+        location = f"evaluator_rollouts.jsonl:1/ng_trajectory/tool_calls/{len(trajectory['tool_calls']) - 1}"
+        assert tool_findings == {("tool.terminal", location + "/status"), ("tool.outcome", location)}
+    else:
+        assert tool_findings == set()
+    # Provider omission is faithful evidence; health still evaluates missing usage.
+    for capability in ("TE-1", "TE-2", "TE-3", "TE-4", "TE-6", "TE-7", "TE-8"):
         assert conformance["evidence"][capability]["verdict"] == "fulfilled", (scenario, capability)
     assert conformance["is_behavioral_qualification"] is False

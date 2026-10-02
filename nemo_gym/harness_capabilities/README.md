@@ -40,6 +40,13 @@ These verdicts describe evidence conformance, not task success. A rollout with
 zero reward can have fully conforming evidence; a successful task can have
 incomplete evidence.
 
+Known producer gap: `miniswe_sandboxed_agent` retains its final submit tool call
+as `incomplete`, without output or error evidence. This fails TE-5 with
+`tool.terminal` and `tool.outcome`, so the P0 gate is `not_fulfilled` for those
+rollouts. mini-SWE must save a terminal result correlated with the submit call
+before exiting, and Gym must retain it in the projected evidence. See the
+[mini-SWE observability limits](../../responses_api_agents/miniswe_sandboxed_agent/README.md#native-behavior-and-observability).
+
 TE-6 requires a finite numeric `reward` even when `mask_sample=true` excludes it
 from scoring. Masked results and explicitly incomplete verification require
 nonblank `failure_kind` and `failure_reason`; a masked `reward=0.0` is valid
