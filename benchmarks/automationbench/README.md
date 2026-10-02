@@ -28,6 +28,21 @@ directly comparable to the AA leaderboard column.
 - Scoring code: `automationbench_env/` (imports upstream
   `automationbench`; vendors nothing)
 
+## Per-assertion results (optional)
+
+Off by default. To keep every assertion's verdict in the rollout, collect with
+
+```bash
+++automationbench.responses_api_agents.verifiers_agent.export_state_columns='[assertion_results]'
+```
+
+Each rollout then carries
+`response.exported_state.assertion_results`, one record per assertion in task
+order: `index`, `type`, `app` (the WorldState service the assertion inspects),
+`role` (`objective`, `guardrail` or `unscored`), `passed` (final-world verdict;
+a guardrail with `passed: false` is a violation) and `initially_passed`. The
+records use the same classification as the count metrics.
+
 ## Install
 
 The env package is not on PyPI, install it into the agent's venv for data prep.
