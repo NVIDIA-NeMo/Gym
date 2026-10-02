@@ -19,7 +19,7 @@ from nemo_gym.rollout_collection import (
     _native_episode_request_body,
 )
 from nemo_gym.server_utils import ServerClient
-from nemo_gym.single_agent_task import materialize_single_agent_task
+from nemo_gym.single_agent_turn_task import materialize_single_agent_task
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 from nemo_gym.train_data_utils import TrainDataProcessor
 

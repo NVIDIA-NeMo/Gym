@@ -458,7 +458,9 @@ class DatasetConfig(BaseModel):
     type: DatasetType
     jsonl_fpath: str
     taskset: Optional[str] = Field(
-        default=None, min_length=1, description="Materialize flat rows as single-agent-turn tasks for this taskset."
+        default=None,
+        min_length=1,
+        description="Taskset identifier used to materialize and route this dataset's tasks to an Environment Server.",
     )
 
     num_repeats: int = Field(default=1, ge=1)
@@ -552,7 +554,9 @@ class BenchmarkDatasetConfig(BaseModel):
     jsonl_fpath: Path
     prepare_script: Path
     taskset: Optional[str] = Field(
-        default=None, min_length=1, description="Materialize flat rows as single-agent-turn tasks for this taskset."
+        default=None,
+        min_length=1,
+        description="Taskset identifier used to materialize and route this dataset's tasks to an Environment Server.",
     )
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
