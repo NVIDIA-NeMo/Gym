@@ -254,3 +254,40 @@ async def test_a_retire_during_final_cleanup_does_not_interrupt_it() -> None:
     await run
 
     assert cleanup_finished.is_set()
+
+
+async def test_a_commit_that_no_longer_continues_a_restored_episode_releases_it(tmp_path: Path) -> None:
+    episode_id = EpisodeId(rollout_id="r")
+    source = EnvironmentParticipant()
+    source_controller = controller_for(source)
+    release = asyncio.Event()
+
+    async def episode() -> None:
+        source.begin(episode_id, TASK, None)
+        await source.boundary(episode_id, {"next": "verify"})
+        async with source.step(episode_id, "replay"):
+            await release.wait()
+
+    task = asyncio.create_task(episode())
+    await asyncio.sleep(0)
+    await source_controller.prepare(CheckpointRequest(**request()))
+    await source_controller.commit(CommitRequest(**request(checkpoint_dir=str(tmp_path / "first"))))
+    task.cancel()
+
+    restored = EnvironmentParticipant()
+    controller = controller_for(restored)
+    await controller.restore(
+        RestoreRequest(**request("r1", checkpoint_dir=str(tmp_path / "first"), episode_ids=[episode_id]))
+    )
+    await controller.resume(CheckpointRequest(**request("r1")))
+    await controller.prepare(CheckpointRequest(**request("c2")))
+    # The controller continues nothing from this checkpoint, so attempt 1 will never start.
+    committed = await controller.commit(
+        CommitRequest(**request("c2", checkpoint_dir=str(tmp_path / "second"), episode_ids=[]))
+    )
+    await controller.resume(CheckpointRequest(**request("c2")))
+
+    assert committed["episode_ids"] == ["r-a1"]
+    assert controller.status()["restored_pending"] == []
+    with pytest.raises(StaleAttemptError):
+        restored.begin(EpisodeId(rollout_id="r", attempt=1), TASK, None)
