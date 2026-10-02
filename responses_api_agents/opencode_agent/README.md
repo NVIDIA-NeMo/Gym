@@ -86,3 +86,19 @@ key, and provider configuration are unchanged.
 - `opencode_version`: npm version to pin on install (null means latest)
 
 See `configs/opencode_agent.yaml`.
+
+## Embedding live pipe observation
+
+The agent supports the shared `_native_output_observer(rollout_id)` hook.
+See the [pipe-observation contract](../codex_agent/README.md#embedding-live-pipe-observation)
+for exact bytes, EOF, bounded chunks, consumer failures and retention limits.
+Native execution stays in this agent. Timeout and cancellation stop its process
+group before temporary workspace cleanup.
+When an observer is present, Gym requests native `--format json` output.
+The SQLite artifact remains the source of final trajectory and usage results.
+Artifact reads run off the event loop so SQLite waits cannot stall concurrent
+native pipe readers. Cancellation joins the reader before deleting its workspace.
+
+The shared [`native_stream` configuration](../codex_agent/README.md#embedding-live-pipe-observation)
+also activates an installed observer factory without subclassing. It provides
+collector task/rollout scope, resolved runner input and bounded async finalization.

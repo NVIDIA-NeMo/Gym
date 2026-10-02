@@ -5543,7 +5543,8 @@ class TestRolloutAggregationHelper:
         assert captured["rows"] is captured["results"]
         # Merged shard concatenation honoured (merge_shards=True).
         assert output_fpath.exists()
-        assert sum(1 for _ in output_fpath.open()) == 3
+        with output_fpath.open() as stream:
+            assert sum(1 for _ in stream) == 3
         # Metrics file path returned and points next to the merged JSONL.
         assert metrics_fpath == tmp_path / "rollouts_aggregate_metrics.json"
         assert metrics_fpath.exists()
@@ -7491,3 +7492,46 @@ class TestEnvironmentServerRouting:
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
         assert sorted(r[nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] for r in persisted) == ["a", "b"]
         assert all(r[NG_ENVIRONMENT_SERVER_KEY] == "environment" for r in persisted)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("environment_routed", [False, True])
+async def test_native_observation_scope_is_attached_before_dispatch(monkeypatch, enabled, environment_routed):
+    from nemo_gym.native_stream import NativeInvocationScope
+
+    row = {
+        "task_id": "synthetic-task-🐉",
+        AGENT_REF_KEY_NAME: {"name": "my_agent"},
+        TASK_INDEX_KEY_NAME: 3,
+        ROLLOUT_INDEX_KEY_NAME: 7,
+        ATTEMPT_INDEX_KEY_NAME: 2,
+    }
+    if environment_routed:
+        row[NG_ENVIRONMENT_SERVER_KEY] = "environment"
+        del row[AGENT_REF_KEY_NAME]
+    client = MagicMock()
+    agent_config = {"native_stream": {"factory": "synthetic:factory"}} if enabled else {}
+    client.global_config_dict = OmegaConf.create(
+        {
+            "my_agent": {"responses_api_agents": {"impl": agent_config}},
+            "environment": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}},
+        }
+    )
+    response = MagicMock(status=200)
+    response.read = AsyncMock(return_value=b'{"response": {}}')
+    client.post = AsyncMock(return_value=response)
+    monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: client)
+    returned, result = await next(RolloutCollectionHelper().run_examples([row]))
+    assert returned is row and result == {"response": {}}
+    kwargs = client.post.call_args.kwargs
+    assert kwargs["server_name"] == "environment"
+    assert kwargs["json"] is row
+    if enabled:
+        [header] = kwargs["headers"].values()
+        scope = NativeInvocationScope.model_validate_json(header)
+        assert scope.task_id == "synthetic-task-🐉"
+        assert scope.rollout_id == "3-7-a2"
+        assert scope.agent_name == "my_agent"
+        assert scope.attempt_index == 2
+    else:
+        assert "headers" not in kwargs

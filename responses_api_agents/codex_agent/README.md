@@ -153,3 +153,64 @@ Each rollout result is stamped with a `skills_ref` for provenance and grouping d
 - `turns_used` counts assistant messages right now, not tool calls.
 - Codex has no `--max-turns` equivalent; runaway rollouts are bounded by `timeout`.
 - Multi-turn dataset inputs are collapsed to a single prompt: only the first `system` message (as `developer_instructions`) and the last `user` message are passed to `codex exec`; any earlier user/assistant/tool turns in `responses_create_params.input` are dropped. This matches the Claude Code agent and is fine for single-turn datasets like reasoning_gym, but datasets that encode prior conversation turns in `input` will not see that history.
+
+## Embedding live pipe observation
+
+`CodexAgent._native_output_observer(rollout_id)` is an optional embedding hook.
+Return a fresh `nemo_gym.native_stream.NativeStreamObserver` for each invocation.
+Gym calls its consumer with `("stdout" | "stderr", bytes)` while
+it drains the native process. Empty bytes mark EOF for that channel. A chunk
+is at most 16 KiB and is not necessarily a UTF-8 or JSON record boundary.
+The rollout identity includes Gym's retry suffix when present.
+
+Start and consume callbacks may return awaitables; Gym gives each awaitable a
+three-second cooperative deadline. Synchronous callbacks must not block the
+event loop, and asynchronous callbacks must honor cancellation. Finalization
+also has a three-second deadline and runs once, including after callback failure.
+The consumer owns bounded framing, delivery,
+attribution beyond the rollout, and retention. A consumer exception disables
+that observer and sets `failed`; cancellation also marks observation failed.
+The embedding owner must record this as incomplete capture. Gym continues
+native execution after a consumer exception. Existing output parsing and usage
+calculation still receive the complete native stdout; full transcript retention
+remains unbounded. This hook does not implement a public event transport.
+
+Returning `None` preserves ordinary execution. Cancellation kills and reaps the
+Codex process group before removing its temporary home. Detached descendants
+and inherited pipes require further containment qualification.
+
+
+Configure an installed observer without subclassing by setting `native_stream`
+on the agent configuration:
+
+```yaml
+native_stream:
+  factory: installed_module:create_observer
+  options:
+    endpoint: /private/run/events.sock
+```
+
+This imports trusted executable code, like a component entrypoint. The factory
+receives keyword arguments `options`, `agent_name`, `rollout_id`, and `scope`;
+it returns a fresh `NativeStreamObserver` synchronously. Missing modules or an
+invalid factory result fail before spawning the native CLI. `scope` contains
+Gym's canonical task/rollout identity, resolved agent name, task/rollout indices,
+and attempt index. Direct calls without collector metadata receive `None`;
+consumers must describe unavailable attribution rather than invent it.
+
+The collector attaches scope before dispatch to the configured environment
+server. Native CLI agents use Gym's existing `legacy_agent` environment server,
+which relays the header unchanged; no second forwarding mechanism is needed.
+Pi and OpenCode forward it only on their internal agent self-call. Request-local state is reset on exit or
+cancellation. The private Gym correlation header is limited to 8 KiB; invalid,
+duplicate or oversized headers are rejected before execution. This metadata
+is not authentication and assumes Gym's existing trusted service network.
+
+The observer's optional `on_start(instruction, system_prompt)` sees the runner
+input before spawn (including Codex's effective developer instructions).
+`on_finish(returncode, incomplete)` is async and runs once during cleanup,
+including spawn failure, timeout and cancellation, with a three-second drain
+deadline. Callbacks must cooperate with cancellation and never block the event
+loop. Callback failure sets `failed`; it does not change native results. Exit
+status describes a process, never independent task correctness. This seam
+still requires an embedding owner to retain capture-failure summaries.

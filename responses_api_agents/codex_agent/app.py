@@ -19,7 +19,6 @@ import logging
 import os
 import re
 import shutil
-import signal
 import subprocess
 import tempfile
 from asyncio import Semaphore
@@ -36,6 +35,8 @@ from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunReq
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
+from nemo_gym.native_stream import communicate_native
+from nemo_gym.native_stream import kill_native_process_group as _kill_process_group
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -238,18 +239,6 @@ def parse_exec_jsonl(stdout: str) -> tuple[list[Any], dict]:
     if errors:
         metadata["errors"] = errors
     return output_items, metadata
-
-
-def _kill_process_group(proc: Any) -> None:
-    """Kill the codex subprocess and every child in its process group.
-
-    Killing only the direct child leaves the npm shim's vendored-binary child alive, holding the
-    stdout pipe open — the post-kill ``communicate()`` would then block until the orphan exits.
-    """
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:
-        proc.kill()
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -480,7 +469,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
         codex_home: Optional[Path] = None
         scratch_cwd: Optional[str] = None
+        observer = None
+        proc = None
         try:
+            observer = self._native_output_observer(rollout_id)
+            if observer is not None:
+                await observer.start(instruction, config.get("developer_instructions"))
             # Inside the try so a bad skills_path (raising in stage_skills) still cleans up the
             # partially-created home in the finally rather than leaking it per failing request.
             codex_home = self._setup_codex_home(config, skills_path=skills_path)
@@ -507,23 +501,42 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 start_new_session=True,
             )
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                stdout, stderr = await asyncio.wait_for(
+                    communicate_native(proc, observer) if observer is not None else proc.communicate(),
+                    timeout=self.config.timeout,
+                )
             except asyncio.TimeoutError:
+                if observer is not None:
+                    observer.failed = True
                 _kill_process_group(proc)
                 await proc.communicate()
                 LOG.warning("codex timed out after %ds", self.config.timeout)
                 return "", model
+            except asyncio.CancelledError:
+                _kill_process_group(proc)
+                await proc.communicate()
+                raise
 
             if proc.returncode not in (0, None):
                 LOG.warning("codex exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             LOG.debug("codex stdout (%d chars): %s", len(stdout), stdout[:2000].decode(errors="replace"))
             return stdout.decode(errors="replace"), model
+        except BaseException:
+            if observer is not None:
+                observer.failed = True
+            raise
         finally:
-            if codex_home is not None:
-                shutil.rmtree(codex_home, ignore_errors=True)
-            if scratch_cwd is not None:
-                shutil.rmtree(scratch_cwd, ignore_errors=True)
+            try:
+                if observer is not None:
+                    await observer.close(
+                        returncode=proc.returncode if proc is not None else None,
+                    )
+            finally:
+                if codex_home is not None:
+                    shutil.rmtree(codex_home, ignore_errors=True)
+                if scratch_cwd is not None:
+                    shutil.rmtree(scratch_cwd, ignore_errors=True)
 
     def _resources_server_base_url(self) -> str:
         cfg = get_first_server_config_dict(

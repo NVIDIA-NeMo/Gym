@@ -15,6 +15,10 @@
 
 import asyncio
 import json
+import os
+import signal
+import sys
+import tempfile
 import tomllib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,6 +30,7 @@ from fastapi import Request
 from pydantic import ValidationError
 
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
+from nemo_gym.native_stream import NativeStreamObserver
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -41,6 +46,7 @@ from responses_api_agents.codex_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
     _extract_instruction,
+    _kill_process_group,
     parse_exec_jsonl,
     toml_dumps,
 )
@@ -855,3 +861,138 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 32
         assert inner["sandbox_mode"] == "danger-full-access"
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_native_observer_receives_output_before_codex_process_exits(tmp_path, cancel):
+    """Exercise the actual Gym launch path with a barrier-controlled child."""
+    ready = asyncio.Event()
+    received = bytearray()
+    identities = []
+    program = r"""
+import os, socket, sys
+with socket.socket(socket.AF_UNIX) as connection:
+    connection.connect(sys.argv[1])
+    os.write(1, b'{"type":"thread.started","thread_id":"native-test"}\n')
+    assert connection.recv(1) == b"!"
+os.write(1, b'{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":4}}\n')
+"""
+
+    def consume(channel, chunk):
+        if channel == "stdout":
+            received.extend(chunk)
+            if b'"thread.started"' in received:
+                ready.set()
+
+    prompts = []
+    completions = []
+
+    async def finish(returncode, incomplete):
+        completions.append((returncode, incomplete))
+
+    observer = NativeStreamObserver(
+        consume, on_start=lambda instruction, system: prompts.append((instruction, system)), on_finish=finish
+    )
+
+    class ObservedCodex(CodexAgent):
+        def _native_output_observer(self, rollout_id):
+            identities.append(rollout_id)
+            return observer
+
+        def _setup_codex_home(self, config, skills_path=None):
+            home = tmp_path / "native-home"
+            home.mkdir()
+            return home
+
+        def _build_command(self, instruction, cwd):
+            return [sys.executable, "-c", program, instruction]
+
+    agent = ObservedCodex.model_construct(
+        config=_config(cwd=str(tmp_path), extra_config={"developer_instructions": "effective system"})
+    )
+    released = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def release(reader, writer):
+        try:
+            await ready.wait()
+            assert not task.done()
+            if cancel:
+                task.cancel()
+                await finished.wait()  # Keep the child blocked until Gym reaps it.
+            else:
+                writer.write(b"!")
+                await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            released.set()
+
+    with tempfile.TemporaryDirectory(prefix="ng-stream-", dir="/tmp") as temporary:
+        socket_path = str(Path(temporary) / "barrier.sock")
+        async with await asyncio.start_unix_server(release, socket_path):
+            async with asyncio.timeout(15):
+                task = asyncio.create_task(
+                    agent._run_codex(socket_path, system_prompt="overridden system", rollout_id="2-3-a1")
+                )
+                try:
+                    if cancel:
+                        with pytest.raises(asyncio.CancelledError):
+                            await task
+                    else:
+                        stdout, model = await task
+                finally:
+                    finished.set()
+                await released.wait()
+    assert not (tmp_path / "native-home").exists()
+    assert prompts == [(socket_path, "effective system")]
+    assert len(completions) == 1
+    if cancel:
+        assert observer.failed
+        assert completions == [(-9, True)]
+        return
+    assert completions == [(0, False)]
+    assert identities == ["2-3-a1"]
+    assert received.decode() == stdout
+    assert not observer.failed
+    assert parse_exec_jsonl(stdout)[1] == {
+        "input_tokens": 3,
+        "output_tokens": 4,
+        "cached_input_tokens": 0,
+        "reasoning_tokens": 0,
+    }
+    assert model == "codex-default"
+    assert not (tmp_path / "native-home").exists()
+
+
+async def test_kill_group_after_leader_exits_with_inherited_pipes():
+    program = r"""
+import os, subprocess, sys
+child = subprocess.Popen([sys.executable, "-c", "import signal; signal.pause()"])
+os.write(2, str(child.pid).encode() + b"\n")
+"""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        program,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        async with asyncio.timeout(10):
+            assert process.stderr is not None
+            child_pid = int(await process.stderr.readline())
+            # The child holds both pipes open. Observe the leader's exit, not
+            # pipe EOF; Process.wait() waits for both and would deadlock here.
+            while process.returncode is None:
+                await asyncio.sleep(0)
+            os.kill(child_pid, 0)
+            _kill_process_group(process)
+            assert await process.communicate() == (b"", b"")
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await process.communicate()

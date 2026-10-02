@@ -201,3 +201,15 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
 - With `model_server`, model calls go through Gym and can be captured. Direct Anthropic or
   `anthropic_base_url` runs bypass Gym capture.
 - `turns_used` counts assistant messages, not tool calls.
+
+## Embedding live pipe observation
+
+The agent supports the shared `_native_output_observer(rollout_id)` hook.
+See the [pipe-observation contract](../codex_agent/README.md#embedding-live-pipe-observation)
+for exact bytes, EOF, bounded chunks, consumer failures and retention limits.
+Native execution stays in this agent. Timeout and cancellation stop its process
+group before temporary workspace cleanup.
+
+The shared [`native_stream` configuration](../codex_agent/README.md#embedding-live-pipe-observation)
+also activates an installed observer factory without subclassing. It provides
+collector task/rollout scope, resolved runner input and bounded async finalization.

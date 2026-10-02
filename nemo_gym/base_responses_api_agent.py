@@ -34,6 +34,7 @@ from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
+from nemo_gym.native_stream import NativeScopeMiddleware, NativeStreamConfig, NativeStreamObserver
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -110,6 +111,7 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
     # The run-level ``token_id_capture.enabled`` setting gates the capture infrastructure.
     # The run-level ``token_id_capture.all_agents`` setting overrides this agent-level choice.
     token_id_capture: bool = False
+    native_stream: Optional[NativeStreamConfig] = None
     tool_accesses: list[ToolAccess] = Field(default_factory=list)
 
     @field_validator("tool_accesses")
@@ -134,8 +136,19 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         accesses.update((access.name, access) for access in request.tool_accesses)
         return list(accesses.values())
 
+    def _native_output_observer(self, rollout_id: Optional[str]) -> Optional[NativeStreamObserver]:
+        """Return an invocation-local observer, or None for ordinary execution.
+
+        Embedders may override this hook; the observer must not block. The
+        rollout id is Gym's correlation identity, including retry suffixes.
+        """
+        config = self.config.native_stream
+        return config.create(agent_name=self.config.name, rollout_id=rollout_id) if config is not None else None
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
+        if self.config.native_stream is not None:
+            app.add_middleware(NativeScopeMiddleware)
 
         self.setup_session_middleware(app)
 
@@ -195,7 +208,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         It also requires the static agent flag or run-level ``all_agents``.
         Missing global configuration disables correlation.
         """
-        return self._model_call_capture_enabled() or self._token_id_capture_enabled()
+        return (
+            self.config.native_stream is not None
+            or self._model_call_capture_enabled()
+            or self._token_id_capture_enabled()
+        )
 
     def _model_call_capture_enabled(self) -> bool:
         """Whether evaluation model-call observability is enabled."""

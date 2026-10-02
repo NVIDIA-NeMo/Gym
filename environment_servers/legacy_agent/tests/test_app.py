@@ -14,6 +14,7 @@ from pydantic import ConfigDict
 import nemo_gym.server_utils
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from nemo_gym.config_types import AgentServerRef
+from nemo_gym.native_stream import NativeInvocationScope
 from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
 
 
@@ -65,11 +66,24 @@ def _app(*responses: _Upstream) -> tuple[TestClient, _Client]:
 def test_run_relays_body_headers_and_cookies_to_the_agent() -> None:
     body = orjson.dumps({"responses_create_params": {"input": "task"}, "_ng_task_index": 3})
     app, client = _app(_Upstream(b'{"reward": 1.0}'))
+    metadata = NativeInvocationScope(
+        task_id="task-🐉",
+        rollout_id="3-7-a2",
+        agent_name="agent",
+        task_index=3,
+        rollout_index=7,
+        attempt_index=2,
+    )
 
     response = app.post(
         "/run",
         content=body,
-        headers={"content-type": "application/json", "x-trace": "abc", "cookie": "session=agent-cookie"},
+        headers={
+            "content-type": "application/json",
+            "x-trace": "abc",
+            "cookie": "session=agent-cookie",
+            **metadata.headers(),
+        },
     )
 
     assert response.status_code == 200
@@ -77,6 +91,7 @@ def test_run_relays_body_headers_and_cookies_to_the_agent() -> None:
     [(server, path, kwargs)] = client.calls
     assert (server, path) == ("agent", "/run")
     assert kwargs["data"] == body
+    assert NativeInvocationScope.model_validate_json(kwargs["headers"]["x-nemo-gym-native-scope"]) == metadata
     assert kwargs["cookies"] == {"session": "agent-cookie"}
     relayed = {name.lower() for name in kwargs["headers"]}
     assert {"content-type", "x-trace"} <= relayed

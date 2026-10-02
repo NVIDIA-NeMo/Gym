@@ -65,3 +65,19 @@ configuration is unchanged.
 - `pi_version`: npm version to pin on install (null means latest)
 
 See `configs/pi_agent.yaml`.
+
+## Embedding live pipe observation
+
+The agent supports the shared `_native_output_observer(rollout_id)` hook.
+See the [pipe-observation contract](../codex_agent/README.md#embedding-live-pipe-observation)
+for exact bytes, EOF, bounded chunks, consumer failures and retention limits.
+Native execution stays in this agent. Timeout and cancellation stop its process
+group before temporary workspace cleanup.
+
+The shared [`native_stream` configuration](../codex_agent/README.md#embedding-live-pipe-observation)
+also activates an installed observer factory without subclassing. It provides
+collector task/rollout scope, resolved runner input and bounded async finalization.
+
+Retained observations use the native JSON session header's ID when available,
+matching live pipe attribution. Older streams without a session header retain
+the rollout/response fallback. Conflicting session headers fail observation parsing.

@@ -79,9 +79,11 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.native_stream import NativeInvocationScope
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import trajectory_identity as _trajectory_identity
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
@@ -394,15 +396,6 @@ def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
         if isinstance(gaps, list) and any(isinstance(gap, dict) and gap.get("code") == code for gap in gaps):
             return True
     return False
-
-
-def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
-    task_id = next(
-        (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
-        str(row[TASK_INDEX_KEY_NAME]),
-    )
-    rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
-    return task_id, rollout_id
 
 
 def _turn_content(request: Any, response: Any) -> tuple[Any, Any, Any, int]:
@@ -2718,11 +2711,10 @@ class RolloutCollectionHelper(BaseModel):
                 output_fpath,
             )
 
-        expected_rollouts = (
-            sum(1 for _ in config.materialized_jsonl_fpath.open("rb"))
-            if config.materialized_jsonl_fpath.exists()
-            else len(input_rows) + persisted_count
-        )
+        expected_rollouts = len(input_rows) + persisted_count
+        if config.materialized_jsonl_fpath.exists():
+            with config.materialized_jsonl_fpath.open("rb") as materialized_file:
+                expected_rollouts = sum(1 for _ in materialized_file)
         scored_rollouts = persisted_count + len(counted)
         coverage = _coverage_report(expected_rollouts, scored_rollouts, failure_counts, failures_fpath)
         if get_exporters():  # pragma: no cover
@@ -3231,7 +3223,15 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 res = None
                 try:
                     request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
-                    res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
+                    request_options = {}
+                    agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+                    agent_config = server_client.global_config_dict.get(agent_name, {}) if agent_name else {}
+                    implementations = agent_config.get("responses_api_agents", {})
+                    if any(config.get("native_stream") for config in implementations.values()):
+                        request_options["headers"] = NativeInvocationScope.from_row(row).headers()
+                    res = await server_client.post(
+                        server_name=server_name, url_path="/run", json=request_body, **request_options
+                    )
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived

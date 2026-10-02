@@ -22,7 +22,6 @@ import shutil
 import subprocess
 import tempfile
 from asyncio import Semaphore
-from contextlib import suppress
 from pathlib import Path
 from time import monotonic, time
 from typing import Any, Callable, Optional
@@ -35,6 +34,7 @@ from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunReq
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
+from nemo_gym.native_stream import communicate_native, kill_native_process_group
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -449,7 +449,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
         claude_config_dir = None
         run_metadata: dict[str, Any] = {"status": "unknown"}
+        observer = None
+        proc = None
         try:
+            observer = self._native_output_observer(rollout_id)
+            if observer is not None:
+                await observer.start(instruction, system_prompt)
             # Inside the try so a bad skills.path (raising in stage_skills) still cleans up the
             # partially-created config dir in the finally rather than leaking it per failing request.
             claude_config_dir = self._setup_config_dir(skills_path=skills_path)
@@ -482,17 +487,20 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
             )
-            communication = asyncio.create_task(proc.communicate())
+            communication = asyncio.create_task(
+                communicate_native(proc, observer) if observer is not None else proc.communicate()
+            )
             try:
                 stdout, stderr = await asyncio.wait_for(
                     asyncio.shield(communication),
                     timeout=self.config.timeout,
                 )
             except asyncio.TimeoutError:
-                if proc.returncode is None:
-                    with suppress(ProcessLookupError):
-                        proc.kill()
+                if observer is not None:
+                    observer.failed = True
+                kill_native_process_group(proc)
                 stdout, _ = await communication
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
                 _, run_metadata = parse_stream_json(stdout.decode(errors="replace"))
@@ -503,9 +511,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 )
                 return [], model, run_metadata
             except asyncio.CancelledError:
-                if proc.returncode is None:
-                    with suppress(ProcessLookupError):
-                        proc.kill()
+                kill_native_process_group(proc)
                 await asyncio.gather(communication, return_exceptions=True)
                 raise
 
@@ -521,15 +527,25 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             if error_type is not None:
                 run_metadata["error_type"] = error_type
             return output_items, model, run_metadata
+        except BaseException:
+            if observer is not None:
+                observer.failed = True
+            raise
         finally:
-            if claude_config_dir is not None:
-                try:
-                    if observation_collector is not None:
-                        await asyncio.to_thread(observation_collector, claude_config_dir, run_metadata)
-                except Exception:
-                    LOG.exception("failed to collect Claude Code observations")
-                finally:
-                    shutil.rmtree(claude_config_dir, ignore_errors=True)
+            try:
+                if observer is not None:
+                    await observer.close(
+                        returncode=proc.returncode if proc is not None else None,
+                    )
+            finally:
+                if claude_config_dir is not None:
+                    try:
+                        if observation_collector is not None:
+                            await asyncio.to_thread(observation_collector, claude_config_dir, run_metadata)
+                    except Exception:
+                        LOG.exception("failed to collect Claude Code observations")
+                    finally:
+                        shutil.rmtree(claude_config_dir, ignore_errors=True)
 
     def _resources_server_base_url(self) -> str:
         cfg = get_first_server_config_dict(
