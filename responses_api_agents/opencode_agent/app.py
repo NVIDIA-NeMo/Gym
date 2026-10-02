@@ -38,7 +38,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.native_stream import communicate_native, kill_native_process_group, native_stream_headers
+from nemo_gym.native_stream import communicate_native, kill_native_process_group, native_stream_headers, run_native_io
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -732,7 +732,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         returncode=proc.returncode if proc is not None else None,
                     )
             finally:
-                shutil.rmtree(work_dir, ignore_errors=True)
+                await run_native_io(lambda: shutil.rmtree(work_dir, ignore_errors=True))
 
     async def _create_episode(
         self,

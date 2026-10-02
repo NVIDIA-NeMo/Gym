@@ -44,6 +44,7 @@ from nemo_gym.native_stream import (
     kill_native_process_group,
     native_stream_headers,
     read_native_pipe,
+    run_native_io,
 )
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -626,7 +627,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                         returncode=proc.returncode if proc is not None else None,
                     )
             finally:
-                shutil.rmtree(work_dir, ignore_errors=True)
+                await run_native_io(lambda: shutil.rmtree(work_dir, ignore_errors=True))
 
     async def _create_episode(
         self,

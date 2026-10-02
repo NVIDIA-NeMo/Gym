@@ -35,7 +35,7 @@ from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunReq
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
-from nemo_gym.native_stream import communicate_native
+from nemo_gym.native_stream import communicate_native, run_native_io
 from nemo_gym.native_stream import kill_native_process_group as _kill_process_group
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -477,10 +477,15 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 await observer.start(instruction, config.get("developer_instructions"))
             # Inside the try so a bad skills_path (raising in stage_skills) still cleans up the
             # partially-created home in the finally rather than leaking it per failing request.
-            codex_home = self._setup_codex_home(config, skills_path=skills_path)
             cwd = self.config.cwd
-            if cwd is None:
-                cwd = scratch_cwd = tempfile.mkdtemp(prefix="nemo_gym_codex_ws_")
+
+            def prepare() -> None:
+                nonlocal codex_home, scratch_cwd, cwd
+                codex_home = self._setup_codex_home(config, skills_path=skills_path)
+                if cwd is None:
+                    cwd = scratch_cwd = tempfile.mkdtemp(prefix="nemo_gym_codex_ws_")
+
+            await run_native_io(prepare)
 
             env = {
                 **os.environ,
@@ -533,24 +538,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
                         returncode=proc.returncode if proc is not None else None,
                     )
             finally:
-                # Filesystem cleanup must not stall sibling pipe readers. Join
-                # both removals even when cancellation is delivered repeatedly.
-                cleanup = asyncio.gather(
-                    *(
-                        asyncio.to_thread(shutil.rmtree, path, ignore_errors=True)
-                        for path in (codex_home, scratch_cwd)
-                        if path is not None
-                    )
-                )
-                cancelled = False
-                while not cleanup.done():
+
+                def remove_directories() -> None:
                     try:
-                        await asyncio.shield(cleanup)
-                    except asyncio.CancelledError:
-                        cancelled = True
-                cleanup.result()
-                if cancelled:
-                    raise asyncio.CancelledError
+                        if codex_home is not None:
+                            shutil.rmtree(codex_home, ignore_errors=True)
+                    finally:
+                        if scratch_cwd is not None:
+                            shutil.rmtree(scratch_cwd, ignore_errors=True)
+
+                await run_native_io(remove_directories)
 
     def _resources_server_base_url(self) -> str:
         cfg = get_first_server_config_dict(

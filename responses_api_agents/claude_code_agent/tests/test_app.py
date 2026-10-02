@@ -562,6 +562,65 @@ class TestRunClaudeCode:
 
         assert state == ["communicate", "kill", "stopped", "collect"]
 
+    @pytest.mark.parametrize("stage", ["setup", "reader"])
+    async def test_repeated_cancellation_joins_filesystem_work_before_cleanup(
+        self, tmp_path: Path, stage: str
+    ) -> None:
+        agent = _make_agent()
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        paths = []
+
+        def hold(config_dir: Path) -> None:
+            assert threading.current_thread() is not threading.main_thread()
+            paths.append(config_dir)
+            loop.call_soon_threadsafe(entered.set)
+            try:
+                assert release.wait(10), "test did not release observation reader"
+                assert config_dir.exists(), "cleanup removed the active reader's directory"
+            finally:
+                finished.set()
+
+        setup = agent._setup_config_dir
+
+        def prepare(**kwargs):
+            path = setup(**kwargs)
+            if stage == "setup":
+                hold(path)
+            return path
+
+        def collect(config_dir: Path, metadata: dict) -> None:
+            if stage == "reader":
+                hold(config_dir)
+
+        process = MagicMock(returncode=0, communicate=AsyncMock(return_value=(b"", b"")))
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch.object(agent, "_setup_config_dir", side_effect=prepare),
+            patch(
+                "responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", return_value=process
+            ) as spawn,
+        ):
+            running = asyncio.create_task(agent._run_claude_code("hello", observation_collector=collect))
+            try:
+                await asyncio.wait_for(entered.wait(), 3)
+                for _ in range(2):
+                    running.cancel()
+                    delivered = asyncio.Event()
+                    loop.call_soon(delivered.set)
+                    await delivered.wait()
+                    assert not running.done(), "run abandoned its active observation reader"
+                    assert paths[0].exists()
+            finally:
+                release.set()
+                await asyncio.gather(running, return_exceptions=True)
+                assert await asyncio.to_thread(finished.wait, 5)
+            assert running.cancelled()
+            assert spawn.await_count == (stage == "reader")
+        assert len(paths) == 1 and not paths[0].exists()
+
     def test_collects_observations_before_cleanup(self, tmp_path: Path) -> None:
         agent = _make_agent()
         captured: dict = {}

@@ -371,15 +371,14 @@ class TestRunCodex:
             ):
                 task = asyncio.create_task(agent._run_codex("hello"))
                 try:
-                    for _ in range(2):
-                        arrival = asyncio.create_task(entered.get())
-                        done, _ = await asyncio.wait({task, arrival}, return_when=asyncio.FIRST_COMPLETED)
-                        if task in done:
-                            arrival.cancel()
-                            await asyncio.gather(arrival, return_exceptions=True)
-                            await task
-                            pytest.fail("run returned before cleanup finished")
-                        await arrival
+                    arrival = asyncio.create_task(entered.get())
+                    done, _ = await asyncio.wait({task, arrival}, return_when=asyncio.FIRST_COMPLETED)
+                    if task in done:
+                        arrival.cancel()
+                        await asyncio.gather(arrival, return_exceptions=True)
+                        await task
+                        pytest.fail("run returned before cleanup finished")
+                    await arrival
                     if cancel:
                         for _ in range(2):
                             task.cancel()
@@ -395,6 +394,7 @@ class TestRunCodex:
                     assert task.cancelled()
                 else:
                     task.result()
+                assert len(paths) == 2
                 assert all(not path.exists() for path in paths)
 
         asyncio.run(scenario())

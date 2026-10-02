@@ -40,6 +40,24 @@ _MAX_SCOPE_BYTES = 8192
 _NATIVE_SCOPE: ContextVar["NativeInvocationScope | None"] = ContextVar("native_invocation_scope", default=None)
 
 
+async def run_native_io(operation: Callable[[], None]) -> None:
+    """Join off-loop filesystem work before propagating caller cancellation.
+
+    Setup callbacks must retain created paths in their owner's cleanup scope
+    before returning; cancellation cannot abandon a created directory or reader.
+    """
+    working = asyncio.create_task(asyncio.to_thread(operation))
+    cancelled = False
+    while not working.done():
+        try:
+            await asyncio.shield(working)
+        except asyncio.CancelledError:
+            cancelled = True
+    working.result()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 class NativeInvocationScope(BaseModel):
     """Collector-owned identity bound before agent requests are multiplexed."""
 

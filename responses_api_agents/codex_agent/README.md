@@ -179,6 +179,12 @@ Returning `None` preserves ordinary execution. Cancellation kills and reaps the
 Codex process group before removing its temporary home. Detached descendants
 and inherited pipes require further containment qualification.
 
+Codex and Claude prepare native homes off the service event loop. All four
+native adapters join directory cleanup before returning, including repeated
+cancellation. Claude also joins its artifact reader before deleting the home.
+Filesystem work retains invocation context and cannot be abandoned by cancelling
+the awaiting task; the embedding process owner still owns forced termination.
+
 
 Configure an installed observer without subclassing by setting `native_stream`
 on the agent configuration:

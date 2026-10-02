@@ -16,10 +16,30 @@
 
 import asyncio
 import sys
+import threading
+from contextvars import ContextVar
 
 import pytest
 
-from nemo_gym.native_stream import PIPE_CHUNK_BYTES, NativeStreamObserver, communicate_native
+from nemo_gym.native_stream import PIPE_CHUNK_BYTES, NativeStreamObserver, communicate_native, run_native_io
+
+
+async def test_native_io_preserves_invocation_context_and_errors():
+    invocation = ContextVar("test_native_io_invocation", default="unset")
+    token = invocation.set("owned-invocation")
+    observed = []
+
+    def operation():
+        assert threading.current_thread() is not threading.main_thread()
+        observed.append(invocation.get())
+        raise OSError("synthetic filesystem failure")
+
+    try:
+        with pytest.raises(OSError, match="synthetic filesystem failure"):
+            await run_native_io(operation)
+        assert observed == ["owned-invocation"]
+    finally:
+        invocation.reset(token)
 
 
 async def test_live_fidelity_and_concurrent_pipe_drainage():
