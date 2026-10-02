@@ -20,7 +20,7 @@ from os import environ
 from pathlib import Path
 from subprocess import Popen
 from sys import stderr, stdout
-from typing import IO, Any
+from typing import IO, Any, Mapping
 
 from omegaconf import DictConfig
 
@@ -32,6 +32,7 @@ from nemo_gym.global_config import (
     PYTHON_VERSION_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
+    UV_LOCK_TIMEOUT_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     get_global_config_dict,
@@ -104,7 +105,13 @@ def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
 
 
 def get_venv_path(dir_path: Path, global_config_dict: DictConfig) -> Path:
-    """Return the server venv path for the configured venv root."""
+    """Resolve the venv a server runs from: ``uv_venv_dir/<type>/<name>/.venv``, else ``<server dir>/.venv``.
+
+    Callers need this to launch a server with the venv's own interpreter rather than trusting whatever
+    ``bin/activate`` puts on PATH. A venv copied or moved after creation keeps the *original* prefix
+    hard-coded in ``bin/activate``, so sourcing it silently hands the server a different interpreter than
+    the one ``uv_venv_dir`` asked for.
+    """
     root_venv_path = Path(global_config_dict[UV_VENV_DIR_KEY_NAME])
     if root_venv_path.resolve() != PARENT_DIR.resolve():
         return Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
@@ -122,6 +129,12 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     venv_python_fpath = venv_path / "bin/python"
     venv_activate_fpath = venv_path / "bin/activate"
     skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
+    should_skip_venv_setup = bool(skip_venv_if_present) and venv_python_fpath.exists() and venv_activate_fpath.exists()
+    activate_cmd = f"source {shlex.quote(str(venv_activate_fpath))}"
+    if should_skip_venv_setup:
+        # Reuse existing environments, including prebuilt venvs without Gym's
+        # completion marker or writable setup-lock directories.
+        return f"cd {shlex.quote(str(dir_path))} && {activate_cmd}"
 
     # explicitly set python path if specified. In Google colab, gym env start fails due to uv pip install falls back to system python (/usr) without this and errors.
     # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
@@ -133,7 +146,6 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
 
-    activate_cmd = f"source {shlex.quote(str(venv_activate_fpath))}"
     try:
         has_pyproject_toml = (dir_path / "pyproject.toml").exists()
         has_requirements_txt = (dir_path / "requirements.txt").exists()
@@ -184,8 +196,8 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         # readiness check determines that installation is required.
         install_command = f"printf '%s\\n' {shlex.quote(str(error))} >&2; exit 1"
 
-    # Readiness must be checked by the setup process under its lock, not here:
-    # another server may already have created the venv but still be installing.
+    # When setup is needed, serialize installers and recheck readiness under
+    # the lock in case another server completes installation before this one.
     setup_command = [
         sys.executable,
         str(Path(__file__).with_name("_venv_setup.py")),
@@ -209,12 +221,15 @@ def run_command(
     global_config_dict: DictConfig | None = None,
     stdout_target: IO[Any] | None = None,
     stderr_target: IO[Any] | None = None,
+    extra_env: Mapping[str, str] | None = None,
 ) -> Popen:
     if global_config_dict is None:
         global_config_dict = get_global_config_dict()
 
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
+    if extra_env is not None:
+        custom_env.update(extra_env)
     # The server dir on PYTHONPATH lets `import app` work. When a caller passes `project_root` (the
     # dir containing resources_servers/, responses_api_agents/, ...), it's added so generated
     # `resources_servers.<name>.app`-style imports resolve from outside a repo checkout — opt-in, so
@@ -228,6 +243,11 @@ def run_command(
     custom_env["PYTHONPATH"] = ":".join(py_path_entries)
 
     custom_env["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+    # Servers start concurrently and contend for the lock on that shared cache, so the wait has to
+    # cover a cold install of the slowest one rather than uv's 300s default.
+    uv_lock_timeout = global_config_dict.get(UV_LOCK_TIMEOUT_KEY_NAME)
+    if uv_lock_timeout is not None:
+        custom_env["UV_LOCK_TIMEOUT"] = str(uv_lock_timeout)
 
     log_dir = global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME)
     if log_dir:

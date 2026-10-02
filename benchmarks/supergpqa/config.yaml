@@ -20,3 +20,10 @@ supergpqa_mcqa_simple_agent:
           prompt_config: benchmarks/prompts/eval/aai/mcq-10choices.yaml
           prepare_script: benchmarks/supergpqa/prepare.py
           num_repeats: 1
+
+supergpqa_mcqa_environment_server:
+  _inherit_from: mcqa_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: supergpqa_mcqa_simple_agent

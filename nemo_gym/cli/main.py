@@ -1024,6 +1024,11 @@ COMMANDS = {
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
+            _bool_flag(
+                "interleave-repeats",
+                "interleave_repeats",
+                "Dispatch repeats round by round rather than each task's back to back.",
+            ),
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
             _value_flag("split", "split", "Dataset split to use (train, validation, or benchmark)."),
@@ -1098,6 +1103,19 @@ COMMANDS = {
                 )
             ),
             JSON,
+        ),
+    ),
+    "eval export": Command(
+        target="nemo_gym.cli.eval:export_rollouts_as_atif",
+        summary="Export supported Gym trajectories as ATIF.",
+        flags=(
+            _value_flag("format", "format", "Output trajectory format.", choices=("atif",)),
+            _value_flag("rollouts", "rollouts_jsonl_fpath", "Gym rollouts JSONL to export.", quote=True),
+            _value_flag("output-dir", "output_dirpath", "New directory for exported trajectories.", quote=True),
+            _value_flag("session-id", "session_id", "Stable identifier for the source evaluation run.", quote=True),
+            _value_flag(
+                "agent-version", "agent_version", "Version of the agent that produced the rollouts.", quote=True
+            ),
         ),
     ),
     "eval reverify": Command(

@@ -1924,7 +1924,10 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             "export POETRY_VIRTUALENVS_CREATE=false && "
             "export POETRY_VIRTUALENVS_PATH=/openhands_setup/OpenHands && "
             f"export TMUX_MEMORY_LIMIT={self.config.apptainer_memory_limit_mb} && "
+            # COMMAND_EXEC_TIMEOUT only caps commands that pass an explicit timeout;
+            # SANDBOX_TIMEOUT is the default for commands that omit one.
             f"export COMMAND_EXEC_TIMEOUT={self.config.command_exec_timeout} && "
+            f"export SANDBOX_TIMEOUT={self.config.command_exec_timeout} && "
             f"{crypto_fix_cmd}"
             f"{diversify_tool_names_cmd}"
             f"{camel_case_tool_names_cmd}"
@@ -3005,6 +3008,7 @@ class RunOpenHandsAgent(BaseModel):
 
 
 class SWEBenchWrapper(SimpleResponsesAPIAgent):
+    ray_enabled = True
     config: SWEBenchWrapperConfig
 
     _sem: Optional[Semaphore] = None
@@ -4043,14 +4047,17 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 }
             terminal_response_id = metadata.get("terminal_response_id")
 
+            instance_config = SWEBenchWrapperInstanceConfig.model_validate_json(metadata["instance_config"])
+
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
                 response=response,
                 reward=1.0 if metrics.resolved else 0.0,
+                # Report it on the contract as well; `instance_config.mask_sample` stays
+                # for one release so existing consumers keep working.
+                mask_sample=instance_config.mask_sample,
                 **metrics.model_dump(),
-                instance_config=SWEBenchWrapperInstanceConfig.model_validate_json(
-                    metadata["instance_config"]
-                ).model_dump(),
+                instance_config=instance_config.model_dump(),
                 subagent_trajectories=subagent_trajectories,
                 terminal_response_id=terminal_response_id,
             )

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run real single-runner smoke checks in CPU, Compose, GPU order.
+"""Run real agent/resources smoke checks in CPU, Compose, GPU order.
 
 Uses loopback HTTP between Gym services. mini-SWE routes model calls through
 the local Gym model server.
@@ -23,6 +23,9 @@ from dotenv import dotenv_values
 from omegaconf import OmegaConf
 
 from nemo_gym import global_config, server_utils
+from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
+from nemo_gym.rollout_collection import _attach_trajectory_record
+from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.server_utils import BaseServerConfig, GlobalAIOHTTPAsyncClientConfig, ServerClient
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
 from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
@@ -45,6 +48,7 @@ def load_baseline(paths):
 
 
 async def main(args):
+    host = getattr(args, "host", "127.0.0.1")
     baseline = load_baseline(args.baseline_health)
     if args.env_file:
         for key, value in dotenv_values(args.env_file).items():
@@ -74,6 +78,7 @@ async def main(args):
             "resources_servers/terminal_bench_4/verifier.py",
             "responses_api_agents/miniswe_sandboxed_agent/app.py",
             "responses_api_agents/miniswe_sandboxed_agent/harness.py",
+            "responses_api_agents/miniswe_sandboxed_agent/bootstrap.py",
             "responses_api_agents/miniswe_sandboxed_agent/mcp_client.py",
         ]
     ]
@@ -98,9 +103,13 @@ async def main(args):
         )
     )
     config = OmegaConf.load(root / "resources.yaml")
+    config.observability_enabled = True
+    capture_dir = args.output / "model_calls"
+    config.model_call_capture_dir = str(capture_dir)
     config.tb4_split_sandbox_endpoints = True
     config.tb4_agent_max_timeout_sec = args.agent_timeout
     config.tb4_jobs_dir = str(args.output / "resources")
+    config.tb4_agent_artifacts_dir = str(args.output / "agent")
     config.tb4_max_steps = args.steps
     agent_name = "terminal_bench_4_" + args.harness
     profile = OmegaConf.load(root / f"{args.harness}.yaml")
@@ -112,7 +121,7 @@ async def main(args):
     resource_config.environment.sandbox_metadata["nemo-gym.nvidia.com/run"] = args.output.name
     agent_config = next(iter(config[agent_name].responses_api_agents.values()))
     model_config = {
-        "host": "127.0.0.1",
+        "host": host,
         "port": ports["policy_model"],
         "name": "policy_model",
         "entrypoint": "app.py",
@@ -122,7 +131,7 @@ async def main(args):
     }
     config.policy_model = {"responses_api_models": {"openai_model": model_config}}
     for name, values in [("terminal_bench_4", resource_config), (agent_name, agent_config)]:
-        values.update({"name": name, "host": "127.0.0.1", "port": ports[name]})
+        values.update({"name": name, "host": host, "port": ports[name]})
     config = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
     global_config._GLOBAL_CONFIG_DICT = config
     client = ServerClient(head_server_config=BaseServerConfig(host="127.0.0.1", port=1), global_config_dict=config)
@@ -137,9 +146,7 @@ async def main(args):
     )
     model = SimpleModelServer(config=SimpleModelServerConfig.model_validate(model_config), server_client=client)
     servers = [
-        uvicorn.Server(
-            uvicorn.Config(instance.setup_webserver(), host="127.0.0.1", port=ports[name], log_level="warning")
-        )
+        uvicorn.Server(uvicorn.Config(instance.setup_webserver(), host=host, port=ports[name], log_level="warning"))
         for name, instance in [("terminal_bench_4", resource), (agent_name, agent), ("policy_model", model)]
     ]
     workers = [asyncio.create_task(s.serve()) for s in servers]
@@ -149,6 +156,7 @@ async def main(args):
         await asyncio.sleep(0.1)
     manifest = json.loads((root / "manifest.json").read_text())
     rows = []
+    rollout_records = []
     semaphore = asyncio.Semaphore(args.concurrency)
 
     async def check(task):
@@ -165,12 +173,16 @@ async def main(args):
             try:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
                     async with session.post(
-                        f"http://127.0.0.1:{ports[agent_name]}/run",
+                        f"http://{host}:{ports[agent_name]}/run",
                         json={
+                            "task_id": f"terminal-bench/{task['name']}",
                             "task_name": "terminal-bench/" + task["name"],
                             "task_ref": task["ref"],
                             "dataset_ref": manifest["ref"],
                             "rollout_id": f"{args.output.name}-{task['name']}",
+                            "_ng_rollout_id": f"{args.output.name}-{task['name']}",
+                            "_ng_task_index": manifest["tasks"].index(task),
+                            "_ng_rollout_index": 0,
                             "responses_create_params": {"input": [], "max_output_tokens": 16384},
                         },
                     ) as response:
@@ -179,6 +191,14 @@ async def main(args):
                         if response.status != 200:
                             raise RuntimeError(f"Agent HTTP {response.status}; see task response")
                         result = json.loads(text)
+                        result.update(
+                            _ng_rollout_id=f"{args.output.name}-{task['name']}",
+                            _ng_task_index=manifest["tasks"].index(task),
+                            _ng_rollout_index=0,
+                        )
+                        merge_model_call_capture_into_record(result, [capture_dir], include_payloads=True)
+                        _attach_trajectory_record(result, result)
+                        rollout_records.append(result)
                         agent_observed = bool((result.get("response") or {}).get("output"))
                         row |= {
                             "reward": result.get("reward"),
@@ -224,11 +244,18 @@ async def main(args):
         await asyncio.gather(*workers, return_exceptions=True)
         await http.close()
         server_utils._GLOBAL_AIOHTTP_CLIENT = None
+    if rollout_records:
+        rollout_path = args.output / "evaluator_rollouts.jsonl"
+        with rollout_path.open("w") as handle:
+            for record in rollout_records:
+                handle.write(json.dumps(record) + "\n")
+        run_health_checks(rollout_path, output_dir=args.output, workers=1)
     return bool(rows) and not any(row["regression"] for row in rows)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="127.0.0.1", help="Service bind address reachable from the sandboxes")
     parser.add_argument("--harness", choices=["miniswe"], default="miniswe")
     parser.add_argument("--tasks", nargs="*")
     parser.add_argument("--exclude-tasks", nargs="*", default=[])

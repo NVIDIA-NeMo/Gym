@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from glob import glob
 from pathlib import Path
+from shlex import join
 from sys import stderr
 from tempfile import NamedTemporaryFile
 from time import time
@@ -28,6 +29,19 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
+
+
+# Bullseye security packages were removed from the live mirror after LTS ended.
+# Keep the signed final-LTS repository and package versions available to task setup.
+_BULLSEYE_SECURITY_SNAPSHOT_SETUP = r"""set -eu
+. "$1"
+if [ "${ID:-}:${VERSION_CODENAME:-}" = "debian:bullseye" ]; then
+    snapshot=https://snapshot.debian.org/archive/debian-security/20260831T235959Z/
+    old='deb http://deb[.]debian[.]org/debian-security bullseye-security main'
+    new="deb [check-valid-until=no] $snapshot bullseye-security main"
+    sed -i -E "s|^$old$|$new|" "$2"
+fi
+"""
 
 
 class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
@@ -121,6 +135,7 @@ TEST_SH_PATCHES = {
 
 
 class TerminalBench21ResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: TerminalBench21ResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -185,6 +200,15 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
 
         async def _run_setup(sandbox: AsyncSandbox) -> None:
+            result = await sandbox.exec(
+                join(
+                    ["bash", "-c", _BULLSEYE_SECURITY_SNAPSHOT_SETUP, "--", "/etc/os-release", "/etc/apt/sources.list"]
+                ),
+                timeout_s=self.config.evaluation_timeout,
+            )
+            if result.return_code != 0:
+                raise RuntimeError(f"Failed to prepare TerminalBench package sources: {result}")
+
             result = await sandbox.exec("apt-get update", timeout_s=self.config.evaluation_timeout)
             if result.return_code != 0:
                 print(f"Failed to apt-get update: {result}")
@@ -261,6 +285,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             golden_patch_result = await eval_sandbox.exec(
                 f"bash {cwd}/solve.sh",
                 timeout_s=self.config.evaluation_timeout,
+                preserve_background_services=True,
             )
             golden_patch_output = (golden_patch_result.stderr or "") + (golden_patch_result.stdout or "")
             if self.config.debug:
@@ -295,8 +320,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             try:
                 with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
                     await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
-                    temp_file.seek(0)
-                    reward = float(temp_file.read())
+                    # Providers such as Docker can replace the destination file during download.
+                    reward = float(Path(temp_file.name).read_text())
 
                 evaluation_completed = True
             except:
