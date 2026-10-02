@@ -187,7 +187,7 @@ class CaptureLedger(LineageResolver, Protocol):
 
         Retire a finished rollout once its manifest has been read and the receipt built from it is
         durable, and an abandoned rollout as soon as the framework gives up on it. Like
-        ``TokenSource.drop`` on the complete-record store, retiring keeps a fence: later ``record`` and
+        ``TokenSource.retire`` on the complete-record store, retiring keeps a fence: later ``record`` and
         ``record_failure`` calls for the rollout are discarded instead of starting a new ledger. Even a
         finished rollout can still write: a client retry can run it twice, and the second execution
         writes after the first one returned.
@@ -286,6 +286,25 @@ class TokenSource(Protocol):
 
         Return ``False`` if state changed after the snapshot.
         Transports without delete return ``True`` and own retention.
+        """
+        ...
+
+    async def retire(self, rollout_ids: Sequence[str]) -> dict:
+        """Remove rollouts' records and keep a fence, whatever their state.
+
+        This is ``drop`` without the snapshot check, for rollouts the consumer is done with but won't
+        drop as a consumed snapshot, such as masked or failed captures and abandoned attempts. Later
+        writes for a retired rollout must fail. Retiring again is a no-op. ``CaptureLedger.retire`` is the same operation for external staging.
+        The result validates as ``staging.records.RolloutRemoval``.
+        """
+        ...
+
+    async def delete(self, rollout_ids: Sequence[str]) -> dict:
+        """Remove rollouts' records and fences.
+
+        Delete retired rollouts once nothing of those attempts can still write, or a rollout ID before
+        reusing it. Deleting again is a no-op. ``CaptureLedger.delete`` is the same operation for
+        external staging. The result validates as ``staging.records.RolloutRemoval``.
         """
         ...
 

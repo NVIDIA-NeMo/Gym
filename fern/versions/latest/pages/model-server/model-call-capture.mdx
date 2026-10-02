@@ -305,8 +305,8 @@ with the same two operations the complete-record token store uses:
   framework gives up on it. Retiring deletes the ledger and keeps an empty
   `<rollout_id>.lineage.retired` fence, so a call that finishes later is discarded instead of
   starting a new ledger. That covers an abandoned agent that keeps running, and a client retry
-  that ran a finished rollout twice. This matches `TokenSource.drop`, which keeps a retired
-  tombstone.
+  that ran a finished rollout twice. This matches `TokenSource.retire`, which keeps a
+  fence too.
 - **Delete** retired rollouts once nothing of those attempts can still write, for example after
   every Gym server has restarted or at the end of the run, to remove their fences. Delete a
   rollout ID before reusing it. Deleting removes the ledger and any fence. This matches

@@ -203,6 +203,11 @@ await retire_rollout_token_capture(rollout_id, source, built)
 
 Call `finalize_rollout_token_capture` before training and exclude any result with `mask_sample: true`. Call `retire_rollout_token_capture` only after the rebuilt result has been accepted by durable downstream storage.
 
+`retire_rollout_token_capture` keeps masked and failed captures for diagnosis, and never sees an attempt you abandon. Remove those with the source's batched operations, which match the external-staging capture ledger's:
+
+- `await source.retire(rollout_ids)` removes the records and keeps a fence, so a late write fails: from an abandoned attempt that is still running, or from a duplicate execution after a client retry. Use it for masked or failed captures once you no longer need them, and for abandoned attempts.
+- `await source.delete(rollout_ids)` also removes the fence. Use it once nothing of those attempts can still write, for example at the end of the run, and before reusing a rollout ID.
+
 Run `nemo_gym.token_id_capture.conformance.run_conformance` against custom sink, source, and lineage factories before using the transport for training. For a multi-process deployment, run the check with independent clients connected to the real shared backend.
 
 <Warning>

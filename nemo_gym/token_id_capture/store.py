@@ -32,7 +32,6 @@ import hashlib
 import logging
 import os
 import tempfile
-import time
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -349,7 +348,7 @@ class TokenCaptureStore:
             )
 
     async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
-        """Delete snapshot payloads while retaining its tombstone and lock."""
+        """Delete snapshot payloads while retaining its fence and lock."""
         return await asyncio.to_thread(self._drop, rollout_id, snapshot_id, version)
 
     def _drop(self, rollout_id: str, snapshot_id: str, version: int) -> bool:
@@ -361,113 +360,79 @@ class TokenCaptureStore:
                 or int(state.get("version", 0)) != version
             ):
                 return False
-            self.path_for(rollout_id).unlink(missing_ok=True)
-            self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-            self.intents_path_for(rollout_id).unlink(missing_ok=True)
-            # Keep a frozen tombstone until explicit pre-dispatch cleanup.
-            # A late writer from this attempt must still observe the freeze.
-            state["indexed_size"] = 0
-            state["entry_digests"] = {}
-            state["retired"] = True
-            self._write_state(rollout_id, state)
-            self._fsync_root()
+            self._retire_unlocked(rollout_id, state)
             return True
+
+    def _retire_unlocked(self, rollout_id: str, state: dict[str, Any]) -> None:
+        self.path_for(rollout_id).unlink(missing_ok=True)
+        self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+        self.intents_path_for(rollout_id).unlink(missing_ok=True)
+        # Keep a fence until ``delete``: a late writer from this attempt must still observe it.
+        state["indexed_size"] = 0
+        state["entry_digests"] = {}
+        state["retired"] = True
+        self._write_state(rollout_id, state)
+        self._fsync_root()
+
+    async def retire(self, rollout_ids: Sequence[str]) -> dict:
+        """Remove rollouts' records and keep a fence, whatever their state.
+
+        This is ``drop`` without the snapshot check, for rollouts the consumer is done with but won't
+        drop as a consumed snapshot: masked or failed captures once their evidence is no longer needed,
+        and abandoned attempts. Like ``drop``, it leaves the fence that makes later writes for the
+        rollout fail, including writes from a duplicate execution of the same rollout. Retiring again
+        is a no-op.
+        The result validates as ``staging.records.RolloutRemoval``.
+        """
+        return await asyncio.to_thread(self.retire_now, rollout_ids)
+
+    def retire_now(self, rollout_ids: Sequence[str]) -> dict:
+        """Synchronous ``retire``."""
+        removed, absent = [], []
+        for rollout_id in validate_rollout_ids(rollout_ids):
+            with self._locked(rollout_id):
+                had_records = self._has_records(rollout_id)
+                state = self._read_state(rollout_id)
+                if not state.get("retired", False):
+                    self._retire_unlocked(rollout_id, state)
+                (removed if had_records else absent).append(rollout_id)
+        return {"removed": removed, "absent": absent}
+
+    async def delete(self, rollout_ids: Sequence[str]) -> dict:
+        """Remove rollouts' records and fences.
+
+        Delete retired rollouts once nothing of those attempts can still write, for example at the end
+        of the run, which removes their fences. Delete a rollout ID before reusing it, so the new
+        execution starts empty. Deleting again is a no-op. The result validates as ``staging.records.RolloutRemoval``.
+        """
+        return await asyncio.to_thread(self.delete_now, rollout_ids)
+
+    def delete_now(self, rollout_ids: Sequence[str]) -> dict:
+        """Synchronous ``delete``."""
+        removed, absent = [], []
+        for rollout_id in validate_rollout_ids(rollout_ids):
+            with self._locked(rollout_id):
+                (removed if self._has_records(rollout_id) else absent).append(rollout_id)
+                self.path_for(rollout_id).unlink(missing_ok=True)
+                self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+                self.intents_path_for(rollout_id).unlink(missing_ok=True)
+                self.state_path_for(rollout_id).unlink(missing_ok=True)
+        if removed or absent:
+            self._fsync_root()
+        return {"removed": removed, "absent": absent}
+
+    def _has_records(self, rollout_id: str) -> bool:
+        return any(
+            path.exists()
+            for path in (
+                self.path_for(rollout_id),
+                self.incomplete_path_for(rollout_id),
+                self.intents_path_for(rollout_id),
+            )
+        )
 
     async def close(self) -> None:
         """The file store owns no persistent handles."""
-
-    def delete(self, rollout_id: str) -> None:
-        """Unconditionally remove a rollout's records.
-
-        This compatibility helper supports administrative cleanup.
-        Normal consumers use conditional ``drop``.
-        The lock file remains so concurrent callers keep using one inode.
-        """
-        with self._locked(rollout_id):
-            self.path_for(rollout_id).unlink(missing_ok=True)
-            self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-            self.intents_path_for(rollout_id).unlink(missing_ok=True)
-            self.state_path_for(rollout_id).unlink(missing_ok=True)
-            self._fsync_root()
-
-    def sweep_retired(self, older_than_seconds: float) -> int:
-        """Remove retired tombstones older than the cutoff and return the count removed.
-
-        Callers choose the retention policy.
-        ``drop`` already removed entries and JSONL payloads.
-        This removes state, locks, intents, and incomplete markers.
-        """
-        cutoff = time.time() - older_than_seconds
-        removed = 0
-        for state_path in self._root.glob("*.tokens.state.json"):
-            rollout_id = state_path.name[: -len(".tokens.state.json")]
-            try:
-                validate_rollout_id(rollout_id)
-            except ValueError:
-                continue
-            with self._locked(rollout_id):
-                try:
-                    if state_path.stat().st_mtime > cutoff:
-                        continue
-                except FileNotFoundError:
-                    continue
-                if not self._read_state(rollout_id).get("retired", False):
-                    continue
-                state_path.unlink(missing_ok=True)
-                self.intents_path_for(rollout_id).unlink(missing_ok=True)
-                self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-                self.lock_path_for(rollout_id).unlink(missing_ok=True)
-                removed += 1
-        if removed:
-            self._fsync_root()
-        return removed
-
-    def sweep_stale(self, older_than_seconds: float) -> int:
-        """Remove abandoned unretired captures older than the cutoff and return the count removed.
-
-        A rollout whose request was cancelled between its first captured call
-        and the post-delivery retire leaves an unretired capture behind, the
-        token JSONL and its side files, which ``sweep_retired`` deliberately
-        skips. A capture counts as abandoned only when every file of it (state,
-        token records, intents, incomplete marker) is older than the cutoff, so
-        an in-flight rollout, whose records are still being appended, is never
-        touched; callers pass a cutoff above the longest possible session.
-        Unlike ``sweep_retired`` this removes the token records too, because no
-        ``drop`` ever ran for an abandoned capture.
-        """
-        cutoff = time.time() - older_than_seconds
-        removed = 0
-        for state_path in self._root.glob("*.tokens.state.json"):
-            rollout_id = state_path.name[: -len(".tokens.state.json")]
-            try:
-                validate_rollout_id(rollout_id)
-            except ValueError:
-                continue
-            with self._locked(rollout_id):
-                if self._read_state(rollout_id).get("retired", False):
-                    continue
-                newest = 0.0
-                for path in (
-                    state_path,
-                    self.path_for(rollout_id),
-                    self.intents_path_for(rollout_id),
-                    self.incomplete_path_for(rollout_id),
-                ):
-                    try:
-                        newest = max(newest, path.stat().st_mtime)
-                    except FileNotFoundError:
-                        continue
-                if newest > cutoff:
-                    continue
-                self.path_for(rollout_id).unlink(missing_ok=True)
-                state_path.unlink(missing_ok=True)
-                self.intents_path_for(rollout_id).unlink(missing_ok=True)
-                self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-                # Preserve the inode so waiting and subsequent writers use the same lock.
-                removed += 1
-        if removed:
-            self._fsync_root()
-        return removed
 
     def read_entries(self, rollout_id: str) -> list[TokenEntry]:
         with self._locked(rollout_id, shared=True):
