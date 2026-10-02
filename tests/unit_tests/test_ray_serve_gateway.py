@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import socket
+from unittest.mock import call, patch
 
 import pytest
 
@@ -91,16 +92,22 @@ def test_parse_args_accepts_gpus_per_node_for_caller_compatibility():
 # ---------------------------------------------------------------------------
 
 
-def test_free_local_port_returns_a_usable_port():
-    port = free_local_port()
-    assert 0 < port < 65536
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("", port))
+@pytest.mark.parametrize("port", [12345, 54321])
+def test_free_local_port_binds_ephemeral_tcp_port_and_closes_socket(port):
+    # The socket is closed on return, so neither uniqueness nor later availability is guaranteed.
+    with patch("nemo_gym.orchestration.ray_serve_gateway.socket.socket") as socket_factory:
+        sock = socket_factory.return_value.__enter__.return_value
+        sock.getsockname.return_value = ("0.0.0.0", port)
 
+        assert free_local_port() == port
 
-def test_free_local_port_returns_distinct_ports_across_calls():
-    ports = {free_local_port() for _ in range(20)}
-    assert len(ports) == 20
+    assert socket_factory.mock_calls == [
+        call(socket.AF_INET, socket.SOCK_STREAM),
+        call().__enter__(),
+        call().__enter__().bind(("", 0)),
+        call().__enter__().getsockname(),
+        call().__exit__(None, None, None),
+    ]
 
 
 # ---------------------------------------------------------------------------

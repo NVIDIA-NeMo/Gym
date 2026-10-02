@@ -443,6 +443,7 @@ def _strip_ignored(args: dict) -> dict:
 
 
 class ImageToolsPivotResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: ImageToolsPivotResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
