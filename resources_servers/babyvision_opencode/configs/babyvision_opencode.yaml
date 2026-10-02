@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# BabyVision under OpenCode with a Python shell, graded by a GPT correctness judge.
+# The judge model server and key come from benchmarks/babyvision_opencode/config.yaml.
+babyvision_opencode:
+  resources_servers:
+    babyvision_opencode:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: BabyVision visual puzzles solved by OpenCode with a Python image toolkit, GPT-judged final answers.
+      value: Evaluate tool-assisted fine-grained visual reasoning (counting, coordinates, tracing).
+      judge_model_server:
+        type: responses_api_models
+        name: babyvision_opencode_judge_model
+      judge_model: us/azure/openai/gpt-4o-mini
+
+babyvision_opencode_agent:
+  responses_api_agents:
+    opencode_vision_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: babyvision_opencode
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: policy
+      concurrency: 64
+      command: opencode
+      opencode_version: 1.17.11
+      thinking: false
+      # The only hard stop, as in Python_call_gen: OpenCode itself has no turn cap.
+      timeout: 1800
+      context_window: 131072
+      max_output_tokens: 32768
+      attach_images: true
+      vision: true
+      env:
+        OMP_NUM_THREADS: "1"
+        OPENBLAS_NUM_THREADS: "1"
+        MKL_NUM_THREADS: "1"
+        NUMEXPR_NUM_THREADS: "1"
+        VECLIB_MAXIMUM_THREADS: "1"
+        OPENCV_FOR_THREADS_NUM: "1"
+      opencode_config:
+        permission:
+          bash: allow
+          edit: allow
+          webfetch: deny
+          external_directory:
+            /tmp/*: allow
+        experimental:
+          continue_loop_on_deny: true
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/babyvision_opencode/data/example.jsonl
+        num_repeats: 1
