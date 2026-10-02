@@ -9,7 +9,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from environments.usersim import prepare as prepare_module
-from nemo_gym.config_types import BenchmarkDatasetConfig
+from nemo_gym.config_types import DatasetConfig
 
 
 REGISTERED_PROBES = (
@@ -32,12 +32,13 @@ REGISTERED_PROBES = (
 
 def test_environment_config_declares_one_preparable_example() -> None:
     config = OmegaConf.load("environments/usersim/config.yaml")
-    dataset = BenchmarkDatasetConfig.model_validate(config.usersim_resources.resources_servers.usersim.datasets[0])
+    raw_dataset = config.usersim_resources.resources_servers.usersim.datasets[0]
+    dataset = DatasetConfig.model_validate(raw_dataset)
 
     assert dataset.name == "example"
     assert dataset.type == "example"
-    assert dataset.agent == "usersim_assistant"
-    assert dataset.prepare_script == Path("environments/usersim/prepare.py")
+    assert raw_dataset.agent == "usersim_assistant"
+    assert raw_dataset.prepare_script == "environments/usersim/prepare.py"
 
 
 def test_prepare_materializes_every_registered_probe_with_usersim(
