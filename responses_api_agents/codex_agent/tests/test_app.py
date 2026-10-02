@@ -19,6 +19,7 @@ import os
 import signal
 import sys
 import tempfile
+import threading
 import tomllib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -340,6 +341,64 @@ class TestRunForwardsSkillsPath:
 
 
 class TestRunCodex:
+    @pytest.mark.parametrize("cancel", [False, True])
+    def test_cleanup_keeps_loop_responsive_and_joins_on_cancellation(self, tmp_path: Path, cancel: bool) -> None:
+        import shutil
+
+        agent = _make_agent()
+        remove = shutil.rmtree
+        release = threading.Event()
+        paths = []
+
+        async def scenario():
+            loop = asyncio.get_running_loop()
+            entered = asyncio.Queue()
+
+            def blocked_remove(path, **kwargs):
+                assert threading.current_thread() is not threading.main_thread()
+                paths.append(Path(path))
+                loop.call_soon_threadsafe(entered.put_nowait, path)
+                assert release.wait(10), "test did not release cleanup"
+                remove(path, **kwargs)
+
+            proc = MagicMock(returncode=0, communicate=AsyncMock(return_value=(b"", b"")))
+            with (
+                patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
+                patch(
+                    "responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", AsyncMock(return_value=proc)
+                ),
+                patch("responses_api_agents.codex_agent.app.shutil.rmtree", blocked_remove),
+            ):
+                task = asyncio.create_task(agent._run_codex("hello"))
+                try:
+                    for _ in range(2):
+                        arrival = asyncio.create_task(entered.get())
+                        done, _ = await asyncio.wait({task, arrival}, return_when=asyncio.FIRST_COMPLETED)
+                        if task in done:
+                            arrival.cancel()
+                            await asyncio.gather(arrival, return_exceptions=True)
+                            await task
+                            pytest.fail("run returned before cleanup finished")
+                        await arrival
+                    if cancel:
+                        for _ in range(2):
+                            task.cancel()
+                            delivered = asyncio.Event()
+                            loop.call_soon(delivered.set)
+                            await delivered.wait()
+                            assert not task.done()
+                    assert all(path.exists() for path in paths)
+                finally:
+                    release.set()
+                    await asyncio.gather(task, return_exceptions=True)
+                if cancel:
+                    assert task.cancelled()
+                else:
+                    task.result()
+                assert all(not path.exists() for path in paths)
+
+        asyncio.run(scenario())
+
     def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
         agent = _make_agent(openai_api_key="sk-test", system_prompt=None)  # pragma: allowlist secret
         captured: dict = {}

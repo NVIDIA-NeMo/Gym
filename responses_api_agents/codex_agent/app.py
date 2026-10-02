@@ -533,10 +533,24 @@ class CodexAgent(SimpleResponsesAPIAgent):
                         returncode=proc.returncode if proc is not None else None,
                     )
             finally:
-                if codex_home is not None:
-                    shutil.rmtree(codex_home, ignore_errors=True)
-                if scratch_cwd is not None:
-                    shutil.rmtree(scratch_cwd, ignore_errors=True)
+                # Filesystem cleanup must not stall sibling pipe readers. Join
+                # both removals even when cancellation is delivered repeatedly.
+                cleanup = asyncio.gather(
+                    *(
+                        asyncio.to_thread(shutil.rmtree, path, ignore_errors=True)
+                        for path in (codex_home, scratch_cwd)
+                        if path is not None
+                    )
+                )
+                cancelled = False
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                cleanup.result()
+                if cancelled:
+                    raise asyncio.CancelledError
 
     def _resources_server_base_url(self) -> str:
         cfg = get_first_server_config_dict(
