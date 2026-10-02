@@ -477,15 +477,19 @@ def retained_staging_keys(records: Iterable[CheckpointRecord]) -> list[str]:
     return sorted(keys)
 
 
-async def retire_ledgers(ledger: Optional[CheckpointableLedger], episode_id: EpisodeId) -> None:
-    """Retire the ledgers of ``episode_id`` and every earlier attempt, which a checkpoint retire fences too."""
-    if ledger is not None:
-        await ledger.retire(
-            [
-                EpisodeId(rollout_id=episode_id.rollout_id, attempt=attempt).capture_key
-                for attempt in range(episode_id.attempt + 1)
-            ]
-        )
+async def retire_ledgers(ledger: Optional[CheckpointableLedger], episode_ids: Iterable[EpisodeId]) -> None:
+    """Retire the ledgers of each episode and every earlier attempt of it, in one batch.
+
+    A checkpoint retire stops these attempts, and a restore continues them as a later attempt, so nothing
+    will write their ledgers again.
+    """
+    keys = [
+        EpisodeId(rollout_id=episode_id.rollout_id, attempt=attempt).capture_key
+        for episode_id in episode_ids
+        for attempt in range(episode_id.attempt + 1)
+    ]
+    if ledger is not None and keys:
+        await ledger.retire(keys)
 
 
 def ledger_removal_refusal(app: Any) -> Optional[str]:
@@ -570,7 +574,7 @@ class PolicyModelParticipant(CheckpointParticipant):
         await self.gate.retire(episode_id)
         for capture_key in [key for key in self._restored_cuts if covers(episode_id, key)]:
             del self._restored_cuts[capture_key]
-        await retire_ledgers(self.ledger, episode_id)
+        await retire_ledgers(self.ledger, [episode_id])
 
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         if self.ledger is None:
@@ -593,6 +597,11 @@ class PolicyModelParticipant(CheckpointParticipant):
         if self.gate.served:
             raise ControlError("model restore requires a freshly started model server; this one has served calls")
         self._restored_cuts.update(await asyncio.to_thread(import_model_records, self.ledger, records))
+        # The restored attempts continue as the next attempt, so their own ledgers are no longer used.
+        await retire_ledgers(self.ledger, [record.episode_id for record in records])
+
+    async def restored_pending(self) -> list[EpisodeId]:
+        return [EpisodeId.from_capture_key(key) for key in self._restored_cuts]
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
         return {"staging_keys": retained_staging_keys(records)}

@@ -332,7 +332,7 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
             "retire", {"episode_id": episode_id.model_dump(mode="json")}, timeout=_MESSAGE_TIMEOUT_SECONDS
         )
         # After every worker cancelled the attempts' calls, so no late row recreates a ledger.
-        await retire_ledgers(self.ledger, episode_id)
+        await retire_ledgers(self.ledger, [episode_id])
 
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         raise NotImplementedError("the coordinated policy participant exports asynchronously; use export()")
@@ -354,6 +354,11 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
     async def install(self, records: list[CheckpointRecord]) -> None:
         self._check_restorable()
         self.restored_cuts.update(await asyncio.to_thread(import_model_records, self.ledger, records))
+        # The restored attempts continue as the next attempt, so their own ledgers are no longer used.
+        await retire_ledgers(self.ledger, [record.episode_id for record in records])
+
+    async def restored_pending(self) -> list[EpisodeId]:
+        return [EpisodeId.from_capture_key(key) for key in self.restored_cuts]
 
     def _check_restorable(self) -> None:
         if any(worker.report is None or worker.report.served for worker in self.workers.values()):
