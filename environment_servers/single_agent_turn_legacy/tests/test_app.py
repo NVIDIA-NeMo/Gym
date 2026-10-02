@@ -246,3 +246,121 @@ async def test_legacy_and_native_envelopes_project_the_same_result() -> None:
     native_result = await native_adapter.run_legacy(native_request.model_dump(mode="json"))
 
     assert native_result == legacy_result
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("failure_kind", [None, "judge_failed"])
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_protocol_failure_metadata_survives_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy: bool,
+    failure_kind: str | None,
+    partial: bool,
+    terminal: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    import nemo_gym.rollout_collection as collection
+    from nemo_gym.episode_types import EpisodeFailure
+    from nemo_gym.rollout_journal import logical_rollout_id
+    from nemo_gym.rollout_outcomes import RolloutFailure
+    from nemo_gym.rollout_store import RolloutStore
+    from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResponse
+    from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
+
+    environment, client = _environment_server()
+    if legacy:
+        environment = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)
+    answer = _agent_response() if partial else None
+
+    async def failed_episode(
+        self: SingleAgentTurnEnvironmentServer, request: SingleAgentTurnRequest
+    ) -> SingleAgentTurnResponse:
+        return SingleAgentTurnResponse(
+            episode_id=request.episode_id,
+            task_id=request.task.task_id,
+            failure=SingleAgentTurnFailure(
+                failure_reason="Judge unavailable",
+                failure_kind=failure_kind,
+                stage="verification",
+                terminal=terminal,
+                partial_response=answer,
+            ),
+        )
+
+    monkeypatch.setattr(SingleAgentTurnEnvironmentServer, "run_request", failed_episode)
+    with TestClient(environment.setup_webserver()) as http:
+
+        async def post(**kwargs):
+            response = http.post("/run", json=kwargs["json"])
+            assert response.status_code == 200
+            return FakeResponse(response.status_code, response.json())
+
+        collector = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        collector.global_config_dict = OmegaConf.create(
+            {
+                "agent": {"responses_api_agents": {"test": {}}},
+                "environment": {
+                    "environment_servers": {
+                        "single_agent_turn_legacy" if legacy else "single_agent_turn": {
+                            "agent_server": {"name": "agent"},
+                            "resources_server": {"name": "resources"},
+                        }
+                    }
+                },
+            }
+        )
+        monkeypatch.setattr(collection, "get_global_config_dict", lambda: {})
+        source = tmp_path / "input.jsonl"
+        row = (
+            {
+                "agent_ref": {"name": "agent"},
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": "task"},
+            }
+            if legacy
+            else {
+                "task_id": {"taskset": "resources", "task_id": "task"},
+                "task_input": {"responses_create_params": {"input": "task"}, "task_data": {}},
+            }
+        )
+        source.write_bytes(orjson.dumps(row) + b"\n")
+        output = tmp_path / "rollouts.jsonl"
+        with pytest.raises(RuntimeError, match="has no score to report"):
+            await collection.RolloutCollectionHelper().run_from_config(
+                collection.RolloutCollectionConfig(
+                    input_jsonl_fpath=str(source),
+                    output_jsonl_fpath=str(output),
+                    environment_server_routes={"resources": "environment"} if not legacy else {},
+                    route_failures_to_sidecar=True,
+                    disable_aggregation=True,
+                    disable_health_check=True,
+                    require_complete=False,
+                )
+            )
+
+    store = RolloutStore.read(output)
+    [saved] = store.failures()
+    expected_kind = failure_kind or "environment_server_failed"
+    assert saved["_ng_failure_class"] == expected_kind
+    assert saved.get("_ng_failure_terminal", False) is terminal
+    assert "reward" not in saved and "response" not in saved
+    record = RolloutFailure.model_validate(saved["_ng_failure_record"])
+    assert record.run_id == store.manifest.run_id
+    assert record.episode_id.rollout_id == logical_rollout_id(saved)
+    assert (record.source, record.delivery) == ("environment", "delivered")
+    assert type(record.failure) is EpisodeFailure
+    assert record.failure.failure_kind == expected_kind
+    assert record.failure.failure_reason == "Judge unavailable"
+    assert record.failure.stage == "verification" and record.failure.terminal is terminal
+    assert "partial_response" not in record.model_dump()["failure"]
+    assert RolloutFailure.model_validate_json(record.model_dump_json()) == record
+    if answer is None:
+        assert "_ng_failure_partial_response" not in saved
+    else:
+        assert saved["_ng_failure_partial_response"] == answer.model_dump(mode="json")
+    assert store.coverage()["failed"] == 1 and store.coverage()["measured"] == 0
+    assert store.selected("success") == []

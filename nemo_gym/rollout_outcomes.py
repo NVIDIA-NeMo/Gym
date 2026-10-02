@@ -51,3 +51,7 @@ class RolloutFailure(BaseModel):
         if self.source == "environment" and self.delivery != "delivered":
             raise ValueError("An environment-reported failure requires delivery='delivered'")
         return self
+
+
+class InvalidRolloutResult(ValueError):
+    """An agent returned a body that cannot represent a completed result."""

@@ -844,12 +844,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     tool_choice="none",
                     tools=[],
                 ).model_dump()
-            # EXCEPT when the HARNESS is what broke. Then nothing about this sample failed, so
-            # scoring it 0 is wrong, and persisting a row is worse: _load_from_cache keys on
-            # (task_index, rollout_index) and would treat it as permanently done. NG_NO_PERSIST_KEY
-            # writes no row at all (nemo_gym/rollout_collection.py), so resume's set-difference
-            # re-dispatches it on the next chain-hop. The 4h cluster cap makes chain-hops
-            # unavoidable on a 1266-sample run, so this path is load-bearing, not a corner case.
+            # A harness failure is not a scored model outcome. Gym's journal-backed collector
+            # persists kill_shaped in the failure sidecar and may retry it within the run's
+            # dispatched-attempt budget. Retain NG_NO_PERSIST_KEY for legacy consumers.
+            # Long evaluations spanning several cluster jobs need a sufficient attempt budget.
             # Merged LAST so a stale sentinel echoed from `body` cannot shadow the fresh value.
             routing = {NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: "kill_shaped"} if infra else {}
             return BrowsecompAgentVerifyResponse.model_validate(

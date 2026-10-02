@@ -21,6 +21,7 @@ from typing import Any
 
 import orjson
 
+from nemo_gym.config_types import ConfigError
 from nemo_gym.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
     _LENGTH_LIMIT_FINISH_REASONS,
@@ -61,6 +62,8 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
+from nemo_gym.rollout_journal import journal_path_for
+from nemo_gym.rollout_recovery import manifest_path_for
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -469,6 +472,12 @@ def run_health_checks(
     if not paths:
         raise ValueError("at least one rollout JSONL path is required")
     for path in paths:
+        if manifest_path_for(path).exists() or journal_path_for(path).exists():
+            raise ConfigError(
+                "Journal-aware health reports are a follow-up to evaluation resume. "
+                "Run health checks on a merged selected-result projection from `gym eval aggregate`, "
+                "or disable automatic health checks with +disable_health_check=true."
+            )
         if not path.is_file():
             raise FileNotFoundError(f"Rollout JSONL not found: {path}")
 

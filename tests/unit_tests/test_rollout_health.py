@@ -360,6 +360,12 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
     capsys: pytest.CaptureFixture[str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    from uuid import UUID
+
+    import nemo_gym.rollout_recovery as recovery
+
+    # Hold run identity fixed while comparing the effect of health checks.
+    monkeypatch.setattr(recovery, "uuid4", lambda: UUID(int=1))
     monkeypatch.setattr(rollout_collection, "get_global_config_dict", lambda: {})
     source = {
         "responses_create_params": {"input": []},
@@ -421,11 +427,11 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
             "failures": output_path.with_name("rollouts_failures.jsonl").read_bytes(),
             "metrics": output_path.with_name("rollouts_aggregate_metrics.json").read_bytes(),
         }
-        assert (run_dir / "quality_summary.json").exists() is not disabled
-        assert (run_dir / "rollout_verdicts.jsonl").exists() is not disabled
+        assert not (run_dir / "quality_summary.json").exists()
+        assert not (run_dir / "rollout_verdicts.jsonl").exists()
         if not disabled:
-            assert stdout.rstrip().endswith(str(run_dir / "quality_summary.json"))
-            assert stdout.index("Finished rollout collection") < stdout.index("Rollout health")
+            assert "Finished rollout collection" in stdout
+            assert "Journal-aware health reports are a follow-up" in caplog.text
 
     assert artifacts[False] == artifacts[True]
 
