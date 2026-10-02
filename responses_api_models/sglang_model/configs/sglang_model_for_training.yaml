@@ -1,0 +1,12 @@
+# SGLang-backed policy model server for token-level RL training.
+policy_model:
+  responses_api_models:
+    sglang_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      # Required: set this to the SGLang server's max total sequence length.
+      context_length: ???
+      return_token_id_information: true
+      uses_reasoning_parser: true
