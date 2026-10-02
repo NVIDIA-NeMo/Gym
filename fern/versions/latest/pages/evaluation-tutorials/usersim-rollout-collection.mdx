@@ -156,6 +156,16 @@ Preparation calls `usersim.engine.external.materialize_episode_inputs(...)` in t
 writes `environments/usersim/data/example.jsonl`. It produces one deterministic row for every registered
 probe. UserSim—not Gym—owns all sampled content and provenance.
 
+In practical terms:
+
+- There is one generated Gym task file: `environments/usersim/data/example.jsonl`.
+- Each of its 14 rows is already a complete task. UserSim has resolved the persona, scenario/probe, theme,
+  tools, locale, random seed, trajectory identity, and provenance for that row.
+- Gym does not maintain a second `example_source.jsonl`, a separate pool of 1,000 personas, or scenario
+  templates that it combines with UserSim data.
+- At runtime, the Resources Server checks that the task is the same immutable, provenance-pinned row that was
+  prepared. It does not choose a different persona, probe, or scenario.
+
 <Warning>
 The NGC key grants access to persona data; it is unrelated to GitHub authentication. This preparation flow
 does not require GitHub SSH keys or a separate UserSim installation. It downloads the public UserSim source
