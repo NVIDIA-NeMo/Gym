@@ -190,8 +190,10 @@ def close_body(session_id):
     return {"agent_session_id": session_id, "episode_id": seed().episode_id.model_dump()}
 
 
-def test_http_native_flow_runs_openclaw_in_borrowed_sandbox(setup):
+@pytest.mark.parametrize("model_timeout_seconds", [600, 1200])
+def test_http_native_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeout_seconds):
     agent, sandbox = setup
+    agent.config.model_timeout_seconds = model_timeout_seconds
     with patch.object(agent, "_run_openclaw", AsyncMock(side_effect=AssertionError("host OpenClaw must not run"))):
         with TestClient(agent.setup_webserver()) as client:
             created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
@@ -226,9 +228,11 @@ def test_http_native_flow_runs_openclaw_in_borrowed_sandbox(setup):
             payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
             assert payload["prompt"] == "Fix the code"
             assert payload["command"][0].endswith("/node/bin/node")
+            assert payload["timeout"] == 900
             assert "PATH" not in payload["env"]
             models = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/openclaw.json"])
             assert models["agents"]["defaults"]["workspace"] == "/app"
+            assert models["models"]["providers"]["nemo"]["timeoutSeconds"] == model_timeout_seconds
             assert models["models"]["providers"]["nemo"]["models"][0]["compat"]["supportsUsageInStreaming"] is True
             assert (
                 models["models"]["providers"]["nemo"]["baseUrl"]
@@ -1309,7 +1313,9 @@ async def test_caller_id_never_controls_filesystem_path(setup):
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(body.agent_session_id)))
 
 
-@pytest.mark.parametrize("field", ["timeout", "sandbox_install_timeout_seconds", "session_close_timeout_seconds"])
+@pytest.mark.parametrize(
+    "field", ["timeout", "model_timeout_seconds", "sandbox_install_timeout_seconds", "session_close_timeout_seconds"]
+)
 @pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
 def test_deadlines_are_positive_and_finite(setup, field, value):
     agent, _ = setup

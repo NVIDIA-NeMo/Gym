@@ -58,6 +58,9 @@ provider configuration is unchanged.
 - `system_prompt`: prepended to the user message
 - `setup_timeout`: seconds for `openclaw setup`
 - `timeout`: seconds for the `openclaw agent` run
+- `model_timeout_seconds`: request and stream-idle timeout for the generated Gym model provider
+  (default: 600 seconds). OpenClaw still caps this by the overall agent deadline. Explicit provider
+  `timeoutSeconds` settings in local-mode `openclaw_config` take precedence.
 - `extra_args`: extra flags appended to `openclaw agent`
 - `env`: extra env vars for the subprocess (e.g. provider API keys)
 - `openclaw_config`: deep-merged into the generated `openclaw.json`
@@ -122,6 +125,12 @@ Submit episodes to **EnvironmentServer `/run`**. It seeds Resources, opens the a
 calls the rollout-scoped Responses endpoint, closes the agent, verifies, and closes Resources.
 The model server address must be reachable from inside the task sandbox. Its `/ng-rollout/.../v1`
 route is embedded in OpenClaw's Chat Completions provider configuration to retain model-call linkage.
+
+The native adapter sets OpenClaw's provider `timeoutSeconds` to `model_timeout_seconds` (600 seconds
+by default). This raises the upstream 120-second idle watchdog so buffered reasoning responses can
+finish. For example, set `openclaw_agent_native.responses_api_agents.openclaw_agent.model_timeout_seconds`
+to `1200` for a 20-minute model-call limit. Increase the separate `timeout` and EnvironmentServer episode
+deadline when a task needs more total time; increasing those alone does not raise the model-idle limit.
 
 The installer supports Linux glibc on x86_64/aarch64 and musl on x86_64, with Python 3.8 or later for the
 supervisor. Node 22.19.0 and OpenClaw are installed under
@@ -197,7 +206,7 @@ The shared `SimpleResponsesAPIAgent` lifecycle owns session identity, serializat
 receipts. `session_lifetime_seconds` has been removed: the episode owner and provider TTL govern
 abandoned-session recovery; there is no adapter timer cancelling active sessions. Setup failures
 whose cleanup fails retain cleanup-only state through `AgentSessionSetupError`.
-`timeout`, `sandbox_install_timeout_seconds`, and `session_close_timeout_seconds` must be positive
+`timeout`, `model_timeout_seconds`, `sandbox_install_timeout_seconds`, and `session_close_timeout_seconds` must be positive
 and finite. The shared `session_close_retry_window_seconds` bounds close receipts and tombstones.
 
 Session state is process-local. Keep requests on one worker. Failed cleanup sessions are retained

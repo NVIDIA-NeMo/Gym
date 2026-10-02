@@ -403,6 +403,7 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     setup_timeout: int = 900
     timeout: int = Field(default=900, gt=0)
+    model_timeout_seconds: int = Field(default=600, gt=0)
     extra_args: list[str] = []
     openclaw_config: dict[str, Any] = Field(default_factory=dict)
     context_window: Optional[int] = None
@@ -927,6 +928,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     "models": [model_entry],
                 }
             )
+            # OpenClaw uses this provider request deadline for its stream-idle
+            # watchdog too. Gym may buffer a long reasoning call before SSE delivery.
+            # Preserve explicit provider settings on the legacy local CLI path.
+            nemo.setdefault("timeoutSeconds", self.config.model_timeout_seconds)
         self._merge_headless_tool_denies(cfg)
         return cfg
 

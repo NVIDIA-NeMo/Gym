@@ -364,6 +364,17 @@ class TestBuildOpenclawConfig:
         assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
         assert provider["baseUrl"] == "http://model/v1"
         assert provider["models"][0]["id"] == "Qwen3.6-35B-A3B"
+        assert provider["timeoutSeconds"] == 600
+
+    def test_explicit_local_provider_timeout_is_preserved(self) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            openclaw_config={"models": {"providers": {"nemo": {"timeoutSeconds": 1800}}}},
+        )
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            cfg = agent._build_openclaw_config({})
+
+        assert cfg["models"]["providers"]["nemo"]["timeoutSeconds"] == 1800
 
     def test_context_window_and_max_tokens_omitted_by_default(self) -> None:
         # Regression: a static default here previously caused every request to fail unconditionally
