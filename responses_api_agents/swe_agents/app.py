@@ -136,6 +136,18 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         default="HEAD", description="Which commit to use when cloning the SWE-agent/OpenHands repo"
     )
     # Container configuration
+    python_hash_seed: int | None = Field(
+        default=0,
+        ge=0,
+        le=2**32 - 1,
+        strict=True,
+        description=(
+            "Python hash seed for both agent and verifier containers. Defaults to 0 "
+            "to make hash-dependent tool output repeatable. Set null to retain the "
+            "container image's default hash randomization. Does not seed model sampling "
+            "or Python/NumPy random-number generators."
+        ),
+    )
     container_formatter: str | list[str] = Field(
         default="docker://swebench/sweb.eval.x86_64.{instance_id}", description="Container path template"
     )
@@ -3605,6 +3617,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             "-Drobolectric.dependency.repo.url=https://maven-central.storage-download.googleapis.com/maven2/"
         )
         env_args = f"--env _JAVA_OPTIONS='{java_options}' "
+        if params.python_hash_seed is not None:
+            # --cleanenv removes host settings. Set the seed before Python starts
+            # in either container, including subprocesses launched by agent tools.
+            env_args += f"--env PYTHONHASHSEED={params.python_hash_seed} "
 
         # Force Gradle to read init.d from /root/.gradle regardless of the
         # container image's default user. We use the tmpfs path (not the

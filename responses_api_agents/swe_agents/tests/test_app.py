@@ -3416,3 +3416,50 @@ def test_merge_reparents_a_new_live_child_to_the_stable_recorded_root() -> None:
 
     merged = merge_replay_subagent_trajectories(manifest, captured)
     assert merged[0]["parent_session_id"] == "recorded_root"
+
+
+@pytest.mark.parametrize("mode", ["agent", "eval"])
+@pytest.mark.parametrize("seed", [0, 42, 2**32 - 1, None])
+def test_container_python_hash_seed(monkeypatch, tmp_path, mode, seed):
+    import shlex
+    import subprocess
+    import sys
+
+    wrapper = _create_wrapper(monkeypatch)
+    params = _make_instance_config(str(tmp_path), python_hash_seed=seed)
+    oh_dir = Path(params.openhands_setup_dir) / "OpenHands"
+    for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+        (oh_dir / subdir).mkdir(parents=True, exist_ok=True)
+    (Path(params.openhands_setup_dir) / "miniforge3").mkdir(parents=True, exist_ok=True)
+    command = ExecuteContainerCommandArgs(
+        command="echo test", expected_file_pattern="/tmp/*.json", mode=mode, timeout=300
+    )
+    args = shlex.split(wrapper._build_apptainer_command(params, command))
+    env_options = dict(args[i + 1].split("=", 1) for i, arg in enumerate(args) if arg == "--env")
+    assert "--cleanenv" in args
+    if seed is None:
+        assert "PYTHONHASHSEED" not in env_options
+        return
+    assert env_options["PYTHONHASHSEED"] == str(seed)
+    # Execute a fresh Python tool process with the emitted environment, and its
+    # child, rather than testing a seed set after interpreter initialization.
+    code = "import os; print(os.environ['PYTHONHASHSEED']); print(list({f'item_{i}' for i in range(32)}))"
+    child = f"import subprocess, sys; subprocess.run([sys.executable, '-c', {code!r}], check=True)"
+    outputs = []
+    for host_seed in ("17", "987"):
+        env = {**os.environ, "PYTHONHASHSEED": host_seed, **env_options}
+        outputs.append(subprocess.check_output([sys.executable, "-c", child], env=env, text=True))
+    assert outputs[0] == outputs[1]
+    assert outputs[0].splitlines()[0] == str(seed)
+
+
+def test_container_python_hash_seed_default():
+    assert _minimal_server_config().python_hash_seed == 0
+
+
+@pytest.mark.parametrize("seed", [-1, 2**32, True, 1.5, "random", "42"])
+def test_invalid_container_python_hash_seed(tmp_path, seed):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="python_hash_seed"):
+        _make_instance_config(str(tmp_path), python_hash_seed=seed)
