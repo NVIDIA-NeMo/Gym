@@ -28,6 +28,7 @@ from nemo_gym.token_id_capture import (
     set_token_sink,
     trajectories_from_source,
 )
+from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.sink import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
 from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
@@ -70,7 +71,8 @@ def test_external_staging_resolves_served_reasoning_history(tmp_path, endpoint, 
     records = {}
 
     class Sink:
-        def stage(self, record):
+        def stage(self, record, *, attachments=None):
+            assert attachments is None
             key = f"{record.rollout_id}/{record.model_call_id}"
             records[key] = record
             return StageResult(ok=True, staging_key=key)
@@ -114,7 +116,7 @@ def test_external_staging_resolves_served_reasoning_history(tmp_path, endpoint, 
         supply_prefix_token_ids=False,
         uses_reasoning_parser=reasoning_field is not None,
     )
-    model._external_capture_enabled = True
+    model._external_capture_handler = VLLMWorkerCaptureHandler()
     ledger = FileLineageStore(tmp_path)
     ledger.record = AsyncMock(wraps=ledger.record)
     history = [{"role": "user", "content": "question"}]
@@ -206,7 +208,8 @@ def test_external_staging_conversion_failure_does_not_commit(tmp_path, monkeypat
     staged = []
 
     class Sink:
-        def stage(self, record):
+        def stage(self, record, *, attachments=None):
+            assert attachments is None
             staged.append(record)
             return StageResult(ok=True, staging_key=f"{record.rollout_id}/{record.model_call_id}")
 
@@ -227,7 +230,7 @@ def test_external_staging_conversion_failure_does_not_commit(tmp_path, monkeypat
     backend = MagicMock(spec=NeMoGymAsyncOpenAI)
     backend.create_chat_completion = AsyncMock(side_effect=complete)
     model = _model(backend, return_token_id_information=False, supply_prefix_token_ids=False)
-    model._external_capture_enabled = True
+    model._external_capture_handler = VLLMWorkerCaptureHandler()
 
     def fail_conversion(*args, **kwargs):
         raise ValueError("injected final conversion failure")

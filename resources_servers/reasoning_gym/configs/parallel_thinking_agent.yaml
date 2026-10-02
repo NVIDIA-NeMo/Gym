@@ -26,3 +26,11 @@ reasoning_gym_parallel_thinking_agent:
           version: 1.0.0
           artifact_fpath: train_knights_knaves.jsonl
         license: Apache 2.0
+
+reasoning_gym_parallel_thinking_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: reasoning_gym_parallel_thinking_agent

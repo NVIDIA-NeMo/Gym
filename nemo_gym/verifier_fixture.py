@@ -177,8 +177,8 @@ async def exercise_verifier_fixture(
     if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in (lower, upper)):
         raise VerifierFixtureError("reward_range endpoints must be finite numbers")
     lower, upper = float(lower), float(upper)
-    if not math.isfinite(lower) or not math.isfinite(upper) or lower >= upper:
-        raise VerifierFixtureError("reward_range must contain finite endpoints with lower < upper")
+    if not math.isfinite(lower) or not math.isfinite(upper) or lower > upper:
+        raise VerifierFixtureError("reward_range must contain finite endpoints with lower <= upper")
     if not isinstance(higher_is_better, bool):
         raise VerifierFixtureError("higher_is_better must be a boolean")
     full_reward, zero_reward = (upper, lower) if higher_is_better else (lower, upper)

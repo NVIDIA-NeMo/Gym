@@ -13,31 +13,18 @@ deprecated upstream due to contamination risk and are not mirrored here.
 
 ## Verification
 
-Uses the `math_with_autograder` resource server: **symbolic-first with an
-autograder LLM fallback**. The HuggingFace `math-verify` library checks symbolic
-equivalence of the model's `\boxed{...}` against `expected_answer`; only on a
-symbolic miss is the judge asked "is this answer Correct or Incorrect?". Answers
-math-verify already accepts never reach the judge, so grading stays deterministic
-for the large majority of rollouts.
+Uses `math_with_judge`: **symbolic-first with a dedicated Luna medium fallback**.
+The final response must contain a nonempty, complete `\boxed{...}`. Missing or
+empty boxes receive zero without a judge call. `math-verify` checks symbolic
+equivalence first; only misses reach Luna with the raw boxed answer, reference,
+and question. A positive judgment is checked again with the answers swapped,
+and both judgments must be positive for credit.
 
-The judge is a **dedicated** model (`judge_nemotron3ultra.yaml` →
-Nemotron 3 Ultra by default), not the policy model, so the grading standard stays
-fixed when comparing different policy models. Point `judge_model` at a different endpoint to swap it.
+The judge is separate from the policy model.
 
-### Grading vs. the leaderboard
-
-MathArena grades ArXivMath with its own SymPy-based parser and no LLM judge
-("Requires judging: No" in [eth-sri/matharena](https://github.com/eth-sri/matharena)).
-That parser is not reused here: it pins `antlr4-python3-runtime==4.11`, which is
-incompatible with the `==4.9.*` that Hydra/OmegaConf — Gym's config system —
-require.
-
-Instead `math-verify` does the symbolic check and the autograder judge covers
-what it misses. Replaying MathArena's published model outputs against their own
-`correct` labels, symbolic-only agrees on 93-95% of rollouts, and every
-disagreement is a false negative (a correct answer marked wrong, e.g.
-`(\gamma-3)\cdot s` vs `s(\gamma-3)`) — no false positives. The judge recovers
-those, so scores here can run slightly above the public leaderboard.
+MathArena grades final-answer math symbolically without an LLM fallback.
+Gym's parser and fallback differ, so its scores are not an exact reproduction
+of the leaderboard's grading methodology.
 
 ## Prompt
 
@@ -73,10 +60,15 @@ gym env start \
 
 ```bash
 gym eval run --no-serve \
-    --agent arxivmath_0526_math_with_autograder_simple_agent \
+    --agent arxivmath_0526_math_with_judge_simple_agent \
     --input benchmarks/arxivmath_0526/data/arxivmath_0526_benchmark.jsonl \
     --output results/arxivmath_0526_rollouts.jsonl \
-    --num-repeats 4
+    --num-repeats 16
 ```
 
-The judge needs `NVIDIA_API_KEY` in the environment.
+The judge needs `OPENAI_API_KEY` (or `JUDGE_API_KEY`) in the environment.
+The shared [judge config](../judge_luna.yaml) uses the public OpenAI Responses
+API. For another compatible provider, set `JUDGE_BASE_URL`, `JUDGE_MODEL`, and
+`JUDGE_API_KEY` together. It must support medium reasoning through the Responses
+API. The example supplies all repeats at collection time; do not also repeat
+the prepared dataset.

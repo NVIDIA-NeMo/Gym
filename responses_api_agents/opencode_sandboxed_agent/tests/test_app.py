@@ -43,6 +43,7 @@ from nemo_gym.rollout_observability import (
     AgentInvocation,
     SandboxObservation,
     ToolCallObservation,
+    TrajectoryRecord,
 )
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
@@ -56,11 +57,12 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 
 
 class TestOpenCodeSandboxedAgent:
-    def test_import_does_not_load_standalone_opencode_agent(self) -> None:
+    def test_import_only_loads_shared_opencode_observability(self) -> None:
         code = (
             "import sys; import responses_api_agents.opencode_sandboxed_agent.app; "
-            "assert not any(name == 'responses_api_agents.opencode_agent' "
-            "or name.startswith('responses_api_agents.opencode_agent.') for name in sys.modules)"
+            "assert {name for name in sys.modules if name == 'responses_api_agents.opencode_agent' "
+            "or name.startswith('responses_api_agents.opencode_agent.')} == "
+            "{'responses_api_agents.opencode_agent', 'responses_api_agents.opencode_agent.observability'}"
         )
         subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
 
@@ -114,6 +116,22 @@ class TestOpenCodeSandboxedAgent:
         assert spec.env["EXECD_API_GRACE_SHUTDOWN"] == "50ms"
         assert spec.env["OMP_NUM_THREADS"] == "4"
         assert all(spec.env[name] == "2" for name in CPU_CAP_ENV_VARS if name != "OMP_NUM_THREADS")
+
+    async def test_start_sandbox_connects_in_the_seeded_workdir(self, monkeypatch: MonkeyPatch) -> None:
+        async_sandbox = MagicMock()
+        async_sandbox.connect = AsyncMock(return_value=MagicMock())
+        monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app_module, "create_provider", lambda *_: MagicMock())
+        monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+        monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+        monkeypatch.setattr(app_module, "AsyncSandbox", async_sandbox)
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+
+        await server._start_sandbox(sandbox_id="sb-1", workdir="/workspace/repo")
+        assert async_sandbox.connect.await_args.args[0] == {"sandbox_id": "sb-1", "workdir": "/workspace/repo"}
+
+        await server._start_sandbox(sandbox_id="sb-2")
+        assert async_sandbox.connect.await_args.args[0] == {"sandbox_id": "sb-2", "workdir": None}
 
     @fixture
     def opencode_export_test_data(self) -> Dict[str, Any]:
@@ -448,6 +466,10 @@ class TestOpenCodeSandboxedAgent:
                 1,
             ),
         )
+        for part_id, kind in [("start", "step-start"), ("finish", "step-finish")]:
+            connection.execute(
+                "insert into part values (?, 'm1', 'root', ?, 2)", (part_id, json.dumps({"type": kind}))
+            )
         connection.commit()
         assert db_path.with_name(f"{db_path.name}-wal").stat().st_size > 0
         main_only_path = tmp_path / "main-only.db"
@@ -538,6 +560,10 @@ class TestOpenCodeSandboxedAgent:
             connection.close()
 
         assert result.ng_agent_observations is not None
+        [turn] = TrajectoryRecord.model_validate(result.ng_trajectory).turns
+        assert (turn.task_id, turn.rollout_id, turn.invocation_id) == ("7", "7-2", "root")
+        assert turn.answer[0]["call_id"] == "call-1"
+        assert not turn.model_calls
         [invocation] = [
             record for record in result.ng_agent_observations.records if isinstance(record, AgentInvocation)
         ]

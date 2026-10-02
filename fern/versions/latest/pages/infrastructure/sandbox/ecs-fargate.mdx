@@ -4,23 +4,67 @@ description: "Run sandboxes as AWS ECS Fargate tasks reached over an SSH sidecar
 position: 3
 ---
 
+# ECS Fargate
+
 The `ecs_fargate` provider runs each sandbox as an AWS ECS Fargate task reached over an SSH sidecar. It implements the provider-neutral `SandboxProvider` contract, so any sandbox-backed agent or resources server can use it by selecting `ecs_fargate` in its sandbox config.
 
 ## Setup
 
-ECS Fargate needs the AWS SDK and a provisioned account/region:
+ECS Fargate requires an existing sandbox stack and the AWS SDK:
 
 ```bash
 uv pip install boto3
 ```
 
-- **Infrastructure.** The reference Terraform stack publishes its outputs to SSM at `/<ssm_project>/ecs-sandbox/config` (`ssm_project` defaults to `harbor`): cluster, subnets, security groups, task/execution roles, ECR mirror, EFS, and the SSH-sidecar key ARNs. A missing parameter raises an actionable error.
-- **Credentials.** `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (or an instance role) plus `AWS_REGION`.
-- **Network.** The host must reach each task's SSH sidecar port (`52222`). Run inside the sandbox VPC/peered network, or allow the host IP on the sidecar security group. Exec, file transfer, and model reverse-tunnels all ride this SSH connection.
+Ask your AWS platform owner for the account, region, SSM project name, runtime
+permissions, and quota. Use an AWS profile, temporary session, or workload role
+through the [Boto3 credential chain](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/credentials.html).
+Set `AWS_REGION`; temporary environment credentials also need `AWS_SESSION_TOKEN`.
+The Gym host must reach each task's SSH sidecar on port `52222`.
+
+### Provisioning reference
+
+For a new deployment, have the infrastructure owner follow the pinned
+[NeMo Evaluator Terraform stack instructions](https://github.com/NVIDIA-NeMo/Evaluator/blob/d9c321ad0a9c83918ca9c03cc36396b27990944f/terraform/stacks/ecs-sandbox/README.md).
+The stack provisions the sandbox infrastructure; deploy Gym and the model endpoint
+separately. Review the target regions (the default is eleven), project name, optional EFS, and
+`orchestrator_allowed_cidrs` before applying.
+
+<Warning>
+Provisioning creates billable resources; Terraform state contains credentials
+and SSH keys. Protect that state and coordinate provisioning and teardown with
+the infrastructure owner. Teardown can delete stored data and secrets.
+</Warning>
+
+### Runtime permissions
+
+Use the pinned stack's [IAM policies](https://github.com/NVIDIA-NeMo/Evaluator/blob/d9c321ad0a9c83918ca9c03cc36396b27990944f/terraform/stacks/ecs-sandbox/iam.tf)
+as a starting point, scoped to your deployment. Gym's runtime identity needs ECS
+task operations, SSM config/cache access, SSH-secret access, S3 staging access,
+and permission to pass the configured roles. Image mirroring/building also needs
+ECR and CodeBuild permissions. Use these scoped permissions for runtime access.
+
+For staging cleanup, ask the owner to add `s3:DeleteObject` to the pinned
+orchestrator policy for the staging prefix and configure a lifecycle
+cleanup rule. Customer-managed encryption keys may also require KMS permissions.
+
+### SSM discovery
+
+The stack publishes its [configuration](https://github.com/NVIDIA-NeMo/Evaluator/blob/d9c321ad0a9c83918ca9c03cc36396b27990944f/terraform/modules/ecs-sandbox-region/ssm.tf)
+at `/<project>/ecs-sandbox/config`. Set Gym's `ssm_project` to Terraform's
+`project`: **the stack defaults to `nel-sandbox`, but Gym defaults to `harbor`**.
+
+Set `GYM_SSM_PROJECT` to that project name for the examples below; it is passed
+explicitly into Gym's config. Before launching, confirm SSM/secret access,
+SSH connectivity, image access, and Fargate quota with the owner.
 
 ## Provider Configuration
 
-NeMo Gym ships this provider config at `nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml`. It defines a top-level `sandbox` block that an agent selects with `sandbox_provider: sandbox`. Region-only is enough; everything else auto-discovers from SSM (explicit YAML always wins), and task cpu/memory/disk come from the agent's `sandbox_spec.resources`:
+Load `nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml` and select it
+with `sandbox_provider: sandbox`. Set the region and SSM project as below.
+Explicit YAML values take precedence; setting `cluster` disables SSM discovery
+and requires the remaining infrastructure fields. Task resources come from
+`sandbox_spec.resources`.
 
 ```yaml
 sandbox:
@@ -28,6 +72,7 @@ sandbox:
     sandbox-api: ecs-fargate
   ecs_fargate:
     region: ${oc.env:AWS_REGION}
+    ssm_project: ${oc.env:GYM_SSM_PROJECT}
 ```
 
 | Field | Default | Purpose |
@@ -78,15 +123,23 @@ The first task for a new image waits on a one-time build (~1–3 min for typical
 
 ## First-Run Example
 
-Drive a sandbox directly through the provider-neutral API:
+After confirming access and quota, this example starts a billable Fargate task
+and may trigger a CodeBuild image-mirroring job. The context manager stops the
+task on exit; shared infrastructure remains.
 
 ```python
 import asyncio
+import os
 
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 
 
-provider_config = {"ecs_fargate": {"region": "us-east-1"}}
+provider_config = {
+    "ecs_fargate": {
+        "region": os.environ["AWS_REGION"],
+        "ssm_project": os.environ["GYM_SSM_PROJECT"],
+    }
+}
 spec = SandboxSpec(
     image="python:3.13.14-slim",
     ttl_s=1800,
@@ -111,14 +164,16 @@ For an end-to-end agent run, add this provider config to `mini_swe_agent_2`'s co
 gym env start \
     --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
     --config nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml \
-    --config <MODEL_CONFIG>
+    --config "<MODEL_CONFIG>" \
+    ++sandbox.ecs_fargate.ssm_project="$GYM_SSM_PROJECT"
 ```
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 | --- | --- |
-| `SSM parameter '/…/ecs-sandbox/config' not found` | Infrastructure is not provisioned in that region. Run the Terraform stack, or set the ECS fields explicitly in YAML. |
+| `SSM parameter '/…/ecs-sandbox/config' not found` | Check the account, region, and `ssm_project` with the owner before requesting a new stack. The Terraform and Gym project defaults differ. |
+| `AccessDenied` reading SSM, SSH secrets, or launching tasks | Ask the owner to check the runtime identity's permissions and encryption-key policies. |
 | Exec/SSH times out after the task reaches RUNNING | The host cannot reach the sidecar port `52222`. Run inside the sandbox VPC or allow the host IP on the sidecar security group. |
 | `Fargate memory for cpu=… must be …` | The CPU/memory pair is not a supported Fargate combination. Pick a valid pair. |
 | `ephemeral storage must be between 21 and 200 GiB` | `disk_gib` is out of range. Omit it for the implicit 20 GiB default. |
@@ -127,5 +182,7 @@ gym env start \
 | `ECS Fargate does not support GPU sandboxes` | Fargate has no GPU; use a GPU-capable provider instead. |
 
 <Warning>
-The reference sidecar security group allows `0.0.0.0/0` on `52222` for convenience. Restrict it to the orchestrator's egress IP (or move to a private/peered path) before non-smoke use.
+The pinned reference requires `orchestrator_allowed_cidrs` and rejects `0.0.0.0/0`.
+For older or customized deployments, also limit port `52222` access to the
+orchestrator's network.
 </Warning>

@@ -41,7 +41,7 @@ import orjson
 
 # Increment when fingerprint canonicalization or hash layout changes.
 # Resolvers ignore entries stamped with a different version.
-FINGERPRINT_VERSION = 1
+FINGERPRINT_VERSION = 2
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
@@ -183,10 +183,15 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
     tools: list[tuple[str, str, str]] = []
     # A Responses item is the tool call.
     if message.get("type") == "function_call":
+        name = str(message.get("name", ""))
+        if message.get("namespace"):
+            # SSE separates these fields; the backend and echoed request sanitizer join them.
+            # Preserve the namespace so different tools with the same short name cannot match.
+            name = f"{message['namespace']}__{name}"
         tools.append(
             (
                 str(message.get("call_id") or message.get("id") or ""),
-                str(message.get("name", "")),
+                name,
                 canonicalize_tool_arguments(message.get("arguments")),
             )
         )

@@ -28,6 +28,7 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
+    MAX_NUM_TRIES,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -91,6 +92,7 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
+    max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
 
     reasoning_effort_none_replacement: Optional[ReasoningEffort] = Field(
         default="minimal",
@@ -115,7 +117,8 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         default=None,
         description=(
             "Set to 1 to disable the outbound client's inner transport and "
-            "HTTP-status retry layers. None preserves existing behavior."
+            "HTTP-status retry layers; this overrides max_http_attempts. None "
+            "preserves existing behavior."
         ),
     )
     upstream_request_timeout_seconds: Optional[float] = Field(default=None, gt=0)
@@ -179,6 +182,7 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
 
 
 class SimpleModelServer(SimpleResponsesAPIModel):
+    ray_enabled = False
     config: SimpleModelServerConfig
 
     def model_post_init(self, context):
@@ -189,6 +193,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             max_num_tries=self.config.upstream_max_num_tries,
             request_timeout_seconds=self.config.upstream_request_timeout_seconds,
             connect_timeout_seconds=self.config.upstream_connect_timeout_seconds,
+            max_http_attempts=self.config.max_http_attempts,
         )
         self._semaphore = (
             asyncio.Semaphore(self.config.max_concurrent_requests)

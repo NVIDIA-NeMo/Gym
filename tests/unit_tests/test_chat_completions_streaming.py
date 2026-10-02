@@ -41,6 +41,7 @@ from nemo_gym.chat_streaming import (
     synthesize_chat_completion_sse,
 )
 from nemo_gym.openai_utils import (
+    CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
@@ -54,6 +55,7 @@ def _completion(
     content=None,
     tool_calls=None,
     reasoning=None,
+    refusal=None,
     finish_reason="stop",
     usage=None,
     choices=None,
@@ -62,6 +64,8 @@ def _completion(
         message = {"role": "assistant", "content": content}
         if reasoning:
             message["reasoning_content"] = reasoning
+        if refusal is not None:
+            message["refusal"] = refusal
         if tool_calls:
             message["tool_calls"] = tool_calls
         choices = [{"index": 0, "finish_reason": finish_reason, "message": message}]
@@ -120,6 +124,19 @@ class TestSanitizeStreamingChatBody:
         assert set(cleaned) == {"messages", "temperature"}
         NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(cleaned)
 
+    def test_drops_provider_extension_fields(self) -> None:
+        # The non-streaming schema accepts these; the streaming path keeps dropping them, including
+        # values the strict schema would reject (e.g. ``thinking: true``).
+        extensions = {
+            "chat_template_kwargs": {"enable_thinking": True},
+            "thinking": True,
+            "output_config": {"effort": "high"},
+        }
+        assert set(extensions) == CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+        cleaned, _ = sanitize_streaming_chat_body({"messages": [], "stream": True, **extensions})
+        assert set(cleaned) == {"messages"}
+        NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(cleaned)
+
     def test_keeps_known_sampling_and_tool_fields(self) -> None:
         body = {
             "messages": [{"role": "user", "content": "hi"}],
@@ -173,6 +190,33 @@ class TestSynthesizeChatSSE:
         rebuilt = _reconstruct_chat_sse(_parse_sse_events(text.encode()))
         assert rebuilt["choices"][0]["message"]["reasoning_content"] == "let me think"
         assert rebuilt["choices"][0]["message"]["content"] == "answer"
+
+    @pytest.mark.parametrize("content", [None, "Additional information."])
+    def test_refusal_delta_roundtrips(self, content) -> None:
+        refusal = "I cannot help with that."
+        completion = _completion(content=content, refusal=refusal).model_dump(mode="json")
+        text = "".join(synthesize_chat_completion_sse(completion))
+        events = _events(text)
+        assert any(event["choices"][0]["delta"] == {"refusal": refusal} for event in events)
+        assert events[-1]["choices"][0]["finish_reason"] == "stop"
+        assert text.endswith("data: [DONE]\n\n")
+        rebuilt = _reconstruct_chat_sse(_parse_sse_events(text.encode()))
+        assert rebuilt["choices"][0]["message"]["refusal"] == refusal
+        assert rebuilt["choices"][0]["message"]["content"] == content
+
+    def test_reconstructor_joins_refusal_fragments(self) -> None:
+        events = [
+            {"choices": [{"delta": {"role": "assistant"}}]},
+            {"choices": [{"delta": {"refusal": "I cannot "}}]},
+            {"choices": [{"delta": {"refusal": "help with that."}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ]
+        rebuilt = _reconstruct_chat_sse(events)
+        assert rebuilt["choices"][0]["message"] == {
+            "role": "assistant",
+            "content": None,
+            "refusal": "I cannot help with that.",
+        }
 
     def test_tool_calls_roundtrip(self) -> None:
         completion = _completion(content=None, tool_calls=[_TOOL_CALL], finish_reason="tool_calls").model_dump(

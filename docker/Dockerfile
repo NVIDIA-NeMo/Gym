@@ -31,6 +31,7 @@ ENV NEMO_GYM_CONTAINER=1
 USER root
 
 ARG ENROOT_VERSION=3.5.0
+ARG NSYS_VERSION=2026.5.1.161-265138896106v0
 RUN <<"EOF" bash -exu -o pipefail
 export DEBIAN_FRONTEND=noninteractive
 export TZ=America/Los_Angeles
@@ -87,6 +88,27 @@ curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-contai
 apt-get update
 apt-get install -y nvidia-container-toolkit
 rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+# Replace the CUDA base image's bundled Nsight Systems, which is built
+# against an outdated Go toolchain flagged by CVE scans, with a current
+# release from NVIDIA's devtools apt repo.
+rm -rf /usr/local/cuda*/NsightSystems-cli-* /opt/nvidia/nsight-systems*
+apt-get remove --purge -y --allow-change-held-packages 'nsight-systems*' || true
+
+nsys_release=$(echo "${NSYS_VERSION}" | cut -d. -f1-3)
+nsys_repo="https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${arch}"
+curl -fsSL "${nsys_repo}/nvidia.pub" -o /usr/share/keyrings/nvidia-devtools.asc
+echo "deb [signed-by=/usr/share/keyrings/nvidia-devtools.asc] ${nsys_repo}/ /" \
+    > /etc/apt/sources.list.d/nvidia-devtools.list
+apt-get update
+apt-get install -y --no-install-recommends "nsight-systems-cli-${nsys_release}=${NSYS_VERSION}"
+rm -f /etc/apt/sources.list.d/nvidia-devtools.list /usr/share/keyrings/nvidia-devtools.asc
+
+# The base image's cuda/bin dir can precede /usr/local/bin on PATH; if it
+# already symlinks nsys (pointing at the old bundled copy), repoint it.
+if [ -L /usr/local/cuda/bin/nsys ]; then
+    ln -sf /usr/local/bin/nsys /usr/local/cuda/bin/nsys
+fi
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -165,7 +187,7 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # an environment variable — they would have to rebuild. Off remains the default: the code
 # is inert until NEMO_LENS_ENABLED=1.
 RUN uv venv --seed && \
-    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --no-install-project
+    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --extra dev --no-install-project
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
@@ -201,11 +223,33 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # worktree was created for the runtime UID in the base stage, so restore build ownership
 # before setuptools invokes Git.
 RUN chown root:root /opt/nemo-gym && \
-    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry
+    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry --extra dev
 
-# Keep runtime uv and XDG caches separate from the root-owned build cache that
-# backs the symlinked project environment.
+# Seed the runtime uv cache with the full dependency set (including the dev
+# extra and the project itself) so that CI scripts can run offline: setup_dev.sh
+# resolves `uv sync --extra dev --offline` from this cache in a fresh venv.
+# The runtime cache is separate from the root-owned build cache (/opt/uv/cache)
+# that backs the symlinked project environment.
 ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv
+RUN uv venv /opt/nemo-gym/cache/seed-venv && \
+    UV_PROJECT_ENVIRONMENT=/opt/nemo-gym/cache/seed-venv \
+        uv sync --locked --extra vllm --extra telemetry --extra dev && \
+    rm -rf /opt/nemo-gym/cache/seed-venv && \
+    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
+
+# Seed the pre-commit hook cache (PRE_COMMIT_HOME) so the image's offline lint
+# path needs no network: lint.sh reuses the baked pre-commit executable, but a
+# bare `pre-commit run` still clones the hook repositories declared in
+# .pre-commit-config.yaml and pip-installs the local hooks' dependencies on
+# first run. Resolving every hook environment here, while the build has
+# network, keeps the runtime lint hermetic.
+ENV PRE_COMMIT_HOME=/opt/nemo-gym/cache/pre-commit
+# Local build contexts exclude .git, but pre-commit requires a repository to
+# resolve the configuration. Use disposable metadata while seeding the cache.
+RUN git init --quiet && \
+    pre-commit install-hooks && \
+    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}" && \
+    rm -rf .git
 RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" \
         "${UV_CACHE_DIR}" \
         /opt/nemo-gym/cache/xdg
@@ -218,6 +262,14 @@ RUN <<"EOF" bash -exu
 if [[ -n "${NEMO_GYM_PREFETCH_CONFIGS:-}" ]]; then
     gym env prefetch "+config_paths=[${NEMO_GYM_PREFETCH_CONFIGS}]"
 fi
+
+# ray's bundled Java worker jar ships an outdated httpcore5 with a known CVE
+# (GHSA-hf6x-8p5f-cgmf). Gym never uses Ray's Java cross-language worker, and
+# removing the jar doesn't affect ray.init(), remote tasks, actors, or
+# ray.serve (verified locally). Scoped to installed venvs (site-packages)
+# only, not uv's raw cache: deleting a file uv's cache expects to still be
+# there could break hardlinking a fresh venv for a server not prefetched here.
+find /opt -path "*/site-packages/ray/jars/ray_dist.jar" -delete
 
 # Keep ownership changes for generated caches and server venvs in the layer
 # that creates them so later layers do not duplicate their contents.
@@ -249,6 +301,7 @@ RUN export HOME=/home/nemo-runtime \
     test -w "${HOME}" && \
     test -w "${XDG_CACHE_HOME}" && \
     test -w "${UV_CACHE_DIR}" && \
+    test -w "${PRE_COMMIT_HOME}" && \
     test -w /opt/nemo-gym/cache && \
     test -w /opt/nemo-gym/results && \
     test -x /usr/local/bin/uv && \

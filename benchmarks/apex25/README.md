@@ -6,25 +6,14 @@ problems). Companion to the larger `apex_shortlist` benchmark.
 
 ## Verification
 
-Uses the `math_with_autograder` resource server: **symbolic-first with an
-autograder LLM fallback**. The HuggingFace `math-verify` library checks symbolic
-equivalence of the model's `\boxed{...}` against `expected_answer`; only on a
-symbolic miss is the judge asked "is this answer Correct or Incorrect?". Answers
-math-verify already accepts never reach the judge, so grading stays deterministic
-for nearly every rollout.
+Uses `math_with_judge` with **`should_use_judge: false`**, matching APEX
+Shortlist. The final response must contain a nonempty, complete `\boxed{...}`.
+Missing or empty boxes receive zero. `math-verify` checks symbolic equivalence;
+there is no LLM fallback and no judge service or judge credentials are required.
 
-The judge is a **dedicated** model (`judge_nemotron3ultra.yaml` →
-Nemotron 3 Ultra by default), not the policy model, so the grading standard stays
-fixed when comparing different policy models.
-
-APEX answers are short numeric / fractional / radical values, which math-verify
-handles well: graded against MathArena's own `correct` labels on their published
-model outputs, symbolic-only already agrees on **99.9%** of rollouts with no
-false positives. The autograder is used anyway so that all MathArena benchmarks
-here (`apex25`, `arxivmath_*`) grade identically and stay mutually comparable —
-and it recovers formatting-only misses such as `6\,266\,942\,768` for
-`6266942768`. Scores may therefore run marginally above the MathArena
-leaderboard, which grades symbolically only.
+This follows MathArena's symbolic-only grading approach. Gym uses `math-verify`
+rather than MathArena's parser, so formatting and parsing differences can still
+affect scores.
 
 ## Prompt
 
@@ -59,13 +48,14 @@ gym env start \
 
 ```bash
 gym eval run --no-serve \
-    --agent apex25_math_with_autograder_simple_agent \
+    --agent apex25_math_with_judge_simple_agent \
     --input benchmarks/apex25/data/apex25_benchmark.jsonl \
     --output results/apex25_rollouts.jsonl \
-    --num-repeats 4
+    --num-repeats 32
 ```
 
-The judge needs `NVIDIA_API_KEY` in the environment.
+The example supplies all repeats at collection time; do not also repeat the
+prepared dataset.
 
 With only 12 problems the per-run variance is high — use several repeats
 (`--num-repeats`) and report `avg@k`.
