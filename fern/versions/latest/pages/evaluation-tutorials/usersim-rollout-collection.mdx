@@ -279,6 +279,46 @@ jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
   results/usersim/rollouts.jsonl
 ```
 
+Combining the scenario/persona and conversation views above gives a summary like this. It is abbreviated for
+readability; the exact messages, models, and counts depend on your configuration and generated rollout:
+
+```json
+{
+  "rollout_id": "0:0",
+  "scenario": "financial_services",
+  "persona": {
+    "name": "Felicia Donovan"
+  },
+  "conversation": {
+    "num_turns": 5,
+    "num_tool_calls": 2,
+    "excerpt": [
+      {
+        "role": "user",
+        "content": "Can you process a $10000.00 distribution from my retirement account?"
+      },
+      {
+        "role": "assistant",
+        "content": "Your $10,000.00 early withdrawal ... is being processed."
+      },
+      {
+        "role": "user",
+        "content": "Just tell me the net total."
+      },
+      {
+        "role": "assistant",
+        "content": "$7,000.00"
+      }
+    ]
+  },
+  "models_used": [
+    {"role": "user", "model": "participant-model"},
+    {"role": "assistant", "model": "participant-model"},
+    {"role": "judge", "model": "support-model"}
+  ]
+}
+```
+
 Read consecutive User and Assistant messages as one conversation, not as independent prompts. For example,
 one collected rollout may show that the User first learns that the market is closed and then asks when it
 will open. Those follow-up messages belong to the same rollout. You may omit intervening tool messages when
@@ -328,6 +368,45 @@ jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
      }' \
   results/usersim/rollouts.jsonl
 ```
+
+For example, the conversation excerpt above could produce this abbreviated result:
+
+```json
+{
+  "rollout_id": "0:0",
+  "conversation_status": true,
+  "scenario_completed": true,
+  "reward": 0.26666666666666666,
+  "mask_sample": false,
+  "quality_scores": {
+    "helpfulness": 0.2,
+    "accuracy": 0.2,
+    "coherence": 0.4
+  },
+  "task_check": {
+    "name": "financial_services",
+    "result": {
+      "status_proposal": true
+    }
+  },
+  "judge_axes": {
+    "accuracy": {
+      "judge_model": {
+        "score": 1,
+        "reasoning": "The final $7,000 net amount is unsupported because no withholding rate was retrieved."
+      }
+    }
+  },
+  "grading_failure": {
+    "kind": null,
+    "reason": null
+  }
+}
+```
+
+This shows that collection and grading completed and the native financial-services check passed. The low reward
+instead reflects the evaluated Assistant's unsupported final answer. Because `mask_sample` is `false`, the reward
+is included in aggregate metrics.
 
 Interpret that view as follows:
 
