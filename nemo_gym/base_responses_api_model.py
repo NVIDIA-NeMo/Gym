@@ -1883,7 +1883,7 @@ def install_model_call_capture(
         if not isinstance(lineage_store, CaptureLedger):
             raise ValueError(
                 "token_id_capture.external_staging requires the lineage store to implement "
-                "the CaptureLedger protocol (record, record_failure, manifest, has_rows)"
+                "the CaptureLedger protocol (record, record_failure, manifest, has_rows, retire, delete)"
             )
         capture_ledger: CaptureLedger = lineage_store
         install_rollout_control_routes(
