@@ -65,8 +65,8 @@ included UserSim environment contains an example suite with one task for each of
 probes. The suite demonstrates and tests the integration.
 
 <Note>
-To run the tutorial, you only need to configure a model endpoint and run the preparation and evaluation
-commands. You do not need to understand the internal two-Agent topology or support-model routing. The optional
+To run the tutorial, configure the model endpoints and provide NGC access for the first persona-dataset
+download. You do not need to understand the internal two-Agent topology or support-model routing. The optional
 architecture section later on explains it for readers who want to customize models, roles, or observability.
 </Note>
 
@@ -87,6 +87,18 @@ source .venv/bin/activate
 
 Preparation runs the pinned UserSim revision in a preparation-only isolated environment. Runtime servers
 install the same revision into their own environments. Neither step modifies the Gym environment.
+
+UserSim samples personas from the extended Nemotron-Personas dataset on NGC. Unless the `en_US` dataset is
+already cached under `~/.data-designer/managed-assets/datasets/`, create a free
+[NGC API key](https://org.ngc.nvidia.com/account/api-keys) and export it before preparation:
+
+```bash
+export NGC_CLI_API_KEY="<your-ngc-key>"
+```
+
+UserSim also recognizes the legacy `NGC_API_KEY` variable. `NGC_CLI_API_KEY` is preferred because it matches
+the current NGC CLI documentation. The key is needed for the persona dataset download, not for access to the
+public UserSim source repository.
 
 Configure the User, Assistant policy, and structured-output support models in a local repository-root
 `env.yaml`:
@@ -145,10 +157,11 @@ writes `environments/usersim/data/example.jsonl`. It produces one deterministic 
 probe. UserSim—not Gym—owns all sampled content and provenance.
 
 <Warning>
-This preparation flow does **not** require `NGC_API_KEY`, GitHub SSH keys, or a separate UserSim installation.
-It downloads the public UserSim source over HTTPS and uses UserSim's canonical sampler directly. If the output
-mentions `git+ssh`, `usersim panel`, or `_prepare_panel`, your checkout contains an older preparation
-implementation and does not match this tutorial. Update your NeMo Gym checkout before continuing.
+The NGC key grants access to persona data; it is unrelated to GitHub authentication. This preparation flow
+does not require GitHub SSH keys or a separate UserSim installation. It downloads the public UserSim source
+over HTTPS and uses UserSim's canonical sampler directly. If the output mentions `git+ssh`, `usersim panel`,
+or `_prepare_panel`, your checkout contains an older preparation implementation and does not match this
+tutorial. Update your NeMo Gym checkout before continuing.
 </Warning>
 
 The equivalent UserSim CLI contract for one selected probe is:
