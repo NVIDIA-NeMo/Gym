@@ -295,6 +295,26 @@ def test_unsupported_request_does_not_reach_generation(monkeypatch, tmp_path, di
     assert not harness.worker_calls
 
 
+def test_tool_arguments_beyond_the_64_bit_range_still_admit(monkeypatch, tmp_path):
+    """A tool call whose arguments carry an integer beyond 64 bits (a kernel
+    task's bitmask) must canonicalize for the replay digest instead of failing
+    the call's capture and poisoning the rest of the attempt."""
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    history = HISTORY + [
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "shell",
+            "arguments": '{"mask": 340282366920938463463374607431768211455}',
+        },
+        {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
+    ]
+    first = assert_clean(harness.post("attempt", history))
+    assert_clean(harness.post("attempt", history + first["output"] + [{"role": "user", "content": "next"}]))
+    manifest = harness.manifest("attempt")
+    assert len(manifest.records) == 2 and not manifest.failures and not manifest.pending_call_ids
+
+
 def test_streaming_responses_capture_like_their_non_streaming_twin(monkeypatch, tmp_path):
     """SSE-only Responses harnesses (the Codex CLI) send ``stream: true``. The dispatch
     makes exactly one non-streaming worker call through capture and replays the finished

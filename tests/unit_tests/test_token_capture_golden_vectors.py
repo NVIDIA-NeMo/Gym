@@ -111,6 +111,12 @@ VECTORS = {
             "expected": '{"n":1.5,"s":"caf\u00e9 \\"quoted\\""}',
         },
         "none": {"input": None, "expected": ""},
+        # Valid JSON that the fast encoder refuses (integers beyond the
+        # 64-bit range); a kernel task's tool arguments carry such masks.
+        "beyond_64_bit": {
+            "input": '{"mask": 340282366920938463463374607431768211455, "n": 1}',
+            "expected": '{"mask":340282366920938463463374607431768211455,"n":1}',
+        },
     },
     "compute_digest": {
         "empty": {

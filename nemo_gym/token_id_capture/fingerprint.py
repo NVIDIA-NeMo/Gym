@@ -256,7 +256,17 @@ def _canonical_json(value: Any) -> str:
     """Serialize JSON-compatible prompt content without losing structure."""
     try:
         return orjson.dumps(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
-    except (TypeError, orjson.JSONEncodeError) as error:
+    except (TypeError, orjson.JSONEncodeError):
+        pass
+    # orjson refuses integers beyond the 64-bit range and non-string keys,
+    # both of which valid JSON (and json.loads, so any reparsed tool-call
+    # arguments) can produce; a CUDA kernel task's arguments carry such
+    # integers routinely. The stdlib encoder handles them and stays
+    # deterministic with sorted keys, so these values canonicalize instead
+    # of failing the call's capture and poisoning the whole attempt.
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError) as error:
         raise ValueError(f"unsupported prompt content: {type(value).__name__}") from error
 
 
