@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import multiprocessing
+import pickle
 import socket
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
@@ -28,6 +29,7 @@ from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
+from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
 
 import nemo_gym.global_config
@@ -48,12 +50,14 @@ from nemo_gym.server_utils import (
     DictConfig,
     GlobalAIOHTTPAsyncClientConfig,
     HeadServer,
+    KeepaliveHttpToolsProtocol,
     ServerClient,
     SimpleServer,
     UvicornProxyHeadersConfig,
     _format_upstream_error_log,
     _log_validation_exception,
     _make_keepalive_socket_factory,
+    _set_tcp_keepalive,
     _validation_exception_handler,
     initialize_ray,
     raise_for_status,
@@ -65,6 +69,8 @@ from nemo_gym.telemetry.connection_pool import connection_pool_capacity, report_
 _TCP_KEEPALIVE_TEST_IDLE = 42
 _TCP_KEEPALIVE_TEST_INTERVAL = 7
 _TCP_KEEPALIVE_TEST_PROBES = 2
+# macOS exposes the idle option as TCP_KEEPALIVE rather than TCP_KEEPIDLE.
+_TCP_KEEPIDLE_OPT = getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None))
 _TEST_ADDR_INFO = (
     socket.AF_INET,
     socket.SOCK_STREAM,
@@ -535,7 +541,7 @@ class TestServerUtils:
         mock_sock = MagicMock()
         socket_ctor_mock = MagicMock(return_value=mock_sock)
         monkeypatch.setattr(socket, "socket", socket_ctor_mock)
-        for opt_name in ("TCP_KEEPIDLE", "TCP_KEEPINTVL", "TCP_KEEPCNT"):
+        for opt_name in ("TCP_KEEPIDLE", "TCP_KEEPALIVE", "TCP_KEEPINTVL", "TCP_KEEPCNT"):
             monkeypatch.delattr(socket, opt_name, raising=False)
 
         factory = _make_keepalive_socket_factory(
@@ -546,6 +552,40 @@ class TestServerUtils:
         factory(_TEST_ADDR_INFO)
 
         mock_sock.setsockopt.assert_called_once_with(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+    def test_keepalive_idle_falls_back_to_macos_tcp_keepalive(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.delattr(socket, "TCP_KEEPIDLE", raising=False)
+        monkeypatch.setattr(socket, "TCP_KEEPALIVE", 0x10, raising=False)
+        mock_sock = MagicMock()
+
+        _set_tcp_keepalive(
+            mock_sock, _TCP_KEEPALIVE_TEST_IDLE, _TCP_KEEPALIVE_TEST_INTERVAL, _TCP_KEEPALIVE_TEST_PROBES
+        )
+
+        mock_sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, 0x10, _TCP_KEEPALIVE_TEST_IDLE)
+
+    @mark.parametrize("family", [socket.AF_INET, socket.AF_INET6, socket.AF_UNIX])
+    def test_keepalive_httptools_protocol_enables_keepalive_on_tcp_only(
+        self, monkeypatch: MonkeyPatch, family: int
+    ) -> None:
+        parent_connection_made = MagicMock()
+        monkeypatch.setattr(HttpToolsProtocol, "__init__", lambda self, *args, **kwargs: None)
+        monkeypatch.setattr(HttpToolsProtocol, "connection_made", parent_connection_made)
+        protocol = KeepaliveHttpToolsProtocol(
+            keepalive=(_TCP_KEEPALIVE_TEST_IDLE, _TCP_KEEPALIVE_TEST_INTERVAL, _TCP_KEEPALIVE_TEST_PROBES)
+        )
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        transport = MagicMock()
+        transport.get_extra_info.return_value = sock
+        try:
+            protocol.connection_made(transport)  # A Unix socket must not raise on TCP-level options.
+            keepalive_on = sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
+            assert keepalive_on is (family != socket.AF_UNIX)
+            if family != socket.AF_UNIX and _TCP_KEEPIDLE_OPT is not None:
+                assert sock.getsockopt(socket.IPPROTO_TCP, _TCP_KEEPIDLE_OPT) == _TCP_KEEPALIVE_TEST_IDLE
+        finally:
+            sock.close()
+        parent_connection_made.assert_called_once_with(transport)
 
     def test_GlobalAIOHTTPAsyncClientConfig_keepalive_defaults(self) -> None:
         cfg = GlobalAIOHTTPAsyncClientConfig()
@@ -856,6 +896,22 @@ class TestServerUtils:
         finally:
             await client.close()
             monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+
+    @mark.parametrize(
+        "field, value",
+        [
+            ("global_aiohttp_tcp_keepalive_idle_seconds", 0),
+            ("global_aiohttp_tcp_keepalive_idle_seconds", 32768),
+            ("global_aiohttp_tcp_keepalive_interval_seconds", 0),
+            ("global_aiohttp_tcp_keepalive_interval_seconds", 32768),
+            ("global_aiohttp_tcp_keepalive_probes", 0),
+            ("global_aiohttp_tcp_keepalive_probes", 128),
+        ],
+    )
+    def test_GlobalAIOHTTPAsyncClientConfig_rejects_out_of_range_keepalive(self, field: str, value: int) -> None:
+        # Linux setsockopt returns EINVAL for these, so they must fail at config load instead.
+        with raises(ValidationError):
+            GlobalAIOHTTPAsyncClientConfig.model_validate({field: value})
 
     def test_keepalive_socket_factory_uses_configured_values(self, monkeypatch: MonkeyPatch) -> None:
         mock_sock = MagicMock()
@@ -1713,10 +1769,66 @@ class TestRunWebserverProxyKwargs:
         """The issue calls out parser, keepalive, access-log, and graceful-shutdown as must-not-change."""
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
 
-        assert "httptools" == kwargs["http"]
+        # Still the httptools parser (never an h11 fallback), now with TCP keepalive on accepted connections.
+        assert issubclass(kwargs["http"].func, HttpToolsProtocol)
         assert 30 == kwargs["timeout_keep_alive"]
         assert kwargs["access_log"] is False
         assert 0.5 == kwargs["timeout_graceful_shutdown"]
+
+    def test_server_tcp_keepalive_uses_global_aiohttp_keepalive_config(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
+        assert kwargs["http"].func is KeepaliveHttpToolsProtocol
+        assert kwargs["http"].keywords["keepalive"] == (60, 10, 3)
+
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch,
+            {"global_aiohttp_tcp_keepalive_idle_seconds": 90, "global_aiohttp_tcp_keepalive_probes": 5},
+            num_workers=4,
+        )
+        assert kwargs["http"].keywords["keepalive"] == (90, 10, 5)
+        # Multi-worker uvicorn pickles its config into spawned worker processes.
+        restored = pickle.loads(pickle.dumps(kwargs["http"]))
+        assert restored.func is KeepaliveHttpToolsProtocol
+        assert restored.keywords["keepalive"] == (90, 10, 5)
+
+    @mark.skipif(_TCP_KEEPIDLE_OPT is None, reason="platform has no TCP keepalive idle option")
+    async def test_uvicorn_applies_tcp_keepalive_to_accepted_connections(self, monkeypatch: MonkeyPatch) -> None:
+        """Start a real uvicorn server with the `http` protocol that run_webserver builds and serve one request."""
+        http_protocol = self._capture_uvicorn_kwargs(
+            monkeypatch, {"global_aiohttp_tcp_keepalive_idle_seconds": 90}, num_workers=1
+        )["http"]
+
+        async def app(scope, receive, send) -> None:
+            await send({"type": "http.response.start", "status": 200, "headers": [(b"content-length", b"2")]})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        server = uvicorn.Server(
+            uvicorn.Config(app, host="127.0.0.1", port=0, http=http_protocol, lifespan="off", log_level="warning")
+        )
+        serve_task = asyncio.create_task(server.serve())
+        try:
+            while not server.started:
+                await asyncio.sleep(0.01)
+            port = server.servers[0].sockets[0].getsockname()[1]
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+            await writer.drain()
+            response = await asyncio.wait_for(reader.readuntil(b"ok"), timeout=5)
+            assert response.startswith(b"HTTP/1.1 200")
+
+            # HTTP/1.1 keeps the connection open, so the server side of it can be inspected.
+            (connection,) = server.server_state.connections
+            accepted_sock = connection.transport.get_extra_info("socket")
+            assert accepted_sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
+            assert 90 == accepted_sock.getsockopt(socket.IPPROTO_TCP, _TCP_KEEPIDLE_OPT)
+            assert 10 == accepted_sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL)
+            assert 3 == accepted_sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT)
+
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            server.should_exit = True
+            await asyncio.wait_for(serve_task, timeout=5)
 
     def test_trusted_proxy_opt_in_is_forwarded_to_uvicorn(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(
