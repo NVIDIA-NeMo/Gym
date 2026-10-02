@@ -112,14 +112,19 @@ class ResourcesParticipant(CheckpointParticipant):
         # Sessions seeded after admission closed. Their episodes' boundaries precede the seed, so they
         # are not part of this checkpoint: they neither block it nor are exported by it.
         self._seeded_while_closed: set[str] = set()
+        # Restored sessions no request has used yet; a commit that no longer continues their episode retires them.
+        self._restored_pending: set[str] = set()
 
     def admit(self, session_id: Optional[str], path: str) -> None:
-        if session_id in self._retired_sessions:
+        # Closing a retired attempt's session is never stale: it is how the server releases that session's state,
+        # which a restart_only server's retire cannot do.
+        if session_id in self._retired_sessions and path != _SESSION_CLOSE:
             raise StaleAttemptError(f"resources session {session_id!r} belongs to a retired attempt")
         # A replay-safe request may still arrive from an episode step the checkpoint did not wait for.
         # Refusing it would fail that episode; its episode re-runs it after a crash anyway.
         if not self.accepting and path not in self.replayable_paths:
             raise ResourcesAdmissionClosedError("resources admission is closed for a checkpoint")
+        self._restored_pending.discard(session_id)
 
     async def wait_open(self) -> None:
         """Return once admission is open: after resume, or when a lease expires."""
@@ -134,6 +139,7 @@ class ResourcesParticipant(CheckpointParticipant):
     def ended(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
         self._seeded_while_closed.discard(session_id)
+        self._restored_pending.discard(session_id)
 
     async def close_admission(self, request: CheckpointRequest) -> None:
         self.accepting = False
@@ -160,6 +166,7 @@ class ResourcesParticipant(CheckpointParticipant):
         for session_id, bound in list(self._sessions.items()):
             if bound.rollout_id == episode_id.rollout_id and bound.attempt <= episode_id.attempt:
                 del self._sessions[session_id]
+                self._restored_pending.discard(session_id)
                 self._retired_sessions.add(session_id)
                 if self.mode == "exported":
                     await self.hooks.retire_session_state(session_id)
@@ -198,6 +205,13 @@ class ResourcesParticipant(CheckpointParticipant):
             await self.hooks.restore_session_states({record.session_id: record.state for record in records})
         for record in records:
             self._sessions[record.session_id] = next_attempt(record.episode_id)
+            self._restored_pending.add(record.session_id)
+
+    async def restored_pending(self) -> list[EpisodeId]:
+        return sorted(
+            {self._sessions[session_id] for session_id in self._restored_pending},
+            key=lambda episode_id: episode_id.capture_key,
+        )
 
     def restore_records(self, records: list[CheckpointRecord]) -> None:
         raise NotImplementedError("resources sessions restore through install(), which awaits the server's hooks")

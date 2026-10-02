@@ -362,3 +362,52 @@ async def test_a_close_during_a_checkpoint_waits_for_resume_and_then_ends_the_se
     assert waiting and prepared.json()["phase"] == "prepared"
     assert closed.status_code == 200
     assert server._checkpoint.readiness().counts["sessions"] == 0
+
+
+async def test_a_retired_session_can_still_be_closed_to_release_it() -> None:
+    server, client = make_server(RestartOnlyServer)
+    close = {"resources_session_id": "s", "episode_id": {"rollout_id": "r"}}
+    async with client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        await client.post(
+            "/ng-control/v1/checkpoint/retire", json=control(episode_ids=[{"rollout_id": "r"}]), headers=AUTH
+        )
+        tool = await client.post("/increment")
+        # The retired episode's final cleanup: a restart_only server releases its state only through close.
+        closed = await client.post("/ng-rollout/r/close_session", json=close)
+
+    assert tool.status_code == 409 and tool.json()["error"]["code"] == "stale_attempt"
+    assert closed.status_code == 200
+
+
+async def test_a_commit_that_no_longer_continues_a_restored_session_releases_it(tmp_path: Path) -> None:
+    _, client = make_server()
+    async with client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        await client.post("/increment")
+        await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
+        await client.post(
+            "/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path / "first")), headers=AUTH
+        )
+
+    restored, fresh = make_server()
+    async with fresh:
+        await fresh.post(
+            "/ng-control/v1/checkpoint/restore",
+            json=control("r1", checkpoint_dir=str(tmp_path / "first"), episode_ids=[{"rollout_id": "r"}]),
+            headers=AUTH,
+        )
+        await fresh.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
+        restored_counters = dict(restored.counters)
+        # The controller continues nothing from the next checkpoint: the restored session is never used.
+        await fresh.post("/ng-control/v1/checkpoint/prepare", json=control("c2"), headers=AUTH)
+        await fresh.post(
+            "/ng-control/v1/checkpoint/commit",
+            json=control("c2", checkpoint_dir=str(tmp_path / "second"), episode_ids=[]),
+            headers=AUTH,
+        )
+        await fresh.post("/ng-control/v1/checkpoint/resume", json=control("c2"), headers=AUTH)
+
+    assert list(restored_counters.values()) == [1]
+    assert restored.counters == {}
+    assert restored._checkpoint.readiness().counts["sessions"] == 0
