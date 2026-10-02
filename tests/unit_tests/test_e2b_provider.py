@@ -1021,9 +1021,14 @@ class TestRetries:
         monkeypatch.setattr(FakeCommands, "run", run)
         return calls
 
-    async def test_command_start_retries_gateway_502(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        "message", ["HTTP 502: This error is likely due to sandbox timeout", "upstream unavailable"]
+    )
+    async def test_command_start_retries_gateway_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, message: str
+    ) -> None:
         # A not-yet-ready envd behind the gateway: the command never started, so starting it again is safe.
-        calls = self._flaky_start(monkeypatch, [FakeTimeout("HTTP 502: This error is likely due to sandbox timeout")])
+        calls = self._flaky_start(monkeypatch, [FakeTimeout(message)])
         provider = E2BProvider(create={"template": "base"}, operations={"retries": 3, "retry_delay_s": 0})
         handle = await provider.create(_spec())
         result = await provider.exec(handle, "echo hi")

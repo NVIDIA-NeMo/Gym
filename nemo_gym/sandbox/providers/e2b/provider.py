@@ -64,7 +64,9 @@ T = TypeVar("T")
 # other punctuation overlap with OCI image syntax in ``SandboxSpec.image``.
 _DIRECT_TEMPLATE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # How the SDK words a gateway that could not reach the sandbox's envd (raised as TimeoutException/ConnectError).
-_GATEWAY_UNAVAILABLE_RE = re.compile(r"\bHTTP 50[23]\b|\b50[23] Bad Gateway\b|\b503 Service Unavailable\b")
+_GATEWAY_UNAVAILABLE_RE = re.compile(
+    r"\bHTTP 50[23]\b|\b50[23] Bad Gateway\b|\b503 Service Unavailable\b|\bupstream unavailable\b"
+)
 
 # Passed straight through to the SDK (``ApiParams``) on every call.
 _API_PARAM_KEYS = (
