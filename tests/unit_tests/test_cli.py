@@ -169,6 +169,57 @@ def test_server_suite_exit_status(tmp_path: Path, monkeypatch: MonkeyPatch, capf
         assert "Tests passed 2 / 2" in output.out
 
 
+def test_server_suite_setup_only_installs_every_venv_without_running_tests(
+    tmp_path: Path, monkeypatch: MonkeyPatch, capfd
+) -> None:
+    """`setup_only` installs each server venv the suite would build, runs no pytest, and reports every failure.
+
+    The container build relies on this to seed its uv cache for offline server tests, so a server whose
+    venv cannot be installed must fail the run without hiding the servers after it.
+    """
+    servers = [tmp_path / "resources_servers" / name for name in ("broken", "first", "second")]
+    for server in servers:
+        server.mkdir(parents=True)
+        (server / "README.md").touch()
+        (server / "requirements.txt").touch()
+        (server / "test_app.py").write_text("from pathlib import Path\n\ndef test_runs():\n    Path('ran').touch()\n")
+    venv_root = tmp_path / "venvs"
+    config = OmegaConf.create(
+        {
+            "uv_cache_dir": str(tmp_path / "uv-cache"),
+            "uv_venv_dir": str(venv_root),
+            "setup_only": True,
+            "delete_venvs_after_each_test": True,
+        }
+    )
+
+    def fake_setup(directory: Path, *_) -> str:
+        if directory.name == "broken":
+            return "exit 3"
+        venv = venv_root / "resources_servers" / directory.name / ".venv"
+        return f"cd {shlex.quote(str(directory))} && mkdir -p {shlex.quote(str(venv))} && touch set-up"
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr("nemo_gym.cli.setup_command.get_global_config_dict", lambda: config)
+    monkeypatch.setattr("nemo_gym.cli.setup_command.stdout", sys.stdout)
+    monkeypatch.setattr("nemo_gym.cli.setup_command.stderr", sys.stderr)
+    monkeypatch.setattr(nemo_gym.cli.env, "component_search_roots", lambda: [tmp_path])
+    monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", fake_setup)
+
+    with raises(SystemExit) as exc:
+        nemo_gym.cli.env.test_all()
+
+    assert exc.value.code == 1
+    assert [(server / "set-up").exists() for server in servers] == [False, True, True]
+    assert not any((server / "ran").exists() for server in servers)
+    assert not any(venv_root.glob("resources_servers/*/.venv"))
+    output = capfd.readouterr().out
+    assert "Server venvs set up 2 / 3" in output
+    assert "Server venv setup failed 1 / 3 (33.33%):\n- resources_servers/broken\n" in output
+    assert "Tests passed" not in output
+
+
 def test_server_venv_cleanup_uses_configured_root(tmp_path: Path) -> None:
     server_dir = tmp_path / "checkout" / "resources_servers" / "example"
     source_venv = server_dir / ".venv"

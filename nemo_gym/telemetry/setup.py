@@ -65,6 +65,7 @@ logger = logging.getLogger(__name__)
 #: False`` before either sets it and both call ``setup_telemetry``, which nemo-lens
 #: raises on for a second call in the same process.
 _TELEMETRY_HANDLE: Optional["TelemetryHandle"] = None
+_METRICS_EXPORTING = False
 _INITIALISED = False
 #: False when ``_TELEMETRY_HANDLE`` wraps providers another library set up in this
 #: process. Shutting those down would end that library's telemetry too.
@@ -346,6 +347,16 @@ def _build_resource_attributes(server_name: Optional[str], server_type: Optional
     return attrs
 
 
+def _sdk_meter_provider_installed() -> bool:
+    """Whether a real OpenTelemetry SDK meter provider, not a no-op or proxy, is registered."""
+    try:
+        from opentelemetry import metrics
+        from opentelemetry.sdk.metrics import MeterProvider
+    except ImportError:
+        return False
+    return isinstance(metrics.get_meter_provider(), MeterProvider)
+
+
 def init_telemetry(
     server_name: Optional[str] = None,
     server_type: Optional[str] = None,
@@ -369,7 +380,7 @@ def init_telemetry(
         handle over its providers; Gym's service name and resource attributes do not apply
         then. Never raises: a telemetry failure must not take a server down.
     """
-    global _TELEMETRY_HANDLE, _INITIALISED, _OWNS_PROVIDERS
+    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _INITIALISED, _OWNS_PROVIDERS
     # The whole check-and-set plus the actual setup_telemetry() call is one critical
     # section: without the lock, two threads can both observe `_INITIALISED is False`
     # before either sets it and both call setup_telemetry, which nemo-lens raises on for
@@ -400,6 +411,8 @@ def init_telemetry(
         # sets it only for an enabled setup, so the owner is exporting.
         if getattr(lens_handle, "_INITIALIZED", False):
             _TELEMETRY_HANDLE = TelemetryHandle(tracer=get_tracer(), meter=get_meter(), is_exporting=True)
+            # Lens registers an SDK meter provider only when the owner enabled metrics.
+            _METRICS_EXPORTING = _sdk_meter_provider_installed()
             logger.info(
                 "nemo-lens was already initialised in this process; Gym reuses its providers "
                 "and span-group spec (server=%s)",
@@ -440,6 +453,7 @@ def init_telemetry(
 
         _TELEMETRY_HANDLE = handle
         _OWNS_PROVIDERS = True
+        _METRICS_EXPORTING = bool(config.metrics_enabled and handle.is_exporting)
 
         if config.logs_enabled and handle.is_exporting:
             try:
@@ -464,6 +478,16 @@ def get_telemetry() -> Optional["TelemetryHandle"]:
     return _TELEMETRY_HANDLE
 
 
+def is_metrics_exporter_active() -> bool:
+    """Whether this process has an active metrics exporter for Gym to record into.
+
+    True after Gym's own telemetry setup succeeds with metrics enabled, or after Gym reuses
+    providers that another library set up with metrics enabled. Unlike
+    :func:`is_telemetry_metrics_enabled`, this stays false until telemetry is set up.
+    """
+    return _METRICS_EXPORTING
+
+
 def shutdown_telemetry(timeout_ms: int = 5000) -> None:
     """Flush and shut down this process's telemetry providers.
 
@@ -486,7 +510,8 @@ def _reset_for_testing() -> None:
     Test-only. Production code has exactly one init per process, which is what
     ``_INITIALISED`` enforces.
     """
-    global _TELEMETRY_HANDLE, _INITIALISED, _OWNS_PROVIDERS
+    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _INITIALISED, _OWNS_PROVIDERS
     _TELEMETRY_HANDLE = None
+    _METRICS_EXPORTING = False
     _INITIALISED = False
     _OWNS_PROVIDERS = False
