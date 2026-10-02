@@ -19,7 +19,14 @@ from nemo_gym._checkpoint.control import (
 )
 from nemo_gym._checkpoint.errors import ControlError, StaleAttemptError
 from nemo_gym._checkpoint.generation_cut import GenerationCutInventory, GenerationCutPrefixAck, GenerationCutReceipt
-from nemo_gym._checkpoint.model import PolicyAdmissionMiddleware, PolicyModelParticipant, attach_capture_context
+from nemo_gym._checkpoint.model import (
+    ModelRecord,
+    PolicyAdmissionMiddleware,
+    PolicyModelParticipant,
+    attach_capture_context,
+    import_model_records,
+)
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_rollout_id
 from nemo_gym.token_id_capture.lineage import FileLineageStore
 from nemo_gym.token_id_capture.records import ParentResolutionStatus
@@ -518,8 +525,44 @@ def test_a_batched_ledger_import_syncs_the_directory_once(tmp_path: Path, monkey
 
     assert len(directory_opens) == 1
     assert ledger.export_rows("r7-a1") == [{"model_call_id": "c7"}]
-    with pytest.raises(ValueError, match="different rows"):
-        ledger.import_rows_many({"r7-a1": [{"model_call_id": "other"}]})
+
+
+def test_restoring_a_checkpoint_again_after_its_replacement_made_a_call_continues_from_the_checkpoint(
+    tmp_path: Path,
+) -> None:
+    row = {"model_call_id": "c0", "staging_key": "roll-1/c0"}
+    record = ModelRecord(episode_id=EpisodeId.from_capture_key("roll-1"), rows=[row])
+    import_model_records(FileLineageStore(tmp_path), [record])
+    # The replacement attempt commits a call, then Gym crashes before the next checkpoint.
+    with (tmp_path / "roll-1-a1.lineage.jsonl").open("a") as handle:
+        handle.write('{"model_call_id":"c1","staging_key":"roll-1-a1/c1"}\n')
+
+    import_model_records(FileLineageStore(tmp_path), [record])
+
+    assert FileLineageStore(tmp_path).export_rows("roll-1-a1") == [row]
+
+
+def test_a_ledger_import_discards_dead_executions_of_the_target_and_later_attempts(tmp_path: Path) -> None:
+    ledger = FileLineageStore(tmp_path)
+    ledger.import_rows_many(
+        {
+            "r-a1": [{"model_call_id": "dead"}],
+            "r-a2": [{"model_call_id": "dead-later"}],
+            "r1-a2": [{"model_call_id": "other-rollout"}],
+            "r-a1x-a3": [{"model_call_id": "look-alike"}],
+        }
+    )
+    (tmp_path / "r-a2.tokens.jsonl").write_text("{}\n")
+    (tmp_path / "r-a2.tokens.incomplete").write_text("x\n")
+    # A restored attempt 1 owns the rollout from here on: attempt 2 of the dead execution must not survive.
+    fresh = FileLineageStore(tmp_path)
+    fresh.import_rows_many({"r-a1": [{"model_call_id": "checkpointed"}]})
+
+    assert fresh.export_rows("r-a1") == [{"model_call_id": "checkpointed"}]
+    assert fresh.export_rows("r-a2") == []
+    assert not (tmp_path / "r-a2.tokens.jsonl").exists() and not (tmp_path / "r-a2.tokens.incomplete").exists()
+    assert fresh.export_rows("r1-a2") == [{"model_call_id": "other-rollout"}]
+    assert fresh.export_rows("r-a1x-a3") == [{"model_call_id": "look-alike"}]
 
 
 async def test_readiness_stays_cheap_while_many_cut_calls_are_held(

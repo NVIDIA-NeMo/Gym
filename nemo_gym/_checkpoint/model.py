@@ -474,23 +474,25 @@ def import_model_records(
 ) -> dict[str, GenerationCutRecord]:
     """Install every record's rows under its next attempt; return the restored cuts by capture key.
 
-    Everything is validated before anything is written.
+    Everything is validated before anything is written. The import replaces what a dead execution left in the
+    ledger for a target attempt and later attempts: restoring a checkpoint again, after its replacement attempt
+    made calls and crashed, continues from the checkpoint's boundary.
     """
     if records and ledger is None:
         raise ControlError("checkpoint holds capture-ledger rows but this model server has no capture ledger")
     targets = [(record, next_attempt(record.episode_id).capture_key) for record in records]
     for record, target in targets:
-        existing = ledger.export_rows(target)
-        if existing and existing != record.rows:
-            raise ControlError(f"capture ledger for {target} already holds rows from another execution")
         if len(record.generation_cuts) > 1:
             raise ControlError(f"episode {record.episode_id.capture_key} has more than one undelivered cut")
     import_many = getattr(ledger, "import_rows_many", None)
-    if import_many is not None:
-        import_many({target: record.rows for record, target in targets})
-    else:
-        for record, target in targets:
-            ledger.import_rows(target, record.rows)
+    try:
+        if import_many is not None:
+            import_many({target: record.rows for record, target in targets})
+        else:
+            for record, target in targets:
+                ledger.import_rows(target, record.rows)
+    except ValueError as error:
+        raise ControlError(f"capture ledger refused the restore: {error}") from error
     return {target: record.generation_cuts[0] for record, target in targets if record.generation_cuts}
 
 

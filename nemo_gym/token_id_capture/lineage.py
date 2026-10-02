@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.token_id_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
@@ -716,6 +717,10 @@ class IncrementalLineageStore:
             self._materialized_tokens = 0
 
 
+_LEDGER_SUFFIX = ".lineage.jsonl"
+_TOKENS_SUFFIX = ".tokens.jsonl"
+
+
 class FileLineageStore(IncrementalLineageStore):
     """Resolve lineage from the token JSONL committed by ``TokenCaptureStore``.
 
@@ -741,6 +746,8 @@ class FileLineageStore(IncrementalLineageStore):
         self._ledger_root = Path(root)
         self._ledger_root.mkdir(parents=True, exist_ok=True)
         self._ledger_cache: dict[str, tuple[int, int, list[dict]]] = {}
+        # Ledgers this process appended to belong to live episodes; a checkpoint import never replaces them.
+        self._appended: set[str] = set()
 
     def _read_locked(self, rollout_id: str):
         return self._store._locked(rollout_id, shared=True)
@@ -792,7 +799,7 @@ class FileLineageStore(IncrementalLineageStore):
     def _ledger_path(self, rollout_id: str) -> Path:
         from nemo_gym.token_id_capture.store import validate_rollout_id
 
-        return self._ledger_root / f"{validate_rollout_id(rollout_id)}.lineage.jsonl"
+        return self._ledger_root / f"{validate_rollout_id(rollout_id)}{_LEDGER_SUFFIX}"
 
     def _locked(self, rollout_id: str):
         # Ledger rows share the token store's per-rollout lock file. The two
@@ -845,6 +852,7 @@ class FileLineageStore(IncrementalLineageStore):
                 os.close(directory_fd)
         records.append(record)
         self._ledger_cache[rollout_id] = (inode, offset, records)
+        self._appended.add(rollout_id)
 
     def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
         resolution = super()._resolve(rollout_id, request_items)
@@ -945,30 +953,43 @@ class FileLineageStore(IncrementalLineageStore):
             return list(self._read(rollout_id))
 
     def import_rows(self, rollout_id: str, rows: list[dict]) -> None:
-        """Install checkpointed rows as the complete ledger of an unused ``rollout_id``.
-
-        Importing identical rows again is a no-op; any other existing ledger is an error.
-        """
+        """Install checkpointed rows as the complete ledger of ``rollout_id``; see ``import_rows_many``."""
         self.import_rows_many({rollout_id: rows})
 
     def import_rows_many(self, ledgers: Mapping[str, list[dict]]) -> None:
         """Install several rollouts' ledgers from a checkpoint, then sync the directory once.
 
+        Capture files already present for a target attempt, or for a later attempt of the same rollout, come from
+        an execution that died after an earlier restore of the checkpoint, unless this process wrote them. Those
+        from a dead execution are discarded: kept, they would mix its calls into the replacement's lineage, and
+        refusing them would make a checkpoint unrestorable once its replacement had made a call. A ledger this
+        process appended to belongs to a live episode, so the import refuses it before writing anything.
+
         The files are not synced one by one: the checkpoint they come from is the durable copy, and importing it
-        again is a no-op for ledgers that match, so a crash during or after the import only repeats it. A later
-        append to a ledger syncs its file, imported rows included.
+        again only repeats the import, so a crash during or after the import is harmless. A later append to a
+        ledger syncs its file, imported rows included.
         """
         present = {entry.name for entry in os.scandir(self._ledger_root)} if self._ledger_root.exists() else set()
+        stale_by_target = {rollout_id: self._later_attempts(rollout_id, present) for rollout_id in ledgers}
+        live = sorted(
+            key
+            for rollout_id, later in stale_by_target.items()
+            for key in [rollout_id, *later]
+            if key in self._appended and (key != rollout_id or self._read(key) != ledgers[rollout_id])
+        )
+        if live:
+            raise ValueError(f"lineage ledgers {live} belong to live episodes of this process")
         installed = []
         for rollout_id, rows in ledgers.items():
+            for stale in stale_by_target[rollout_id]:
+                with self._locked(stale):
+                    self._discard(stale)
+                installed.append(stale)
             with self._locked(rollout_id):
                 path = self._ledger_path(rollout_id)
-                if path.name in present:
-                    existing = self._read(rollout_id)
-                    if existing == rows:
-                        continue
-                    if existing:
-                        raise ValueError(f"lineage ledger for {rollout_id} already holds different rows")
+                if path.name in present and self._read(rollout_id) == rows:
+                    continue
+                self._discard(rollout_id)
                 payload = b"".join(
                     json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows
                 )
@@ -984,3 +1005,36 @@ class FileLineageStore(IncrementalLineageStore):
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
+
+    def _later_attempts(self, capture_key: str, present: set[str]) -> list[str]:
+        """Capture keys among the files in ``present`` of the same rollout as ``capture_key`` and a later attempt."""
+        episode = EpisodeId.from_capture_key(capture_key)
+        later = set()
+        for name in present:
+            key = name.removesuffix(_LEDGER_SUFFIX).removesuffix(_TOKENS_SUFFIX)
+            if key == name or not key.startswith(f"{episode.rollout_id}-a"):
+                continue
+            try:
+                candidate = EpisodeId.from_capture_key(key)
+            except ValueError:
+                continue
+            if candidate.rollout_id == episode.rollout_id and candidate.attempt > episode.attempt:
+                later.add(key)
+        return sorted(later)
+
+    def _discard(self, rollout_id: str) -> None:
+        """Remove every capture file of ``rollout_id`` but its lock, and forget it; the caller holds the lock."""
+        for path in (
+            self._ledger_path(rollout_id),
+            self._store.path_for(rollout_id),
+            self._store.incomplete_path_for(rollout_id),
+            self._store.intents_path_for(rollout_id),
+            self._store.state_path_for(rollout_id),
+        ):
+            path.unlink(missing_ok=True)
+        self._ledger_cache.pop(rollout_id, None)
+        with self._cache_guard:
+            self._cache.pop(rollout_id, None)
+            materialized = self._materialized.pop(rollout_id, None)
+            if materialized is not None:
+                self._materialized_tokens -= len(materialized[1])
