@@ -98,8 +98,9 @@ Save it as `native-run.yaml`, then run:
 ```bash
 gym env start --config native-run.yaml --model-type openai_model
 
-gym eval run --no-serve --config native-run.yaml --model-type openai_model \
-  --agent openclaw_agent_native --allow-unsupported-pairing \
+NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1 \
+  gym eval run --no-serve --config native-run.yaml --model-type openai_model \
+  --agent openclaw_agent_native \
   --input /path/to/prepared-swe-pro.jsonl --output outputs/openclaw-native.jsonl --limit 1
 ```
 
@@ -110,8 +111,9 @@ selected Resources server. `--agent` selects the harness for existing rows. No e
 materialization script is required.
 
 SWE-Pro currently has a legacy `allowed_agents` list that excludes OpenClaw. The explicit
-`--allow-unsupported-pairing` opt-in permits this smoke without replacing benchmark or verifier
-settings. It does not establish compatibility with other benchmarks. Switch compatible components
+`NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1` opt-in permits this smoke without replacing benchmark or
+verifier settings. Use the environment form with `--no-serve`: the current collector reloads its
+server config from the head server and can lose the CLI-only `--allow-unsupported-pairing` flag. It does not establish compatibility with other benchmarks. Switch compatible components
 by changing their independent config paths and the two EnvironmentServer references; keep
 benchmark data, preparation, and verifier settings with Resources. There is no combined
 benchmark/harness preset.
