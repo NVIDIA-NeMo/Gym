@@ -516,24 +516,42 @@ def import_model_records(
 
     Everything is validated before anything is written. The import replaces what dead executions left for a target
     attempt and later attempts, fences included: restoring a checkpoint again, after its replacement attempt made
-    calls and Gym crashed, continues from the checkpoint's boundary.
+    calls and Gym crashed, continues from the checkpoint's boundary. Each staged row keeps the capture key it was
+    staged under, so a receipt of the next attempt verifies those calls against their own staged data.
     """
     if records and ledger is None:
         raise ControlError("checkpoint holds capture-ledger rows but this model server has no capture ledger")
-    targets = [(record, next_attempt(record.episode_id).capture_key) for record in records]
-    for record, target in targets:
+    targets = [
+        (record, next_attempt(record.episode_id).capture_key, _with_capture_key(record.rows, record.episode_id))
+        for record in records
+    ]
+    for record, _, _ in targets:
         if len(record.generation_cuts) > 1:
             raise ControlError(f"episode {record.episode_id.capture_key} has more than one undelivered cut")
     import_many = getattr(ledger, "import_rows_many", None)
     try:
         if import_many is not None:
-            import_many({target: record.rows for record, target in targets})
+            import_many({target: rows for _, target, rows in targets})
         else:
-            for record, target in targets:
-                ledger.import_rows(target, record.rows)
+            for _, target, rows in targets:
+                ledger.import_rows(target, rows)
     except ValueError as error:
         raise ControlError(f"capture ledger refused the restore: {error}") from error
-    return {target: record.generation_cuts[0] for record, target in targets if record.generation_cuts}
+    return {target: record.generation_cuts[0] for record, target, _ in targets if record.generation_cuts}
+
+
+def _with_capture_key(rows: list[dict[str, Any]], episode_id: EpisodeId) -> list[dict[str, Any]]:
+    """Stamp each staged row with the capture key it was staged under.
+
+    A row a restore already carried over keeps its stamp, so a chain of restores still names the attempt
+    that staged the call.
+    """
+    return [
+        {**row, "capture_key": episode_id.capture_key}
+        if row.get("staging_key") is not None and row.get("capture_key") is None
+        else row
+        for row in rows
+    ]
 
 
 class PolicyModelParticipant(CheckpointParticipant):
