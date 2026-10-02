@@ -97,6 +97,7 @@ from openai.types.responses.response_create_params import (
 from openai.types.responses.response_function_call_output_item_list_param import (
     ResponseFunctionCallOutputItemListParam,
 )
+from openai.types.responses.response_function_web_search import ActionFind, ActionOpenPage, ActionSearch
 from openai.types.responses.response_input_content_param import ResponseInputContentParam
 from openai.types.responses.response_input_item import (
     AdditionalTools as InputAdditionalTools,
@@ -144,6 +145,7 @@ from pydantic import (
     Field,
     PrivateAttr,
     Tag,
+    field_serializer,
     model_serializer,
     model_validator,
 )
@@ -398,14 +400,28 @@ class NeMoGymResponseFileSearchToolCall(ResponseFileSearchToolCall):
 class NeMoGymResponseFunctionWebSearch(ResponseFunctionWebSearch):
     """A hosted web-search output item returned by the OpenAI Responses API."""
 
-    # Hosted-tool output is provider-owned bookkeeping. Preserve action
-    # payloads opaquely rather than coupling response validation to today's
-    # provider action vocabulary.
+    # Hosted-tool output is provider-owned bookkeeping. Keep the SDK's typed
+    # actions for shapes it knows, and preserve other action payloads opaquely
+    # rather than coupling response validation to today's provider vocabulary.
     model_config = ConfigDict(extra="allow")
 
     # The live API can emit completed bookkeeping items without an action
     # object, so retain that valid omission instead of rejecting the response.
-    action: Optional[Dict[str, Any]] = None
+    action: Optional[Union[ActionSearch, ActionOpenPage, ActionFind, Dict[str, Any]]] = Field(
+        default=None, union_mode="left_to_right"
+    )
+
+    @field_serializer("action", mode="wrap")
+    def _serialize_action_as_received(self, action: Any, handler: Any, info: Any) -> Any:
+        if isinstance(action, BaseModel):
+            # Dump only the fields the provider sent so replayed payloads round-trip unchanged.
+            return action.model_dump(
+                mode="json" if info.mode_is_json() else "python",
+                by_alias=bool(info.by_alias),
+                exclude_unset=True,
+                exclude_none=info.exclude_none,
+            )
+        return handler(action)
 
     @model_serializer(mode="wrap")
     def _serialize_without_inventing_action(self, handler: Any) -> dict[str, Any]:

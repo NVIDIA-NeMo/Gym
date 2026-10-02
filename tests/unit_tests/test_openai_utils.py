@@ -671,7 +671,7 @@ class TestNeMoGymResponse:
         web_search_call = response.output[1]
         assert isinstance(web_search_call, NeMoGymResponseFunctionWebSearch)
         assert web_search_call.status == "completed"
-        assert web_search_call.action == response_payload["output"][1]["action"]
+        assert web_search_call.model_dump(mode="json")["action"] == response_payload["output"][1]["action"]
 
         serialized = response.model_dump(mode="json")
         assert serialized["output"][1] == response_payload["output"][1]
@@ -716,7 +716,7 @@ class TestNeMoGymResponse:
 
         web_search_call = NeMoGymResponseFunctionWebSearch.model_validate(payload)
 
-        assert web_search_call.action == action
+        assert web_search_call.model_dump(mode="json")["action"] == action
         assert web_search_call.model_dump(mode="json") == payload
         assert (
             NeMoGymResponseFunctionWebSearch.model_validate(web_search_call.model_dump(mode="json")).model_dump(
@@ -741,6 +741,41 @@ class TestNeMoGymResponse:
         assert isinstance(params.input, list)
         assert isinstance(params.input[0], NeMoGymResponseFunctionWebSearch)
         assert params.input[0].model_dump(mode="json") == payload
+
+    def test_web_search_call_keeps_typed_sdk_actions(self) -> None:
+        from openai.types.responses.response_function_web_search import (
+            ActionOpenPage,
+            ActionSearch,
+            ResponseFunctionWebSearch,
+        )
+
+        payload = {
+            "id": "ws_1",
+            "type": "web_search_call",
+            "status": "completed",
+            "action": {"type": "search", "query": "q"},
+        }
+        web_search_call = NeMoGymResponseFunctionWebSearch.model_validate(payload)
+        assert isinstance(web_search_call.action, ActionSearch)
+        assert web_search_call.action.query == "q"
+        assert web_search_call.model_dump(mode="json") == payload
+
+        built = NeMoGymResponseFunctionWebSearch(
+            id="ws_2", type="web_search_call", status="completed", action=ActionSearch(type="search", query="q")
+        )
+        assert built.model_dump(mode="json")["action"] == {"type": "search", "query": "q"}
+
+        sdk_item = ResponseFunctionWebSearch(
+            id="ws_3",
+            type="web_search_call",
+            status="completed",
+            action=ActionOpenPage(type="open_page", url="https://a"),
+        )
+        converted = NeMoGymResponseFunctionWebSearch.model_validate(sdk_item, from_attributes=True)
+        assert isinstance(converted.action, ActionOpenPage)
+
+        unknown = {"id": "ws_4", "type": "web_search_call", "status": "completed", "action": {"type": "future-action"}}
+        assert NeMoGymResponseFunctionWebSearch.model_validate(unknown).action == {"type": "future-action"}
 
     def test_web_search_call_accepts_missing_action_and_preserves_omission(self) -> None:
         payload = {

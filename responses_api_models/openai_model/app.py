@@ -299,7 +299,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
 
         async def create_and_validate() -> NeMoGymResponse:
             response_dict = await self._client.create_response(**body_dict)
-            reasoning = response_dict.get("reasoning")
+            reasoning = response_dict.get("reasoning") if isinstance(response_dict, dict) else None
             if (
                 self.config.reasoning_effort_none_replacement is not None
                 and isinstance(reasoning, dict)

@@ -32,6 +32,7 @@ from nemo_gym.base_responses_api_model import (
 )
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import ServerClient
@@ -395,6 +396,15 @@ class TestApp:
         res = client.post("/v1/responses", json={"input": "hello"})
         assert res.status_code == 200
         assert res.json()["reasoning"]["effort"] == expected_effort
+
+    async def test_responses_accepts_a_validated_response_object_from_the_client(self) -> None:
+        server = self._setup_server()
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(return_value=NeMoGymResponse.model_validate(_response_data()))
+
+        response = await server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+
+        assert response.id == _response_data()["id"]
 
     async def test_responses_reasoning_workarounds_apply_when_retrying(self) -> None:
         server = self._setup_server(

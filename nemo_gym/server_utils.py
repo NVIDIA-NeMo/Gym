@@ -400,9 +400,9 @@ async def request(
     method: str,
     url: str,
     _internal: bool = False,
-    _max_num_tries: Optional[int] = None,
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
+    _max_num_tries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -452,9 +452,9 @@ async def _traced_request(
     method: str,
     url: str,
     _internal: bool = False,
-    _max_num_tries: Optional[int] = None,
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
+    _max_num_tries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -544,9 +544,9 @@ async def _request_with_retries(
     method: str,
     url: str,
     _internal: bool = False,
-    _max_num_tries: Optional[int] = None,
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
+    _max_num_tries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
