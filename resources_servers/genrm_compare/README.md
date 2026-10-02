@@ -160,8 +160,8 @@ for the input format, explicit group IDs, and recovery limits.
 | `cohort_collection_timeout_s` | float | `1800` | Deadline to collect all group members |
 | `cohort_evaluation_timeout_s` | float | `1800` | Overall judging deadline after collection |
 | `judge_request_timeout_s` | float | `1800` | Per-request deadline, including connection retries |
-| `cohort_result_ttl_s` | float or null | `3600` | Terminal-record retention; null disables time expiry, but the count cap still applies |
-| `max_terminal_cohorts` | int | `4096` | Maximum number of retained terminal groups |
+| `cohort_result_ttl_s` | float or null | `3600` | Retention time for results and finished-group attempt records; null disables time expiry only |
+| `max_terminal_cohorts` | int | `4096` | Count limit applied separately to results and finished-group attempt records |
 
 ## Comparison Strategies
 
@@ -398,12 +398,24 @@ restart the entire cohort.
 ### Replacement attempts and retention
 
 To replace a group, the caller increments `_ng_group_attempt` for **every** member and dispatches the entire
-group. Newer attempts retire active older ones. An older judge task cannot publish rewards into a newer
-attempt. An individual rollout's retry counter does not advance this shared group attempt.
+group. Newer attempts retire active older ones. If Gym still remembers the prior attempt, it also removes
+that attempt's saved result. An older judge task cannot publish rewards into a newer attempt. An individual
+rollout's retry counter does not advance this shared group attempt.
 
 Run the resources server with one HTTP worker. State is process-local. Completed explicit-ID groups and
 failed groups retain compact response digests, rewards when completed, and failure/attempt information;
 full answer bodies and waiters are released. Retention is bounded by `cohort_result_ttl_s` and `max_terminal_cohorts`.
+
+Results expire from completion time. Time-based retention of the newest-attempt record also starts at
+completion. Retries for a retained, finished attempt with matching prompt and principle refresh its attempt
+record, even when the answer conflicts or the attempt failed. They do not extend the result's lifetime.
+If Gym still remembers an attempt but its result has been evicted, another request for that attempt receives 409 immediately.
+Recover by dispatching a complete group with a higher shared `_ng_group_attempt`.
+
+Cleanup visits finished groups only. Active groups keep their attempt records and do not count toward
+`max_terminal_cohorts`. Results and finished-group attempt records are capped separately. An exact retry
+can still replay a retained result after its attempt record is evicted; superseded results are removed
+when a newer attempt is accepted while the prior attempt is tracked.
 
 The count cap can evict state before the TTL. After eviction or restart, replay and stale-attempt detection
 are no longer guaranteed. The caller must enforce accepted attempt identity across those boundaries and
