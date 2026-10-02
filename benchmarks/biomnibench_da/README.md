@@ -25,7 +25,7 @@ gym eval prepare --benchmark biomnibench_da \
 > Add `++prepare_script_args.overwrite=true` to overwrite existing generated tasks.
 
 > [!warning]
-> This preparation is a large download. Use `++prepare_script_args.limit=5` to prepare only five tasks for debugging.
+> This preparation is a large download. Use `++prepare_script_args.limit=1` to prepare one task for debugging.
 
 Singularity must be installed; set `SINGULARITY_CACHEDIR` and `SINGULARITY_TMPDIR` to existing host directories,
 and export `NVINF_API_KEY` for the NVIDIA Inference example below.
@@ -41,18 +41,21 @@ gym eval run \
   --model nvinf/nvidia/nvidia/nemotron-3-ultra \
   --output "${PWD}/benchmarks/biomnibench_da/logs/rollouts.jsonl" \
   --concurrency 8 \
-  --resume
+  --resume \
+  ++harbor_dataset_path="${PWD}/benchmarks/biomnibench_da/data"
 ```
 
 > [!tip]
-> If you override `prepare_script_args.output_dir` during preparation, pass the same override to this command.
-> Add `--limit 5` with that override for a small debugging run.
+> If you override `prepare_script_args.output_dir` during preparation, set `harbor_dataset_path` to its absolute path
+> and update the dataset's `jsonl_fpath` in `config.yaml` to match.
+> Add `--limit 1` for a small debugging run.
 
 ## Configuration
 
 | Variable | Type | Description |
 | --- | --- | --- |
-| `output_jsonl_fpath` | Hydra value | Rollout output path. Set by `-o/--output` on `gym eval run`. |
+| `harbor_dataset_path` | Hydra value | Absolute path to the generated Harbor dataset. Set with `++harbor_dataset_path=...` on `gym eval run`. |
+| `output_jsonl_fpath` | Hydra value | Absolute rollout output path. Set by `-o/--output` on `gym eval run`. |
 | `policy_model_name` | Hydra value | Model name passed to the OpenCode agent. Must use OpenCode provider in [opencode.json](./harbor/task-template/environment/opencode.json). Automatically set when using `-m/--model` flag in the script above. |
 | `SINGULARITY_CACHEDIR` | Environment variable | Singularity image cache directory; `/harbor` is appended. |
 | `SINGULARITY_TMPDIR` | Environment variable | Singularity temp directory; Must already exist on host. |
