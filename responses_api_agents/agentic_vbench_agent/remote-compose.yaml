@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+services:
+  main:
+    image: localhost/${MAIN_IMAGE_NAME}
+    userns_mode: host
+    user: "0:0"
+    pid: private
+    entrypoint:
+      - /bin/bash
+      - -c
+      - mkdir -p /logs/agent /logs/verifier /logs/artifacts; trap 'exit 0' TERM INT; sleep infinity & wait
+    deploy:
+      resources:
+        limits:
+          cpus: ${CPUS}
+          memory: ${MEMORY}

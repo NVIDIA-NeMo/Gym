@@ -3,31 +3,33 @@
 Evaluate video-editing agents on the 100 pinned Agentic-VBench tasks: Repair (18),
 Assembly (18), Sequencing (28), and Repurpose (36). This benchmark uses the
 `agentic_vbench_agent` adapter and Gym's `legacy_agent` environment server.
-The agent delegates execution and verification to the existing AgenticVBench
-Harbor/OpenCode runner; it does not replace the benchmark with a question-answering task.
+The agent delegates execution and verification to the upstream Harbor/OpenCode runner; it does not replace the benchmark with a question-answering task.
 
 Task revision: `610c4ecc69ac56fc62e8cfbd3b28dddd88f22863`.
 Harbor: `0.6.6`. OpenCode: `1.14.39`.
-The advertised model context is 131,072 tokens and output capability is 32,000 tokens.
-The task's own timeouts govern execution. Gym sampling arguments do not override
-the pinned OpenCode protocol. Run independent server seeds 201, 202, and 203 for
+The advertised model context is 262,144 tokens and output capability is 100,000 tokens.
+The task's own timeouts govern execution. The Factory request proxy applies sampling overrides. Run independent request seeds 201, 202, and 203 for
 the standard three-rollout report.
 
 ## Runtime requirements
 
-This integration currently uses the Linux/HPC runner in the AgenticVBench repository:
-`evals/VLMEvalKit/shell/run_agentic_vbench_harbor_trial.sh`.
-It requires rootless Podman, curl, flock, internet access for task setup, and a
-reachable OpenAI-compatible model endpoint with native image input and tool calling.
-The runner installs pinned Harbor and podman-compose into a locked node-local cache.
-Run Gym on a CPU worker that supports rootless Podman; a generic evaluation container
-without that runtime is insufficient.
+This development adapter calls `harbor_runner.py` with a separate Python environment
+containing upstream `harbor==0.6.6`. Its custom Podman environment uses the original
+task Dockerfiles and native verifier. It requires rootless Podman, slirp4netns,
+`/usr/bin/tini`, and a reachable OpenAI-compatible model endpoint.
+
+Synthetic container build, execution, file transfer, host-local HTTP access, and
+cleanup have passed on the CPU cluster. The original voicebank repair image also passed these checks (CPU job 2116776).
+A build-only apt configuration mount runs apt as mapped container root to support
+the cluster’s single-UID namespace. Original task Dockerfiles stay unchanged.
+Other task images and real model rollouts still require validation.
+This migration has not yet produced a validated benchmark result.
 
 Set these variables to real paths before preparing or running:
 
 ```bash
 export AGENTIC_VBENCH_ROOT=/path/to/pinned/agentic-vbench
-export AGENTIC_VBENCH_EVALKIT_ROOT=/path/to/AgenticVBench/evals/VLMEvalKit
+export AGENTIC_VBENCH_HARBOR_PYTHON=/path/to/harbor-venv/bin/python
 export AGENTIC_VBENCH_OUTPUT_ROOT=/path/outside/checkouts/episodes
 export AGENTIC_VBENCH_RUNTIME_ROOT=/node/local/writable/avb-runtime
 export AGENTIC_VBENCH_MODEL_BASE_URL=http://model-host:8000/v1
@@ -81,9 +83,8 @@ Gym's generic `mean/reward` is task-weighted. The benchmark's leaderboard-style
 score is the equal mean of four family scores, averaged across three complete
 rollouts. Do not report a subset smoke result as the benchmark score. The Eval
 Factory companion integration validates selected IDs, emits the native TSV layout,
-and supports the existing parser/secret/aggregation audits. Run those audits
-before reporting a benchmark comparison.
+and aggregates the selected episodes. End-to-end result and request audits remain
+required before reporting a benchmark comparison.
 
 This adapter does not produce model token IDs/logprobs and is intended for evaluation,
-not RL training. Raw wire captures come from the companion serving launcher's passive
-proxy. Do not treat unit tests or an unaudited partial run as a validated baseline.
+not RL training. Request capture must be configured in the Factory pipeline. Do not treat unit tests or an unaudited partial run as a validated baseline.

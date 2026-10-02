@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Pinned task inventory and strict interpretation of the existing Harbor runner."""
+"""Pinned task inventory and direct interpretation of upstream Harbor artifacts."""
 
 import asyncio
-import csv
 import hashlib
 import json
 import math
@@ -74,30 +73,34 @@ def dataset_rows(tasks: dict[str, dict], selector: str = "all") -> list[dict]:
 
 
 def read_result(output: Path, task: dict) -> dict:
-    with (output / "agentic_vbench_results.tsv").open() as f:
-        rows = list(csv.DictReader(f, delimiter="\t"))
-    if len(rows) != 1 or rows[0]["task"] != task["task_id"]:
-        raise ValueError("Runner returned a missing, duplicate, or mismatched task")
-    row = rows[0]
-    if row["family"] != "agentic_vbench_" + task["family"]:
-        raise ValueError("Runner returned the wrong task family")
-    if not row["reward"] or row["status"].startswith("FAIL"):
-        raise RuntimeError(f"Unscored infrastructure/verifier failure: {row['status']}; artifacts: {output}")
-    reward = float(row["reward"])
-    if not math.isfinite(reward) or not 0 <= reward <= 1:
+    task_results = sorted(output.glob("jobs/trial/*/result.json"))
+    if len(task_results) != 1:
+        raise RuntimeError(f"Expected one Harbor trial result, found {len(task_results)}")
+    trial = json.loads(task_results[0].read_text())
+    task_name = trial.get("task_name", "").removeprefix("agentic-vbench/")
+    if task_name != task["task_id"]:
+        raise ValueError(f"Harbor returned a mismatched task: {task_name}")
+    trial_dir = task_results[0].parent
+    reward_files = list(trial_dir.glob("steps/solve/verifier/reward.json"))
+    if len(reward_files) != 1:
+        raise RuntimeError(f"Missing native verifier reward: {trial_dir}")
+    reward = json.loads(reward_files[0].read_text())["reward"]
+    if (
+        isinstance(reward, bool)
+        or not isinstance(reward, (int, float))
+        or not math.isfinite(reward)
+        or not 0 <= reward <= 1
+    ):
         raise ValueError(f"Invalid verifier reward: {reward}")
-    job_dir = Path(row["job_dir"]).resolve(strict=True)
-    if not job_dir.is_relative_to(output.resolve()):
-        raise ValueError("Runner result escapes the episode output directory")
-    trajectories = sorted(job_dir.glob("**/agent/trajectory.json"))
+    trajectories = list(trial_dir.glob("steps/solve/agent/trajectory.json"))
     if len(trajectories) != 1:
-        raise RuntimeError(f"Expected one model trajectory, found {len(trajectories)}: {job_dir}")
+        raise RuntimeError(f"Expected one model trajectory: {trial_dir}")
     trajectory = json.loads(trajectories[0].read_text())
     if not any(step.get("source") == "agent" for step in trajectory.get("steps", [])):
         raise RuntimeError("No model trajectory: cannot count this episode as a model outcome")
     return {
         "reward": reward,
-        "status": row["status"],
+        "status": "OK",
         "trajectory": trajectory,
         "artifacts": str(output),
     }

@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import HTTPException
 from pydantic import ConfigDict, Field, PrivateAttr
@@ -30,15 +30,15 @@ from responses_api_agents.harbor_agent.utils import HarborAgentUtils
 
 class AgenticVBenchConfig(BaseResponsesAPIAgentConfig):
     benchmark_root: str
-    evalkit_root: str
+    harbor_python: str
     output_root: str
     runtime_root: str
     model_base_url: str
     model_id: str
     concurrency: int = Field(default=2, ge=1)
     credentials_file: str | None = None
-    model_context_tokens: Literal[131072] = 131072
-    model_output_capability_tokens: Literal[32000] = 32000
+    model_context_tokens: int = Field(default=262144, gt=0)
+    model_output_capability_tokens: int = Field(default=100000, gt=0)
 
 
 class AgenticVBenchRunRequest(BaseRunRequest):
@@ -66,10 +66,9 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
         self._semaphore = asyncio.Semaphore(self.config.concurrency)
         self._tasks = inventory(Path(self.config.benchmark_root))
-        runner = Path(self.config.evalkit_root) / "shell/run_agentic_vbench_harbor_trial.sh"
-        if not runner.is_file():
-            raise FileNotFoundError(runner)
-        for root in (self.config.benchmark_root, self.config.evalkit_root):
+        if not Path(self.config.harbor_python).is_file():
+            raise FileNotFoundError(self.config.harbor_python)
+        for root in (self.config.benchmark_root, Path(__file__).parent):
             if Path(self.config.output_root).resolve().is_relative_to(Path(root).resolve()):
                 raise ValueError("Evaluation output must be outside source checkouts")
 
@@ -119,32 +118,21 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 raise RuntimeError(f"Incomplete existing episode; inspect before any infrastructure retry: {output}")
             output.mkdir(parents=True, exist_ok=False)
             command = [
-                "bash",
-                str(Path(self.config.evalkit_root) / "shell/run_agentic_vbench_harbor_trial.sh"),
-                "--agentic-vbench-root",
-                self.config.benchmark_root,
-                "--vlmevalkit-src",
-                self.config.evalkit_root,
-                "--model-base-url",
+                self.config.harbor_python,
+                str(Path(__file__).with_name("harbor_runner.py")),
+                "--task-path",
+                str(Path(self.config.benchmark_root) / "tasks" / f"agentic_vbench_{task['family']}" / task_id),
+                "--endpoint",
                 self.config.model_base_url.rstrip("/"),
-                "--model-id",
+                "--model",
                 self.config.model_id,
-                "--output-dir",
+                "--output",
                 str(output),
-                "--tasks",
-                task_id,
-                "--max-parallel",
-                "1",
-                "--setup-max-attempts",
-                "1",
-                "--official-compatible",
-                "--opencode-version",
-                "1.14.39",
-                "--harbor-version",
-                "0.6.6",
-                "--model-context-tokens",
+                "--runtime-root",
+                str(Path(self.config.runtime_root) / key[:16]),
+                "--context-tokens",
                 str(self.config.model_context_tokens),
-                "--model-output-capability-tokens",
+                "--output-tokens",
                 str(self.config.model_output_capability_tokens),
             ]
             if self.config.credentials_file:

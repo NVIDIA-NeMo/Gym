@@ -8,13 +8,15 @@ from responses_api_agents.agentic_vbench_agent import core
 
 
 def fixture_result(tmp_path, reward="0", status="OK", trajectory=True):
-    job = tmp_path / "jobs/trial"
-    (job / "agent").mkdir(parents=True)
+    job = tmp_path / "jobs/trial/repair1"
+    step = job / "steps/solve"
+    (step / "agent").mkdir(parents=True)
+    (step / "verifier").mkdir()
+    (job / "result.json").write_text(json.dumps({"task_name": "repair1"}))
     if trajectory:
-        (job / "agent/trajectory.json").write_text(json.dumps({"steps": [{"source": "agent", "message": "done"}]}))
-    (tmp_path / "agentic_vbench_results.tsv").write_text(
-        f"task\tfamily\treward\tstatus\tjob_dir\nrepair1\tagentic_vbench_repair\t{reward}\t{status}\t{job}\n"
-    )
+        (step / "agent/trajectory.json").write_text(json.dumps({"steps": [{"source": "agent", "message": "done"}]}))
+    if status != "FAIL":
+        (step / "verifier/reward.json").write_text(json.dumps({"reward": float(reward)}))
     return {"task_id": "repair1", "family": "repair"}
 
 
@@ -32,7 +34,7 @@ def test_invalid_reward_fails(tmp_path, reward):
 
 def test_infra_failure_does_not_become_zero(tmp_path):
     task = fixture_result(tmp_path, reward="", status="FAIL")
-    with pytest.raises(RuntimeError, match="Unscored"):
+    with pytest.raises(RuntimeError, match="Missing native verifier"):
         core.read_result(tmp_path, task)
 
 

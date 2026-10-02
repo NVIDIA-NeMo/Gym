@@ -22,9 +22,8 @@ def agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> app.AgenticVBenchA
         "prompt_sha256": "hash",
     }
     monkeypatch.setattr(app, "inventory", lambda _: {"task1": task})
-    evalkit = tmp_path / "evalkit"
-    (evalkit / "shell").mkdir(parents=True)
-    (evalkit / "shell/run_agentic_vbench_harbor_trial.sh").touch()
+    harbor_python = tmp_path / "python"
+    harbor_python.touch()
     return app.AgenticVBenchAgent(
         config=app.AgenticVBenchConfig(
             host="127.0.0.1",
@@ -32,7 +31,7 @@ def agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> app.AgenticVBenchA
             entrypoint="app.py",
             name="avb",
             benchmark_root=str(tmp_path / "benchmark"),
-            evalkit_root=str(evalkit),
+            harbor_python=str(harbor_python),
             output_root=str(tmp_path / "outputs"),
             runtime_root=str(tmp_path / "runtime"),
             model_base_url="http://model:8000/v1",
@@ -86,14 +85,15 @@ async def test_retry_reuses_zero_reward_and_distinct_rollout_runs_again(
 
     async def fake_runner(command: list[str], output: Path, runtime: Path) -> int:
         calls.append(command)
-        job = output / "jobs/trial/steps/solve/agent"
+        job = output / "jobs/trial/task1/steps/solve/agent"
         job.mkdir(parents=True)
         (job / "trajectory.json").write_text(
             json.dumps({"steps": [{"step_id": 1, "source": "agent", "message": "Could not complete"}]})
         )
-        (output / "agentic_vbench_results.tsv").write_text(
-            f"task\tfamily\treward\tstatus\tjob_dir\ntask1\tagentic_vbench_repair\t0\tOK\t{output / 'jobs/trial'}\n"
-        )
+        (output / "jobs/trial/task1/result.json").write_text(json.dumps({"task_name": "task1"}))
+        verifier = job.parent / "verifier"
+        verifier.mkdir()
+        (verifier / "reward.json").write_text(json.dumps({"reward": 0}))
         return 0
 
     monkeypatch.setattr(app, "run_process", fake_runner)
@@ -102,8 +102,8 @@ async def test_retry_reuses_zero_reward_and_distinct_rollout_runs_again(
     assert first.reward == second.reward == 0
     assert first.artifacts == second.artifacts
     assert len(calls) == 1
-    assert "--official-compatible" in calls[0]
-    assert calls[0][calls[0].index("--setup-max-attempts") + 1] == "1"
+    assert Path(calls[0][1]).name == "harbor_runner.py"
+    assert calls[0][calls[0].index("--task-path") + 1].endswith("agentic_vbench_repair/task1")
     assert first.response.output
     # Recover a persisted completed episode after a server restart without executing a new trajectory.
     agent._inflight.clear()
