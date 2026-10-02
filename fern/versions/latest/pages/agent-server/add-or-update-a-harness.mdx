@@ -18,12 +18,38 @@ Keep task data, preparation, verification, and sandbox requirements with the ben
 
 Bind their references through [EnvironmentServer](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/single_agent_turn) and submit episodes to its `/run`. A compatible pairing should require only composition changes, without a pair-specific launcher, adapter, or preset.
 
-The single-agent lifecycle is:
+The single-agent flow through EnvironmentServer `/run` is:
 
-```text
-Resources: seed task and create sandbox
-Agent:     open session → install runtime → run harness → close session
-Resources: verify result → close resources session and destroy sandbox
+```mermaid
+sequenceDiagram
+    participant E as EnvironmentServer
+    participant R as Resources
+    participant A as Agent adapter
+    participant S as Task sandbox
+    participant M as Model Server
+
+    E->>R: Seed task
+    R->>S: Create sandbox and prepare task
+    R-->>E: SandboxAccess
+    E->>A: Open session with SandboxAccess
+    A->>S: Install pinned runtime
+    E->>A: Run agent
+    A->>S: Start harness
+    loop Model and tool calls
+        S->>M: Model request with rollout identity
+        M-->>S: Model response
+        S->>S: Harness executes tools
+    end
+    S-->>A: Harness output
+    A-->>E: Agent response
+    E->>A: Close agent session
+    A->>S: Stop harness and tool descendants
+    S-->>A: Cleanup confirmed
+    A-->>E: Close result and observations
+    E->>R: Verify result
+    R-->>E: Reward and grading evidence
+    E->>R: Close resources session
+    R->>S: Destroy sandbox
 ```
 
 Resources owns the sandbox. The agent borrows it. **Agent close must succeed before verification.**
