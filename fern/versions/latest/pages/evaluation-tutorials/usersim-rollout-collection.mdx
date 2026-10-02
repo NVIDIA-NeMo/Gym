@@ -1,24 +1,24 @@
 ---
-title: "Run Multi-turn User Simulation with NeMo UserSim"
+title: "Run Multi-turn User Simulation with NeMo User Sim"
 description: "Evaluate an assistant through realistic multi-turn conversations with simulated users."
 position: 4
 ---
 
-# Run Multi-turn User Simulation with NeMo UserSim
+# Run Multi-turn User Simulation with NeMo User Sim
 
 Use this tutorial when you want to evaluate an assistant through realistic multi-turn conversations instead of
-independent, single-turn prompts. NeMo UserSim creates synthetic users with varied backgrounds and goals, while
+independent, single-turn prompts. NeMo User Sim creates synthetic users with varied backgrounds and goals, while
 NeMo Gym runs their conversations with your assistant at scale and records the results for evaluation.
 
 The rollout has two participant Agents because both sides of the conversation must be generated independently:
 
 - The **User Agent** acts as the sampled synthetic person and produces realistic follow-up messages.
-- The **Assistant Agent** routes each activation to `policy_model`. UserSim evaluates the resulting Assistant
+- The **Assistant Agent** routes each activation to `policy_model`. NeMo User Sim evaluates the resulting Assistant
   messages and tool choices, not the Agent Server process itself.
 
 ```mermaid
 sequenceDiagram
-    participant P as UserSim sampler
+    participant P as NeMo User Sim sampler
     participant E as Gym Environment Server
     participant U as User Agent<br/>user_model
     participant A as Assistant Agent<br/>policy_model
@@ -27,47 +27,47 @@ sequenceDiagram
     participant C as Gym rollout collector
 
     P->>E: Materialized persona, scenario, tools, and provenance
-    loop Multi-turn UserSim conversation
+    loop Multi-turn NeMo User Sim conversation
         E->>U: Request next User message
         U-->>E: Simulated User message
         E->>A: Request Assistant response with available tools
         A-->>E: Assistant message or function calls
-        Note over E: UserSim owns conversation state<br/>and executes accepted tool calls
+        Note over E: NeMo User Sim owns conversation state<br/>and executes accepted tool calls
         E->>S: Optional judge, summary, or tool-result request
         S-->>E: Structured support response
     end
-    E->>R: Completed native UserSim result
+    E->>R: Completed native NeMo User Sim result
     R->>S: Evaluate quality and run the probe scorer
     S-->>R: Scores and explanations
     R-->>E: Verification and Assistant reward
     E-->>C: Conversation, tool activity, invocations, and score
 ```
 
-The Environment Server drives UserSim's native conversation loop. The User and Assistant Agents supply the
+The Environment Server drives NeMo User Sim's native conversation loop. The User and Assistant Agents supply the
 two participant messages, the support model handles structured internal calls, and the Resources Server
 verifies the completed episode before Gym saves it.
 
 By the end of this tutorial, you will:
 
-1. Materialize canonical UserSim episode inputs.
+1. Materialize canonical NeMo User Sim episode inputs.
 2. Run one multi-turn conversation against your model endpoint.
 3. Inspect the conversation, score, and underlying model calls.
 4. Optionally expand the run across 14 included evaluation scenarios.
 
 ## Understand the workflow
 
-At a conceptual level, a UserSim rollout has four stages:
+At a conceptual level, a NeMo User Sim rollout has four stages:
 
-1. **Resolve episode inputs:** UserSim's canonical sampler resolves persona, probe, theme, toolset, locale,
+1. **Resolve episode inputs:** NeMo User Sim's canonical sampler resolves persona, probe, theme, toolset, locale,
    configuration, trajectory identity, and provenance. A **probe** tests a behavior such as answering
    educational questions, using tools, or maintaining safety boundaries.
-2. **Wrap Gym tasks:** Gym places each unchanged UserSim row in a task envelope without resampling it.
+2. **Wrap Gym tasks:** Gym places each unchanged NeMo User Sim row in a task envelope without resampling it.
 3. **Hold a conversation:** A simulated user and the assistant exchange messages over multiple dialogue rounds.
-   UserSim decides when the user's goal has been met or the conversation should stop.
-4. **Verify the result:** Gym stores the complete episode and UserSim's probe-specific evidence and score.
+   NeMo User Sim decides when the user's goal has been met or the conversation should stop.
+4. **Verify the result:** Gym stores the complete episode and NeMo User Sim's probe-specific evidence and score.
 
 In this tutorial, a **task** specifies what to simulate, and an **episode** is one attempt to run that task. The
-included UserSim environment contains an example suite with one task for each of UserSim's 14 first-party
+included NeMo User Sim environment contains an example suite with one task for each of NeMo User Sim's 14 first-party
 probes. The suite demonstrates and tests the integration.
 
 ## Prerequisites
@@ -78,10 +78,10 @@ Install NeMo Gym and activate its environment as described in [Installation](/ge
 source .venv/bin/activate
 ```
 
-Preparation runs the pinned UserSim revision in a preparation-only isolated environment. Runtime servers
+Preparation runs the pinned NeMo User Sim revision in a preparation-only isolated environment. Runtime servers
 install the same revision into their own environments. Neither step modifies the Gym environment.
 
-UserSim samples personas from the extended Nemotron-Personas dataset on NGC. Unless the `en_US` dataset is
+NeMo User Sim samples personas from the extended Nemotron-Personas dataset on NGC. Unless the `en_US` dataset is
 already cached under `~/.data-designer/managed-assets/datasets/`, create a free
 [NGC API key](https://org.ngc.nvidia.com/account/api-keys) and export it before preparation:
 
@@ -89,9 +89,9 @@ already cached under `~/.data-designer/managed-assets/datasets/`, create a free
 export NGC_CLI_API_KEY="<your-ngc-key>"
 ```
 
-UserSim also recognizes the legacy `NGC_API_KEY` variable. `NGC_CLI_API_KEY` is preferred because it matches
+NeMo User Sim also recognizes the legacy `NGC_API_KEY` variable. `NGC_CLI_API_KEY` is preferred because it matches
 the current NGC CLI documentation. The key is needed for the persona dataset download, not for access to the
-public UserSim source repository.
+public NeMo User Sim source repository.
 
 Configure the User, Assistant policy, and structured-output support models in a local repository-root
 `env.yaml`:
@@ -148,17 +148,17 @@ gym eval prepare --config environments/usersim/config.yaml
 
 Preparation calls `usersim.engine.external.materialize_episode_inputs(...)` in the isolated environment and
 writes `environments/usersim/data/example.jsonl`. It produces one deterministic row for every registered
-probe. UserSim—not Gym—owns all sampled content and provenance.
+probe. NeMo User Sim—not Gym—owns all sampled content and provenance.
 
 In practical terms:
 
 - There is one generated Gym task file: `environments/usersim/data/example.jsonl`.
-- Each of its 14 rows is already a complete task. UserSim has resolved the persona, scenario/probe, theme,
+- Each of its 14 rows is already a complete task. NeMo User Sim has resolved the persona, scenario/probe, theme,
   tools, locale, random seed, trajectory identity, and provenance for that row.
 - At runtime, the Resources Server checks that the task is the same immutable, provenance-pinned row that was
   prepared. It does not choose a different persona, probe, or scenario.
 
-The equivalent UserSim CLI contract for one selected probe is:
+The equivalent NeMo User Sim CLI contract for one selected probe is:
 
 ```bash
 usersim simulate \
@@ -202,9 +202,9 @@ gym eval run \
 ```
 
 `gym eval run` starts the required Environment, Resources, Agent, and Model Servers for this command. Increase
-the limit only after the smoke rollout completes. UserSim's materialized row owns outer-turn configuration.
+the limit only after the smoke rollout completes. NeMo User Sim's materialized row owns outer-turn configuration.
 For a tool probe, each Assistant Agent call performs one model activation and returns any function calls to the
-Environment-owned UserSim runtime. UserSim executes those calls and requests another Assistant activation when
+Environment-owned NeMo User Sim runtime. NeMo User Sim executes those calls and requests another Assistant activation when
 the probe's native loop requires one.
 The three reasoning-parser flags describe what each upstream endpoint returns, not the endpoint's role. Set a
 flag to `true` only when that endpoint returns reasoning fields that require parsing.
@@ -217,7 +217,7 @@ Before interpreting a score, make sure you can answer two questions:
 - **What was evaluated?** Confirm whose behavior was scored, why it received that score, and whether collection,
   simulation, or grading failed.
 
-Successful episodes are in `rollouts.jsonl`. The exact UserSim input, including the sampled persona and
+Successful episodes are in `rollouts.jsonl`. The exact NeMo User Sim input, including the sampled persona and
 scenario, is in `rollouts_materialized_inputs.jsonl`. Choose one rollout and use the same indices in the
 commands below. For example, task 13 and its first repeat have rollout identity `13:0`:
 
@@ -234,7 +234,7 @@ When following the earlier `--limit 1` smoke command, use `task_index=0`.
 
 ### Inspect the scenario and persona
 
-UserSim—not Gym—sampled these values. Read them from the materialized input:
+NeMo User Sim—not Gym—sampled these values. Read them from the materialized input:
 
 ```bash
 jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
@@ -258,7 +258,7 @@ materialized file remains the authoritative record of all sampled inputs.
 
 ### Inspect the conversation, tools, and models
 
-The following view keeps the complete ordered conversation. UserSim records User, Assistant, Assistant
+The following view keeps the complete ordered conversation. NeMo User Sim records User, Assistant, Assistant
 tool-call, and tool-result messages together in `conversation_messages`:
 
 ```bash
@@ -414,18 +414,18 @@ Interpret that view as follows:
   Assistant participant behavior, and the persisted evidence is named `assistant_eval`.
 - The Environment projects `reward`, `mask_sample`, `failure_kind`, `failure_reason`, and `reward_components`
   from the Resources verifier onto the rollout's top level. This is the standard Gym scoring contract used by
-  aggregation. The nested `verification` object retains the full UserSim-specific evidence.
-- `conversation_status: true` means UserSim finished the conversation; `scenario_completed: true` additionally
+  aggregation. The nested `verification` object retains the full NeMo User Sim-specific evidence.
+- `conversation_status: true` means NeMo User Sim finished the conversation; `scenario_completed: true` additionally
   means both participants completed and any probe-specific scorer passed.
 - `mask_sample: false` means the reward is eligible for aggregation. A masked row is retained for diagnosis
   but does not measure the Assistant policy.
-- `reward` is UserSim's `assistant_quality`: the mean of the normalized helpfulness, accuracy, and coherence
+- `reward` is NeMo User Sim's `assistant_quality`: the mean of the normalized helpfulness, accuracy, and coherence
   axes. `normalized_axis_scores` shows those components.
 - `assistant_eval.axes` contains the original judge score and explanation. For example, a helpfulness rating
   of 4 on a 5-point scale is normalized to `0.8`.
 - `native_scorer_name` and `native_scores` report the probe-specific task check when the scenario has one.
 
-Resources calls UserSim's `TrajectoryEvaluatorGenerator.agenerate()` once with the explicit scorer selected
+Resources calls NeMo User Sim's `TrajectoryEvaluatorGenerator.agenerate()` once with the explicit scorer selected
 for the prepared probe. The full native `assistant_eval` cell, including judge reasoning and applicable
 probe-scorer output, is retained under `verification.verifier_data`.
 
@@ -436,7 +436,7 @@ Do not treat every missing reward as poor Assistant behavior:
 - **Collection or Environment failure:** inspect `results/usersim/rollouts_failures.jsonl`. The
   `_ng_failure_class`, `_ng_failure_stage`, and `_ng_failure_message` fields identify failures before a
   completed rollout could be stored.
-- **UserSim simulation failure:** inspect `usersim_result.simulation_outcome`. Verification copies its failure
+- **NeMo User Sim simulation failure:** inspect `usersim_result.simulation_outcome`. Verification copies its failure
   category and detail to the top-level `failure_kind` and `failure_reason`.
 - **Grading failure:** top-level `failure_kind` is `probe_scorer_error` or `trajectory_evaluator_error`;
   details remain in `failure_reason`, `verification.verifier_data.native_scores`, or
@@ -454,7 +454,7 @@ jq '{
 The key saved fields are:
 
 - `usersim_result.conversation_messages`: ordered User, Assistant, tool-call, and tool-result messages.
-- `usersim_result.conversation_status`: whether UserSim completed the conversation.
+- `usersim_result.conversation_status`: whether NeMo User Sim completed the conversation.
 - `reward`, `mask_sample`, and `reward_components`: Gym's top-level scoring contract.
 - `verification.verifier_data.assistant_eval`: quality ratings and judge explanations.
 - `failure_kind` and `failure_reason`: top-level simulation or grading failure details.
@@ -474,7 +474,7 @@ jq '.invocations[] | {
 }' results/usersim/rollouts.jsonl
 ```
 
-`role` is one of `user`, `assistant`, `judge`, `summary`, or `tool_simulation`. Internal UserSim model aliases
+`role` is one of `user`, `assistant`, `judge`, `summary`, or `tool_simulation`. Internal NeMo User Sim model aliases
 and an agent-versus-model executor label are intentionally not exposed. The `request` and `response` fields
 preserve the exact Responses API exchange for each Environment-owned activation.
 
@@ -494,7 +494,7 @@ jq '.ng_model_call_capture, .ng_trajectory' results/usersim/rollouts.jsonl
 Use these layers for different questions:
 
 - `reward`, `mask_sample`, and `reward_components`: Gym's standard scoring and aggregation fields.
-- `usersim_result`: UserSim's native conversation and outcome.
+- `usersim_result`: NeMo User Sim's native conversation and outcome.
 - `verification`: normalized axes, judge explanations, and native scorer evidence.
 - `invocations`: ordered, role-attributed Environment activations.
 - `ng_model_call_capture`: underlying model calls, token usage, latency, and tool-call evidence.
@@ -521,8 +521,8 @@ gym eval run \
 ```
 
 The `tool_calling`, `safety_agentic`, and `financial_services` probes expose episode-scoped simulated tools to
-the Environment-owned native UserSim runtime. The Resources Server verifies the runtime's tool evidence and
-dispatches the probe's native UserSim scorer when one applies.
+the Environment-owned native NeMo User Sim runtime. The Resources Server verifies the runtime's tool evidence and
+dispatches the probe's native NeMo User Sim scorer when one applies.
 
 ## Architecture details (optional)
 
@@ -535,11 +535,11 @@ evidence. It requests each User, Assistant, Judge, or Summary activation. The En
 activations through the matching Agent Server and support activations directly to the support Model Server.
 
 For `tool_calling`, `safety_agentic`, and `financial_services`, the Assistant Agent returns function calls
-without executing them. The Environment submits that response to `ProbeEpisodeRuntime`; UserSim executes the
+without executing them. The Environment submits that response to `ProbeEpisodeRuntime`; NeMo User Sim executes the
 accepted calls, appends the native tool messages, and decides whether another Assistant activation is needed.
-UserSim's internal `api_response_model` calls route through the Environment's `tool_simulation_model`.
+NeMo User Sim's internal `api_response_model` calls route through the Environment's `tool_simulation_model`.
 
-The Resources Server does not reconstruct a second probe runtime and exposes no probe tool or UserSim-specific
+The Resources Server does not reconstruct a second probe runtime and exposes no probe tool or NeMo User Sim-specific
 `/runtime` endpoints. It validates the immutable prepared row at seed time and verifies the authoritative
 native result after the Environment completes the episode.
 
