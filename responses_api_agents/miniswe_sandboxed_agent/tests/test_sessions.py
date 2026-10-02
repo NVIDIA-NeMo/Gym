@@ -182,7 +182,7 @@ def test_a_second_different_turn_on_the_same_session_is_refused(tmp_path, monkey
 
 def test_session_identity_rules(tmp_path, monkeypatch):
     _, client, sandbox, _, connect = make_agent(tmp_path, monkeypatch)
-    assert client.post("/v1/responses", json={"input": "x"}).status_code == 404
+    assert client.post("/v1/responses", json={"input": "x"}).status_code == 409
     assert client.post("/v1/agent_sessions", json=seed_body(with_sandbox=False)).status_code == 422
     assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
     assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200  # idempotent
