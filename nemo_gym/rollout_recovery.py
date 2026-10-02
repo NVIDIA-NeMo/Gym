@@ -58,6 +58,7 @@ _COLLECTION_OPTIONS = frozenset(
         "health_check_ignored_checks",
         "upload_rollouts",
         "count_failure_classes_as_zero",
+        "count_missing_rollouts_as_zero",
         "route_failures_to_sidecar",
     }
 )

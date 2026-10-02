@@ -19,7 +19,7 @@ import gc
 import tracemalloc
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import orjson
 import pytest
@@ -750,3 +750,81 @@ def test_offline_coverage_declares_and_applies_timeout_retry_policy(prepared_run
     assert offline == online
     assert offline["retry_terminal_timeouts"] is retry_timeouts
     assert offline["attempts_exhausted"] == int(retry_timeouts)
+
+
+@pytest.mark.parametrize("previous", ["success", "failure", "none"])
+@pytest.mark.parametrize("other", ["failure", "unscored", "omitted"])
+async def test_missing_zero_uses_latest_attempt_without_changing_recovery(prepared_run, monkeypatch, previous, other):
+    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper, RolloutCollectionHelper
+    from nemo_gym.rollout_journal import coverage_path_for
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row, second = store.pending(3)
+        store.record_dispatch(row)
+        if previous != "none":
+            payload = {"reward": 1.0} if previous == "success" else {"_ng_failure_class": "agent_run_error"}
+            store.record_outcome(row | payload)
+            # The retry was dispatched but never saved an outcome. The older
+            # success/failure must not hide the new unknown attempt.
+            store.record_dispatch(row | {"_ng_attempt_index": 1})
+        store.record_dispatch(second)
+        other_payload = {
+            "failure": {"_ng_failure_class": "agent_run_error"},
+            "unscored": {"execute_only": True, "response": {}},
+            "omitted": {"_ng_failure_class": "skipped", "_ng_failure_terminal": True},
+        }[other]
+        store.record_outcome(second | other_payload)
+    before = snapshot(output)
+    metrics = AsyncMock(return_value=None)
+    monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", metrics)
+    merged = output.parent / "aggregate" / "merged.jsonl"
+    await RolloutAggregationHelper().run_from_config(
+        RolloutAggregationConfig(
+            input_glob=str(output),
+            output_jsonl_fpath=str(merged),
+            count_missing_rollouts_as_zero=True,
+            disable_health_check=True,
+        )
+    )
+    supplied = metrics.await_args.args[0]
+    zeros = [row for row in supplied if "reward" in row]
+    assert [(row["_ng_task_index"], row["reward"]) for row in zeros] == [(0, 0.0)]
+    assert len(supplied) == (2 if other == "unscored" else 1)
+    report = orjson.loads(coverage_path_for(merged).read_bytes())
+    assert (report["expected"], report["unknown"], report["imputed"], report["scored"]) == (2, 1, 1, 1)
+    assert report["failures_counted_as_zero"] == 0
+    assert not report["complete"]
+    assert snapshot(output) == before
+    assert 0 in [row["_ng_task_index"] for row in RolloutStore.read(output).pending(3)]
+
+
+async def test_missing_zero_keeps_separate_journal_run_identities(prepared_run, monkeypatch):
+    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper, RolloutCollectionHelper
+    from nemo_gym.rollout_journal import coverage_path_for
+
+    output, prepare = prepared_run
+    other = output.with_name("second.jsonl")
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        store.record_outcome(row | {"reward": 1.0})
+    with RolloutStore.start_or_resume(other, prepare, resume=False):
+        pass
+    metrics = AsyncMock(return_value=None)
+    monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", metrics)
+    merged = output.parent / "merged.jsonl"
+    await RolloutAggregationHelper().run_from_config(
+        RolloutAggregationConfig(
+            input_glob=f"{output},{other}",
+            output_jsonl_fpath=str(merged),
+            count_missing_rollouts_as_zero=True,
+            disable_health_check=True,
+        )
+    )
+    supplied = metrics.await_args.args[0]
+    assert len(supplied) == 4
+    assert sum(row["reward"] for row in supplied) == 1.0
+    report = orjson.loads(coverage_path_for(merged).read_bytes())
+    assert (report["expected"], report["successful"], report["imputed"], report["unknown"]) == (4, 1, 3, 3)
+    assert not report["complete"]

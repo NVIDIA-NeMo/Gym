@@ -216,7 +216,11 @@ def saved_manifest(tmp_path):
 
 def test_resume_allows_new_server_addresses_and_operational_options(saved_manifest):
     source, rows, materialized, config, servers, saved, path = saved_manifest
-    config = config | {"resume_from_cache": True, "num_samples_in_parallel": 10}
+    config = config | {
+        "resume_from_cache": True,
+        "num_samples_in_parallel": 10,
+        "count_missing_rollouts_as_zero": True,
+    }
     servers["policy"]["responses_api_models"]["vllm_model"].update(host="host-B", port=200, api_key="new")
     current = RunManifest.create(source, rows, config, servers)
     assert validate_resume(path, current, materialized).run_id == saved.run_id

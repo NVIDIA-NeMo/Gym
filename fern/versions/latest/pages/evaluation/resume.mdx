@@ -272,3 +272,11 @@ recovery history through either spelling. Copied journal-backed runs
 are rejected by run identity. Legacy runs have no trustworthy run identifier: independent evaluations may share the
 same input inventory, so Gym does not identify them by an inventory hash. Supply each original legacy run only once;
 copies at different locations are treated as separate inputs, and their coverage is relative to those supplied inputs.
+
+
+When `+count_missing_rollouts_as_zero=true` is enabled, a task with no result for
+its newest attempt contributes a zero to metrics only. It stays unfinished in
+the recovery coverage and remains eligible for resume. A known failure still
+requires the separate `count_failure_classes_as_zero` policy, and an intentional
+unscored completion is not treated as missing. Aggregation reports these added
+zeros as `imputed`, separately from measured rewards and counted failures.

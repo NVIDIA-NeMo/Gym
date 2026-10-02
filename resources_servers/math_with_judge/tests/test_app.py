@@ -964,3 +964,83 @@ class TestAggregateMetrics:
         assert "pass@1[avg-of-2]/symbolic_accuracy/std_dev_across_runs" in am
         assert "pass@2/symbolic_accuracy" in result.key_metrics
         assert "majority@2/symbolic_accuracy" in result.key_metrics
+
+
+async def test_failure_zero_uses_verifier_fields_and_counts_every_repeat():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.config_types import ResourcesServerRef
+    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.reward_profile import compute_pass_majority_metrics
+    from nemo_gym.sandbox import agent_tools
+    from resources_servers.math_with_judge.app import LibraryJudgeMathResourcesServer, LibraryJudgeMathVerifyRequest
+
+    original = NeMoGymResponse.model_validate(
+        dict(
+            id="failed-generation",
+            created_at=0,
+            model="test",
+            object="response",
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "answer",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "\\boxed{4}", "annotations": []}],
+                }
+            ],
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=True,
+        )
+    )
+    body = LibraryJudgeMathVerifyRequest.model_validate(
+        dict(
+            responses_create_params={"input": "Compute 2+2"},
+            response=original,
+            question="Compute 2+2",
+            expected_answer="4",
+        )
+    )
+    grader = LibraryJudgeMathResourcesServer(
+        config=LibraryJudgeMathResourcesServerConfig(
+            host="127.0.0.1",
+            port=8080,
+            entrypoint="",
+            name="math",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    grader._verify_answer_with_judge = AsyncMock(side_effect=AssertionError("Empty answers must not call the judge"))
+
+    async def post(**kwargs):
+        assert kwargs["json"]["response"]["output"] == []
+        result = await grader.verify(LibraryJudgeMathVerifyRequest.model_validate(kwargs["json"]))
+        return SimpleNamespace(
+            ok=True, read=AsyncMock(return_value=result.model_dump_json().encode()), raise_for_status=lambda: None
+        )
+
+    client = SimpleNamespace(post=AsyncMock(side_effect=post))
+    result = await agent_tools.verify_agent_response(
+        client,
+        ResourcesServerRef(type="resources_servers", name="math"),
+        body,
+        original,
+        {},
+        force_zero_reward=True,
+    )
+    assert result["reward"] == result["library_reward"] == 0
+    assert result["failure_kind"] == "agent_run_error"
+    assert result["response"] == original.model_dump(mode="json")
+    assert result["extracted_answer"] is None
+    correct = dict(reward=1, library_reward=1, extracted_answer="4")
+    metrics = compute_pass_majority_metrics(
+        [[result] * 8 + [correct] * 8], score_fn=grader._math_score_fn, answer_key="extracted_answer"
+    )[0]
+    assert metrics["pass@1[avg-of-16]/symbolic_accuracy"] == 50
+    assert metrics["pass@1[avg-of-8]/symbolic_accuracy"] == 0
+    assert not grader._verify_answer_with_judge.called
