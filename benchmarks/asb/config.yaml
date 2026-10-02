@@ -1,0 +1,22 @@
+config_paths:
+  - resources_servers/asb/configs/asb.yaml
+
+# Agent Security Bench as a Gym benchmark. Inherits the resources server, judge wiring and
+# agent settings from asb_agent (resources_servers/asb/configs/asb.yaml) and points them at
+# the whole 27-condition matrix built by prepare.py.
+#
+# ASB ships construction tools rather than a dataset, so prepare.py clones the pinned
+# upstream revision, checks every load-bearing input by SHA-256, and performs the
+# agent x task x attacker-tool expansion. Rows arrive with a fully built
+# responses_create_params.input, so prompt_config is null and no template is applied.
+asb_benchmark_agent:
+  _inherit_from: asb_agent
+  responses_api_agents:
+    asb_agent:
+      datasets:
+      - name: asb
+        type: benchmark
+        jsonl_fpath: benchmarks/asb/data/asb_benchmark.jsonl
+        prepare_script: benchmarks/asb/prepare.py
+        prompt_config: null
+        license: MIT

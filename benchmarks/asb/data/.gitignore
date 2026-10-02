@@ -1,0 +1,4 @@
+# The benchmark JSONL is built by prepare.py from the pinned upstream revision.
+# It is 60+ MB of generated rows; only the manifest that pins it is committed.
+*
+!.gitignore
