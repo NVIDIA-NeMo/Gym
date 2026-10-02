@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -27,6 +28,9 @@ from responses_api_agents.verifiers_agent.app import (
     VerifiersAgent,
     VerifiersAgentConfig,
     _NoStoreCookieJar,
+)
+from responses_api_agents.verifiers_agent.app import (
+    logger as agent_app_logger,
 )
 
 
@@ -536,8 +540,15 @@ class TestExportStateColumns:
 
         async def fake_run_group(*, group_inputs, client, model, sampling_args, state_columns):
             seen_columns.extend(state_columns)
-            rollout = {"reward": 1.0, "metrics": {}, "completion": [], "trajectory": []}
-            return [{**rollout, **{column: self.RECORDS for column in state_columns if column != "trajectory"}}]
+            state = {
+                "reward": 1.0,
+                "metrics": {},
+                "completion": [],
+                "trajectory": [],
+                "assertion_results": self.RECORDS,
+            }
+            # Like verifiers' state_to_output: a requested column missing from the State comes back as None.
+            return [{**state, **{column: state.get(column) for column in state_columns}}]
 
         env = MagicMock()
         env.run_group = fake_run_group
@@ -561,3 +572,9 @@ class TestExportStateColumns:
         columns, body = self._run(export_state_columns=["assertion_results", "trajectory"])
         assert columns == ["trajectory", "assertion_results"]
         assert body["response"]["exported_state"] == {"assertion_results": self.RECORDS}
+
+    def test_columns_missing_from_the_state_are_omitted_with_a_warning(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            _, body = self._run(export_state_columns=["assertion_result"])
+        assert "exported_state" not in body["response"]
+        assert "['assertion_result'] not on the verifiers State" in caplog.text

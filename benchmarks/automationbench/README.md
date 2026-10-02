@@ -40,8 +40,11 @@ Each rollout then carries
 `response.exported_state.assertion_results`, one record per assertion in task
 order: `index`, `type`, `app` (the WorldState service the assertion inspects),
 `role` (`objective`, `guardrail` or `unscored`), `passed` (final-world verdict;
-a guardrail with `passed: false` is a violation) and `initially_passed`. The
-records use the same classification as the count metrics.
+a guardrail with `passed: false` is a violation) and `initially_passed`
+(initial-world verdict; `null` for unscored assertions and for tasks without an
+initial state). The records use the same classification as the count metrics.
+If the rubric could not score a rollout (an assertion raised), the key is
+omitted and the agent logs a warning.
 
 ## Install
 

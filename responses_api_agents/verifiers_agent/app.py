@@ -603,6 +603,10 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             rollout_output = outputs[0]
             reward = rollout_output.get("reward", 0.0) or 0.0
             metrics = rollout_output.get("metrics", {}) or {}
+            # verifiers exports a column missing from the State as None (a typo, or the rubric never set it).
+            exported_state = {c: rollout_output[c] for c in extra_columns if rollout_output.get(c) is not None}
+            if missing := [c for c in extra_columns if c not in exported_state]:
+                logger.warning(f"Task {task_idx}: export_state_columns {missing} not on the verifiers State, omitted")
 
             output = self._convert_trajectory_to_output(rollout_output)
 
@@ -632,7 +636,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 group_id=str(task_idx),
                 reward=reward,
                 metrics=metrics,
-                exported_state={c: rollout_output.get(c) for c in extra_columns},
+                exported_state=exported_state,
             )
         except Exception as e:
             logger.error(f"Exception in responses(): {type(e).__name__}: {e}")
