@@ -16,8 +16,14 @@ from environment_servers.usersim.app import (
     _to_responses_input_items,
 )
 from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
+from nemo_gym.rollout_collection import _episode_record
 from nemo_gym.server_utils import ServerClient
-from resources_servers.usersim.episode_contracts import UserSimSeedResponse
+from resources_servers.usersim.episode_contracts import (
+    UserSimEpisodeResult,
+    UserSimSeedResponse,
+    UserSimSimulationResult,
+    UserSimVerification,
+)
 
 
 def _server() -> UserSimEnvironmentServer:
@@ -47,6 +53,46 @@ def test_aliases_route_participants_and_support_roles() -> None:
     assert config.target_for_alias("judge_model").name == "support_model"
     assert config.target_for_alias("summary_model").name == "support_model"
     assert config.target_for_alias("api_response_model").name == "support_model"
+
+
+def test_episode_result_projects_verification_into_gym_scoring_contract() -> None:
+    usersim_result = UserSimSimulationResult(
+        conversation_messages=[
+            {"role": "user", "content": "Help me."},
+            {"role": "assistant", "content": "Here is help."},
+        ],
+        conversation_status=True,
+        simulation_outcome={"status": "completed"},
+    )
+    verification = UserSimVerification(
+        reward=0.75,
+        mask_sample=False,
+        failure_kind=None,
+        failure_reason=None,
+        reward_components={"assistant_quality": 0.75},
+        scenario_completed=True,
+        verifier_data={"assistant_eval": {"axes": {}}},
+    )
+
+    result = UserSimEpisodeResult.from_verification(
+        verification=verification,
+        usersim_result=usersim_result,
+        invocations=[],
+    )
+    record = _episode_record(
+        {
+            "episode_id": {"rollout_id": "0-0", "attempt": 0},
+            "task_id": {"taskset": "usersim:example", "task_id": "0"},
+            "result": result.model_dump(mode="json"),
+        }
+    )
+
+    assert record["reward"] == 0.75
+    assert record["mask_sample"] is False
+    assert record["failure_kind"] is None
+    assert record["failure_reason"] is None
+    assert record["reward_components"] == {"assistant_quality": 0.75}
+    assert record["verification"]["verifier_data"]["assistant_eval"] == {"axes": {}}
 
 
 def test_assistant_tool_calls_and_results_convert_to_responses_items() -> None:

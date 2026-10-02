@@ -4,7 +4,7 @@
 """Wire contracts for the NeMo UserSim episode protocol."""
 
 import json
-from typing import Any
+from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -104,10 +104,35 @@ class UserSimEpisodeResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    reward: float
+    mask_sample: bool = False
+    failure_kind: str | None = None
+    failure_reason: str | None = None
+    reward_components: dict[str, float]
     verification: UserSimVerification
     usersim_result: UserSimSimulationResult
     invocations: list[UserSimInvocation]
     episode_interaction_protocol: str = USERSIM_EPISODE_PROTOCOL
+
+    @classmethod
+    def from_verification(
+        cls,
+        *,
+        verification: UserSimVerification,
+        usersim_result: UserSimSimulationResult,
+        invocations: list[UserSimInvocation],
+    ) -> Self:
+        """Project verifier scoring fields onto Gym's persisted episode-result contract."""
+        return cls(
+            reward=verification.reward,
+            mask_sample=verification.mask_sample,
+            failure_kind=verification.failure_kind,
+            failure_reason=verification.failure_reason,
+            reward_components=verification.reward_components,
+            verification=verification,
+            usersim_result=usersim_result,
+            invocations=invocations,
+        )
 
 
 class UserSimEpisodeFailure(EpisodeFailure):
