@@ -40,6 +40,7 @@ class CalendarResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class CalendarResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: CalendarResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

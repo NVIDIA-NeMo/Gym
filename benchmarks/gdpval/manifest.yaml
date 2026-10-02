@@ -1,0 +1,31 @@
+name: gdpval
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-rollout-driver
+domain: other
+description: GDPVal professional deliverable tasks with Stirrup and rubric scoring;
+  preparation uses the upstream train split.
+modality: multimodal
+licensing: unknown
+authors:
+- Serge Panev
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: gdpval
+agent_server: stirrup_agent
+datasets:
+- name: gdpval
+  type: benchmark
+  jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark.jsonl
+  prepare_script: benchmarks/gdpval/prepare.py
+  num_repeats: 1
+model_server: policy_model
+rollout_driver: resources_servers.gdpval.multistage_orchestrator:run_rollout_collection
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active
