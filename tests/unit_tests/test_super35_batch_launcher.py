@@ -519,6 +519,30 @@ def test_lmarena_preparation_keeps_generation_defaults_on_its_rows(
     assert json.loads(source.read_text()) == source_row
 
 
+_LMARENA_CURRENT_ROW = {"responses_create_params": {"input": [], **lmarena_prepare.GENERATION_DEFAULTS}}
+
+
+@pytest.mark.parametrize(
+    ("lines", "expected"),
+    [
+        ([_LMARENA_CURRENT_ROW, _LMARENA_CURRENT_ROW], True),
+        ([{"responses_create_params": {"input": []}}], False),
+        ([_LMARENA_CURRENT_ROW, {"responses_create_params": {"input": [], "max_output_tokens": 65536}}], False),
+        ([{"question_id": "row without request parameters"}], False),
+        (["{not json"], False),
+        ([], False),
+    ],
+    ids=["current", "older-rows", "one-divergent-row", "no-request-parameters", "malformed", "empty"],
+)
+def test_cached_lmarena_rows_are_current_only_when_every_row_has_the_defaults(
+    tmp_path: Path, lines: list, expected: bool
+) -> None:
+    cached = tmp_path / "lmarena_v2_validation.jsonl"
+    cached.write_text("".join((line if isinstance(line, str) else json.dumps(line)) + "\n" for line in lines))
+
+    assert lmarena_prepare.is_prepared_data_current(cached) is expected
+
+
 @pytest.mark.parametrize("config_path", [BENCHMARK / "core_text.yaml", BENCHMARK / "batch_configs/core.yaml"])
 def test_core_suite_preserves_each_members_request_settings(monkeypatch, config_path: Path) -> None:
     """Composing the suite must preserve GPQA's budget and LMArena's row-local settings."""

@@ -28,6 +28,24 @@ from nemo_gym.gitlab_utils import download_jsonl_dataset
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "lmarena_v2_validation.jsonl"
+GENERATION_DEFAULTS = {"temperature": 1.0, "top_p": 0.95, "max_output_tokens": 16384, "stream": False}
+
+
+def is_prepared_data_current(fpath: Path) -> bool:
+    """Whether a cached prepared file has rows and carries the generation defaults on every one."""
+    has_rows = False
+    try:
+        with fpath.open() as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                has_rows = True
+                params = json.loads(line).get("responses_create_params") or {}
+                if any(params.get(key) != value for key, value in GENERATION_DEFAULTS.items()):
+                    return False
+    except (json.JSONDecodeError, AttributeError):
+        return False
+    return has_rows
 
 
 def prepare() -> Path:
@@ -49,9 +67,7 @@ def prepare() -> Path:
         with source_fpath.open() as source, staged_fpath.open("w") as target:
             for line in source:
                 row = json.loads(line)
-                row["responses_create_params"].update(
-                    temperature=1.0, top_p=0.95, max_output_tokens=16384, stream=False
-                )
+                row["responses_create_params"].update(GENERATION_DEFAULTS)
                 target.write(json.dumps(row) + "\n")
         staged_fpath.replace(OUTPUT_FPATH)
     return OUTPUT_FPATH

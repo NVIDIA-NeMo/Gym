@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,6 +22,7 @@ from omegaconf import OmegaConf
 from yaml import safe_load
 
 import nemo_gym.global_config
+from benchmarks.lmarena_v2 import prepare as lmarena_prepare
 from nemo_gym.cli.eval import list_benchmarks, prepare_benchmark
 
 
@@ -646,6 +649,95 @@ class TestPrepareBenchmark:
             prepare_benchmark()
 
         assert mock_module.prepare.call_count == 0
+
+    def _prepare_with_cached_file(self, tmp_path: Path, module: object, *, use_cache: bool = True) -> None:
+        bench_dir, config_path = self._make_bench_dir(tmp_path)
+        (tmp_path / "output.jsonl").write_text("cached rows")
+        config = {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
+        if use_cache:
+            config["use_cached_prepared_benchmarks"] = True
+        with (
+            patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
+            patch("nemo_gym.cli.eval.importlib.import_module", return_value=module),
+        ):
+            prepare_benchmark()
+
+    def test_cached_file_is_prepared_again_when_the_script_reports_it_stale(self, tmp_path: Path, capsys) -> None:
+        module = MagicMock()
+        module.prepare.return_value = tmp_path / "output.jsonl"
+        module.is_prepared_data_current.return_value = False
+
+        self._prepare_with_cached_file(tmp_path, module)
+
+        module.is_prepared_data_current.assert_called_once_with(tmp_path / "output.jsonl")
+        module.prepare.assert_called_once_with()
+        assert "is out of date" in " ".join(capsys.readouterr().out.split())
+
+    def test_cached_file_is_kept_when_the_script_reports_it_current(self, tmp_path: Path) -> None:
+        module = MagicMock()
+        module.is_prepared_data_current.return_value = True
+
+        self._prepare_with_cached_file(tmp_path, module)
+
+        module.is_prepared_data_current.assert_called_once_with(tmp_path / "output.jsonl")
+        assert module.prepare.call_count == 0
+
+    def test_staleness_check_is_not_consulted_without_the_cache_option(self, tmp_path: Path) -> None:
+        module = MagicMock()
+        module.prepare.return_value = tmp_path / "output.jsonl"
+
+        self._prepare_with_cached_file(tmp_path, module, use_cache=False)
+
+        assert module.is_prepared_data_current.call_count == 0
+        module.prepare.assert_called_once_with()
+
+    def test_cached_file_is_kept_when_the_script_has_no_staleness_check(self, tmp_path: Path) -> None:
+        module = SimpleNamespace(prepare=MagicMock())
+
+        self._prepare_with_cached_file(tmp_path, module)
+
+        assert module.prepare.call_count == 0
+
+    def test_cached_lmarena_file_without_generation_defaults_is_prepared_again(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Older prepared rows keep their own limits unless the cache check sends them back through prepare()."""
+        repo_root = Path(__file__).parents[2]
+        output = tmp_path / "lmarena_v2_validation.jsonl"
+        old_row = {"responses_create_params": {"input": [], "temperature": 0.2, "max_output_tokens": 65536}}
+        output.write_text(json.dumps(old_row) + "\n")
+
+        def fake_download(download_config) -> None:
+            Path(download_config.output_fpath).write_text(json.dumps(old_row) + "\n")
+
+        monkeypatch.chdir(repo_root)
+        monkeypatch.setattr(lmarena_prepare, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(lmarena_prepare, "OUTPUT_FPATH", output)
+        monkeypatch.setattr(lmarena_prepare, "download_jsonl_dataset", fake_download)
+        config = {
+            "use_cached_prepared_benchmarks": True,
+            "lmarena_agent": {
+                "responses_api_agents": {
+                    "simple_agent": {
+                        "datasets": [
+                            {
+                                "name": "lmarena_v2",
+                                "type": "benchmark",
+                                "jsonl_fpath": str(output),
+                                "prepare_script": "benchmarks/lmarena_v2/prepare.py",
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+
+        with patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)):
+            prepare_benchmark()
+
+        params = json.loads(output.read_text().splitlines()[0])["responses_create_params"]
+        assert {key: params[key] for key in lmarena_prepare.GENERATION_DEFAULTS} == lmarena_prepare.GENERATION_DEFAULTS
+        assert lmarena_prepare.is_prepared_data_current(output)
 
     def test_two_declarations_resolving_to_one_agent_both_prepare(self, tmp_path: Path) -> None:
         """Keying by resolved agent used to silently drop all but the last declaration."""
