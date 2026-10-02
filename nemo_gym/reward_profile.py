@@ -708,7 +708,9 @@ def compute_subset_metrics(
     """
     subsets: Dict[str, List[List[Dict[str, Any]]]] = {}
     for task_rollouts in tasks:
-        value = task_rollouts[0].get(subset_key) if task_rollouts else None
+        # The first rollout that has it: a row counted as zero for a rollout that never ran can
+        # come first in its task and lack the fields its verifier would have computed.
+        value = next((rollout[subset_key] for rollout in task_rollouts if rollout.get(subset_key)), None)
         if value:
             subsets.setdefault(value, []).append(task_rollouts)
 

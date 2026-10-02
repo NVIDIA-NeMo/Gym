@@ -144,7 +144,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
         A benchmark scoring 0/1 gets the combinatorial estimator, a continuous one gets
         max-of-k; `compute_pass_majority_metrics` decides per task. `answer_key` is left unset
         because Harbor reports a score, not an extracted answer, so majority@k has nothing to
-        take a majority of.
+        take a majority of. As in that helper, a task with fewer than k scored trials is left out
+        of pass@k. A failed trial goes to the sidecar as `harbor_failed`, so list that class in
+        `count_failure_classes_as_zero`, and set `count_missing_rollouts_as_zero` for trials that
+        left no row, to keep every task at every k.
         """
         metrics, _, _, _ = compute_pass_majority_metrics(tasks, score_fn=self._score_fn)
         return metrics
