@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Inkling evaluation settings and pinned task inputs; select a sandbox deployment separately.
+# For the shared-mount OpenSandbox service, also load deployments/opensandbox_shared_mounts.yaml
+# and provide the remote_tmux_binary_path available on that service.
+# Serving configuration: benchmarks/nemotron_3.5_super/vllm_configs/inkling_small_fast_parsers.sh
+config_paths:
+  - benchmarks/terminal_bench_2_1/terminus_2.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+terminal_bench_2_1_terminus_2_sandboxed_agent:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      num_workers: 4
+      model_context_limit: 1048576
+      sandbox_timeout: 10800
+      llm_request_timeout: 3600
+      recover_stalled_interrupts: true
+      # Retain reasoning history in both the agent and model adapter.
+      interleaved_thinking: true
+      datasets:
+        - name: terminal_bench_2_1_inkling_small
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark_inkling_small.jsonl
+          prepare_script: benchmarks/terminal_bench_2_1/prepare_inkling_small.py
+          num_repeats: 8
+
+terminal_bench_2_1_terminus_2_sandboxed_resources_server:
+  resources_servers:
+    terminal_bench_2_1:
+      evaluation_timeout: 1800
+      sandbox_config:
+        env:
+          # Use package defaults instead of interactive configuration prompts.
+          DEBIAN_FRONTEND: noninteractive
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      num_workers: 4
+      uses_interleaved_reasoning: true
+      chat_template_kwargs:
+        reasoning_effort: max
+      sampling_overrides:
+        max_output_tokens: null
+        max_tokens: null
+        max_completion_tokens: null
+
+num_samples_in_parallel: 256
+upload_rollouts: false
+observability_enabled: true
+# Set a unique absolute directory with ++model_call_capture_dir when submitting.
+model_call_capture_dir: null
