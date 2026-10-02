@@ -10,21 +10,72 @@ Environment Server. This harness is currently for evaluation; token IDs and logp
 
 ## Configure and run
 
-Import [configs/pi_agent.yaml](configs/pi_agent.yaml) in your environment/run configuration
-and compose its `pi_agent` with your benchmark's Resources Server, a sandbox provider, and a Gym
-Model Server. The agent config contains no benchmark or dataset selection. Use the existing
-component names directly; the run configuration supplies the Environment Server references.
+The benchmark owns task data, preparation, verification, and task sandbox settings.
+The harness owns its runtime and model/tool loop. The Environment Server binds the two
+and closes the agent before verification.
 
-- On Pi, set `num_workers: 1`, an exact `pi_version` (for example `0.80.2`),
-  `model_server` pointing to the Gym Model Server, and `model` to its served model ID.
-- On [single-agent Environment Server](../../environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml),
-  set `agent_server` to Pi, `resources_server` to the benchmark, and `resources_tool_transports: []`.
-- Resources must support sandbox sessions and return direct `SandboxAccess` with an
-  absolute task working directory. Pi does not create a fallback sandbox.
+Run from the Gym repository root with Gym and the benchmark's preparation dependencies
+installed. For SWE-bench Pro, save this composition as `run.yaml`:
 
-Benchmark selection and evaluation settings belong in that environment/run configuration,
-not a Pi-specific benchmark preset. Pi's own `resources_server` setting is needed only for
-its existing `/run`; omit it for sandbox sessions. Session setup rejects `pi_version: latest`.
+```yaml
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
+  - responses_api_agents/pi_agent/configs/pi_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+single_agent_turn_legacy:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: swebench_pro_resources_server
+      agent_server:
+        name: pi_agent
+      resources_tool_transports: []
+```
+
+Supply the `policy_model` Gym Model Server, `policy_model_name`, and `sandbox` provider in
+`model-provider.yaml`. The agent's `model` defaults to `${policy_model_name}` and remains
+overridable. The sandbox must be able to reach the Model Server.
+
+```bash
+python benchmarks/swebench/pro/prepare.py
+
+gym env start --config run.yaml --config model-provider.yaml
+
+gym eval run --no-serve \
+  --config run.yaml --config model-provider.yaml \
+  --agent pi_agent \
+  -i benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+  -o rollouts.jsonl --limit 3 --concurrency 3
+```
+
+The collector calls Environment Server `/run`: seed Resources, seed the agent, call its
+rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
+flat rows use `single_agent_turn_legacy` with this native session lifecycle; no additional
+materialization script is needed. Collection does not call the agent's compatibility `/run`.
+Pass the same configuration to startup and `--no-serve` collection; collection does not
+inherit routing settings from the running servers.
+
+### Switch harness or benchmark
+
+To change a compatible harness, replace its config import, harness-specific settings,
+the Environment Server's `agent_server.name`, and the collection command's `--agent`.
+Keep benchmark data, preparation, and verifier settings unchanged. To change a compatible
+benchmark, replace its Resources config/reference and prepared input, keeping the harness
+definition unchanged. Check tool grants, task-image/runtime support, model API, and the
+benchmark's declared `allowed_agents` before running a new pairing.
+
+Use this explicit composition for now. `--agent` selects a configured agent; it does not
+install or rebind one. The existing `--agent-type` swap and automatic benchmark-data lookup
+still depend on legacy Agent-to-Resources bindings; they are not equivalent to this workflow.
+A new pairing does not need another combined preset.
+
+## Runtime and model requirements
+
+Use one agent worker, an exact `pi_version` (default **0.80.2**), a Gym `model_server`, and
+direct `SandboxAccess` with an absolute task working directory. Pi does not create a
+fallback sandbox. Session setup rejects `pi_version: latest`. Pi's `resources_server`
+setting is required only for its compatibility `/run`, not native sessions.
 
 Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with Python 3.8+,
 bash, tar/gzip, and SHA-256 utilities. Missing bootstrap packages are installed with apt-get
@@ -48,43 +99,7 @@ Keep `resources_tool_transports: []`: Pi provides its own sandbox tools.
 Required Resources HTTP/MCP tools are rejected. Sandbox sessions also reject host command,
 extra-argument, and environment overrides; those remain available on the local path.
 
-For example, a SWE-bench Pro run can use the following `run.yaml`. The benchmark's
-[Resources config](../../resources_servers/swebench_pro/configs/swebench_pro.yaml)
-owns sandbox and verification settings; Pi's config owns the harness settings.
-The run binds these independent components:
-
-```yaml
-config_paths:
-  - resources_servers/swebench_pro/configs/swebench_pro.yaml
-  - responses_api_agents/pi_agent/configs/pi_agent.yaml
-  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
-
-single_agent_turn_legacy:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_server:
-        name: swebench_pro_resources_server
-      agent_server:
-        name: pi_agent
-```
-
-Supply `policy_model`, `policy_model_name`, and a `sandbox` provider in `model-provider.yaml`.
-Pi uses `${policy_model_name}` by default. The Environment Server accepts the benchmark's
-prepared flat JSONL rows through `single_agent_turn_legacy`, using the same session lifecycle
-as `single_agent_turn`. No separate task conversion is required:
-
-```bash
-python benchmarks/swebench/pro/prepare.py
-gym env start --config run.yaml --config model-provider.yaml
-gym eval run --no-serve \
-  --config run.yaml --config model-provider.yaml \
-  -i benchmarks/swebench/data/swebench_pro_benchmark.jsonl -o rollouts.jsonl \
-  +agent_name=pi_agent
-```
-
-The collector calls the Environment Server's `/run`; the environment seeds Resources
-and Pi, invokes Pi's `/v1/responses`, closes Pi, then verifies and closes Resources.
-Collection does not call Pi's compatibility `/run` endpoint.
+## Requests and settings
 
 Input is one text user message, optionally preceded by a system message. Both sandbox
 and local execution combine the configured system prompt, request `instructions`, and input
