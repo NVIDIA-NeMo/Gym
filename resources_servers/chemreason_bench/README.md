@@ -141,146 +141,110 @@ zeroed every Phi-3-mini contrastive row; one is enough here. The window defaults
 ceiling of 20 (`+prepare_script_args.top_logprobs`); a model reporting many `lm_abstained`
 rows needs it and vLLM's `--max-logprobs` raised together (Phi-3-mini: 1000).
 
+## Comparison with upstream
+
+Three checks, strongest first. All runs: the full 10,648 rows (7,306 `gen` + 3,342 `lm`),
+temperature 0, one pass. Gym serves the model with vLLM; upstream's harness is `predict.py` +
+`eval.py` at the pinned commit, run unmodified on the same weights.
+
+| Primary-Overall | Gym | upstream harness on same weights | paper |
+|---|---|---|---|
+| Qwen2.5-7B-Instruct | 53.82 | 53.82 | 53.94 |
+| Llama-3.1-8B-Instruct (paper's double BOS) | 49.35 | 49.43 | 49.45 |
+| Llama-3.1-8B-Instruct (single BOS, default) | 50.43 | — | — |
+| Phi-3-mini-4k-instruct | 43.55 | — | 43.51 |
+
+### Per task
+
+`task` is the published quantity: the mean of `gen` and `lm` for the three discriminative
+tasks, the `gen` value otherwise. Primary-Overall is the unweighted mean of the six.
+
+**Qwen2.5-7B-Instruct**
+
+| task | Gym gen | paper gen | Gym lm | paper lm | Gym task | upstream task | paper task |
+|---|---|---|---|---|---|---|---|
+| ordering | 78.70 | 78.74 | — | — | 78.70 | 78.51 | 78.74 |
+| contrastive_choice | 63.51 | 63.42 | 65.00 | 65.65 | 64.25 | 64.21 | 64.53 |
+| step_validation | 75.04 | 75.10 | 68.90 | 69.35 | 71.97 | 72.16 | 72.23 |
+| condition_validation | 80.59 | 80.85 | 85.08 | 85.06 | 82.83 | 82.95 | 82.95 |
+| step_completion | 7.10 | 7.25 | — | — | 7.10 | 6.97 | 7.25 |
+| rationalization | 18.05 | 17.96 | — | — | 18.05 | 18.11 | 17.96 |
+
+**Llama-3.1-8B-Instruct**, under the paper's double-BOS prompt (see below)
+
+| task | Gym gen | paper gen | Gym lm | paper lm | Gym task | upstream task | paper task |
+|---|---|---|---|---|---|---|---|
+| ordering | 73.15 | 73.14 | — | — | 73.15 | 73.13 | 73.14 |
+| contrastive_choice | 62.40 | 62.58 | 61.00 | 61.37 | 61.70 | 61.65 | 61.98 |
+| step_validation | 70.86 | 70.90 | 44.38 | 45.45 | 57.62 | 57.99 | 58.18 |
+| condition_validation | 80.88 | 80.80 | 61.44 | 61.79 | 71.16 | 71.41 | 71.30 |
+| step_completion | 9.48 | 9.23 | — | — | 9.48 | 9.43 | 9.22 |
+| rationalization | 22.99 | 22.87 | — | — | 22.99 | 22.94 | 22.87 |
+
+With a single BOS, the port's default, Llama scores 50.43: ordering 75.22, step_completion
+12.20, `lm` step_validation 41.75; the other cells move by less than a point.
+
+**Phi-3-mini-4k-instruct**
+
+| task | Gym gen | paper gen | Gym lm | paper lm | Gym task | paper task |
+|---|---|---|---|---|---|---|
+| ordering | 79.76 | 79.83 | — | — | 79.76 | 79.83 |
+| contrastive_choice | 59.80 | 59.24 | 50.60 | 51.07 | 55.20 | 55.15 |
+| step_validation | 72.04 | 72.46 | 17.93 | 16.98 | 44.99 | 44.72 |
+| condition_validation | 83.39 | 83.33 | 20.14 | 20.39 | 51.76 | 51.86 |
+| step_completion | 5.27 | 5.30 | — | — | 5.27 | 5.30 |
+| rationalization | 24.33 | 24.19 | — | — | 24.33 | 24.19 |
+
+### Reading the numbers
+
+- **Every cell is within ~1 point of the paper, and within 0.4 of upstream's harness.** Upstream
+  publishes neither a spread nor a run count, so no significance test is constructible;
+  run-to-run drift at temperature 0 was measured at up to 0.35 on a task.
+- **The published numbers carry a tokenization bug.** `predict.py` renders the chat template to
+  text, which already contains the BOS token, then calls `tokenizer(text)` with the default
+  `add_special_tokens=True`. Any model whose tokenizer has `add_bos_token=true` was therefore
+  scored from a double-BOS prompt, on both protocols. This port sends a single BOS by default;
+  the paper's condition is one override away, no code change:
+  `++policy_model.responses_api_models.vllm_model.extra_body.add_special_tokens=true`.
+  Upstream's own code on our Llama weights gives 49.43, so the gap to the port's 50.43 is the
+  tokenization, not the model snapshot. Qwen2.5 (no BOS token) and Phi-3-mini
+  (`add_bos_token=false`) are unaffected either way.
+- **Phi-3.** The paper's "Phi-3-mini 7B" is `Phi-3-mini-4k-instruct` (3.8B); the 128k variant is
+  a different fine-tune and scores differently. Run with `CTX=4096`, `MAX_OUT=1024` and a
+  1000-token logprob window. Its collapsed `lm` validation scores reproduce, so they are a
+  property of the model, not the harness.
+- **Generation caps.** Upstream caps output at 96-200 new tokens per task; the Gym runs allowed
+  4096. Phi-3 was not run through upstream's harness.
+
+### Same answers, both scorers
+
+All 21,918 generated answers from the three Gym runs were fed through upstream's parsing and
+`post_*` functions and scored by upstream's `eval.py`, and the same text through this scorer.
+All 18 per-task metrics and Primary-Overall agree to two decimals. 50 rows (0.23%) differ in the
+prediction record without moving a score: 49 `step_completion` actions outside the allowed set,
+which upstream blanks to `""` where this port keeps the string (neither matches gold), and one
+three-object contrastive reply where upstream's first-`{`-to-last-`}` span fails to parse and
+its raw scan takes the first option while the rightmost-object rule takes the last (gold was a
+fourth option).
+
 ## Harness validation
 
-Model-free checks only; no model is involved in any number here.
+Model-free checks.
 
 - **Gold as prediction.** Upstream's own answers replayed through this scorer and through
-  upstream's `eval/eval.py` agree on all six primary metrics and on Primary-Overall
-  (0.988983) to six decimal places. Repeated with replies delivered bare, `<think>`-wrapped
-  and fenced, and across both protocols: unchanged.
-- **Model output replayed through upstream.** All 21,918 generated answers from the three
-  reproduction runs below (`gen` rows of Qwen2.5-7B, Llama-3.1-8B and Phi-3-mini-4k) were fed
-  through upstream's parsing tail and `post_*` functions and scored by upstream's `eval/eval.py`,
-  and the same text through this scorer. Every per-task primary metric and Primary-Overall agree
-  to two decimals, 18 of 18 cells. 50 rows (0.23%) differ in the prediction record without moving
-  any score: 49 are `step_completion` actions outside the allowed set, which upstream blanks to
-  `""` where this port keeps the string (neither matches gold); 1 is a three-object contrastive
-  reply, where upstream's first-`{`-to-last-`}` span fails to parse and its raw scan takes the
-  first option mentioned while the rightmost-object rule above reads the last -- gold was a
-  fourth option, so both are wrong.
-- **Gold cannot reach 100 on `step_completion`.** This is an upstream data property the port
-  reproduces exactly, not a defect here: 460 of 1,483 rows have empty gold slots and
-  `slot_f1({}, {})` is 0 by construction, 2 rows use slot keys outside the schema (`reagents`,
-  `through`), and 6 carry `duration_unit: "day"`, which upstream's own legality check rejects.
-
-  There are two ceilings, and which one applies depends on how much of upstream's pipeline is
-  in play. Scored by `eval.py` alone, gold caps at **0.9339** — that is the figure the
-  six-decimal agreement above is measured against. Through the real pipeline, where
-  `canonicalize_slots` runs first as it does for any model answer, gold caps at **0.9272**,
-  because canonicalization alters 297 of the 1,483 gold slot sets. A model run goes through
-  the second path, so 0.9272 is the ceiling that bounds a reported SC-Score.
-- **Negative controls over all 7,306 rows**, not a sample. An empty prediction scores 0.00
-  Primary-Overall. **A fixed constant answer scores 27.54** -- `f1_positive` pays 0.627 and
-  0.729 on the two validation tasks because always-positive earns good positive-class F1 when
-  46-57% of gold labels are positive. Reversing an ordering scores 0.000 on that task; adding
-  one illegal unit to an otherwise perfect step-completion answer zeroes the task through the
+  upstream's `eval.py` agree on all six primary metrics and Primary-Overall (0.988983) to six
+  decimals, with replies delivered bare, `<think>`-wrapped and fenced, across both protocols.
+- **Gold cannot reach 100 on `step_completion`**, an upstream data property the port reproduces:
+  460 of 1,483 rows have empty gold slots and `slot_f1({}, {})` is 0, 2 rows use slot keys
+  outside the schema, 6 carry `duration_unit: "day"`, which upstream's own legality check
+  rejects. Gold caps at 0.9339 under `eval.py` alone and at 0.9272 through the real pipeline,
+  where `canonicalize_slots` alters 297 of the 1,483 gold slot sets.
+- **Negative controls over all 7,306 rows.** An empty prediction scores 0.00. **A fixed constant
+  answer scores 27.54**: `f1_positive` pays 0.627 and 0.729 on the two validation tasks because
+  46-57% of gold labels are positive. That floor is the key number for reading this benchmark:
+  much of a weak model's headline is reachable without answering anything. Reversing an ordering
+  scores 0.000 on that task; one illegal unit zeroes a perfect step-completion answer through the
   format-error penalty.
-
-That 27.54 floor is the single most important number for reading this benchmark: a large part
-of a weak model's headline is reachable without answering anything.
-
-## Reproduction
-
-Full runs: all 10,648 rows (7,306 `gen` + 3,342 `lm`), temperature 0, one pass, vLLM serving
-the policy locally. `paper` columns are the per-task rows of the paper's Table 2; the three
-discriminative tasks average the two protocols, so Primary-Overall is directly comparable.
-Upstream publishes neither a spread nor a run count, so no significance test is constructible;
-run-to-run drift at temperature 0 was measured at up to 0.35 on a task.
-
-**The published numbers carry a tokenization bug.** `predict.py` renders the chat template to
-text, which already contains the BOS token, then calls `tokenizer(text)` with the default
-`add_special_tokens=True`, so any model whose tokenizer has `add_bos_token=true` was scored
-from a double-BOS prompt, on both protocols. This port sends a single BOS by default. The
-paper's condition is reproducible without a code change:
-`++policy_model.responses_api_models.vllm_model.extra_body.add_special_tokens=true`.
-Qwen2.5 (no BOS token) and Phi-3-mini (`add_bos_token=false`) are unaffected either way.
-
-**Qwen2.5-7B-Instruct** — Primary-Overall **53.82** vs published 53.94.
-
-| task | gen | lm | paper gen | paper lm |
-|---|---|---|---|---|
-| ordering | 78.70 | — | 78.74 | — |
-| contrastive_choice | 63.51 | 65.00 | 63.42 | 65.65 |
-| step_validation | 75.04 | 68.90 | 75.10 | 69.35 |
-| condition_validation | 80.59 | 85.08 | 80.85 | 85.06 |
-| step_completion | 7.10 | — | 7.25 | — |
-| rationalization | 18.05 | — | 17.96 | — |
-
-**Llama-3.1-8B-Instruct** — Primary-Overall **50.43** (single BOS, default) and **49.35**
-with the paper's double BOS reproduced, vs published 49.45.
-
-| task | gen | lm | double-BOS gen | double-BOS lm | paper gen | paper lm |
-|---|---|---|---|---|---|---|
-| ordering | 75.22 | — | 73.15 | — | 73.14 | — |
-| contrastive_choice | 62.40 | 63.88 | 62.40 | 61.00 | 62.58 | 61.37 |
-| step_validation | 73.58 | 41.75 | 70.86 | 44.38 | 70.90 | 45.45 |
-| condition_validation | 81.25 | 62.02 | 80.88 | 61.44 | 80.80 | 61.79 |
-| step_completion | 12.20 | — | 9.48 | — | 9.23 | — |
-| rationalization | 22.71 | — | 22.99 | — | 22.87 | — |
-
-**Phi-3-mini-4k-instruct** — Primary-Overall **43.55** vs published 43.51. The paper's
-"Phi-3-mini 7B" is this 3.8B checkpoint; the 128k variant is a different fine-tune and scores
-differently (ordering 74.6, `lm` validation 47.9 / 70.9). Run with `CTX=4096`, `MAX_OUT=1024`
-and a 1000-token logprob window.
-
-| task | gen | lm | paper gen | paper lm |
-|---|---|---|---|---|
-| ordering | 79.76 | — | 79.83 | — |
-| contrastive_choice | 59.80 | 50.60 | 59.24 | 51.07 |
-| step_validation | 72.04 | 17.93 | 72.46 | 16.98 |
-| condition_validation | 83.39 | 20.14 | 83.33 | 20.39 |
-| step_completion | 5.27 | — | 5.30 | — |
-| rationalization | 24.33 | — | 24.19 | — |
-
-**Per-task composition of Primary-Overall.** Each task's score is the mean of its `gen` and
-`lm` columns above (the three single-protocol tasks are their `gen` value); Primary-Overall is
-the unweighted mean of the six. `paper` is the composite the paper's appendix tables publish;
-Llama is shown under the paper's double-BOS condition.
-
-| task | Qwen2.5-7B | paper | Llama-3.1-8B | paper | Phi-3-mini-4k | paper |
-|---|---|---|---|---|---|---|
-| ordering | 78.70 | 78.74 | 73.15 | 73.14 | 79.76 | 79.83 |
-| contrastive_choice | 64.25 | 64.53 | 61.70 | 61.98 | 55.20 | 55.15 |
-| step_validation | 71.97 | 72.23 | 57.62 | 58.18 | 44.99 | 44.72 |
-| condition_validation | 82.83 | 82.95 | 71.16 | 71.30 | 51.76 | 51.86 |
-| step_completion | 7.10 | 7.25 | 9.48 | 9.22 | 5.27 | 5.30 |
-| rationalization | 18.05 | 17.96 | 22.99 | 22.87 | 24.33 | 24.19 |
-| **Primary-Overall** | **53.82** | **53.94** | **49.35** | **49.45** | **43.55** | **43.51** |
-
-**Side by side with upstream's harness.** The same weights were also run through upstream's
-own `predict.py` and `eval.py` at the pinned commit, unmodified, in the same container (gen pass
-over all 7,306 prompts; `lm` pass over the 3,342 discriminative rows). Per-task composites, Gym
-under the same prompt condition as upstream (double BOS for Llama):
-
-| Llama-3.1-8B | upstream harness | Gym | paper |
-|---|---|---|---|
-| ordering | 73.13 | 73.15 | 73.14 |
-| contrastive_choice | 61.65 | 61.70 | 61.98 |
-| step_validation | 57.99 | 57.62 | 58.18 |
-| condition_validation | 71.41 | 71.16 | 71.30 |
-| step_completion | 9.43 | 9.48 | 9.22 |
-| rationalization | 22.94 | 22.99 | 22.87 |
-| **Primary-Overall** | **49.43** | **49.35** | **49.45** |
-
-| Qwen2.5-7B | upstream harness | Gym | paper |
-|---|---|---|---|
-| ordering | 78.51 | 78.70 | 78.74 |
-| contrastive_choice | 64.21 | 64.25 | 64.53 |
-| step_validation | 72.16 | 71.97 | 72.23 |
-| condition_validation | 82.95 | 82.83 | 82.95 |
-| step_completion | 6.97 | 7.10 | 7.25 |
-| rationalization | 18.11 | 18.05 | 17.96 |
-| **Primary-Overall** | **53.82** | **53.82** | **53.94** |
-
-Every task agrees within 0.4 between the two harnesses. Upstream's code on our Llama weights
-gives 49.43 under its double BOS and Gym gives 50.43 with a single BOS: the published Llama gap
-is the tokenization, not the model snapshot. Upstream caps generation at 96-200 new tokens per
-task where Gym allows 4096.
-
-Under each model's own condition every cell is within ~1 point of the published row, and
-Phi-3's collapsed `lm` validation scores reproduce too: they are a property of that model, not
-of the harness.
 
 ## Quickstart
 
