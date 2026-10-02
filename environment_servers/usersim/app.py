@@ -453,7 +453,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         return UserSimEpisodeResponse(
             episode_id=request.episode_id,
             task_id=request.task.task_id,
-            result=UserSimEpisodeResult(
+            result=UserSimEpisodeResult.from_verification(
                 verification=verification,
                 usersim_result=result,
                 invocations=bridge.invocations,
