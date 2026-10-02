@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import base64
 import copy
 import json
 import logging
@@ -23,6 +24,7 @@ import re
 import shlex
 import shutil
 import tempfile
+import sys
 from asyncio import Semaphore
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -316,6 +318,57 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
     build_json = _dump_with_serialized_member(build, "prompt", prompt)
     agent_json = _dump_with_serialized_member(agent, "build", build_json)
     return _dump_with_serialized_member(config, "agent", agent_json)
+_IMAGE_SUFFIXES = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/webp": ".webp"}
+
+
+def _extract_images(body_input) -> list[tuple[str, bytes]]:
+    """(suffix, bytes) of the data-URL images in the last user message, in order."""
+    for item in reversed(list(body_input)):
+        role = getattr(item, "role", None) or (item.get("role") if isinstance(item, dict) else None)
+        if role != "user":
+            continue
+        content = getattr(item, "content", None) or (item.get("content") if isinstance(item, dict) else None)
+        images = []
+        for part in content if isinstance(content, list) else []:
+            data = part if isinstance(part, dict) else part.model_dump()
+            url = data.get("image_url") if data.get("type") == "input_image" else None
+            match = re.match(r"data:(image/[a-z]+);base64,(.*)", url or "", re.S)
+            if match and match.group(1) in _IMAGE_SUFFIXES:
+                images.append((_IMAGE_SUFFIXES[match.group(1)], base64.b64decode(match.group(2))))
+        return images
+    return []
+
+
+# Runs as `sh -c SCRIPT sh <work_dir> <keep_dirs> <command...>` in a fresh user+mount namespace:
+# the run's own <work_dir>/tmp becomes /tmp, then the colon-separated <keep_dirs> (top-level
+# /tmp entries the run needs: Gym, its venvs, OpenCode) are bound back from the host's /tmp.
+_PRIVATE_TMP_SCRIPT = """set -e
+work=$1; keep=$2; shift 2
+start=$(pwd)
+mkdir -p "$work/.host-tmp" "$work/tmp"
+mount --rbind /tmp "$work/.host-tmp"
+cd "$work"
+mount --bind "$work/tmp" /tmp
+IFS=:
+for dir in $keep; do
+  mkdir -p "$dir"
+  mount --rbind ".host-tmp/${dir#/tmp/}" "$dir"
+done
+unset IFS
+cd "$start"
+exec "$@"
+"""
+
+
+def _tmp_roots(paths: list[Optional[str]]) -> list[str]:
+    """The top-level /tmp/<name> directory of each path that lives under /tmp, deduplicated."""
+    roots = []
+    for path in paths:
+        parts = Path(os.path.realpath(path)).parts if path else ()
+        root = str(Path(*parts[:3])) if len(parts) > 2 and parts[:2] == ("/", "tmp") else None
+        if root and root not in roots:
+            roots.append(root)
+    return roots
 
 
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -397,6 +450,14 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
                 "or use system_prompt_mode='append'."
             )
         return self
+    # Multimodal tasks: write the last user message's data-URL images into the project dir as
+    # image_<i>.<ext> and attach them with -f. `vision` declares a generated (model_server)
+    # model entry image-capable, so OpenCode sends attachments and `read` returns image files.
+    attach_images: bool = False
+    vision: bool = False
+    # Give each run a private /tmp (unshare --user --mount; needs unprivileged user namespaces).
+    # Models write scratch files to fixed /tmp names, which concurrent runs would share.
+    private_tmp: bool = False
 
     @property
     def command_parts(self) -> list[str]:
@@ -544,6 +605,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 {
                     "name": self.config.model,
                     "limit": {"context": self.config.context_window, "output": self.config.max_output_tokens},
+                    **(
+                        {"attachment": True, "modalities": {"input": ["text", "image"], "output": ["text"]}}
+                        if self.config.vision
+                        else {}
+                    ),
                 },
             )
             nemo["models"] = {self.config.model: model}
@@ -559,6 +625,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     def _env(self, data_home: str, rollout_id: Optional[str] = None) -> dict[str, str]:
         env = {**os.environ, "XDG_DATA_HOME": data_home}
+        # OpenCode also writes its config/cache/state dirs; keep them in the run dir too
+        # (clusters where $HOME is read-only).
+        for name in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+            env[name] = str(Path(data_home).parent / f".opencode-{name.split('_')[1].lower()}")
         base_url = (
             self._resolve_model_base_url(rollout_id) if self.config.model_server else self.config.openai_base_url
         )
@@ -582,6 +652,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         collect_observations: bool = True,
         trajectory: Optional[TrajectoryRecord] = None,
         timeout: float | None = None,
+        images: Optional[list[tuple[str, bytes]]] = None,
     ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
         """Run one headless OpenCode session and read its persisted artifact."""
         try:
@@ -603,6 +674,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             self._deep_merge(overrides, {"agent": {"build": {"prompt": system_prompt}}})
             env["OPENCODE_CONFIG_CONTENT"] = _serialize_replacement_config(overrides)
             prompt = instruction
+        files = []
+        for index, (suffix, data) in enumerate(images or []):
+            path = project_dir / f"image_{index}{suffix}"
+            path.write_bytes(data)
+            files.append(str(path.resolve()))
 
         cmd = [*self.config.command_parts, "run", "-m", self._effective_model(), "--dir", str(project_dir)]
         if self.config.system_prompt_mode == "replace":
@@ -611,6 +687,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             cmd.append("--thinking")
         cmd.extend(self.config.extra_args)
         cmd.append(prompt)
+        # Repeated -f (an array flag), after the positional prompt so it cannot absorb it.
+        cmd.extend(arg for path in files for arg in ("-f", path))
+        if self.config.private_tmp:
+            keep = _tmp_roots(
+                [str(work_dir), str(project_dir), str(Path(__file__)), sys.prefix, sys.base_prefix, sys.executable]
+                + [shutil.which(self.config.command_parts[0]) if self.config.command_parts else None]
+            )
+            cmd = [
+                *("unshare", "--user", "--map-current-user", "--mount", "sh", "-c", _PRIVATE_TMP_SCRIPT, "sh"),
+                str(work_dir.resolve()),
+                ":".join(keep),
+                *cmd,
+            ]
 
         try:
             timed_out = False
@@ -697,6 +786,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             TrajectoryRecord(task_id="unscoped", rollout_id=rollout_id or "unscoped") if collect_observations else None
         )
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        images = _extract_images(body.input) if self.config.attach_images else []
 
         output_items, usage, model_name, observations = await self._run_opencode(
             user_message,
@@ -705,6 +795,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             collect_observations=collect_observations,
             trajectory=trajectory,
             timeout=timeout,
+            images=images,
         )
         if collect_observations:
             observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
