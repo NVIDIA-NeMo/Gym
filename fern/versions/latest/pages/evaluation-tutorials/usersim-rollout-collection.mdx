@@ -71,9 +71,10 @@ architecture section later on explains it for readers who want to customize mode
 </Note>
 
 <Info>
-The UserSim integration is under active development. It currently installs UserSim revision
-`8fd3ff4798af4037e164364f6c59ad14b4eabdc0` from GitHub over SSH. The installation host needs access to
-[NVIDIA-NeMo/UserSim](https://github.com/NVIDIA-NeMo/UserSim).
+You do not need to install UserSim separately. The preparation and runtime commands automatically install the
+public [NVIDIA-NeMo/UserSim](https://github.com/NVIDIA-NeMo/UserSim) repository over HTTPS, pinned to revision
+`a5f676bf6dc5a73914c8a0860f97c10dd2c214ee` for reproducible results. No SSH credentials or repository access
+approval is required.
 </Info>
 
 ## Prerequisites
@@ -112,11 +113,24 @@ export POLICY_API_KEY="<your-api-key>"
 export SUPPORT_MODEL_API_KEY="<your-api-key>"
 ```
 
-The User Agent uses `user_model`, the Assistant Agent uses `policy_model`, and Judge, Summary, probe scoring,
-and tool-result simulation use `support_model`. These are three independently started Model Servers. Their
-upstream URLs may still match when one provider serves multiple roles, but separate settings let you evaluate
-an Assistant policy against a fixed user-simulation model. A support model that reliably honors JSON-schema
-response formats avoids coupling structured evaluation to participant-model reasoning behavior.
+Gym starts three **Model Server** instances. These are inference proxies, not the User/Assistant Agent Servers
+or the Resources Server:
+
+- **`user_model`** serves the User Agent, which produces simulated User messages. Its upstream endpoint is
+  configured with `user_model_base_url`, `user_model_api_key`, and `user_model_name`.
+- **`policy_model`** serves the Assistant Agent—the system under test. Its upstream endpoint is configured with
+  `policy_base_url`, `policy_api_key`, and `policy_model_name`.
+- **`support_model`** serves Judge, Summary, probe-scoring, and tool-result-simulation calls. Its upstream
+  endpoint is configured with `support_model_base_url`, `support_model_api_key`, and `support_model_name`.
+
+Each Gym Model Server can point to a different upstream model endpoint. The URLs may also match when one
+provider serves multiple roles. Keeping the settings separate lets you hold the simulated User and evaluator
+models fixed while changing the Assistant policy. For `support_model`, prefer a model that reliably follows
+JSON-schema response formats.
+
+The reasoning-parser flags in the rollout command describe the response format of each upstream endpoint.
+They do not select which role uses the model. Enable a parser only when that endpoint returns reasoning fields
+that require it.
 
 ## Prepare resolved inputs
 
