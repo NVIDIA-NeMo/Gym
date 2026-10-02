@@ -157,6 +157,7 @@ class HarnessAgentVerifyResponse(BaseVerifyResponse):
 
 
 class HarnessAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: HarnessAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -256,7 +257,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 local.write_text(content)
                 await self._provider.upload_file(handle, local, self._box_path(handle, target))
 
-    async def run(self, request: Request, body: HarnessAgentRunRequest) -> BaseVerifyResponse:
+    async def run(self, request: Request, body: HarnessAgentRunRequest) -> HarnessAgentVerifyResponse:
         async with self.sem:
             cookies = request.cookies
 

@@ -37,7 +37,8 @@ import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, ClassVar, Iterable, Literal, Mapping, Optional, TypedDict
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
@@ -63,7 +64,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -86,7 +87,7 @@ from nemo_gym.token_id_capture import (
 
 # The store factory needs Gym's server stack.
 # The leaf package does not re-export it.
-from nemo_gym.token_id_capture.config import token_id_capture_config
+from nemo_gym.token_id_capture.config import NonGeneratingRequest, token_id_capture_config
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
@@ -99,6 +100,25 @@ logger = logging.getLogger(__name__)
 
 # Stateless; shared by every model server's default /v1/messages handler.
 _ANTHROPIC_CONVERTER = AnthropicConverter()
+
+
+class ModelExecutionOutcome(TypedDict):
+    upstream_attempted: bool
+    response_source: Literal["upstream", "local"] | None
+    upstream_status_code: int | None
+    local_response_reason: str | None
+
+
+def start_model_execution(request: Request, *, upstream_attempted: bool) -> ModelExecutionOutcome:
+    """Keep adapter-owned execution facts separate from the served response and capture settings."""
+    outcome = ModelExecutionOutcome(
+        upstream_attempted=upstream_attempted,
+        response_source=None,
+        upstream_status_code=None,
+        local_response_reason=None,
+    )
+    request.state.nemo_gym_model_execution = outcome
+    return outcome
 
 
 def _request_messages(body: Any) -> list[dict]:
@@ -173,12 +193,13 @@ def _orjson_dispatch_response(content: Any) -> Any:
     if isinstance(content, Response):
         return content
     if isinstance(content, BaseModel):
-        content = content.model_dump(mode="json")
+        content = content.model_dump(mode="json", by_alias=True)
     return Response(content=orjson.dumps(content), media_type="application/json")
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
-    pass
+    # Exact successful routes whose responses cannot contain policy-generated content.
+    token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -186,6 +207,10 @@ class BaseResponsesAPIModel(BaseServer):
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    # Subclasses can declare successful metadata or health routes here.
+    # Unknown successful routes fail closed during training-token capture.
+    non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
+
     async def _finalize_served_response(self, response: Any) -> None:
         """Finalize capture after conversion to the response returned to the client."""
 
@@ -209,6 +234,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             model_server_name=self.config.name,
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
+            non_generating_requests=self.non_generating_model_routes
+            | frozenset(
+                (request.method, request.path) for request in self.config.token_id_capture_non_generating_requests
+            ),
         )
 
         model_attributes = {"nemo.gym.server.name": self.config.name}
@@ -720,6 +749,10 @@ class ModelCallRecord(BaseModel):
     status_code: Optional[int] = None
     response_status: Optional[str] = None
     finish_reason: Optional[str] = None
+    upstream_attempted: Optional[bool] = None
+    response_source: Optional[Literal["upstream", "local"]] = None
+    upstream_status_code: Optional[int] = None
+    local_response_reason: Optional[str] = None
 
     # Wall-clock bounds around the downstream ASGI invocation, as UTC Unix timestamps. These are
     # for external trace correlation; durations use the monotonic latency fields below.
@@ -798,6 +831,10 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
         status_code=exchange.get("status_code"),
         response_status=response.get("status") if isinstance(response.get("status"), str) else None,
         finish_reason=finish_reason,
+        upstream_attempted=exchange.get("upstream_attempted"),
+        response_source=exchange.get("response_source"),
+        upstream_status_code=exchange.get("upstream_status_code"),
+        local_response_reason=exchange.get("local_response_reason"),
         started_at=exchange.get("started_at"),
         completed_at=exchange.get("completed_at"),
         request=raw_request if isinstance(raw_request, dict) else None,
@@ -892,6 +929,43 @@ def _headers_content_type(headers: list) -> bytes:
 def _unique_request_header(headers: list, name: bytes) -> Optional[str]:
     values = {value.decode("latin-1") for key, value in headers if key.lower() == name and value}
     return values.pop() if len(values) == 1 else None
+
+
+def _preserve_capture_prefix_on_redirect(
+    message: dict[str, Any],
+    *,
+    capture_prefix: str,
+    request_headers: list[tuple[bytes, bytes]],
+) -> dict[str, Any]:
+    """Keep rollout correlation on root-relative and same-origin redirects."""
+    status = int(message.get("status") or 0)
+    if not 300 <= status < 400:
+        return message
+
+    request_host = next(
+        (value.decode("latin-1") for key, value in request_headers if key.lower() == b"host"),
+        "",
+    )
+    headers = list(message.get("headers") or [])
+    changed = False
+    for index, (key, value) in enumerate(headers):
+        if key.lower() != b"location":
+            continue
+        location = value.decode("latin-1")
+        parts = urlsplit(location)
+        if parts.netloc and parts.netloc != request_host:
+            continue
+        if not parts.path.startswith("/") or parts.path.startswith(f"{capture_prefix}/"):
+            continue
+        headers[index] = (
+            key,
+            urlunsplit(parts._replace(path=f"{capture_prefix}{parts.path}")).encode("latin-1"),
+        )
+        changed = True
+
+    if not changed:
+        return message
+    return {**message, "headers": headers}
 
 
 def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str]:
@@ -1171,6 +1245,7 @@ def _record(
     latency_ms: float,
     ttft_ms: Optional[float] = None,
     response_raw: Optional[str] = None,
+    execution: Optional[ModelExecutionOutcome] = None,
 ) -> None:
     """Append one exchange (success or failure). Best-effort: never raises."""
     request_body = None
@@ -1201,6 +1276,10 @@ def _record(
         }
         if client_session_id is not None:
             exchange["client_session_id"] = client_session_id
+        if execution is not None:
+            exchange.update(execution)
+            if execution["local_response_reason"] == "context_length_exceeded":
+                exchange["error_category"] = "context_length_exceeded"
         if request_raw is not None:
             exchange["request_raw"] = request_raw
         if response_raw is not None:
@@ -1271,6 +1350,7 @@ class _CaptureMiddleware:
         delta_records: bool = False,
         external_staging: bool = False,
         token_capture_enabled: bool = False,
+        non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
     ) -> None:
         self._app = app
         self._store = store
@@ -1291,6 +1371,7 @@ class _CaptureMiddleware:
         # A framework may stage records from its inference worker.
         # This process still resolves the capture identity.
         self._token_capture_enabled = token_capture_enabled
+        self._non_generating_requests = non_generating_requests
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -1300,14 +1381,21 @@ class _CaptureMiddleware:
         path = scope.get("path", "")
         rollout_from_path: Optional[str] = None
         token_capture_requested = False
+        capture_prefix = ""
         prefix_match = _ROLLOUT_PATH_RE.match(path)
         if prefix_match:
             rollout_from_path = prefix_match.group("rollout_id")
             token_capture_requested = prefix_match.group("token_capture") is not None
+            capture_prefix = path[: prefix_match.start("rest")]
             path = prefix_match.group("rest")
             scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
 
+        method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)
+        known_non_generating = (method, path) in self._non_generating_requests
+
+        # State is shared with the handler even through middleware scope copies.
+        request_state = scope.setdefault("state", {})
 
         # Forward when no active store needs this correlated endpoint.
         # The prefix is already stripped.
@@ -1320,22 +1408,62 @@ class _CaptureMiddleware:
         # Installed sinks are resolved for each request.
         token_sink = self._configured_sink or installed_token_sink() or self._token_store
         capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
-        if token_capture_requested and dialect is None:
-            # An uncapturable call must not look complete.
-            # Its output can still feed later prompts.
-            # Mark the rollout before forwarding so consumers retain that evidence.
-            if token_sink is not None:
+        if token_capture_requested and dialect is None and token_sink is not None:
+            marked_incomplete = False
+            response_started = False
+
+            async def _mark_unobserved_incomplete(reason: str) -> None:
+                nonlocal marked_incomplete
+                if marked_incomplete:
+                    return
+                marked_incomplete = True
                 try:
                     await token_sink.mark_incomplete(rollout_from_path, "")
+                    logger.warning(
+                        f"Marked rollout {rollout_from_path} incomplete because unclassified model request "
+                        f"{method} {path} {reason}. Declare the exact request on the model server only if its "
+                        "response cannot contain policy-generated content."
+                    )
                 except Exception:
                     logger.warning(
-                        "Could not mark rollout %s incomplete for unobserved path %s.",
-                        rollout_from_path,
-                        path,
+                        f"Could not mark rollout {rollout_from_path} incomplete for unobserved path {path}.",
                         exc_info=True,
                     )
+
+            async def _send_unobserved(message: dict[str, Any]) -> None:
+                nonlocal response_started
+                if message.get("type") == "http.response.start":
+                    response_started = True
+                    status = int(message.get("status") or 0)
+                    safe_without_capture = status in {404, 405}
+                    if not known_non_generating and not safe_without_capture:
+                        await _mark_unobserved_incomplete(f"returned HTTP {status}")
+                    message = _preserve_capture_prefix_on_redirect(
+                        message,
+                        capture_prefix=capture_prefix,
+                        request_headers=list(scope.get("headers") or []),
+                    )
+                await send(message)
+
+            try:
+                await self._app(scope, receive, _send_unobserved)
+            except asyncio.CancelledError:
+                if not known_non_generating and not response_started:
+                    await _mark_unobserved_incomplete("was cancelled before starting a response")
+                raise
+            except Exception:
+                if not known_non_generating and not response_started:
+                    await _mark_unobserved_incomplete("failed before starting a response")
+                raise
+            if not known_non_generating and not response_started:
+                await _mark_unobserved_incomplete("completed without starting a response")
+            return
         if (self._store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
-            await self._app(scope, receive, send)
+            # Publish the id to this handler's current_rollout_id() even on the plain
+            # forward path -- this is the common case for a model server with capture
+            # disabled, and the id is already known here from the prefix above.
+            with rollout_context(rollout_from_path):
+                await self._app(scope, receive, send)
             return
 
         rollout_id = rollout_from_path
@@ -1381,7 +1509,8 @@ class _CaptureMiddleware:
                 await send(message)
 
             try:
-                await self._app(scope, receive, _send_training_only)
+                with rollout_context(rollout_id):
+                    await self._app(scope, receive, _send_training_only)
             finally:
                 await _fail_uncommitted_external_call(capture_context)
                 if sink_token is not None:
@@ -1437,7 +1566,8 @@ class _CaptureMiddleware:
                 await send(message)
 
         try:
-            await self._app(scope, _receive, _send)
+            with rollout_context(rollout_id):
+                await self._app(scope, _receive, _send)
         except (Exception, asyncio.CancelledError) as exc:
             completed_at = time.time()
             exception_status, exception_body = _exception_http_details(exc)
@@ -1464,6 +1594,7 @@ class _CaptureMiddleware:
                     latency_ms=(time.perf_counter() - start) * 1000.0,
                     ttft_ms=state["ttft_ms"],
                     response_raw=upstream_body.decode("utf-8", errors="replace") if upstream_body else None,
+                    execution=request_state.get("nemo_gym_model_execution"),
                 )
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
@@ -1533,6 +1664,7 @@ class _CaptureMiddleware:
                 latency_ms=latency_ms,
                 ttft_ms=ttft_ms,
                 response_raw=response_raw,
+                execution=request_state.get("nemo_gym_model_execution"),
             )
 
         try:
@@ -1550,6 +1682,7 @@ def install_model_call_capture(
     model_server_name: str | None = None,
     global_config_dict: Any = None,
     num_workers: int | None = None,
+    non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
 ) -> None:
     """Install model-call capture middleware.
 
@@ -1638,6 +1771,7 @@ def install_model_call_capture(
         delta_records=(capture_settings.token_id_capture.delta_records if capture_settings is not None else False),
         external_staging=external_staging,
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
+        non_generating_requests=non_generating_requests,
     )
 
 

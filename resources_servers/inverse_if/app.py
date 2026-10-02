@@ -261,6 +261,8 @@ def _extract_verdict(judge_text: str) -> tuple[str, str]:
 class InverseIFServer(SimpleResourcesServer):
     """Inverse IF evaluation server."""
 
+    ray_enabled = False
+
     config: InverseIFConfig
 
     def setup_webserver(self) -> FastAPI:
