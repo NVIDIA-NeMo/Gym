@@ -293,3 +293,11 @@ Each rollout result is stamped with a `skills_ref` for provenance and grouping d
 - `turns_used` counts assistant messages right now, not tool calls.
 - Codex has no `--max-turns` equivalent; runaway rollouts are bounded by `timeout`.
 - Multi-turn dataset inputs are collapsed to a single prompt: only the first `system` message (as `developer_instructions`) and the last `user` message are passed to `codex exec`; any earlier user/assistant/tool turns in `responses_create_params.input` are dropped. This matches the Claude Code agent and is fine for single-turn datasets like reasoning_gym, but datasets that encode prior conversation turns in `input` will not see that history.
+
+Without `sandbox_access`, configure `sandbox_provider` and `sandbox_config`
+(`SandboxSpec` fields such as `image`, `workdir`, and `ttl_s`) on the agent.
+It creates a sandbox, runs there, and destroys it on close; the default workdir is
+`/app`. A supplied access always wins, including its workdir; connection failure
+never triggers a replacement or host execution. With neither access nor a usable
+provider, setup fails. Verifiers that inspect task files must keep using a
+Resources-owned sandbox, since agent-owned sandboxes are gone before verification.

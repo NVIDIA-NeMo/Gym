@@ -70,7 +70,9 @@ def make_session(tmp_path):
     request = seed()
     request.sandbox_access.workdir = str(workdir)
     provider = ExecOnlySandbox()
-    state = CodexSandboxSession(request, provider, str(directory), str(tmp_path / "runtime"))
+    state = CodexSandboxSession(
+        request, provider, str(directory), str(tmp_path / "runtime"), workdir=request.sandbox_access.workdir
+    )
     shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
     shutil.copyfile(process_supervisor.__file__, directory / "process_supervisor.py")
     return state, provider, workdir

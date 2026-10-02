@@ -122,8 +122,8 @@ class Sandbox:
     async def create(self, **kwargs):
         payload_path = next(path for path in self.files if path.endswith("/input.json"))
         payload = json.loads(self.files[payload_path])
-        assert payload["cwd"] == "/app"
-        assert kwargs["cwd"] == "/app"
+        assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
+        assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
         assert "sandbox_runner.py" in kwargs["command"]
         self.directory = payload["directory"]
         self.started.set()
@@ -1605,3 +1605,163 @@ async def test_failed_setup_is_cleanup_only_and_preserves_original_exception(set
     sandbox.disconnect.side_effect = None
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seed().agent_session_id)))
     sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_sandbox_source_controls_ownership_and_native_routing(setup, owned):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
+    sandbox.expected_workdir = "/agent-workspace" if owned else "/app"
+    body = seed()
+    if owned:
+        body.sandbox_access = None
+    sandbox.start = AsyncMock()
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox) as factory,
+        patch(f"{module}.resolve_provider_config") as resolve,
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        factory.connect = AsyncMock(return_value=sandbox)
+        created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        state = agent._session_records[body.agent_session_id].state
+        assert state.owns_sandbox is owned
+        assert state.workdir == sandbox.expected_workdir
+        resolve.assert_called_once_with("agent-provider" if owned else "sandbox", {})
+        workspace_calls = [call for call in sandbox.exec.await_args_list if call.args[0].startswith("mkdir -p --")]
+        assert len(workspace_calls) == int(owned)
+        if owned:
+            assert workspace_calls[0].args[0] == "mkdir -p -- /agent-workspace"
+            assert workspace_calls[0].kwargs["cwd"] == "/"
+        if owned:
+            factory.connect.assert_not_awaited()
+            spec = sandbox.start.await_args.args[0]
+            assert spec.image == "test-image"
+            assert spec.workdir == "/agent-workspace"
+        else:
+            factory.assert_not_called()
+            factory.connect.assert_awaited_once()
+        response = client.post(
+            f"/ng-rollout/{body.episode_id.capture_key}/v1/responses", json={"input": "Fix the code"}
+        )
+        assert response.status_code == 200, response.text
+        close_request = {"agent_session_id": body.agent_session_id, "episode_id": body.episode_id.model_dump()}
+        closed = client.post("/v1/agent_sessions/close", json=close_request)
+        assert closed.status_code == 200, closed.text
+        assert client.post("/v1/agent_sessions/close", json=close_request).json() == closed.json()
+        if owned:
+            sandbox.stop.assert_awaited_once()
+            sandbox.disconnect.assert_not_awaited()
+        else:
+            sandbox.stop.assert_not_awaited()
+            sandbox.disconnect.assert_awaited_once()
+        assert (
+            client.post(f"/ng-rollout/{body.episode_id.capture_key}/v1/responses", json={"input": "task"}).status_code
+            == 409
+        )
+
+
+def test_owned_stop_failure_blocks_close_until_retry(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    sandbox.start = AsyncMock()
+    body = seed()
+    body.sandbox_access = None
+    with (
+        patch("responses_api_agents.codex_agent.app.AsyncSandbox", return_value=sandbox),
+        TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        state = agent._session_records[body.agent_session_id].state
+        assert state.workdir == "/workspace"
+        # An owned sandbox can be destroyed even when no runner receipt was returned.
+        state.launch_started = True
+        sandbox.stop.side_effect = [RuntimeError("provider stop failed"), None]
+        close_request = {"agent_session_id": body.agent_session_id, "episode_id": body.episode_id.model_dump()}
+        assert client.post("/v1/agent_sessions/close", json=close_request).status_code == 500
+        assert not state.closed
+        assert (
+            client.post(f"/ng-rollout/{body.episode_id.capture_key}/v1/responses", json={"input": "task"}).status_code
+            == 409
+        )
+        assert client.post("/v1/agent_sessions/close", json=close_request).status_code == 200
+        assert sandbox.stop.await_count == 2
+        sandbox.disconnect.assert_not_awaited()
+
+
+@pytest.mark.parametrize("stage", ["start", "workdir", "install"])
+def test_owned_setup_failure_preserves_error_and_retryable_cleanup(setup, stage):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/app"}
+    sandbox.start = AsyncMock()
+    body = seed()
+    body.sandbox_access = None
+    original = RuntimeError(f"{stage} failed")
+    if stage == "start":
+        sandbox.start.side_effect = original
+    else:
+        execute = sandbox.exec.side_effect
+
+        async def fail_at_stage(command, **kwargs):
+            if (stage == "workdir" and command.startswith("mkdir -p --")) or (
+                stage == "install" and command.startswith("bash ") and "install_codex_runtime.sh" in command
+            ):
+                raise original
+            return await execute(command, **kwargs)
+
+        sandbox.exec.side_effect = fail_at_stage
+    sandbox.stop.side_effect = [RuntimeError("stop failed"), None]
+    with (
+        patch("responses_api_agents.codex_agent.app.AsyncSandbox", return_value=sandbox),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        with pytest.raises(RuntimeError) as error:
+            client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+        assert error.value is original
+        assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 409
+        state = agent._session_records[body.agent_session_id].state
+        assert state.closing and not state.closed
+        response = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": body.agent_session_id, "episode_id": body.episode_id.model_dump()},
+        )
+        assert response.status_code == 200, response.text
+        assert sandbox.stop.await_count == 2
+        sandbox.disconnect.assert_not_awaited()
+
+
+def test_borrow_connection_failure_never_creates_replacement(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "fallback-must-not-be-used"
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox") as factory,
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(aclose=AsyncMock())),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        factory.connect = AsyncMock(side_effect=RuntimeError("borrow failed"))
+        with pytest.raises(RuntimeError, match="borrow failed"):
+            client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        factory.assert_not_called()
+        sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("workdir", [None, "relative"])
+def test_owned_workdir_is_validated_before_creation(setup, workdir):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"workdir": workdir}
+    body = seed()
+    body.sandbox_access = None
+    with (
+        patch("responses_api_agents.codex_agent.app.AsyncSandbox") as factory,
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 422
+        factory.assert_not_called()
+        sandbox.exec.assert_not_awaited()

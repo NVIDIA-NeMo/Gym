@@ -59,7 +59,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
-from nemo_gym.sandbox import AsyncSandbox, create_provider, process_supervisor
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, process_supervisor
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
@@ -401,6 +401,8 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # Extra config.toml content deep-merged over the generated base config (mcp_servers, features,
     # tools, model_verbosity, ...). Per-rollout Gym MCP entries take precedence on name collisions.
     extra_config: dict[str, Any] = Field(default_factory=dict)
+    sandbox_provider: str | None = None
+    sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
@@ -467,12 +469,24 @@ class CodexAgent(SimpleResponsesAPIAgent):
         # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
         if self.config.num_workers not in (None, 1):
             raise HTTPException(422, "Native Codex sessions require num_workers=1")
-        if body.sandbox_access is None or not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
-            raise HTTPException(422, "Native Codex requires direct, Resources-owned SandboxAccess")
-        if not body.sandbox_access.workdir.startswith("/") or ".." in PurePosixPath(body.sandbox_access.workdir).parts:
+        owns_sandbox = body.sandbox_access is None
+        if owns_sandbox:
+            if not self.config.sandbox_provider:
+                raise HTTPException(422, "Codex requires sandbox_access or a configured sandbox_provider")
+            spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config})
+            workdir = spec.workdir
+            provider_ref = self.config.sandbox_provider
+        else:
+            if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
+                raise HTTPException(422, "Codex requires direct SandboxAccess")
+            workdir = body.sandbox_access.workdir
+            provider_ref = body.sandbox_access.connection.provider_config_ref
+        if not isinstance(workdir, str) or not workdir.startswith("/") or ".." in PurePosixPath(workdir).parts:
             raise HTTPException(422, "Codex sandbox workdir must be absolute")
-        workdir = PurePosixPath(body.sandbox_access.workdir)
-        if workdir in (PurePosixPath("/"), PurePosixPath("/tmp")) or str(workdir).startswith("/tmp/nemo-gym-codex"):
+        normalized_workdir = PurePosixPath(workdir)
+        if normalized_workdir in (PurePosixPath("/"), PurePosixPath("/tmp")) or str(normalized_workdir).startswith(
+            "/tmp/nemo-gym-codex"
+        ):
             raise HTTPException(422, "Codex runtime/session files must be outside SandboxAccess.workdir")
         if any(access.required for access in self.effective_tool_accesses(body)):
             raise HTTPException(422, "Native Codex supports its own sandbox tools, not required HTTP/MCP tools")
@@ -483,25 +497,35 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if self.config.cwd is not None or self.config.extra_config or self.config.openai_base_url is not None:
             raise HTTPException(
                 422,
-                "Native Codex uses SandboxAccess.workdir and Gym routing; cwd, extra_config, and openai_base_url overrides are unsupported",
+                "Native Codex uses its sandbox workdir and Gym routing; cwd, extra_config, and openai_base_url overrides are unsupported",
             )
         if self.config.reasoning_effort is not None:
             raise HTTPException(422, "Native Codex cannot guarantee reasoning_effort for custom Gym models")
         if self.config.sandbox_mode != "danger-full-access":
-            raise HTTPException(422, "Native Codex requires danger-full-access inside the Resources-owned sandbox")
+            raise HTTPException(422, "Native Codex requires danger-full-access inside the task sandbox")
 
-        connection = body.sandbox_access.connection
-        provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
-        try:
-            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
-        except BaseException:
-            await provider.aclose()
-            raise
+        provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
+        if owns_sandbox:
+            sandbox = AsyncSandbox(provider)
+        else:
+            try:
+                sandbox = await AsyncSandbox.connect(body.sandbox_access.connection.descriptor, provider=provider)
+            except BaseException:
+                await provider.aclose()
+                raise
         directory = f"/tmp/nemo-gym-codex-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-codex-node-22.19.0-{self.config.codex_version}"
-        state = CodexSandboxSession(body, sandbox, directory, runtime)
+        state = CodexSandboxSession(body, sandbox, directory, runtime, workdir=workdir, owns_sandbox=owns_sandbox)
         try:
-            prepare = _sandbox_prepare_command(body.sandbox_access.workdir, directory, runtime)
+            if owns_sandbox:
+                await sandbox.start(spec)
+                # Providers need not create SandboxSpec.workdir. Never prepare a borrowed task here.
+                workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
+                if workspace.return_code != 0 or workspace.error_type:
+                    raise RuntimeError(
+                        f"Cannot create Codex sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
+                    )
+            prepare = _sandbox_prepare_command(workdir, directory, runtime)
             prepared = await sandbox.exec(prepare, timeout_s=30)
             if prepared.return_code != 0 or prepared.error_type:
                 raise RuntimeError(
@@ -518,7 +542,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             )
             installed = await sandbox.exec(
                 install_command,
-                cwd=body.sandbox_access.workdir,
+                cwd=workdir,
                 timeout_s=self.config.sandbox_install_timeout_seconds,
             )
             if installed.return_code != 0 or installed.error_type:
@@ -628,7 +652,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             self._resolve_call_base_url(state.request.episode_id.capture_key), developer_instructions=system
         )
         await state.upload_text("home/.codex/config.toml", toml_dumps(config))
-        command = self._build_command("-", state.request.sandbox_access.workdir)
+        command = self._build_command("-", state.workdir)
         command[0:1] = [
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/codex/node_modules/@openai/codex/bin/codex.js",
@@ -637,7 +661,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "directory": state.directory,
             "command": command,
             "prompt": prompt,
-            "cwd": state.request.sandbox_access.workdir,
+            "cwd": state.workdir,
             "env": {
                 "HOME": f"{state.directory}/home",
                 "CODEX_HOME": f"{state.directory}/home/.codex",
