@@ -97,6 +97,7 @@ class Deployment:
         model_name: str = "fake-model",
         policy_workers: int = 1,
         server_workers: int = 1,
+        resources_mcp: bool = False,
         extra_config: Optional[dict[str, Any]] = None,
     ) -> None:
         self.topology = topology
@@ -112,6 +113,8 @@ class Deployment:
         self.model_name = model_name
         self.policy_workers = policy_workers
         self.server_workers = server_workers
+        # Expose the counter resources server's tools over MCP, as a CLI agent harness calls them.
+        self.resources_mcp = resources_mcp
         self.external_inference = inference_url is not None
         self.procs: dict[str, subprocess.Popen] = {}
         self.dirs: dict[str, Path] = {}
@@ -177,6 +180,7 @@ class Deployment:
                 domain="agent",
                 verified=False,
                 description="counter",
+                expose_tools_over_mcp=self.resources_mcp,
             )
             add("resources", "resources_servers/example_session_state_mgmt", resources)
         elif self.topology == "slow":

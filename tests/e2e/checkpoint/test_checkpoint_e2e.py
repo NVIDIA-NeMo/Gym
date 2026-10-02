@@ -791,3 +791,52 @@ async def test_a_checkpoint_on_request_lets_collection_continue(deploy, tmp_path
     assert finished == 0, (tmp_path / "collector.log").read_text()[-2000:]
     assert [row["reward"] for row in rows] == [1.0]
     assert [call["n_messages"] for call in deployment.backend_calls()] == [1, 3]
+
+
+MCP_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
+
+
+async def mcp_call(http: httpx.AsyncClient, token: str, name: str, arguments: dict) -> dict:
+    """Call a tool as a CLI agent harness does: the MCP session token only, never the session cookie."""
+    response = await http.post(
+        "/mcp",
+        headers={"accept": "application/json, text/event-stream", MCP_TOKEN_HEADER: token},
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result.get("isError") is not True, result
+    return json.loads(result["content"][0]["text"])
+
+
+async def test_mcp_tool_calls_wait_out_a_checkpoint_and_keep_their_sessions_across_a_restore(
+    deploy, tmp_path: Path
+) -> None:
+    deployment = deploy("counter", server_workers=2, resources_mcp=True)
+    rollout_ids = [f"mcp-{index}" for index in range(8)]
+    async with httpx.AsyncClient(base_url=deployment.url("resources"), timeout=60) as http:
+        tokens = []
+        for index, rollout_id in enumerate(rollout_ids):
+            seeded = await http.post(f"/ng-rollout/{rollout_id}/seed_session", json={"initial_count": index})
+            http.cookies.clear()
+            tokens.append(seeded.json()["mcp"]["headers"][MCP_TOKEN_HEADER])
+            await mcp_call(http, tokens[-1], "increment_counter", {"count": 10})
+
+        participants = await deployment.participants()
+        prepared = await coordination.prepare(participants, "c1", deadline_ts=deadline())
+        assert prepared.prepared, prepared.blockers()
+        # Calls made while the checkpoint is open wait on whichever worker owns the session, instead of failing.
+        waiting = [asyncio.create_task(mcp_call(http, token, "increment_counter", {"count": 100})) for token in tokens]
+        await asyncio.sleep(1)
+        assert not any(task.done() for task in waiting)
+        episode_ids = [EpisodeId(rollout_id=rollout_id) for rollout_id in rollout_ids]
+        await coordination.commit(participants, "c1", str(tmp_path / "ckpt"), episode_ids, deadline_ts=deadline())
+        await coordination.resume(participants, "c1", deadline_ts=deadline())
+        await asyncio.gather(*waiting)
+
+        # Gym restarts with three workers per server; each harness keeps its token.
+        await crash_and_restore(deployment, tmp_path / "ckpt", rollout_ids, server_workers=3)
+        restored = [(await mcp_call(http, token, "get_counter_value", {}))["count"] for token in tokens]
+
+    # The checkpoint holds the counts from before the waiting calls ran.
+    assert restored == [index + 10 for index in range(len(rollout_ids))]
