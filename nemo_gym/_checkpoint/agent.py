@@ -168,7 +168,17 @@ class AgentSessionParticipant(CheckpointParticipant):
         return session_key in self._sessions
 
     def close_session(self, session_key: str) -> None:
-        self._sessions.pop(session_key, None)
+        """Forget a closed session, and stop an activation still running for it.
+
+        The environment server closes a session when its episode ends, including when it gave up waiting on the
+        activation; nothing would use the activation's further model and tool calls.
+        """
+        session = self._sessions.pop(session_key, None)
+        if session is None:
+            return
+        session.resume.set()
+        if session.task is not None and session.task is not asyncio.current_task():
+            session.task.cancel()
 
     @asynccontextmanager
     async def legacy_run(self, session_key: str, episode_id: EpisodeId) -> AsyncIterator[LegacyRun]:
