@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile, load_manifest
 from nemo_gym.environment.scaffold import (
@@ -19,6 +20,7 @@ from nemo_gym.environment.scaffold import (
     scaffold_resources_server,
 )
 from nemo_gym.environment.validation import validate_environment
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 
 
@@ -47,6 +49,9 @@ def test_scaffolds_and_validates_every_kind_and_profile(
     for path in tmp_path.rglob("*.py"):
         compile(path.read_text(encoding="utf-8"), str(path), "exec")
 
+    resources_source = tmp_path.joinpath("resources_servers/sample/app.py").read_text(encoding="utf-8")
+    assert "ray_enabled = False" in resources_source
+
     benchmark_files = [asset / "prepare.py", asset / "prompt.yaml", asset / "data/source.jsonl"]
     assert all(path.is_file() for path in benchmark_files) is (kind == EnvironmentKind.BENCHMARK)
 
@@ -60,6 +65,7 @@ def test_scaffolds_and_validates_every_kind_and_profile(
         extensions = ("responses", "run") if profile == IntegrationProfile.EXTERNAL_AGENT_LOOP else ("responses",)
         assert all(f"async def {extension}(" in agent_source for extension in extensions)
         assert all(f"super().{extension}(" in agent_source for extension in extensions)
+        assert "ray_enabled = False" in agent_source
     assert (asset / "rollout_driver.py").is_file() is (profile == IntegrationProfile.EXTERNAL_ROLLOUT_DRIVER)
 
 
@@ -124,12 +130,40 @@ def test_standalone_resources_server_keeps_its_combined_composition(tmp_path: Pa
     }
     config = yaml.safe_load((server / "configs/shared.yaml").read_text(encoding="utf-8"))
     assert config["shared_resources_server"]["resources_servers"]["shared"]["verified"] is False
+    assert "ray_enabled = False" in (server / "app.py").read_text(encoding="utf-8")
     # Datasets are declared on the resources server (dataset-decoupling); the agent block carries none.
     datasets = config["shared_resources_server"]["resources_servers"]["shared"]["datasets"]
     assert [dataset["type"] for dataset in datasets] == ["train", "validation", "example"]
     assert "datasets" not in config["shared_simple_agent"]["responses_api_agents"]["simple_agent"]
     assert not (tmp_path / "environments").exists()
     assert not (tmp_path / "benchmarks").exists()
+
+
+@pytest.mark.parametrize("name", ["hello_world", "shared"])
+def test_standalone_resources_server_config_resolves_with_model(tmp_path: Path, name: str) -> None:
+    server = tmp_path / "resources_servers" / name
+    scaffold_resources_server(directory=server)
+    config = OmegaConf.merge(
+        OmegaConf.load(server / "configs" / f"{name}.yaml"),
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+    )
+
+    resolved = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=config,
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+
+    environment = resolved[f"{name}_environment_server"].environment_servers.legacy_agent
+    assert environment.entrypoint == "app.py"
+    assert environment.agent_server.type == "responses_api_agents"
+    assert environment.agent_server.name == f"{name}_simple_agent"
+    agent = resolved[environment.agent_server.name].responses_api_agents.simple_agent
+    assert agent.resources_server.name == f"{name}_resources_server"
+    assert agent.model_server.name == "policy_model"
 
 
 @pytest.mark.parametrize("name", ["a-b", "1sample", "class", "Uppercase"])

@@ -134,3 +134,11 @@ inverse_if_simple_agent:
 #       model: ${judge_model_name}
 #       return_token_id_information: false
 #       uses_reasoning_parser: true
+
+inverse_if_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: inverse_if_simple_agent

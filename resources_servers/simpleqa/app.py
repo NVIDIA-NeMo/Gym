@@ -163,6 +163,7 @@ class SimpleQAVerifyResponse(BaseVerifyResponse):
 
 
 class SimpleQAServer(SimpleResourcesServer):
+    ray_enabled = False
     config: SimpleQAConfig
 
     def model_post_init(self, context):

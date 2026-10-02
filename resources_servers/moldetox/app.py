@@ -105,6 +105,7 @@ class MolDeToxVerifyResponse(BaseVerifyResponse):
 
 
 class MolDeToxResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: BaseResourcesServerConfig
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
