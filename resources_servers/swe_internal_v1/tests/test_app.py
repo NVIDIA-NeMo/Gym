@@ -53,7 +53,7 @@ def _inputs(**overrides) -> VerificationInputs:
     base = dict(
         instance_id="instance_org__repo-abc",
         workdir="/app",
-        base_commit="40b9faa17dcb6b111db365a6f7a3b3b0ddfaecb7",
+        base_commit="40b9faa17dcb6b111db365a6f7a3b3b0ddfaecb7",  # pragma: allowlist secret  (a git sha, not a credential)
         patch="diff --git a/src/a.py b/src/a.py\n",
         run_script="#!/bin/bash\necho run $@\n",
         parsing_script="print('parse')\n",
