@@ -10,6 +10,11 @@ Use this tutorial when you want to evaluate an assistant through realistic multi
 independent, single-turn prompts. NeMo UserSim creates synthetic users with varied backgrounds and goals, while
 NeMo Gym runs their conversations with your assistant at scale and records the results for evaluation.
 
+The rollout has two participant Agents because both sides of the conversation must be generated independently:
+
+- The **User Agent** acts as the sampled synthetic person and produces realistic follow-up messages.
+- The **Assistant Agent** is the system under test. Its behavior is what UserSim evaluates and scores.
+
 ```mermaid
 sequenceDiagram
     participant P as UserSim sampler
@@ -224,44 +229,6 @@ Environment-owned UserSim runtime. UserSim executes those calls and requests ano
 the probe's native loop requires one.
 The three reasoning-parser flags describe what each upstream endpoint returns, not the endpoint's role. Set a
 flag to `true` only when that endpoint returns reasoning fields that require parsing.
-
-## Understand the two-Agent topology (optional)
-
-You can run the workflow without knowing this architecture. It becomes relevant when you want to assign
-different models to roles, customize Agent behavior, or interpret low-level invocation traces.
-
-The Environment Server routes typed activation requests for two participant roles:
-
-- The **User Agent** produces the simulated user's messages.
-- The **Assistant Agent** produces the system-under-test responses and receives probe-specific tool access.
-
-The Environment Server reconstructs one `ProbeEpisodeRuntime` from the prepared row. That native runtime owns
-the conversation lifecycle, probe state, tool validation and execution, semantic call indices, and completed
-evidence. It requests each User, Assistant, Judge, or Summary activation. The Environment routes participant
-activations through the matching Agent Server and support activations directly to the support Model Server.
-
-For `tool_calling`, `safety_agentic`, and `financial_services`, the Assistant Agent returns function calls
-without executing them. The Environment submits that response to `ProbeEpisodeRuntime`; UserSim executes the
-accepted calls, appends the native tool messages, and decides whether another Assistant activation is needed.
-UserSim's internal `api_response_model` calls route through the Environment's `tool_simulation_model`.
-
-The Resources Server does not reconstruct a second probe runtime and exposes no probe tool or UserSim-specific
-`/runtime` endpoints. It validates the immutable prepared row at seed time and verifies the authoritative
-native result after the Environment completes the episode.
-
-The **Judge** and **Summary** support aliases are model calls rather than Agents. Native conversations can
-invoke them for semantic checks and optional context processing. Environment-owned tool-result synthesis and
-Resources-owned verification also use `support_model`. This tutorial requires explicit policy and support
-endpoint settings. They may contain the same values only when that upstream model supports both conversational
-reasoning and strict structured output; the Gym aliases remain distinct.
-
-Persisted Environment-owned invocations use the semantic `user`, `assistant`, `judge`, `summary`, and
-`tool_simulation` roles as applicable. The Resources Server owns final verification only. Its
-`probe_scorer_model` also references `support_model`.
-
-Prepared task rows can provide optional per-role request defaults through `responses_create_params`. The
-Environment Server supplies the current conversation as each activation's Responses API `input`; the task
-does not contain a prebuilt transcript.
 
 ## Inspect one collected rollout
 
@@ -491,3 +458,36 @@ gym eval run \
 The `tool_calling`, `safety_agentic`, and `financial_services` probes expose episode-scoped simulated tools to
 the Environment-owned native UserSim runtime. The Resources Server verifies the runtime's tool evidence and
 dispatches the probe's native UserSim scorer when one applies.
+
+## Architecture details (optional)
+
+You do not need this section to run or interpret the tutorial. It becomes relevant when you want to customize
+Agent behavior, tool orchestration, model routing, or low-level observability.
+
+The Environment Server reconstructs one `ProbeEpisodeRuntime` from the prepared row. That native runtime owns
+the conversation lifecycle, probe state, tool validation and execution, semantic call indices, and completed
+evidence. It requests each User, Assistant, Judge, or Summary activation. The Environment routes participant
+activations through the matching Agent Server and support activations directly to the support Model Server.
+
+For `tool_calling`, `safety_agentic`, and `financial_services`, the Assistant Agent returns function calls
+without executing them. The Environment submits that response to `ProbeEpisodeRuntime`; UserSim executes the
+accepted calls, appends the native tool messages, and decides whether another Assistant activation is needed.
+UserSim's internal `api_response_model` calls route through the Environment's `tool_simulation_model`.
+
+The Resources Server does not reconstruct a second probe runtime and exposes no probe tool or UserSim-specific
+`/runtime` endpoints. It validates the immutable prepared row at seed time and verifies the authoritative
+native result after the Environment completes the episode.
+
+The **Judge** and **Summary** support aliases are model calls rather than Agents. Native conversations can
+invoke them for semantic checks and optional context processing. Environment-owned tool-result synthesis and
+Resources-owned verification also use `support_model`. The support endpoint may match another endpoint only
+when that upstream model supports both conversational reasoning and strict structured output; the Gym aliases
+remain distinct.
+
+Persisted Environment-owned invocations use the semantic `user`, `assistant`, `judge`, `summary`, and
+`tool_simulation` roles as applicable. The Resources Server owns final verification only. Its
+`probe_scorer_model` also references `support_model`.
+
+Prepared task rows can provide optional per-role request defaults through `responses_create_params`. The
+Environment Server supplies the current conversation as each activation's Responses API `input`; the task
+does not contain a prebuilt transcript.
