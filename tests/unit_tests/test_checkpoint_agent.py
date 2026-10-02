@@ -407,3 +407,29 @@ async def test_an_agent_that_leaves_a_session_out_of_its_export_fails_the_commit
 
     with pytest.raises(ControlError, match="did not export sessions"):
         await participant.export(None)
+
+
+async def test_closing_a_session_stops_its_running_activation() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_id = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode_id)
+    model_calls = []
+
+    async def activation() -> None:
+        async with participant.activation("s", episode_id):
+            while True:
+                model_calls.append("call")
+                await asyncio.sleep(0.01)
+
+    task = asyncio.create_task(activation())
+    await asyncio.sleep(0.05)
+    # The environment server gave up on the activation and closed the session from its cleanup.
+    participant.close_session("s")
+    done, _ = await asyncio.wait([task], timeout=1)
+    task.cancel()
+    calls_at_close = len(model_calls)
+    await asyncio.sleep(0.05)
+
+    assert done and task.cancelled()
+    assert len(model_calls) == calls_at_close
+    assert not participant.has_session("s")
