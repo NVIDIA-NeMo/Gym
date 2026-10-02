@@ -1,0 +1,14 @@
+config_paths:
+  - resources_servers/even_handedness/configs/even_handedness.yaml
+
+even_handedness_benchmark_agent:
+  _inherit_from: even_handedness_agent
+  responses_api_agents:
+    even_handedness:
+      datasets:
+      - name: even_handedness
+        type: benchmark
+        jsonl_fpath: benchmarks/even_handedness/data/even_handedness_benchmark.jsonl
+        prepare_script: benchmarks/even_handedness/prepare.py
+        prompt_config: null
+        license: Creative Commons Attribution 4.0 International
