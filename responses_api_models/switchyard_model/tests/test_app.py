@@ -406,6 +406,194 @@ class TestApp:
         assert seen["max_output_tokens"] == 16
 
 
+class TestReasoningModels:
+    """uses_reasoning_parser makes this server behave like vllm_model on both legs of a turn."""
+
+    def _setup_server(self, **overrides) -> SwitchyardModel:
+        config = SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="test_switchyard_model",
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+            switchyard_api_key="dummy_key",  # pragma: allowlist secret
+            switchyard_model="policy-model",
+            **overrides,
+        )
+        return SwitchyardModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    def _upstream_reply(self, **message) -> dict:
+        data = _chat_data()
+        data["choices"][0]["message"] = {"role": "assistant", **message}
+        return data
+
+    def test_defaults_keep_the_proxy_transparent(self) -> None:
+        server = self._setup_server()
+        assert server.config.uses_reasoning_parser is False
+        assert server.config.uses_interleaved_reasoning is True
+        assert server.config.sampling_overrides is None
+
+    @pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
+    def test_upstream_reasoning_is_folded_into_think_tags(self, monkeypatch: MonkeyPatch, field: str) -> None:
+        """vLLM >= 0.16 emits `reasoning`; older servers emit `reasoning_content`. Either folds."""
+        server = self._setup_server(uses_reasoning_parser=True)
+
+        async def mock_create_chat_completion(self, **kwargs):
+            return TestReasoningModels()._upstream_reply(content="Hello!", **{field: "thinking"})
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert response.status_code == 200
+        message = response.json()["choices"][0]["message"]
+        assert message["content"] == "<think>thinking</think>Hello!"
+        assert "reasoning" not in message and "reasoning_content" not in message
+
+    def test_fold_keeps_tool_calls_and_finish_reason(self, monkeypatch: MonkeyPatch) -> None:
+        """A tool-call turn has reasoning and no text; the call must survive the fold."""
+        server = self._setup_server(uses_reasoning_parser=True)
+        tool_call = {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            data = TestReasoningModels()._upstream_reply(content=None, reasoning="run it", tool_calls=[tool_call])
+            data["choices"][0]["finish_reason"] = "tool_calls"
+            return data
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert response.status_code == 200
+        choice = response.json()["choices"][0]
+        assert choice["message"]["content"] == "<think>run it</think>"
+        assert choice["message"]["tool_calls"][0]["function"]["name"] == "bash"
+        assert choice["finish_reason"] == "tool_calls"
+
+    def test_replayed_think_block_is_moved_back_into_reasoning_fields(self, monkeypatch: MonkeyPatch) -> None:
+        """The reverse of the fold: what the agent replays goes upstream the way vllm_model sends it."""
+        server = self._setup_server(uses_reasoning_parser=True)
+        seen: dict = {}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            seen.update(kwargs)
+            return _chat_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        tool_call = {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "user", "content": "fix it"},
+                    {"role": "assistant", "content": "<think>plan</think>Let me look.", "tool_calls": [tool_call]},
+                    {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+                ]
+            },
+        )
+        assert response.status_code == 200
+        user, assistant, tool = seen["messages"]
+        assert assistant["content"] == "Let me look."
+        assert assistant["reasoning_content"] == "plan"
+        assert assistant["reasoning"] == "plan"
+        assert assistant["tool_calls"][0]["function"]["name"] == "bash"
+        # Only assistant turns are rewritten, and a turn without a think block gains no fields.
+        assert user == {"role": "user", "content": "fix it"}
+        assert tool["content"] == "ok" and "reasoning" not in tool
+
+    def test_interleaved_off_strips_the_block_without_adding_fields(self) -> None:
+        messages = [{"role": "assistant", "content": "<think>plan</think>Let me look."}]
+        app_module._reasoning_to_fields(messages, interleaved=False)
+        assert messages == [{"role": "assistant", "content": "Let me look."}]
+
+    def test_rewrite_handles_list_content_and_leaves_plain_turns_alone(self) -> None:
+        messages = [
+            {"role": "assistant", "content": [{"type": "text", "text": "<think>plan</think>Done."}]},
+            {"role": "assistant", "content": "no reasoning here"},
+        ]
+        app_module._reasoning_to_fields(messages, interleaved=True)
+        assert messages[0]["content"] == [{"type": "text", "text": "Done."}]
+        assert messages[0]["reasoning_content"] == messages[0]["reasoning"] == "plan"
+        assert messages[1] == {"role": "assistant", "content": "no reasoning here"}
+
+    def test_without_the_flag_replayed_content_is_forwarded_untouched(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server()
+        seen: dict = {}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            seen.update(kwargs)
+            return _chat_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "assistant", "content": "<think>plan</think>Let me look."}]},
+        )
+        assert seen["messages"][0]["content"] == "<think>plan</think>Let me look."
+        assert "reasoning_content" not in seen["messages"][0]
+
+
+class TestSamplingOverrides:
+    def _setup_server(self, **overrides) -> SwitchyardModel:
+        config = SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="test_switchyard_model",
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+            switchyard_api_key="dummy_key",  # pragma: allowlist secret
+            switchyard_model="policy-model",
+            **overrides,
+        )
+        return SwitchyardModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    def test_pinned_values_win_and_null_clears_a_caller_field(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(sampling_overrides={"temperature": 1.0, "top_p": 0.95, "max_tokens": None})
+        seen: dict = {}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            seen.update(kwargs)
+            return _chat_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2, "max_tokens": 131072},
+        )
+        assert response.status_code == 200
+        assert seen["temperature"] == 1.0
+        assert seen["top_p"] == 0.95
+        # The agent's blanket cap is cleared rather than forwarded.
+        assert "max_tokens" in seen and seen["max_tokens"] is None
+
+    def test_route_id_is_applied_last_and_cannot_be_pinned(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(sampling_overrides={"model": "sneaky"})
+        seen: dict = {}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            seen.update(kwargs)
+            return _chat_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert seen["model"] == "policy-model"
+
+    def test_no_pin_is_transparent(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server()
+        seen: dict = {}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            seen.update(kwargs)
+            return _chat_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2})
+        assert seen["temperature"] == 0.2
+
+
 class TestProxyLifecycle:
     def _launch_config(self, **overrides) -> SwitchyardModelConfig:
         return SwitchyardModelConfig(
