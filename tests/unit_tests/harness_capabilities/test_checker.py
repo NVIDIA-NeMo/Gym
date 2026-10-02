@@ -292,11 +292,81 @@ def test_duplicated_step_ref_fails_without_closure_requirement():
     assert verdict(record, "TE-9") == "not_fulfilled"
 
 
-def test_verifier_failure_must_not_be_numeric_zero(record):
-    record.update(mask_sample=True, failure_kind="verifier_unavailable", reward=0.0)
-    assert verdict(record, "TE-6") == "not_fulfilled"
-    record["reward"] = None
+@pytest.mark.parametrize("reward", [0.0, 1.0, -0.5])
+def test_masked_numeric_reward_is_valid_evidence(record, reward):
+    record.update(mask_sample=True, failure_kind="judge_failed", failure_reason="judge unavailable", reward=reward)
     assert verdict(record, "TE-6") == "fulfilled"
+
+
+@pytest.mark.asyncio
+async def test_judge_failsafe_response_satisfies_te6(record):
+    from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
+    from nemo_gym.judge import JudgeError, judge_failsafe
+
+    @judge_failsafe
+    async def verify(body):
+        raise JudgeError("judge unavailable")
+
+    body = BaseVerifyRequest(
+        responses_create_params={"input": "task"},
+        response={
+            "id": "response-1",
+            "created_at": 0,
+            "model": "test",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        },
+    )
+    data = json.loads((await verify(body)).body)
+    verified = BaseVerifyResponse.model_validate(data)
+    assert verified.reward == 0.0 and verified.mask_sample is True
+    record.update(data)
+    assert verdict(record, "TE-6") == "fulfilled"
+
+
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("reward", [None, True, "0.0", float("nan"), float("inf")])
+def test_verifier_reward_must_be_numeric_even_when_masked(record, masked, reward):
+    record.update(mask_sample=masked, failure_kind="judge_failed", failure_reason="judge unavailable", reward=reward)
+    assert verdict(record, "TE-6") == "not_fulfilled"
+
+
+@pytest.mark.parametrize(
+    "signal", [{"mask_sample": True}, {"evaluation_completed": False}, {"verification_error": "error"}]
+)
+@pytest.mark.parametrize("field", ["failure_kind", "failure_reason"])
+@pytest.mark.parametrize("value", [None, "", " \t", False])
+def test_unavailable_verification_requires_both_failure_fields(record, signal, field, value):
+    record.update(signal, failure_kind="judge_failed", failure_reason="judge unavailable")
+    assert verdict(record, "TE-6") == "fulfilled"
+    if value is None:
+        record.pop(field)
+    else:
+        record[field] = value
+    result = inspect_record(hydrate_record(record))
+    assert result["evidence"]["TE-6"]["verdict"] == "not_fulfilled"
+    assert any(f["assertion"] == "verifier.error" and f["location"] == "record/" + field for f in result["findings"])
+
+
+@pytest.mark.parametrize("field", ["mask_sample", "evaluation_completed"])
+@pytest.mark.parametrize("value", [None, 0, "false"])
+def test_verification_flags_must_be_boolean_when_supplied(record, field, value):
+    record[field] = value
+    assert verdict(record, "TE-6") == "not_fulfilled"
+
+
+def test_unmasked_diagnostic_metadata_does_not_invalidate_reward(record):
+    record.update(mask_sample=False, failure_kind="judge_failed")
+    assert verdict(record, "TE-6") == "fulfilled"
+
+
+def test_masked_result_cannot_be_declared_verifier_free(record):
+    record.update(mask_sample=True, reward=None)
+    result = inspect_record(hydrate_record(record), scope=EvidenceScope(verifier=False))
+    assert result["evidence"]["TE-6"]["verdict"] == "not_fulfilled"
 
 
 def test_binary_resolution_does_not_replace_reward(record):

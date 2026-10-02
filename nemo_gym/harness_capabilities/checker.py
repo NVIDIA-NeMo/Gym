@@ -644,8 +644,13 @@ class _RecordInspector:
     def check_verifier(self) -> None:
         """TE-6's shipped Gym surface: rollout verification reward and terminal resolution."""
         reward = self.record.get("reward")
+        failed = (
+            self.record.get("mask_sample") is True
+            or self.record.get("evaluation_completed") is False
+            or self.record.get("verification_error") is not None
+        )
         if not self.scope.verifier:
-            if reward is not None or any(t.get("resolved") is not None for t in self.turns):
+            if reward is not None or failed or any(t.get("resolved") is not None for t in self.turns):
                 self._fail(
                     "TE-6",
                     "scope.contradiction",
@@ -655,24 +660,27 @@ class _RecordInspector:
             else:
                 self.not_applicable.add("TE-6")
             return
-        failed = self.record.get("mask_sample") is True or self.record.get("verification_error") is not None
-        if failed:
-            if reward is not None:
-                self._fail(
-                    "TE-6",
-                    "reward.unavailable",
-                    "/reward",
-                    "unavailable verification must not be represented as a numeric grade",
-                )
-            if not self.record.get("failure_kind") and not self.record.get("verification_error"):
-                self._fail("TE-6", "verifier.error", "", "unavailable verification needs explicit failure evidence")
-        elif not _number(reward):
+        for field in ("mask_sample", "evaluation_completed"):
+            if field in self.record and type(self.record[field]) is not bool:
+                self._fail("TE-6", "verifier.boolean", "/" + field, "verification flags must be booleans when present")
+        # Gym requires a numeric reward even when the mask excludes it from scoring.
+        if not _number(reward):
             self._fail(
                 "TE-6",
                 "reward.required",
                 "/reward",
                 "finite verifier reward is required; binary resolution is not a floating grade",
             )
+        if failed:
+            for field in ("failure_kind", "failure_reason"):
+                value = self.record.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    self._fail(
+                        "TE-6",
+                        "verifier.error",
+                        "/" + field,
+                        "masked or incomplete verification needs nonblank failure metadata",
+                    )
         for invocation in {t.get("invocation_id") for t in self.turns}:
             turns = sorted(
                 (t for t in self.turns if t.get("invocation_id") == invocation), key=lambda t: t.get("turn_no", 0)

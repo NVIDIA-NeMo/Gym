@@ -40,6 +40,13 @@ These verdicts describe evidence conformance, not task success. A rollout with
 zero reward can have fully conforming evidence; a successful task can have
 incomplete evidence.
 
+TE-6 requires a finite numeric `reward` even when `mask_sample=true` excludes it
+from scoring. Masked results and explicitly incomplete verification require
+nonblank `failure_kind` and `failure_reason`; a masked `reward=0.0` is valid
+evidence. The Gym profile uses the default unmasked behavior when `mask_sample`
+is omitted and checks `evaluation_completed` when supplied. Both flags must be
+booleans when present.
+
 Evidence objects must validate Gym's shared models at these paths:
 
 | JSON path | Model |
