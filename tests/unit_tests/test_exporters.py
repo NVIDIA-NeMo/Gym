@@ -117,7 +117,9 @@ def mlflow_config() -> DictConfig:
 def _register_recording(monkeypatch: MonkeyPatch) -> MagicMock:
     """Point the registry at RecordingExporter and hand back the (spied) lazy loader."""
     loader = MagicMock(return_value=RecordingExporter)
-    monkeypatch.setattr(exporters_module, "EXPORTER_REGISTRY", {"recording": (RecordingConfig, "recording")})
+    monkeypatch.setattr(
+        exporters_module, "EXPORTER_REGISTRY", {"recording": (RecordingConfig, "recording", "recording")}
+    )
     monkeypatch.setattr(exporters_module, "_load_exporter_class", loader)
     return loader
 
@@ -175,6 +177,24 @@ class TestRegistry:
 
         assert setup_exporters(wandb_config) == []
         assert get_exporters() == []
+
+    def test_missing_sdk_is_skipped_with_an_actionable_install_hint(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setattr(
+            exporters_module, "EXPORTER_REGISTRY", {"recording": (RecordingConfig, "recording", "recording")}
+        )
+        monkeypatch.setattr(
+            exporters_module,
+            "_load_exporter_class",
+            MagicMock(side_effect=ImportError("No module named 'recording_sdk'")),
+        )
+
+        with caplog.at_level("WARNING"):
+            assert setup_exporters(wandb_config) == []
+
+        assert get_exporters() == []
+        assert "pip install nemo-gym[recording]" in caplog.text
 
     def test_setup_replaces_previously_opened_exporters(
         self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
