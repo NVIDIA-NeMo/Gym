@@ -187,41 +187,172 @@ Prepared task rows can provide optional per-role request defaults through `respo
 Environment Server supplies the current conversation as each activation's Responses API `input`; the task
 does not contain a prebuilt transcript.
 
-## Inspect the collected contracts
+## Inspect one collected rollout
 
-First inspect the persisted top-level shape and the materialized input:
+Before interpreting a score, make sure you can answer two questions:
+
+- **What happened?** Inspect the scenario, persona, User/Assistant conversation, tool activity, and models.
+- **What was evaluated?** Confirm whose behavior was scored, why it received that score, and whether collection,
+  simulation, or grading failed.
+
+Successful episodes are in `rollouts.jsonl`. The exact UserSim input, including the sampled persona and
+scenario, is in `rollouts_materialized_inputs.jsonl`. Choose one rollout and use the same indices in the
+commands below. For example, task 13 and its first repeat have rollout identity `13:0`:
 
 ```bash
-jq 'keys' results/usersim/rollouts.jsonl
-jq . results/usersim/rollouts_materialized_inputs.jsonl
+task_index=13
+rollout_index=0
+
+jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
+  'select(._ng_task_index == $task and ._ng_rollout_index == $repeat)' \
+  results/usersim/rollouts.jsonl
 ```
 
-A successful UserSim episode stores its protocol output and verification directly on the rollout row. Inspect
-them separately:
+When following the earlier `--limit 1` smoke command, use `task_index=0`.
+
+### Inspect the scenario and persona
+
+UserSim—not Gym—sampled these values. Read them from the materialized input:
+
+```bash
+jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
+  'select(._ng_task_index == $task and ._ng_rollout_index == $repeat)
+   | .task_input.resolved_row
+   | {
+       scenario: .probe_type,
+       persona: {
+         id: .persona_uuid,
+         name: ([.persona.first_name, .persona.last_name] | map(select(. != null)) | join(" "))
+       },
+       trajectory_id,
+       theme,
+       tool_subset
+     }' \
+  results/usersim/rollouts_materialized_inputs.jsonl
+```
+
+The scenario is also copied to `verification.verifier_data.probe_type` on the completed rollout. The
+materialized file remains the authoritative record of all sampled inputs.
+
+### Inspect the conversation, tools, and models
+
+The following view keeps the complete ordered conversation. UserSim records User, Assistant, Assistant
+tool-call, and tool-result messages together in `conversation_messages`:
+
+```bash
+jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
+  'select(._ng_task_index == $task and ._ng_rollout_index == $repeat)
+   | {
+       rollout_id: "\($task):\($repeat)",
+       scenario: .verification.verifier_data.probe_type,
+       conversation: (
+         .usersim_result
+         | {num_turns, num_tool_calls, conversation_messages}
+       ),
+       models_used: ([
+         .invocations[]
+         | {role, model: .response.model}
+       ] | unique)
+     }' \
+  results/usersim/rollouts.jsonl
+```
+
+Read consecutive User and Assistant messages as one conversation, not as independent prompts. For example,
+one collected rollout may show that the User first learns that the market is closed and then asks when it
+will open. Those follow-up messages belong to the same rollout. You may omit intervening tool messages when
+sharing a readable excerpt, but do not omit them when diagnosing behavior.
+
+To inspect only tool activity:
+
+```bash
+jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
+  'select(._ng_task_index == $task and ._ng_rollout_index == $repeat)
+   | .usersim_result.conversation_messages
+   | map(select(.role == "tool" or ((.tool_calls // []) | length > 0)))' \
+  results/usersim/rollouts.jsonl
+```
+
+`models_used` reports the model returned by each persisted activation and its semantic role. `user` is the
+simulated User, `assistant` is the system under test, and `judge`, `summary`, and `tool_simulation` are support
+roles. Provider-level requests, responses, token usage, and latency are available in the model-call capture
+described below.
+
+### Interpret the result
+
+This integration evaluates the **Assistant**, not the simulated User. Inspect completion, reward inclusion,
+quality axes, probe-specific checks, and judge explanations together:
+
+```bash
+jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
+  'select(._ng_task_index == $task and ._ng_rollout_index == $repeat)
+   | {
+       rollout_id: "\($task):\($repeat)",
+       conversation_status: .usersim_result.conversation_status,
+       evaluated_role: "assistant",
+       scenario_completed: .verification.scenario_completed,
+       reward: .verification.reward,
+       mask_sample: .verification.mask_sample,
+       quality_scores: .verification.verifier_data.normalized_axis_scores,
+       task_check: {
+         name: .verification.verifier_data.native_scorer_name,
+         result: .verification.verifier_data.native_scores
+       },
+       judge_axes: .verification.verifier_data.assistant_eval.axes,
+       grading_failure: {
+         kind: .verification.failure_kind,
+         reason: .verification.failure_reason
+       }
+     }' \
+  results/usersim/rollouts.jsonl
+```
+
+Interpret that view as follows:
+
+- `conversation_status: true` means UserSim finished the conversation; `scenario_completed: true` additionally
+  means both participants completed and any probe-specific scorer passed.
+- `mask_sample: false` means the reward is eligible for aggregation. A masked row is retained for diagnosis
+  but does not measure the Assistant policy.
+- `reward` is UserSim's `assistant_quality`: the mean of the normalized helpfulness, accuracy, and coherence
+  axes. `normalized_axis_scores` shows those components.
+- `assistant_eval.axes` contains the original judge score and explanation. For example, a helpfulness rating
+  of 4 on a 5-point scale is normalized to `0.8`.
+- `native_scorer_name` and `native_scores` report the probe-specific task check when the scenario has one.
+
+Resources calls UserSim's `TrajectoryEvaluatorGenerator.agenerate()` once with the explicit scorer selected
+for the prepared probe. The full native `assistant_eval` cell, including judge reasoning and applicable
+probe-scorer output, is retained under `verification.verifier_data`.
+
+### Distinguish collection, simulation, and grading failures
+
+Do not treat every missing reward as poor Assistant behavior:
+
+- **Collection or Environment failure:** inspect `results/usersim/rollouts_failures.jsonl`. The
+  `_ng_failure_class`, `_ng_failure_stage`, and `_ng_failure_message` fields identify failures before a
+  completed rollout could be stored.
+- **UserSim simulation failure:** inspect `usersim_result.simulation_outcome`. Verification copies its failure
+  category and detail to `verification.failure_kind` and `verification.failure_reason`.
+- **Grading failure:** `verification.failure_kind` is `probe_scorer_error` or
+  `trajectory_evaluator_error`; details remain in `failure_reason`, `verifier_data.native_scores`, or
+  `verifier_data.assistant_eval.error`.
 
 ```bash
 jq '{
-  task_id: ._ng_task_id,
-  protocol: .episode_interaction_protocol,
-  verification,
-  usersim_result
-}' results/usersim/rollouts.jsonl
+  rollout_id: "\(._ng_task_index):\(._ng_rollout_index)",
+  collection_failure: ._ng_failure_class,
+  stage: ._ng_failure_stage,
+  message: ._ng_failure_message
+}' results/usersim/rollouts_failures.jsonl
 ```
 
-The scalar reward is UserSim's `assistant_quality`: the mean of normalized
-helpfulness, accuracy, and coherence scores from its trajectory evaluator.
-`reward_components` also contains every applicable normalized quality axis.
-Resources calls UserSim's `TrajectoryEvaluatorGenerator.agenerate()` once with
-the explicit scorer selected for the prepared probe, so the full native
-`assistant_eval` cell contains both applicable probe-scorer output and
-quality-axis judge reasoning. That cell is retained under
-`verification.verifier_data`. A conversation must complete with both
-participants, and any probe-specific scorer must pass, before its quality
-score becomes the Gym reward.
+The key saved fields are:
 
-Check `verification.mask_sample` before aggregating rewards. User-simulation,
-judge, or infrastructure failures are masked because they do not measure the
-Assistant policy. A completed Assistant failure remains unmasked.
+- `usersim_result.conversation_messages`: ordered User, Assistant, tool-call, and tool-result messages.
+- `usersim_result.conversation_status`: whether UserSim completed the conversation.
+- `verification.reward`: final Assistant reward for the conversation.
+- `verification.mask_sample`: whether to exclude the conversation from reward aggregation.
+- `verification.verifier_data.assistant_eval`: quality ratings and judge explanations.
+- `verification.failure_kind` and `verification.failure_reason`: simulation or grading failure details.
+- `_ng_failure_*` in the failures sidecar: collection and Environment failure details.
 
 The ordered invocation ledger is the Environment Server's trajectory contract:
 
