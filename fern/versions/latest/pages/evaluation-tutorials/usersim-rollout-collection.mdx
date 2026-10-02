@@ -194,7 +194,7 @@ gym eval run \
   --output results/usersim/rollouts.jsonl \
   --limit 1 \
   --num-repeats 1 \
-  +user_model_uses_reasoning_parser=false \
+  +user_model_uses_reasoning_parser=true \
   +policy_uses_reasoning_parser=true \
   +support_model_uses_reasoning_parser=false \
   ++observability_enabled=true \
@@ -434,6 +434,7 @@ gym eval run \
   --split example \
   --output results/usersim/all-probes.jsonl \
   --num-repeats 1 \
+  +user_model_uses_reasoning_parser=true \
   +policy_uses_reasoning_parser=true \
   +support_model_uses_reasoning_parser=false \
   ++observability_enabled=true \
