@@ -7,10 +7,12 @@ from unittest.mock import MagicMock
 
 import anyio
 import pytest
+from fastapi import Body
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from nemo_gym.base_environment_server import BaseEnvironmentServer, BaseEnvironmentServerConfig, CleanupContext
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
@@ -52,6 +54,9 @@ class _EnvironmentServer(BaseEnvironmentServer[_Request, _Response]):
             task_id=request.task.task_id,
             result=request.task.task_input.value,
         )
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        return AggregateMetrics()
 
 
 def _request() -> _Request:
@@ -118,7 +123,7 @@ def test_failure_response_validates_base_failure_as_protocol_subclass() -> None:
     )
     response = server.failure_response(
         _request(),
-        EpisodeFailure(message="failed", terminal=True),
+        EpisodeFailure(failure_reason="failed", terminal=True),
     )
 
     assert isinstance(response.failure, _ProtocolFailure)
@@ -229,8 +234,8 @@ def test_internal_timeout_error_is_not_reported_as_episode_timeout() -> None:
     response = asyncio.run(server.run_request(_request()))
     assert response.failure is not None
     assert response.failure.terminal is True
-    assert "TimeoutError: dependency timed out" in response.failure.message
-    assert response.failure.message != "Episode timed out"
+    assert "TimeoutError: dependency timed out" in response.failure.failure_reason
+    assert response.failure.failure_reason != "Episode timed out"
 
 
 def test_episode_deadline_returns_retryable_typed_failure() -> None:
@@ -243,7 +248,7 @@ def test_episode_deadline_returns_retryable_typed_failure() -> None:
     server = _TimedOutEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
     response = asyncio.run(server.run_request(_request()))
     assert response.failure is not None
-    assert response.failure.message == "Episode timed out"
+    assert response.failure.failure_reason == "Episode timed out"
     assert response.failure.terminal is False
 
 
@@ -259,7 +264,7 @@ def test_unhandled_error_returns_terminal_typed_failure() -> None:
     response = asyncio.run(server.run_request(_request()))
     assert response.failure is not None
     assert response.failure.terminal is True
-    assert "ValueError: invalid protocol state" in response.failure.message
+    assert "ValueError: invalid protocol state" in response.failure.failure_reason
 
 
 def test_caller_cancellation_waits_for_cleanup() -> None:
@@ -318,3 +323,41 @@ def test_anyio_level_cancellation_waits_for_cleanup() -> None:
 
     anyio.run(run)
     assert cleanup_finished.is_set()
+
+
+@pytest.mark.parametrize("classified", [False, True])
+def test_failure_metadata_survives_the_environment_http_boundary(classified: bool) -> None:
+    class FailureEnvironmentServer(_EnvironmentServer):
+        async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
+            return self.failure_response(
+                request,
+                EpisodeFailure(
+                    failure_reason="Judge unavailable",
+                    terminal=False,
+                    failure_kind="judge_failed" if classified else None,
+                    stage="verification" if classified else None,
+                ),
+            )
+
+    server = FailureEnvironmentServer(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
+    response = TestClient(server.setup_webserver()).post("/run", json=_request().model_dump(mode="json"))
+    assert response.status_code == 200
+    expected = {"failure_reason": "Judge unavailable", "terminal": False}
+    if classified:
+        expected.update(failure_kind="judge_failed", stage="verification")
+    assert response.json()["failure"] == expected
+    assert response.json()["result"] is None
+
+
+def test_admission_timeout_reports_its_stage_before_running_the_episode() -> None:
+    server = _environment_server(max_concurrent_episodes=1, queue_timeout_seconds=0.01)
+
+    async def run() -> _Response:
+        async with server._admission:
+            return await server.run_request(_request())
+
+    response = asyncio.run(run())
+    assert response.result is None
+    assert response.failure.failure_reason == "Episode admission timed out"
+    assert response.failure.stage == "admission"
+    assert response.failure.terminal is False

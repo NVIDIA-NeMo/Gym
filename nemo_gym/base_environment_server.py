@@ -11,11 +11,11 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Generic, TypeVar
 
 from anyio import CancelScope
-from fastapi import FastAPI
+from fastapi import Body, FastAPI
 from pydantic import ConfigDict, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
-from nemo_gym.config_types import BaseRunServerInstanceConfig
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure, EpisodeId
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SimpleServer
@@ -119,7 +119,7 @@ class HandledEpisodeError(Exception):
     """Carry a failure that belongs in the native episode response."""
 
     def __init__(self, failure: EpisodeFailure) -> None:
-        super().__init__(failure.message)
+        super().__init__(failure.failure_reason)
         self.failure = failure
 
 
@@ -148,6 +148,13 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         run_endpoint.__annotations__["body"] = self.request_model
         run_endpoint.__annotations__["return"] = self.response_model
         app.post("/run", response_model=self.response_model)(run_endpoint)
+
+        async def aggregate_metrics_endpoint(body: Any) -> Any:
+            return await self.aggregate_metrics(body)
+
+        aggregate_metrics_endpoint.__annotations__["body"] = AggregateMetricsRequest
+        aggregate_metrics_endpoint.__annotations__["return"] = AggregateMetrics
+        app.post("/aggregate_metrics", response_model=AggregateMetrics)(aggregate_metrics_endpoint)
         return app
 
     async def run_request(self, request: EpisodeRequestT) -> EpisodeResponseT:
@@ -162,8 +169,9 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 return self.failure_response(
                     request,
                     EpisodeFailure(
-                        message="Episode admission timed out",
+                        failure_reason="Episode admission timed out",
                         terminal=False,
+                        stage="admission",
                     ),
                 )
             acquired = True
@@ -187,7 +195,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                         response = self.failure_response(
                             request,
                             EpisodeFailure(
-                                message="Episode timed out",
+                                failure_reason="Episode timed out",
                                 terminal=False,
                             ),
                         )
@@ -219,11 +227,11 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
 
     def _unhandled_failure_response(self, request: EpisodeRequestT, error: Exception) -> EpisodeResponseT:
         LOGGER.exception(f"Unhandled environment server error: episode_id={request.episode_id}")
-        message = f"Unhandled environment server error: {type(error).__name__}: {error}"
+        failure_reason = f"Unhandled environment server error: {type(error).__name__}: {error}"
         return self.failure_response(
             request,
             EpisodeFailure(
-                message=message[:2000],
+                failure_reason=failure_reason[:2000],
                 terminal=True,
             ),
         )
@@ -243,3 +251,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             raise ValueError("response episode_id does not match request")
         if response.task_id != request.task.task_id:
             raise ValueError("response task_id does not match request")
+
+    @abstractmethod
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Aggregate per-rollout scores into task-level metrics."""

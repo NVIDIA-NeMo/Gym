@@ -3,11 +3,9 @@
 
 """Wire contracts for the built-in single-agent-turn protocol."""
 
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, JsonValue
 
-from nemo_gym.base_resources_server import BaseVerifyResponse, ResourcesVerifyRequest
+from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
@@ -40,9 +38,8 @@ class SingleAgentTurnResult(BaseVerifyResponse):
 
 
 class SingleAgentTurnFailure(EpisodeFailure):
-    """Add the failing protocol stage and any usable agent response."""
+    """Extend the shared failure with any usable agent response for diagnostics."""
 
-    stage: Literal["seed", "agent", "verification", "cleanup"] | None = None
     partial_response: NeMoGymResponse | None = None
 
 
@@ -54,16 +51,3 @@ class SingleAgentTurnResponse(BaseEpisodeResponse[SingleAgentTurnResult]):
     """Response for one resources-backed agent turn."""
 
     failure: SingleAgentTurnFailure | None = None
-
-
-class SingleAgentTurnVerificationInput(BaseModel):
-    """Carry one Responses API activation to a resources server."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    response: NeMoGymResponse
-
-
-class SingleAgentTurnResourcesVerifyRequest(ResourcesVerifyRequest[SingleAgentTurnVerificationInput]):
-    """Verify one completed single-agent turn."""
