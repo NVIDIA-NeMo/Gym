@@ -128,6 +128,8 @@ async def run_conformance(
         ("freeze_idempotency", lambda r: _check_freeze_idempotency(sink(), source, r)),
         ("post_freeze_write_safety", lambda r: _check_post_freeze_write(sink(), source(), r)),
         ("conditional_retirement", lambda r: _check_conditional_retirement(sink(), source(), r)),
+        ("unconditional_retirement", lambda r: _check_unconditional_retirement(sink(), source(), r)),
+        ("delete_clears_retirement", lambda r: _check_delete_clears_retirement(sink(), source(), r)),
     ]
     if lineage_factory is not None:
         checks.append(
@@ -261,6 +263,44 @@ async def _check_conditional_retirement(sink: TokenSink, src: TokenSource, rollo
     _require(len(evidence.entries) == 1, name, "a failed retirement discarded the evidence")
     retired = await src.drop(rollout_id, snapshot_id=snapshot.snapshot_id, version=snapshot.version)
     _require(retired, name, "retiring the exact consumed snapshot failed")
+
+
+async def _visible_entries(src: TokenSource, rollout_id: str) -> int:
+    """Entries a consumer could build from; a retired rollout may refuse to freeze instead."""
+    try:
+        return len((await src.freeze(rollout_id)).entries)
+    except Exception:
+        return 0
+
+
+async def _check_unconditional_retirement(sink: TokenSink, src: TokenSource, rollout_id: str) -> None:
+    name = "unconditional_retirement"
+    entry = _make_entry(rollout_id, "call-1", prompt=[11, 12], generation=[13, 14], request_items=_REQUEST, text="a")
+    await sink.put(entry)
+    # No freeze first: retire works whatever the rollout's state.
+    first = await src.retire([rollout_id])
+    _require(first.get("removed") == [rollout_id], name, f"retire did not report the rollout as removed: {first}")
+    late = _make_entry(
+        rollout_id, "call-2", prompt=[11, 12, 13, 14], generation=[15], request_items=_REQUEST, text="b"
+    )
+    try:
+        await sink.put(late)
+    except Exception:
+        pass  # Rejecting the late write is the expected fence.
+    _require(await _visible_entries(src, rollout_id) == 0, name, "a write after retirement became visible")
+    again = await src.retire([rollout_id])
+    _require(again.get("absent") == [rollout_id], name, f"retiring again was not a no-op: {again}")
+
+
+async def _check_delete_clears_retirement(sink: TokenSink, src: TokenSource, rollout_id: str) -> None:
+    name = "delete_clears_retirement"
+    entry = _make_entry(rollout_id, "call-1", prompt=[11, 12], generation=[13, 14], request_items=_REQUEST, text="a")
+    await sink.put(entry)
+    await src.retire([rollout_id])
+    await src.delete([rollout_id])
+    # The rollout ID is reusable: a new execution starts empty and its writes are visible.
+    await sink.put(entry)
+    _require(await _visible_entries(src, rollout_id) == 1, name, "a write after delete was not visible")
 
 
 async def _check_lineage_visibility(

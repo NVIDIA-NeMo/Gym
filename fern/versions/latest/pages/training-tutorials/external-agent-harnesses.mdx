@@ -353,6 +353,11 @@ async def deliver_rollout(
 
 Exclude any result with `mask_sample: true` from the loss. Call `retire_rollout_token_capture` only after durable downstream storage has accepted the rebuilt result. If the framework retires the records first and the write then fails, the captured token ids are lost.
 
+`retire_rollout_token_capture` keeps masked and failed captures for diagnosis, and never sees an attempt you abandon. Remove those with the source's batched operations, which match the external-staging capture ledger's:
+
+- `await source.retire(rollout_ids)` removes the records and keeps a fence, so a late write fails: from an abandoned attempt that is still running, or from a duplicate execution after a client retry. Use it for masked or failed captures once you no longer need them, and for abandoned attempts.
+- `await source.delete(rollout_ids)` also removes the fence. Use it once nothing of those attempts can still write, for example at the end of the run, and before reusing a rollout ID.
+
 ### Check a custom transport
 
 Run `run_conformance` from `nemo_gym.token_id_capture.conformance` before using a custom transport for training. It takes factories rather than instances, because several checks need a fresh client. Each factory call must return a new client connected to the backend. The function is async, returns the names of the checks that passed, and raises `ConformanceError` on the first failure:
