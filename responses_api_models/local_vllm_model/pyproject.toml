@@ -15,7 +15,7 @@
 
 [project]
 name = "local-vllm-model"
-dynamic = ["dependencies"]
+dynamic = ["dependencies", "optional-dependencies"]
 version = "0.2.0rc0"
 requires-python = ">=3.13.14"
 

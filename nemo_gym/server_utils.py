@@ -447,6 +447,7 @@ async def request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _retry: bool = True,
     _server_name: Optional[str] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
@@ -475,6 +476,7 @@ async def request(
             url,
             _internal=_internal,
             _max_connection_retries=_max_connection_retries,
+            _retry=_retry,
             _server_name=_server_name,
             **kwargs,
         )
@@ -483,6 +485,7 @@ async def request(
         url,
         _internal=_internal,
         _max_connection_retries=_max_connection_retries,
+        _retry=_retry,
         _server_name=_server_name,
         **kwargs,
     )
@@ -493,6 +496,7 @@ async def _traced_request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _retry: bool = True,
     _server_name: Optional[str] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
@@ -533,6 +537,7 @@ async def _traced_request(
             url,
             _internal=_internal,
             _max_connection_retries=_max_connection_retries,
+            _retry=_retry,
             _server_name=_server_name,
             **kwargs,
         )
@@ -583,6 +588,7 @@ async def _request_with_retries(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _retry: bool = True,
     _server_name: Optional[str] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
@@ -590,6 +596,10 @@ async def _request_with_retries(
     # Initialization stays inside the client span and sets the metrics flag before it is read.
     token = set_server_name(_server_name or "external") if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY else None
     try:
+        # Generation may already have reached the backend when a timeout or socket
+        # error occurs. Routed serving explicitly opts out of *all* replay here.
+        if not _retry:
+            return await client.request(method=method, url=url, **kwargs)
         num_tries = 1
         retries = 0
         retry_start = time.monotonic()

@@ -34,11 +34,13 @@ from pathlib import Path
 
 import yaml
 
+from responses_api_models.local_vllm_model.subprocess_launcher import normalize_kwargs, validate_managed_kwargs
+
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
 GENERIC_CONFIG = CONFIG_DIR / "local_vllm_model.yaml"
 
-# Asserted by app.py::_configure_vllm_serve on every startup path.
+# Asserted by app.py::_configure_vllm_serve on the legacy Ray startup path.
 REQUIRED_ENV_VARS = ("VLLM_RAY_DP_PACK_STRATEGY",)
 
 
@@ -65,6 +67,9 @@ class TestShippedConfigsSatisfyStartupAssertions:
             loaded = yaml.safe_load(config_path.read_text())
             model = (loaded or {}).get("policy_model", {}).get("responses_api_models", {}).get("local_vllm_model")
             if model is None or "vllm_serve_env_vars" not in model:
+                continue
+            if model.get("launcher") == "subprocess":
+                validate_managed_kwargs(normalize_kwargs(model["vllm_serve_kwargs"]), model["vllm_serve_env_vars"])
                 continue
             missing = [n for n in REQUIRED_ENV_VARS if n not in model["vllm_serve_env_vars"]]
             if missing:

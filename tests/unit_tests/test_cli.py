@@ -414,7 +414,8 @@ class TestRunHelperDryRunSpinup:
 class TestRunHelperLaunchEnvironment:
     """RunHelper.start must pass config dict and path via process environment rather than command line."""
 
-    def test_secrets_passed_in_env_not_command_line(self, monkeypatch: MonkeyPatch) -> None:
+    @pytest.mark.parametrize("managed_subprocess", [False, True])
+    def test_secrets_passed_in_env_not_command_line(self, monkeypatch: MonkeyPatch, managed_subprocess: bool) -> None:
         from nemo_gym.global_config import (
             NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
             NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
@@ -426,13 +427,14 @@ class TestRunHelperLaunchEnvironment:
                 "verbose": False,
                 "uv_venv_dir": str(PARENT_DIR),
                 "test_server": {
-                    "resources_servers": {
-                        "dummy": {
+                    "responses_api_models" if managed_subprocess else "resources_servers": {
+                        "local_vllm_model" if managed_subprocess else "dummy": {
                             "entrypoint": "app.py",
                             "domain": "other",
                             "host": "127.0.0.1",
                             "port": 8000,
                             "secret_token": "sk-super-secret-12345",
+                            "launcher": "subprocess",
                         }
                     }
                 },
@@ -459,7 +461,7 @@ class TestRunHelperLaunchEnvironment:
         def mock_run_command(cmd, dir_path, server_name="", extra_env=None, **kwargs):
             mock_proc = MagicMock()
             mock_proc.pid = 12345
-            captured_calls.append((cmd, extra_env))
+            captured_calls.append((cmd, extra_env, kwargs))
             return mock_proc
 
         monkeypatch.setattr(nemo_gym.cli.env, "run_command", mock_run_command)
@@ -468,7 +470,9 @@ class TestRunHelperLaunchEnvironment:
         runner.start(MagicMock())
 
         assert len(captured_calls) == 1
-        cmd, extra_env = captured_calls[0]
+        cmd, extra_env, kwargs = captured_calls[0]
+        assert kwargs.get("start_new_session", False) is managed_subprocess
+        assert runner._owned_process_groups == ({"test_server": 12345} if managed_subprocess else {})
         # Command line must NOT contain the sensitive config dict or secret token
         assert "NEMO_GYM_CONFIG_DICT=" not in cmd
         assert "sk-super-secret-12345" not in cmd

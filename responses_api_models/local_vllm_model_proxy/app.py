@@ -64,6 +64,9 @@ class LocalVLLMModelProxyServer(VLLMModel):
         self.config.base_url = response_dict["base_url"]
         self.config.api_key = response_dict["api_key"]
         self.config.model = response_dict["model"]
+        self.config.routing_authority = response_dict.get("routing_authority", "gym")
+        self.config.native_dp_size = response_dict.get("native_dp_size", 1)
+        self.config.routing_timeout_seconds = response_dict.get("routing_timeout_seconds", 600)
 
         # Reset clients after base_url config
         self._post_init()

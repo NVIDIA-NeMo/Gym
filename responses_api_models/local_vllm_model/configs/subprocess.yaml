@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Opt-in single-node MP: PP=1, no PD. TP/DP may be overridden within GPU visibility.
+# vLLM is installed independently. See the local-vllm docs for a pinned router.
+policy_model:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      launcher: subprocess
+      num_workers: 1
+      subprocess:
+        executable: vllm
+        startup_timeout_seconds: 600
+        shutdown_timeout_seconds: 10
+        log_dir: results/local_vllm
+      vllm_serve_env_vars: {}
+      vllm_serve_kwargs:
+        data_parallel_size: 1
+        tensor_parallel_size: 1
+        pipeline_parallel_size: 1
+        gpu_memory_utilization: 0.9
