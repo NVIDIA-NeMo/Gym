@@ -49,6 +49,12 @@ PY
     fi
 fi
 
+# Nemotron's three-read Mamba SSM state must use the dimension-sequence layout when KV transfer is enabled.
+export VLLM_SSM_CONV_STATE_LAYOUT=DS
+
+# The V2 model runner has a large speed regression; keep the pilot's V1 runner.
+export VLLM_USE_V2_MODEL_RUNNER=0
+
 # Sampling is in batch_configs/*.yaml so CLI overrides remain effective.
 GYM_MODEL_PARAMS=()
 VLLM_COMMON_ARGS=(

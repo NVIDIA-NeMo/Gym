@@ -181,6 +181,15 @@ def test_submit_forwards_settings_to_dependency_check_prepare_and_run(checkout, 
     assert not (root / "INJECTED").exists()
 
 
+def test_serving_config_exports_mamba_kv_transfer_settings() -> None:
+    """Without the DS conv-state layout, vLLM's engine fails at startup under NIXL KV transfer."""
+    script = f'source {SERVING} && printf "%s\\0%s" "$VLLM_SSM_CONV_STATE_LAYOUT" "$VLLM_USE_V2_MODEL_RUNNER"'
+    result = run_shell(script, ROOT, {"PATH": os.environ["PATH"], "MODEL": "/checkpoint"})
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split("\0") == ["DS", "0"]
+
+
 @pytest.mark.parametrize("check_only", [False, True])
 def test_defaults_do_not_enable_resume_or_select_a_stable_output(checkout, check_only: bool) -> None:
     """A name alone never opts into cached results; --check never submits or creates a run."""
