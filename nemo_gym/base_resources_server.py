@@ -295,7 +295,24 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             instance_name=self.config.name,
         )
         # Innermost, so the session middleware has already resolved the cookie session ID.
-        app.user_middleware.append(Middleware(ResourcesCheckpointMiddleware, participant=participant))
+        mcp_session_id = self._mcp_session_id if self.config.expose_tools_over_mcp else None
+        app.user_middleware.append(
+            Middleware(ResourcesCheckpointMiddleware, participant=participant, mcp_session_id=mcp_session_id)
+        )
+
+    def _mcp_session_id(self, scope: dict[str, Any]) -> Optional[str]:
+        """The session an MCP request's signed token names, or ``None``; the MCP endpoint rejects a bad token."""
+        from itsdangerous import BadSignature, URLSafeSerializer
+
+        header = NEMO_GYM_MCP_SESSION_TOKEN_HEADER.lower().encode()
+        token = next((value for key, value in scope.get("headers", ()) if key.lower() == header), None)
+        if token is None:
+            return None
+        try:
+            payload = URLSafeSerializer(self.get_session_middleware_key(), salt=_MCP_TOKEN_SALT).loads(token.decode())
+        except (BadSignature, UnicodeDecodeError):
+            return None
+        return payload.get("sid") if isinstance(payload, dict) else None
 
     def checkpoint_session_started(self, request: Request) -> None:
         """Report that the request's session began an episode; standard ``/seed_session`` does this itself.

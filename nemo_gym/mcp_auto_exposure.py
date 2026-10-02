@@ -107,6 +107,7 @@ LOG = logging.getLogger(__name__)
 TOKEN_HEADER = NEMO_GYM_MCP_SESSION_TOKEN_HEADER
 
 MCP_URL_PATH = "/mcp"
+CONTROL_ROUTE_PREFIX = "/ng-control/"
 
 PERMISSIVE_SCHEMA: dict = {"type": "object", "additionalProperties": True}
 
@@ -443,6 +444,8 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             continue  # Correlation prefixes are handled before resource routes; direct MCP dispatch has no prefix.
         if f"{cls.__module__}.{cls.__name__}" == ("nemo_gym.server_utils.ClientDisconnectCancellationMiddleware"):
             continue  # Direct MCP dispatch has no client connection to monitor.
+        if getattr(cls, "applies_to_mcp_requests", False):
+            continue  # It does its job on the /mcp request as a whole (for example, checkpoint admission).
         dispatch = m.kwargs.get("dispatch")
         if dispatch is not None and getattr(dispatch, "__module__", None) in _GYM_MIDDLEWARE_MODULES:
             continue  # Gym's add_session_id / exception middleware
@@ -460,6 +463,9 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             continue
         # Never tools. GET docs/openapi are excluded by the POST filter above; /mcp by path.
         if route.path.lstrip("/") in RESERVED_MCP_TOOL_NAMES or route.path == MCP_URL_PATH:
+            continue
+        # Gym's control plane (checkpoint control) is for the controller, never for the model.
+        if route.path.startswith(CONTROL_ROUTE_PREFIX):
             continue
         if "{" in route.path:
             catchall_routes.append(route)
