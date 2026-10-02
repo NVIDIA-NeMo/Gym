@@ -809,6 +809,7 @@ class TestResponses:
         res = client.post("/v1/responses", json=_INPUT)
         assert res.status_code == 200
         assert res.json()["id"] == "error"
+        assert res.json()["metadata"]["stop_reason"] == "context_length"
 
     def test_usage_accumulation(self) -> None:
         """Usage tokens accumulate across multiple model calls."""

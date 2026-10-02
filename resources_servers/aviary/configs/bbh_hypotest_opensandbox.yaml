@@ -1,10 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # BBH Hypotest environment backed by OpenSandbox. Deployments must provide the
 # task catalog and mounted capsule root, and bind the generic
 # bbh_hypotest_judge_model reference to a Responses API model server.
 bbh_hypotest_aviary_resources_server:
   resources_servers:
-    bbh_hypotest:
-      entrypoint: app.py
+    aviary:
+      allowed_agents: [aviary_agent]
+      entrypoint: hypotest_app.py
       domain: coding
       verified: false
       judge_model_server:
@@ -65,16 +69,11 @@ bbh_hypotest_aviary_resources_server:
         pull_capsule_in_pod: true
         opensandbox_spec:
           image: ${oc.env:BBH_OPEN_SANDBOX_IMAGE,akomaragiri89904/hypotest-kernel:opensandbox-rlimit-20260731a}
-          # Connection settings follow Gym's OPENSANDBOX_* convention, falling
-          # back to the SDK's own OPEN_SANDBOX_* variables. Unset (null) values
-          # delegate to OpenSandbox SDK discovery/defaults. A scheme in the
-          # domain (e.g. https://host) also selects the kernel endpoint scheme.
-          domain: ${oc.env:OPENSANDBOX_DOMAIN,${oc.env:OPEN_SANDBOX_DOMAIN,null}}
-          api_key: ${oc.env:OPENSANDBOX_API_KEY,${oc.env:OPEN_SANDBOX_API_KEY,null}}
-          protocol: ${oc.env:OPENSANDBOX_PROTOCOL,${oc.env:OPEN_SANDBOX_PROTOCOL,null}}
-          # Optional extra PEM CA bundle for servers with a self-signed
-          # certificate; added to (not replacing) the default trust store.
-          tls_ca_path: ${oc.env:OPENSANDBOX_TLS_CA_PATH,${oc.env:OPEN_SANDBOX_TLS_CA_PATH,null}}
+          # Null delegates connection discovery and defaults to the
+          # OpenSandbox SDK.
+          domain: null
+          api_key: null
+          protocol: null
           use_server_proxy: true
           capsule_mode: mounted_volume
           mounted_capsule_root: ???
@@ -120,6 +119,9 @@ bbh_hypotest_aviary_agent:
       entrypoint: app.py
       max_steps: 100
       return_transitions: false
+      # One final tool-free model call. Hypotest acknowledges submission without
+      # exposing correctness; scoring and verifier metadata remain available.
+      generate_final_response_after_done: true
       resources_server:
         type: resources_servers
         name: bbh_hypotest_aviary_resources_server
@@ -127,3 +129,11 @@ bbh_hypotest_aviary_agent:
         type: responses_api_models
         name: policy_model
       max_total_sequence_length: 131072
+
+bbh_hypotest_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: bbh_hypotest_aviary_agent
