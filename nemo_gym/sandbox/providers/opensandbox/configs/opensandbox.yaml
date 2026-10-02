@@ -52,6 +52,22 @@ sandbox:
       deadline_s: 180
       stable_count: 2
       stable_delay_s: 1.0
+    # Deployment image policy, applied to every sandbox this provider creates. Tasks and
+    # servers keep naming the published image; the deployment decides what is pulled.
+    images:
+      # Ordered prefix rewrites, e.g. a mirror or a derived image:
+      #   - {from: "harborframework/", to: "registry.example/mirror/"}
+      rewrites: []
+      # Registry credentials by image prefix (longest prefix wins):
+      #   "registry.example/": {username: ${registry_username}, password: ${registry_password}}
+      auth: {}
+    # Commands run as root in every new sandbox before it is handed out, for repairs the
+    # deployment owns rather than the task. A failing command fails the create, unretried.
+    setup:
+      commands: []
+      timeout_s: 600
+      # Environment set in every sandbox, under the spec's own variables (platform knobs only).
+      env: {}
     operations:
       retries: 5
       retry_delay_s: 1.0

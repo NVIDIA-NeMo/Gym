@@ -629,6 +629,13 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
             usage=usage,
+            # The episode path returns only the response, so the outcome rides in its metadata: a
+            # harness exception must not look like a model failure in the row.
+            metadata={
+                "terminus2_completed": str(terminus2_completed).lower(),
+                **({"terminus2_error_type": error_type} if error_type else {}),
+                **({"terminus2_error": error[-500:]} if error else {}),
+            },
         )
 
         total_time = perf_counter() - start_time

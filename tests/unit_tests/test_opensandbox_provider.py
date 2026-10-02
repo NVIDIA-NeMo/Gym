@@ -2488,3 +2488,75 @@ async def test_shared_memory_metadata_reaches_create_api(fake_opensandbox_sdk, s
     provider = OpenSandboxProvider(attribution={"enabled": False}, probe={"command": None})
     await provider.create(SandboxSpec(image="image:tag", metadata={"nemo.nvidia.com/shm": size}))
     assert FakeSandbox.created_kwargs["metadata"]["nemo.nvidia.com/shm"] == size
+
+
+def test_images_config_rewrites_prefixes_and_picks_the_longest_auth_prefix() -> None:
+    images = opensandbox_provider.OpenSandboxImagesConfig(
+        rewrites=[{"from": "harborframework/", "to": "registry.example/mirror/"}],
+        auth={
+            "registry.example/": {"username": "outer", "password": TEST_REGISTRY_PASSWORD},
+            "registry.example/mirror/": {"username": "inner", "password": TEST_REGISTRY_PASSWORD},
+        },
+    )
+    assert images.resolve(None) == (None, None)
+    assert images.resolve("python:3.11") == ("python:3.11", None)
+    image, auth = images.resolve("harborframework/tb:abc@sha256:0")
+    assert image == "registry.example/mirror/tb:abc@sha256:0" and auth["username"] == "inner"
+    image, auth = images.resolve("registry.example/other:1")
+    assert image == "registry.example/other:1" and auth["username"] == "outer"
+
+
+async def test_direct_create_applies_the_provider_image_policy(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        images={
+            "rewrites": [{"from": "harborframework/", "to": "registry.example/mirror/"}],
+            "auth": {"registry.example/": {"username": "mirror", "password": TEST_REGISTRY_PASSWORD}},
+        },
+    )
+    await provider.create(SandboxSpec(image="harborframework/tb:abc"))
+    image = FakeSandbox.created_kwargs["image"]
+    assert image.image == "registry.example/mirror/tb:abc" and image.auth.username == "mirror"
+
+    # A spec's own credentials win over the provider's, and an unrewritten image with no matching prefix is plain.
+    await provider.create(
+        SandboxSpec(
+            image="harborframework/tb:abc", provider_options={"image_auth": {"username": "spec", "password": "x"}}
+        )
+    )
+    assert FakeSandbox.created_kwargs["image"].auth.username == "spec"
+    await provider.create(SandboxSpec(image="python:3.11"))
+    assert FakeSandbox.created_kwargs["image"] == "python:3.11"
+
+
+async def test_direct_create_runs_setup_commands_as_root_and_a_failure_fails_the_create(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        setup={
+            "commands": ["apt-get update", "false"],
+            "timeout_s": 12,
+            "env": {"EXECD_API_GRACE_SHUTDOWN": "50ms", "A": "provider"},
+        },
+    )
+    calls: list[tuple[str, str | None, float | None]] = []
+    cleaned: list[str] = []
+
+    async def exec_(handle, command, **kwargs):
+        calls.append((command, kwargs.get("user"), kwargs.get("timeout_s")))
+        return opensandbox_provider.SandboxExecResult(
+            stdout="", stderr="boom" if command == "false" else "", return_code=int(command == "false")
+        )
+
+    async def cleanup(handle):
+        cleaned.append(handle.sandbox_id)
+
+    monkeypatch.setattr(provider, "exec", exec_)
+    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
+    with pytest.raises(opensandbox_provider.OpenSandboxSetupError, match="setup command failed.*false"):
+        await provider.create(SandboxSpec(image="python:3.11", env={"A": "spec"}))
+    assert calls == [("apt-get update", "root", 12), ("false", "root", 12)]
+    assert cleaned == ["sandbox-1"]
+    # The provider's environment sits under the spec's own variables.
+    assert FakeSandbox.created_kwargs["env"] == {"EXECD_API_GRACE_SHUTDOWN": "50ms", "A": "spec"}

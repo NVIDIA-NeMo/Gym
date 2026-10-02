@@ -8,6 +8,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
 from nemo_gym.tasks.harbor.digest import content_hash
 from nemo_gym.tasks.harbor.dockerfile import base_image_only
 from nemo_gym.tasks.harbor.models import HarborTaskConfig
@@ -91,11 +92,22 @@ def load_task(path: Path) -> HarborTask:
         config = HarborTaskConfig.model_validate(tomllib.loads((path / TASK_FILE).read_text()))
     except (tomllib.TOMLDecodeError, ValueError) as exc:
         raise HarborTaskError(f"{path / TASK_FILE}: {exc}") from exc
+    # The dataset's own settings sit beside the task folders and shape the effective task.toml.
+    try:
+        config = apply_dataset_config(config, path.name, read_dataset_config(path.parent))
+    except ValueError as exc:
+        raise HarborTaskError(str(exc)) from exc
     instruction_path = path / INSTRUCTION_FILE
     if not instruction_path.is_file():
         raise HarborTaskError(f"{path} has no {INSTRUCTION_FILE}")
     if not (path / "tests").is_dir():
         raise HarborTaskError(f"{path} has no tests/ folder")
+    if not config.is_shared_verifier and not config.artifacts:
+        raise HarborTaskError(
+            f"{path / TASK_FILE} uses separate verification but declares no artifacts, so the verifier "
+            "would grade a fresh container without the agent's work. Declare `artifacts` "
+            '(`artifacts = ["/logs/artifacts"]` to grade only what the agent puts there).'
+        )
 
     environment = config.environment
     image = environment.docker_image
