@@ -22,6 +22,7 @@ Prepare closes admission for data routes and is ready once no request is in flig
 
 import asyncio
 import logging
+from collections import Counter
 from collections.abc import Callable
 from typing import Any, Literal, Optional, Protocol
 
@@ -108,7 +109,9 @@ class ResourcesParticipant(CheckpointParticipant):
         self._open.set()
         self.inflight = 0
         self._sessions: dict[str, EpisodeId] = {}
-        self._retired_sessions: set[str] = set()
+        # Sessions a retire is stopping, refused until it has; and requests in flight per session.
+        self._stopping_sessions: set[str] = set()
+        self._session_requests: Counter[str] = Counter()
         # Sessions seeded after admission closed. Their episodes' boundaries precede the seed, so they
         # are not part of this checkpoint: they neither block it nor are exported by it.
         self._seeded_while_closed: set[str] = set()
@@ -116,10 +119,9 @@ class ResourcesParticipant(CheckpointParticipant):
         self._restored_unused: set[str] = set()
 
     def admit(self, session_id: Optional[str], path: str) -> None:
-        # Closing a retired attempt's session is never stale: it is how the server releases that session's state,
-        # which a restart_only server's retire cannot do.
-        if session_id in self._retired_sessions and path != _SESSION_CLOSE:
-            raise StaleAttemptError(f"resources session {session_id!r} belongs to a retired attempt")
+        # A close is never refused: it is how the server releases a session's state.
+        if session_id in self._stopping_sessions and path != _SESSION_CLOSE:
+            raise StaleAttemptError(f"resources session {session_id!r} belongs to an attempt being retired")
         # A replay-safe request may still arrive from an episode step the checkpoint did not wait for.
         # Refusing it would fail that episode; its episode re-runs it after a crash anyway.
         if not self.accepting and path not in self.replayable_paths:
@@ -163,13 +165,34 @@ class ResourcesParticipant(CheckpointParticipant):
         )
 
     async def retire(self, episode_id: EpisodeId) -> None:
-        for session_id, bound in list(self._sessions.items()):
-            if bound.rollout_id == episode_id.rollout_id and bound.attempt <= episode_id.attempt:
-                del self._sessions[session_id]
+        """Refuse the attempts' sessions, wait for their requests in flight, then release them."""
+        retired = [
+            session_id
+            for session_id, bound in self._sessions.items()
+            if bound.rollout_id == episode_id.rollout_id and bound.attempt <= episode_id.attempt
+        ]
+        self._stopping_sessions.update(retired)
+        try:
+            while any(self._session_requests[session_id] for session_id in retired):
+                await self.wait_changed(1.0)
+            for session_id in retired:
+                self._sessions.pop(session_id, None)
                 self._restored_unused.discard(session_id)
-                self._retired_sessions.add(session_id)
                 if self.mode == "exported":
                     await self.hooks.retire_session_state(session_id)
+        finally:
+            self._stopping_sessions.difference_update(retired)
+
+    def request_started(self, session_id: Optional[str]) -> None:
+        if session_id is not None:
+            self._session_requests[session_id] += 1
+
+    async def request_ended(self, session_id: Optional[str]) -> None:
+        if session_id is not None:
+            self._session_requests[session_id] -= 1
+            if not self._session_requests[session_id]:
+                del self._session_requests[session_id]
+            await self.notify()
 
     async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         if self.mode != "exported":
@@ -280,9 +303,11 @@ class ResourcesCheckpointMiddleware:
         counted = path not in self.participant.replayable_paths
         if counted:
             self.participant.inflight += 1
+        self.participant.request_started(session_id)
         try:
             await self.app(scope, receive, capture_status)
         finally:
+            await self.participant.request_ended(session_id)
             if counted:
                 self.participant.inflight -= 1
                 await self.participant.notify()
