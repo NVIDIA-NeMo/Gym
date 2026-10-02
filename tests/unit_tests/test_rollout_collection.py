@@ -4764,6 +4764,30 @@ class TestDispatchBudget:
         # The completed rollout is timed, so the adaptive margin has a basis.
         assert tracker.quantile(0.5) is not None
 
+    @pytest.mark.parametrize(("preloaded_s", "recorded"), [(3600.0, False), (1e-9, True)])
+    async def test_a_failed_run_feeds_the_margin_only_when_it_ran_long(
+        self, monkeypatch: pytest.MonkeyPatch, preloaded_s: float, recorded: bool
+    ) -> None:
+        """A failure counts toward the adaptive margin only when it is at least as long as the median."""
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock(side_effect=http_error(502)))
+        tracker = DispatchLatencyTracker()
+        for _ in range(5):
+            tracker.record(preloaded_s)
+
+        results = [
+            await future
+            for future in self._helper([])._run_examples_with_metadata(
+                [self._row(0)],
+                dispatch_budget_s=3600.0,
+                drain_margin_s=1.0,
+                latency_tracker=tracker,
+                route_failures_to_sidecar=True,
+            )
+        ]
+
+        assert results[0].result[NG_FAILURE_CLASS_KEY] is not None
+        assert (len(tracker._durations) == 6) is recorded
+
     @pytest.mark.parametrize("field", ["dispatch_budget_s", "drain_margin_s"])
     def test_budget_and_margin_cannot_be_negative(self, tmp_path: Path, field: str) -> None:
         with pytest.raises(ValidationError, match="greater than or equal to 0"):
