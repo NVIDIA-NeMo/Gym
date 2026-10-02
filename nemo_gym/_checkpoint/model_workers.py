@@ -239,7 +239,6 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
             "accepting": self.accepting,
             "generation": self.generation,
             "request": self.request.model_dump(mode="json") if self.request is not None else None,
-            "fence": self.attempts.minimums(),
             "restored_keys": sorted(self.restored_cuts),
         }
 
@@ -304,7 +303,7 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
         try:
             await self._broadcast(
                 "open",
-                {"fence": self.attempts.minimums(), "restored_keys": sorted(self.restored_cuts)},
+                {"restored_keys": sorted(self.restored_cuts)},
                 timeout=_MESSAGE_TIMEOUT_SECONDS,
             )
         except ControlError:
@@ -545,7 +544,6 @@ class PolicyWorkerLink:
         self._reader_task = asyncio.create_task(self._channel.run())
         self._reader_task.add_done_callback(self._connection_ended)
         state = await self.call("register", {"pid": os.getpid()})
-        self.attempts.raise_to(state["fence"])
         self.restored_cuts.keys = set(state["restored_keys"])
         if not state["accepting"]:
             # A checkpoint is open: close at once and report, like every other worker did.
@@ -590,7 +588,6 @@ class PolicyWorkerLink:
             await self.gate.close(CheckpointRequest.model_validate(body["request"]))
             return self._numbered_report()
         if kind == "open":
-            self.attempts.raise_to(body["fence"])
             self.restored_cuts.keys = set(body["restored_keys"])
             self.gate.open()
             return {}
@@ -598,8 +595,9 @@ class PolicyWorkerLink:
             return self.gate.snapshot().model_dump(mode="json")
         if kind == "retire":
             episode_id = EpisodeId.model_validate(body["episode_id"])
-            self.attempts.retire(episode_id)
-            await self.gate.retire(episode_id)
+            # This worker refuses the attempts until its calls for them have stopped.
+            with self.attempts.stopping([episode_id]):
+                await self.gate.retire(episode_id)
             return {}
         raise ControlError(f"unknown checkpoint message {kind!r}")
 

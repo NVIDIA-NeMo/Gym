@@ -23,7 +23,7 @@ from nemo_gym._checkpoint.control import (
     RetireRequest,
     install_control_routes,
 )
-from nemo_gym._checkpoint.errors import ControlError, InvalidPhaseError, StaleAttemptError
+from nemo_gym._checkpoint.errors import ControlError, InvalidPhaseError
 from nemo_gym._checkpoint.model import GenerationCutRecord, PolicyGate, _Ticket
 from nemo_gym._checkpoint.model_workers import PolicyCoordinator, PolicyWorkerLink
 from nemo_gym.episode_types import EpisodeId
@@ -184,16 +184,17 @@ async def test_a_worker_that_joins_during_a_checkpoint_closes_at_once() -> None:
     assert prepared["phase"] == "prepared"
 
 
-async def test_fences_reach_every_worker_including_ones_that_join_later() -> None:
+async def test_a_retire_leaves_no_fence_on_any_worker_or_on_one_that_joins_later() -> None:
     async with deployment() as (coordinator, (first, second)):
         await coordinator.controller.retire(RetireRequest(**control(episode_ids=[{"rollout_id": "r"}])))
         late = worker_link(coordinator.socket_path)
         await late.connect()
+        fences = [len(link.attempts) for link in (first, second, late)] + [len(coordinator.participant.attempts)]
         for gate in (first.gate, second.gate, late.gate):
-            with pytest.raises(StaleAttemptError):
-                gate.admit("r")
-            gate.admit("r-a1")
+            gate.admit("r")
         await late.disconnect()
+
+    assert fences == [0, 0, 0, 0]
 
 
 async def test_worker_control_routes_forward_to_the_coordinator() -> None:
@@ -232,7 +233,7 @@ async def test_a_worker_shuts_down_when_its_coordinator_is_gone() -> None:
     assert lost == ["lost"]
 
 
-async def test_restore_across_workers_imports_once_and_fences_and_offers_the_cut_to_every_worker(
+async def test_restore_across_workers_imports_once_and_offers_the_cut_to_every_worker(
     tmp_path: Path,
 ) -> None:
     ledger = FileLineageStore(tmp_path / "ledger")
@@ -251,9 +252,6 @@ async def test_restore_across_workers_imports_once_and_fences_and_offers_the_cut
         )
         closed = [first.gate.accepting, second.gate.accepting]
         await coordinator.controller.resume(CheckpointRequest(**control("r1")))
-        for gate in (first.gate, second.gate):
-            with pytest.raises(StaleAttemptError):
-                gate.admit("r")
         offered = [first.restored_cuts.keys, second.restored_cuts.keys]
 
     assert closed == [False, False]

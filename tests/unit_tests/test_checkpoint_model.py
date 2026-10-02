@@ -18,7 +18,7 @@ from nemo_gym._checkpoint.control import (
     RetireRequest,
     install_participant,
 )
-from nemo_gym._checkpoint.errors import ControlError, StaleAttemptError
+from nemo_gym._checkpoint.errors import ControlError
 from nemo_gym._checkpoint.generation_cut import GenerationCutInventory, GenerationCutPrefixAck, GenerationCutReceipt
 from nemo_gym._checkpoint.model import (
     ModelRecord,
@@ -127,21 +127,21 @@ async def test_undelivered_generation_does_not_block_prepare_and_is_held_until_r
     assert delivered.json() == {"output": "done"}
 
 
-async def test_retire_cancels_a_held_generation_and_fences_its_attempt() -> None:
+async def test_retire_stops_a_running_generation_before_it_replies() -> None:
     app, participant, _ = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
-        held = asyncio.create_task(client.post("/ng-rollout/r/v1/responses"))
+        running = asyncio.create_task(client.post("/ng-rollout/r/v1/responses"))
         await asyncio.sleep(0.05)
-        await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
-        await client.post(
-            "/ng-control/v1/checkpoint/retire", json=control(episode_ids=[{"rollout_id": "r"}]), headers=AUTH
+        retired = await client.post(
+            "/ng-control/v1/checkpoint/retire", json=control("retire", episode_ids=[{"rollout_id": "r"}]), headers=AUTH
         )
-        await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
-        stale = await client.post("/ng-rollout/r/v1/responses")
-        await asyncio.gather(held, return_exceptions=True)
+        inflight_at_reply = participant.readiness().counts["inflight"]
+        await asyncio.gather(running, return_exceptions=True)
 
-    assert stale.status_code == 409 and stale.json()["error"]["code"] == "stale_attempt"
-    assert participant.readiness().counts["inflight"] == 0
+    assert retired.status_code == 200
+    assert inflight_at_reply == 0
+    assert running.cancelled() or running.exception() is not None
+    assert len(participant.attempts) == 0
 
 
 async def _ledger_participant(root: Path) -> tuple[FileLineageStore, PolicyModelParticipant, ParticipantController]:
@@ -175,8 +175,7 @@ async def test_restored_ledger_lets_the_next_attempt_resolve_its_parent(tmp_path
     assert resolution.status == ParentResolutionStatus.RESOLVED
     assert (resolution.match.model_call_id, resolution.match.staging_chain) == ("c1", ("r/c1",))
     assert [record.model_call_id for record in manifest.records] == ["c1"]
-    with pytest.raises(StaleAttemptError):
-        restored.gate.admit("r")
+    assert len(restored.attempts) == 0
 
 
 async def test_model_commit_requires_the_continued_episodes(tmp_path: Path) -> None:

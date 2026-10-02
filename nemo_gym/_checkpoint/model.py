@@ -341,9 +341,18 @@ class PolicyGate:
             ticket.cut_record = None
 
     async def retire(self, episode_id: EpisodeId) -> None:
-        for ticket in list(self.tickets):
-            if covers(episode_id, ticket.capture_key) and ticket.task is not None:
-                ticket.task.cancel()
+        """Cancel the attempts' calls and wait until they have stopped."""
+        tasks = [
+            ticket.task
+            for ticket in list(self.tickets)
+            if covers(episode_id, ticket.capture_key)
+            and ticket.task is not None
+            and ticket.task is not asyncio.current_task()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.wait(tasks)
 
     def report(self) -> GateReport:
         # Held calls never block; only a response that started before admission closed must finish sending.
