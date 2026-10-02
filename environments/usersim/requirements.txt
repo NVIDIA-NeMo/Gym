@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Preparation-only dependency. Keep this revision aligned with the UserSim
+# requirements used by the runtime servers.
+nemo-usersim @ git+ssh://git@github.com/NVIDIA-NeMo/UserSim.git@4fd4c800bbef8883329543df632f328860fc6429

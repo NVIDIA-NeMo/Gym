@@ -1,0 +1,16 @@
+# NeMo UserSim environment composition. Preparation materializes canonical resolved episode rows.
+config_paths:
+  - resources_servers/usersim/configs/usersim.yaml
+
+usersim_resources:
+  resources_servers:
+    usersim:
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/usersim/data/example.jsonl
+          prepare_script: environments/usersim/prepare.py
+          prompt_config: null
+          num_repeats: 1
+          agent: usersim_assistant
+          license: Apache 2.0

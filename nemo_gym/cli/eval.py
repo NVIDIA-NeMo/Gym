@@ -205,7 +205,7 @@ def _multiprocess_benchmark_prepare_fn(args):
     prepare_script_args: Dict[str, Any]
     (benchmark_config, prepare_module_path, prepare_script_args) = args
 
-    print(f"Preparing benchmark: {benchmark_config.name}")
+    print(f"Preparing dataset: {benchmark_config.name}")
 
     module = importlib.import_module(prepare_module_path)
     output_fpath = module.prepare(**prepare_script_args)
@@ -213,7 +213,7 @@ def _multiprocess_benchmark_prepare_fn(args):
         raise ConfigError(
             f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
         )
-    print(f"Benchmark data prepared at: {output_fpath}")
+    print(f"Dataset prepared at: {output_fpath}")
 
 
 def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:

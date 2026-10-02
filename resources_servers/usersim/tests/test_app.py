@@ -19,6 +19,7 @@ from resources_servers.usersim.app import (
     UserSimResourcesServer,
     UserSimResourcesServerConfig,
 )
+from resources_servers.usersim.episode_contracts import UserSimTaskInput
 
 
 _ORIGINAL_EVALUATE_ASSISTANT_QUALITY = UserSimResourcesServer._evaluate_assistant_quality
@@ -39,6 +40,7 @@ PERSONAS = [
         "persona": "Avery is a patient teacher who enjoys explaining unfamiliar topics.",
     },
 ]
+EXAMPLES_PATH = Path(__file__).parents[1] / "data" / "example.jsonl"
 
 
 @pytest.fixture(autouse=True)
@@ -168,7 +170,7 @@ def test_seed_session_resolves_replayable_scenario(tmp_path: Path) -> None:
     assert first.json()["usersim_context"]["personas_dataset_version"] == "0.0.2"
     assert len(first.json()["usersim_context"]["personas_panel_sha256"]) == 64
     assert first.json()["usersim_context"]["usersim_revision"] == (
-        "44c39daf481a23a87742c3c456852aca910653ce"  # pragma: allowlist secret
+        "2d9ec0d7c32ac800f2171b5943382a7b1eb96cbc"  # pragma: allowlist secret
     )
     scenario = first.json()["scenario"]
     assert scenario["persona"]["first_name"] in {"Morgan", "Avery"}
@@ -185,6 +187,16 @@ def test_probe_mix_deterministically_selects_enabled_probe(tmp_path: Path) -> No
     assert response.status_code == 200
     assert response.json()["scenario"]["probe_type"] == "general_educational"
     assert response.json()["scenario"]["theme"]["type"] == "local ecology"
+
+
+def test_examples_cover_every_supported_probe() -> None:
+    rows = [json.loads(line) for line in EXAMPLES_PATH.read_text().splitlines()]
+    tasks = [UserSimTaskInput.model_validate(row["task_input"]) for row in rows]
+
+    assert {task.sampling.probe_type for task in tasks} == SUPPORTED_PROBES
+    assert len({row["task_id"]["task_id"] for row in rows}) == len(rows)
+    tool_calling = next(task for task in tasks if task.sampling.probe_type == "tool_calling")
+    assert tool_calling.probe_data["tools"][0]["function"]["name"] == "get_weather"
 
 
 def test_supported_probes_match_pinned_usersim_registry() -> None:
@@ -310,7 +322,7 @@ def test_startup_loads_prepared_panel_and_validates_manifest(tmp_path: Path, mon
 
 
 def test_missing_pinned_dataset_fails_during_initialization(tmp_path: Path) -> None:
-    with pytest.raises(RuntimeError, match="gym eval prepare --benchmark usersim"):
+    with pytest.raises(RuntimeError, match="gym eval prepare --config environments/usersim/config.yaml"):
         _app(tmp_path)
 
 
