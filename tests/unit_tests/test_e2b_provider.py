@@ -1007,6 +1007,53 @@ class TestRetries:
             await provider.create(_spec())
         assert calls["n"] == 1
 
+    @staticmethod
+    def _flaky_start(monkeypatch: pytest.MonkeyPatch, errors: list) -> dict:
+        calls = {"n": 0}
+        real_run = FakeCommands.run
+
+        async def run(self, **kwargs):
+            calls["n"] += 1
+            if errors:
+                raise errors.pop(0)
+            return await real_run(self, **kwargs)
+
+        monkeypatch.setattr(FakeCommands, "run", run)
+        return calls
+
+    async def test_command_start_retries_gateway_502(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A not-yet-ready envd behind the gateway: the command never started, so starting it again is safe.
+        calls = self._flaky_start(monkeypatch, [FakeTimeout("HTTP 502: This error is likely due to sandbox timeout")])
+        provider = E2BProvider(create={"template": "base"}, operations={"retries": 3, "retry_delay_s": 0})
+        handle = await provider.create(_spec())
+        result = await provider.exec(handle, "echo hi")
+        assert result.return_code == 0
+        assert calls["n"] == 2
+
+    async def test_command_start_does_not_retry_other_timeouts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Any other failure may have started the command; retrying could run it twice.
+        calls = self._flaky_start(monkeypatch, [FakeTimeout("request timed out")])
+        provider = E2BProvider(create={"template": "base"}, operations={"retries": 3, "retry_delay_s": 0})
+        handle = await provider.create(_spec())
+        with pytest.raises(TimeoutError):
+            await provider.exec(handle, "echo hi")
+        assert calls["n"] == 1
+
+    async def test_file_write_retries_timeouts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        errors = [FakeTimeout("HTTP 502: This error is likely due to sandbox timeout")]
+        real_write = FakeFiles.write
+
+        async def write(self, path, data, **kwargs):
+            if errors:
+                raise errors.pop(0)
+            return await real_write(self, path, data, **kwargs)
+
+        monkeypatch.setattr(FakeFiles, "write", write)
+        provider = E2BProvider(create={"template": "base"}, operations={"retries": 3, "retry_delay_s": 0})
+        handle = await provider.create(_spec())
+        await provider.write_file(handle, "/app/seed.txt", "hello")
+        assert handle.raw.files_written["/app/seed.txt"] == "hello"
+
 
 # --------------------------------------------------------------------------
 # Config validation

@@ -63,6 +63,8 @@ T = TypeVar("T")
 # as ``name:v1`` and template IDs, but those must be explicit because ``:`` and
 # other punctuation overlap with OCI image syntax in ``SandboxSpec.image``.
 _DIRECT_TEMPLATE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# How the SDK words a gateway that could not reach the sandbox's envd (raised as TimeoutException/ConnectError).
+_GATEWAY_UNAVAILABLE_RE = re.compile(r"\bHTTP 50[23]\b|\b50[23] Bad Gateway\b|\b503 Service Unavailable\b")
 
 # Passed straight through to the SDK (``ApiParams``) on every call.
 _API_PARAM_KEYS = (
@@ -504,6 +506,25 @@ class E2BProvider:
 
     # -------------------------------------------------------------- commands
 
+    async def _start_command(self, sandbox: Any, kwargs: dict[str, Any]) -> Any:
+        """Start a detached command, retrying only gateway 502/503 answers.
+
+        Right after a burst of creates, a sandbox's envd can briefly be unreachable behind the gateway,
+        which answers 502/503 (the SDK raises them as TimeoutException). The request never reached envd,
+        so the command did not start and retrying is safe; any other failure may have started it.
+        """
+        delay = self._operations.retry_delay_s
+        for attempt in range(self._operations.retries + 1):
+            try:
+                return await sandbox.commands.run(**kwargs, background=True)
+            except Exception as exc:  # noqa: BLE001 - narrowed to gateway-unavailable below
+                if attempt == self._operations.retries or not _GATEWAY_UNAVAILABLE_RE.search(str(exc)):
+                    raise
+                LOGGER.warning("e2b command start got %s (attempt %d); retrying", exc, attempt + 1)
+                await asyncio.sleep(min(delay, self._operations.retry_max_delay_s))
+                delay *= 2
+        raise AssertionError("unreachable")  # pragma: no cover
+
     async def _run_background(self, sandbox: Any, kwargs: dict[str, Any]) -> Any:
         """Run a command detached, reattaching by pid if the stream drops.
 
@@ -530,7 +551,7 @@ class E2BProvider:
             if command_timeout is not None and float(command_timeout) > 0
             else None
         )
-        handle = await sandbox.commands.run(**kwargs, background=True)
+        handle = await self._start_command(sandbox, kwargs)
         pid = getattr(handle, "pid", None)
         stdout = ""
         stderr = ""
@@ -661,6 +682,8 @@ class E2BProvider:
         await self._with_retries(
             lambda: sandbox.files.write(target_path, data, **self._request_params()),
             operation="write_file",
+            # Idempotent, and the SDK reports a gateway 502 from a not-yet-ready envd as a timeout.
+            retry_timeouts=True,
         )
 
     async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
@@ -668,6 +691,7 @@ class E2BProvider:
         data = await self._with_retries(
             lambda: sandbox.files.read(source_path, format="bytes", **self._request_params()),
             operation="read_file",
+            retry_timeouts=True,
         )
         return data if isinstance(data, bytes) else bytes(data)
 
