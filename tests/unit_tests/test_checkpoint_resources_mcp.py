@@ -86,16 +86,27 @@ async def test_a_tool_call_in_flight_holds_up_prepare() -> None:
     assert ready.json()["phase"] == "prepared"
 
 
-async def test_a_retired_sessions_token_is_fenced() -> None:
-    async with mcp_server() as (_, client):
+async def test_a_retire_waits_for_a_tool_call_in_flight_over_mcp() -> None:
+    async with mcp_server() as (server, client):
         token = await seed(client)
-        retire = await client.post(
-            "/ng-control/v1/checkpoint/retire", json=control(episode_ids=[{"rollout_id": "r"}]), headers=AUTH
+        server.gate = asyncio.Event()
+        call = asyncio.create_task(increment(client, token))
+        await asyncio.sleep(0.05)
+        retire = asyncio.create_task(
+            client.post(
+                "/ng-control/v1/checkpoint/retire",
+                json=control("retire", episode_ids=[{"rollout_id": "r"}]),
+                headers=AUTH,
+            )
         )
-        fenced = await increment(client, token)
+        await asyncio.sleep(0.1)
+        waited = not retire.done()
+        server.gate.set()
+        retired = await retire
+        await call
 
-    assert retire.status_code == 200, retire.text
-    assert fenced.status_code == 409 and fenced.json()["error"]["code"] == "stale_attempt"
+    assert waited and retired.status_code == 200
+    assert server.counters == {}
 
 
 async def test_the_harness_keeps_its_token_across_a_restore(tmp_path: Path) -> None:

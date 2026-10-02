@@ -150,20 +150,19 @@ async def test_restart_only_sessions_block_until_their_rollout_is_retired() -> N
         blocked = (
             await client.post("/ng-control/v1/checkpoint/prepare", json=control(timeout=0.1), headers=AUTH)
         ).json()
-        await client.post(
+        # The controller abandons the checkpoint, retires the blocking rollout, and checkpoints again.
+        await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
+        retired = await client.post(
             "/ng-control/v1/checkpoint/retire",
-            json=control(episode_ids=[{"rollout_id": "r", "attempt": 2}]),
+            json=control("retire", episode_ids=[{"rollout_id": "r", "attempt": 2}]),
             headers=AUTH,
         )
-        prepared = (await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)).json()
-        await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
-        stale = await client.post("/increment")
+        prepared = (await client.post("/ng-control/v1/checkpoint/prepare", json=control("c2"), headers=AUTH)).json()
+        await client.post("/ng-control/v1/checkpoint/resume", json=control("c2"), headers=AUTH)
 
     assert blocked["report"]["blockers"] == ["r-a2"]
+    assert retired.status_code == 200
     assert prepared["phase"] == "prepared"
-    # restart_only servers implement no hooks, so a retired session is only fenced, not exported or cleared.
-    assert stale.status_code == 409 and stale.json()["error"]["code"] == "stale_attempt"
-    assert list(server.counters.values()) == [0]
 
 
 async def test_invalid_restored_state_installs_nothing(tmp_path: Path) -> None:
@@ -364,20 +363,30 @@ async def test_a_close_during_a_checkpoint_waits_for_resume_and_then_ends_the_se
     assert server._checkpoint.readiness().counts["sessions"] == 0
 
 
-async def test_a_retired_session_can_still_be_closed_to_release_it() -> None:
-    server, client = make_server(RestartOnlyServer)
-    close = {"resources_session_id": "s", "episode_id": {"rollout_id": "r"}}
+async def test_a_retire_waits_for_the_sessions_request_in_flight() -> None:
+    server, client = make_server()
+    server.gate = asyncio.Event()
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
-        await client.post(
-            "/ng-control/v1/checkpoint/retire", json=control(episode_ids=[{"rollout_id": "r"}]), headers=AUTH
+        tool = asyncio.create_task(client.post("/increment"))
+        await asyncio.sleep(0.05)
+        retire = asyncio.create_task(
+            client.post(
+                "/ng-control/v1/checkpoint/retire",
+                json=control("retire", episode_ids=[{"rollout_id": "r"}]),
+                headers=AUTH,
+            )
         )
-        tool = await client.post("/increment")
-        # The retired episode's final cleanup: a restart_only server releases its state only through close.
-        closed = await client.post("/ng-rollout/r/close_session", json=close)
+        await asyncio.sleep(0.1)
+        waited = not retire.done()
+        # A new request for the session while it stops is refused.
+        refused = await client.post("/increment")
+        server.gate.set()
+        retired, finished = await retire, await tool
 
-    assert tool.status_code == 409 and tool.json()["error"]["code"] == "stale_attempt"
-    assert closed.status_code == 200
+    assert waited and retired.status_code == 200 and finished.status_code == 200
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "stale_attempt"
+    assert server.counters == {} and server._checkpoint.readiness().counts["sessions"] == 0
 
 
 async def test_a_commit_that_no_longer_continues_a_restored_session_releases_it(tmp_path: Path) -> None:
