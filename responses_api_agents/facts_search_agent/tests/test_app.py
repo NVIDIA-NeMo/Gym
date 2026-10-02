@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -120,6 +121,38 @@ async def test_executes_every_parallel_call_for_seven_hops_then_forces_tool_free
     assert model_bodies[-1].input[-1].content == FINAL_REQUEST
     assert trajectory is not None and len(trajectory.turns) == 8 and len(trajectory.tool_calls) == 8
     assert response.output[-1].type == "message"
+
+
+async def test_executes_same_hop_searches_concurrently_and_preserves_call_order():
+    agent, client = _agent(max_hops=1)
+    payloads = iter(
+        [
+            _base("hop", [_tool("slow"), _tool("fast")]),
+            _base("final", [_message("answer")]),
+        ]
+    )
+    active_searches = 0
+    max_active_searches = 0
+    model_bodies = []
+
+    async def post(*, server_name, url_path, json=None, **kwargs):
+        nonlocal active_searches, max_active_searches
+        if server_name == "policy_model":
+            model_bodies.append(json)
+            return _Response(next(payloads))
+        assert server_name == "facts_search" and url_path == "/brave_search"
+        active_searches += 1
+        max_active_searches = max(max_active_searches, active_searches)
+        await asyncio.sleep(0.02 if json["query"] == "slow" else 0)
+        active_searches -= 1
+        return _Response(content=json["query"])
+
+    client.post = AsyncMock(side_effect=post)
+    await agent._create_episode(_body(), model_url_path="/v1/responses")
+
+    assert max_active_searches == 2
+    outputs = [item for item in model_bodies[-1].input if item.type == "function_call_output"]
+    assert [item.call_id for item in outputs] == ["slow", "fast"]
 
 
 async def test_stops_on_ordinary_answer_without_forced_final():

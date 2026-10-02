@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from time import perf_counter, time
 from typing import Any, List
@@ -151,10 +152,12 @@ class FACTSSearchAgent(SimpleAgent):
 
             hops += 1
             queries += len(fn_calls)
-            for function_call in fn_calls:
+
+            async def execute_tool_call(function_call: NeMoGymResponseFunctionToolCall):
                 started_at = time()
                 started_monotonic = perf_counter()
                 error_type = None
+                response_cookies = resources_server_cookies
                 try:
                     arguments = json.loads(function_call.arguments)
                 except (json.JSONDecodeError, TypeError) as exc:
@@ -169,9 +172,30 @@ class FACTSSearchAgent(SimpleAgent):
                         cookies=resources_server_cookies,
                     )
                     tool_output = (await api_response.content.read()).decode(errors="replace")
-                    resources_server_cookies = api_response.cookies
+                    response_cookies = api_response.cookies
                     status = "completed" if 200 <= api_response.status < 400 else "failed"
                     error_type = None if status == "completed" else f"http_{api_response.status}"
+                return (
+                    function_call,
+                    tool_output,
+                    status,
+                    error_type,
+                    started_at,
+                    (perf_counter() - started_monotonic) * 1000,
+                    response_cookies,
+                )
+
+            tool_results = await asyncio.gather(*(execute_tool_call(function_call) for function_call in fn_calls))
+            for (
+                function_call,
+                tool_output,
+                status,
+                error_type,
+                started_at,
+                duration_ms,
+                response_cookies,
+            ) in tool_results:
+                resources_server_cookies = response_cookies
                 if collect_trajectory:
                     tool_records.append(
                         TrajectoryToolCall(
@@ -180,7 +204,7 @@ class FACTSSearchAgent(SimpleAgent):
                             tool_name=function_call.name,
                             started_at=started_at,
                             completed_at=max(started_at, time()),
-                            duration_ms=(perf_counter() - started_monotonic) * 1000,
+                            duration_ms=duration_ms,
                             timing_source="executor",
                             status=status,
                             error_type=error_type,
