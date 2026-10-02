@@ -2,43 +2,29 @@ environment_routing_mode: taskset
 environment_server_routes:
   "usersim:example": usersim_environment
 
-assistant_policy_base_url: ${policy_base_url}
-assistant_policy_api_key: ${policy_api_key}
-assistant_policy_model_name: ${policy_model_name}
+support_model_base_url: ${policy_base_url}
+support_model_api_key: ${policy_api_key}
+support_model_name: ${policy_model_name}
+support_model_uses_reasoning_parser: false
 
-user_policy_base_url: ${policy_base_url}
-user_policy_api_key: ${policy_api_key}
-user_policy_model_name: ${policy_model_name}
-
-tool_simulation_base_url: ${policy_base_url}
-tool_simulation_api_key: ${policy_api_key}
-tool_simulation_model_name: ${policy_model_name}
-
-assistant_policy_model:
+policy_model:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
-      base_url: ${assistant_policy_base_url}
-      api_key: ${assistant_policy_api_key}
-      model: ${assistant_policy_model_name}
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      uses_reasoning_parser: ${oc.select:policy_uses_reasoning_parser,false}
       return_token_id_information: false
 
-user_policy_model:
+support_model:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
-      base_url: ${user_policy_base_url}
-      api_key: ${user_policy_api_key}
-      model: ${user_policy_model_name}
-      return_token_id_information: false
-
-tool_simulation_model:
-  responses_api_models:
-    vllm_model:
-      entrypoint: app.py
-      base_url: ${tool_simulation_base_url}
-      api_key: ${tool_simulation_api_key}
-      model: ${tool_simulation_model_name}
+      base_url: ${support_model_base_url}
+      api_key: ${support_model_api_key}
+      model: ${support_model_name}
+      uses_reasoning_parser: ${support_model_uses_reasoning_parser}
       return_token_id_information: false
 
 usersim_resources:
@@ -53,10 +39,10 @@ usersim_resources:
       usersim_revision: 44c39daf481a23a87742c3c456852aca910653ce  # pragma: allowlist secret
       tool_simulation_model:
         type: responses_api_models
-        name: tool_simulation_model
+        name: support_model
       probe_scorer_model:
         type: responses_api_models
-        name: tool_simulation_model
+        name: support_model
       personas_locales:
       - en_US
       probe_mix:
@@ -80,7 +66,7 @@ usersim_user:
       entrypoint: app.py
       model_server:
         type: responses_api_models
-        name: user_policy_model
+        name: policy_model
       resources_server:
         type: resources_servers
         name: usersim_resources
@@ -92,7 +78,7 @@ usersim_assistant:
       entrypoint: app.py
       model_server:
         type: responses_api_models
-        name: assistant_policy_model
+        name: policy_model
       resources_server:
         type: resources_servers
         name: usersim_resources
@@ -113,18 +99,15 @@ usersim_environment:
       assistant_agent:
         type: responses_api_agents
         name: usersim_assistant
+      judge_model:
+        type: responses_api_models
+        name: support_model
+      summary_model:
+        type: responses_api_models
+        name: support_model
       resources_server:
         type: resources_servers
         name: usersim_resources
-      judge_model:
-        type: responses_api_models
-        name: tool_simulation_model
-      summary_model:
-        type: responses_api_models
-        name: tool_simulation_model
-      api_response_model:
-        type: responses_api_models
-        name: tool_simulation_model
       resources_tool_transports:
         - direct_http
       max_turns: 6

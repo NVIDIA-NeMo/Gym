@@ -27,6 +27,7 @@ from nemo_gym.config_types import DatasetConfig, ResponsesAPIAgentServerInstance
 from nemo_gym.global_config import DictConfig, GlobalConfigDictParser
 from nemo_gym.train_data_utils import (
     AvgMinMax,
+    CategoricalMetrics,
     DatasetMetrics,
     DatasetValidatorState,
     StringMetrics,
@@ -765,6 +766,78 @@ class TestValidateSamplesAndAggregateMetrics:
             ),
         )
         assert expected_metrics.model_dump() == state.metrics.model_dump()
+
+    def test_validate_native_task_metrics_with_owner_hook(self) -> None:
+        processor = TrainDataProcessor()
+        state = DatasetValidatorState()
+        sample = {
+            "task_id": {"taskset": "usersim:example", "task_id": "1042"},
+            "task_input": {
+                "sampling": {
+                    "locale": "en_US",
+                    "seed": 1042,
+                    "probe_type": "general_open_ended",
+                },
+                "responses_create_params": {},
+            },
+        }
+
+        processor._validate_samples_and_aggregate_metrics_single_sample(
+            state=state,
+            sample_idx=0,
+            sample_dict_str=json.dumps(sample),
+            dataset_metrics_hook=lambda task_input: {
+                "Probe types": task_input["sampling"]["probe_type"],
+                "Assistant override coverage": "assistant" in task_input["responses_create_params"],
+            },
+        )
+
+        assert state.offending_example_idxs == []
+        assert state.metrics.number_of_examples == 0
+        assert state.metrics.number_of_tasks == 1
+        output = state.metrics.aggregate().model_dump_for_output()
+        assert output == {
+            "Number of tasks": 1,
+            "Json-dumped task-input words (proxy for token count)": {
+                "Total # non-null values": 1,
+                "Average": len(json.dumps(sample["task_input"]).split()),
+                "Min": len(json.dumps(sample["task_input"]).split()),
+                "Max": len(json.dumps(sample["task_input"]).split()),
+                "Standard deviation": 0,
+            },
+            "Tasksets": {
+                "counts": {"usersim:example": 1},
+                "unique_count": 1,
+                "total_count": 1,
+            },
+            "Probe types": {
+                "counts": {"general_open_ended": 1},
+                "unique_count": 1,
+                "total_count": 1,
+            },
+            "Assistant override coverage": {
+                "Total # non-null values": 1,
+                "Average": 0,
+                "Min": 0,
+                "Max": 0,
+                "Standard deviation": 0,
+            },
+        }
+
+    def test_categorical_metrics_merge_distributions(self) -> None:
+        left = CategoricalMetrics()
+        left.observe("first")
+        right = CategoricalMetrics()
+        right.observe("second")
+        right.observe("first")
+
+        left.add(right)
+
+        assert left.aggregate().model_dump() == {
+            "counts": {"first": 2, "second": 1},
+            "unique_count": 2,
+            "total_count": 3,
+        }
 
     def test_numeric_close_tolerance_validation(self, monkeypatch: MonkeyPatch) -> None:
         """Test numeric_close with various numeric values to validate tolerance thresholds"""
