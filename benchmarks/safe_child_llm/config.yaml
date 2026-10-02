@@ -1,0 +1,22 @@
+config_paths:
+  - resources_servers/safe_child_llm/configs/safe_child_llm.yaml
+
+# Gym-native Safe-Child-LLM benchmark. Inherits the resources server and judge wiring from
+# safe_child_llm_simple_agent and points it at the 200-row JSONL built by prepare.py. Rows
+# already carry a fully built responses_create_params.input, so prompt_config is null.
+#
+# The paper reports each model's safe response rate averaged over five evaluation rounds;
+# num_repeats: 5 reproduces that design (temperature 0 is in the rows, so the rounds measure
+# serving nondeterminism rather than sampling).
+safe_child_llm_benchmark:
+  _inherit_from: safe_child_llm_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: safe_child_llm
+          type: benchmark
+          jsonl_fpath: benchmarks/safe_child_llm/data/safe_child_llm_benchmark.jsonl
+          prepare_script: benchmarks/safe_child_llm/prepare.py
+          prompt_config: null
+          num_repeats: 5
+          license: MIT
