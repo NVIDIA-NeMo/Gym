@@ -333,7 +333,6 @@ jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
    | {
        rollout_id: "\($task):\($repeat)",
        conversation_status: .usersim_result.conversation_status,
-       evaluated_role: "assistant",
        scenario_completed: .verification.scenario_completed,
        reward: .verification.reward,
        mask_sample: .verification.mask_sample,
@@ -353,6 +352,8 @@ jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
 
 Interpret that view as follows:
 
+- `verify()` does not emit a separate `evaluated_role` field. The integration's verification contract targets
+  Assistant participant behavior, and the persisted evidence is named `assistant_eval`.
 - `conversation_status: true` means UserSim finished the conversation; `scenario_completed: true` additionally
   means both participants completed and any probe-specific scorer passed.
 - `mask_sample: false` means the reward is eligible for aggregation. A masked row is retained for diagnosis
