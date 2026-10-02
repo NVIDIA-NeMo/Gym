@@ -342,3 +342,23 @@ async def test_a_session_the_server_already_dropped_is_not_exported_and_does_not
     assert commit.status_code == 200
     assert commit.json()["manifest"]["record_count"] == 0
     assert server._checkpoint.readiness().counts["sessions"] == 0
+
+
+async def test_a_close_during_a_checkpoint_waits_for_resume_and_then_ends_the_session() -> None:
+    server, client = make_server()
+    close = {"resources_session_id": "s", "episode_id": {"rollout_id": "r"}}
+    async with client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
+        # An episode a controller retired runs its final cleanup while the checkpoint is open.
+        closing = asyncio.create_task(client.post("/ng-rollout/r/close_session", json=close))
+        await asyncio.sleep(0.1)
+        waiting = not closing.done()
+        # A waiting close is not in flight, so it does not hold up the checkpoint.
+        prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
+        await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
+        closed = await closing
+
+    assert waiting and prepared.json()["phase"] == "prepared"
+    assert closed.status_code == 200
+    assert server._checkpoint.readiness().counts["sessions"] == 0

@@ -46,7 +46,8 @@ LOGGER = logging.getLogger(__name__)
 
 ResourcesCheckpointMode = Literal["stateless", "exported", "restart_only"]
 _SESSION_START = "/seed_session"
-_SESSION_ENDS = ("/close_session", "/verify")
+_SESSION_CLOSE = "/close_session"
+_SESSION_ENDS = (_SESSION_CLOSE, "/verify")
 
 
 class ResourcesAdmissionClosedError(ControlError):
@@ -213,6 +214,9 @@ class ResourcesCheckpointMiddleware:
     it loses nothing. While a checkpoint is open, an MCP call waits for resume instead of being refused: MCP
     clients are third-party agent harnesses that would show a refusal to the model as a tool error. A waiting
     call is not in flight, so it never holds up prepare.
+
+    A ``/close_session`` waits the same way. It comes from an episode ending while the checkpoint is open, for
+    example one a controller retired, and a refusal would lose the release: its caller closes once.
     """
 
     #: Read by MCP auto-exposure: this middleware does its job on the MCP request as a whole.
@@ -236,8 +240,10 @@ class ResourcesCheckpointMiddleware:
             await self.app(scope, receive, send)
             return
         session_id = (scope.get("session") or {}).get(SESSION_ID_KEY)
-        if self.mcp_session_id is not None and (path == self.mcp_path or path.startswith(self.mcp_path + "/")):
+        is_mcp = self.mcp_session_id is not None and (path == self.mcp_path or path.startswith(self.mcp_path + "/"))
+        if is_mcp:
             session_id = self.mcp_session_id(scope) or session_id
+        if is_mcp or path == _SESSION_CLOSE:
             while not self.participant.accepting:
                 await self.participant.wait_open()
         try:
