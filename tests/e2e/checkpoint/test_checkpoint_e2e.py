@@ -187,6 +187,43 @@ async def test_a_second_crash_before_the_replacement_starts_still_continues(
     assert replacement.json()["result"]["reward"] == 1.0
 
 
+@POLICY_WORKERS
+async def test_a_checkpoint_restores_again_after_its_replacement_made_calls(
+    deploy, tmp_path: Path, policy_workers: int
+) -> None:
+    deployment = deploy("counter", token_capture=True, policy_workers=policy_workers)
+    deployment.backend("/_ctl/script", COUNTER_SCRIPT)
+    deployment.backend("/_ctl/hold", {"after_calls": 1})
+    async with httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120) as http:
+        first = asyncio.create_task(http.post("/run", json=counter_row("again-1")))
+        await wait_until(lambda: len(deployment.backend_calls()) == 2)
+        await checkpoint(deployment, tmp_path / "ckpt", ["again-1"])
+        await crash_and_restore(deployment, tmp_path / "ckpt", ["again-1"])
+        first.cancel()
+        # Attempt 1 commits model calls to its capture ledger, then Gym crashes before the next checkpoint.
+        await http.post("/run", json=counter_row("again-1", attempt=1))
+        dead_calls = len(deployment.backend_calls())
+        await crash_and_restore(deployment, tmp_path / "ckpt", ["again-1"], restore_id="r2")
+
+        replacement = await http.post("/run", json=counter_row("again-1", attempt=1))
+
+    manifest = httpx.get(
+        f"{deployment.url('policy_model')}/training-token-capture/control/rollouts/again-1-a1/manifest",
+        headers={"authorization": f"Bearer {CAPTURE_CONTROL_TOKEN}"},
+    ).json()
+    admissions = [call["admission"] for call in deployment.backend_calls()]
+    chain = [record["model_call_id"] for record in manifest["records"]]
+    dead = {admission["model_call_id"] for admission in admissions[2:dead_calls]}
+
+    # The second run of attempt 1 continues from the checkpoint's boundary, as the first did, and none of the
+    # dead run's calls are part of its lineage.
+    assert replacement.json()["reward"] == 1.0
+    assert admissions[dead_calls]["parent_call_id"] == admissions[0]["model_call_id"]
+    assert chain[0] == admissions[0]["model_call_id"]
+    assert dead and not dead & set(chain)
+    assert not manifest.get("failures")
+
+
 async def test_legacy_run_continues_from_its_last_boundary_after_a_crash(deploy, tmp_path: Path) -> None:
     deployment = deploy("legacy")
     deployment.backend("/_ctl/hold", {"after_calls": 1})
