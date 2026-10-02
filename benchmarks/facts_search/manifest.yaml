@@ -1,0 +1,30 @@
+name: facts_search
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: knowledge
+description: Public FACTS Search-On evaluation with a seven-hop Brave Search agent
+  and Gemini A/B/C grading.
+modality: text
+licensing: Apache-2.0
+authors:
+- Kirsten Ruge
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: facts_search
+agent_server: facts_search_agent
+datasets:
+- name: facts_search_public
+  type: benchmark
+  jsonl_fpath: benchmarks/facts_search/data/facts_search_public.jsonl
+  prepare_script: benchmarks/facts_search/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: public
+prompt_source: prepared
+lifecycle: active

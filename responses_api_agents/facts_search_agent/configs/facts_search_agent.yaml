@@ -1,0 +1,24 @@
+facts_search_agent:
+  responses_api_agents:
+    facts_search_agent:
+      entrypoint: app.py
+      max_hops: 7
+      resources_server:
+        type: resources_servers
+        name: facts_search
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/facts_search/data/example.jsonl
+          license: Apache-2.0
+
+facts_search_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: facts_search_agent
