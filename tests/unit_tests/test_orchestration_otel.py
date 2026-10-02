@@ -188,12 +188,12 @@ def _rendered(config=None):
     return yaml.safe_load(render_collector_config(config or _config(), "scicode", BENCH_DIR))
 
 
-def _attrs(doc):
-    return {a["key"]: (a["value"], a["action"]) for a in doc["processors"]["resource"]["attributes"] if "value" in a}
+def _attrs(doc, processor="resource/managed"):
+    return {a["key"]: (a["value"], a["action"]) for a in doc["processors"][processor]["attributes"] if "value" in a}
 
 
 def test_collector_converts_the_slurm_job_id_to_a_string():
-    actions = _rendered()["processors"]["resource"]["attributes"]
+    actions = _rendered()["processors"]["resource/local"]["attributes"]
     convert = [a for a in actions if a["action"] == "convert"]
     assert convert == [{"key": "slurm_job_id", "action": "convert", "converted_type": "string"}]
     assert actions.index(convert[0]) > max(
@@ -245,9 +245,10 @@ def test_collector_keeps_each_producers_own_name_as_display_identity():
     )
     for signal in ("metric", "trace", "log"):
         assert identity[f"{signal}_statements"] == [{"context": "resource", "statements": [rule]}]
-    for pipeline in doc["service"]["pipelines"].values():
+    for name, pipeline in doc["service"]["pipelines"].items():
         processors = pipeline["processors"]
-        assert processors.index("transform/identity") < processors.index("resource")
+        resource = "resource/local" if name.endswith("/local") else "resource/managed"
+        assert processors.index("transform/identity") < processors.index(resource), name
     assert "service.name.override" not in _attrs(doc)
 
 
@@ -260,11 +261,12 @@ def test_collector_derives_metrics_from_spans_with_display_identity_and_sandbox_
     connector = doc["connectors"]["span_metrics"]
     assert connector["dimensions"] == [{"name": "service.name.override"}, {"name": "nemo.gym.sandbox.provider"}]
     assert connector["metrics_flush_interval"] == "15s"
-    assert "span_metrics" in doc["service"]["pipelines"]["traces"]["exporters"]
-    # The traces pipeline has already applied identity + resource stamping when the connector runs,
-    # so the derived series carry run_id/user like everything else.
-    traces = doc["service"]["pipelines"]["traces"]["processors"]
-    assert traces.index("transform/identity") < traces.index("resource")
+    assert "span_metrics" in doc["service"]["pipelines"]["traces/local"]["exporters"]
+    assert "span_metrics" not in doc["service"]["pipelines"]["traces"]["exporters"]
+    traces = doc["service"]["pipelines"]["traces/local"]["processors"]
+    assert traces.index("transform/identity") < traces.index("resource/local")
+    for name in ("metrics", "metrics/local"):
+        assert "span_metrics" in doc["service"]["pipelines"][name]["receivers"], name
 
 
 def test_collector_renames_colon_metrics_to_underscores_before_export():
@@ -325,8 +327,27 @@ def test_collector_writes_a_local_copy_next_to_the_managed_export():
     doc = _rendered()
     assert doc["exporters"]["file/metrics"]["path"] == str(BENCH_DIR / "otel" / "metrics.jsonl")
     for signal in ("metrics", "traces", "logs"):
-        exporters = doc["service"]["pipelines"][signal]["exporters"]
-        assert exporters[:2] == ["otlp_http/managed", f"file/{signal}"]
+        managed, local = doc["service"]["pipelines"][signal], doc["service"]["pipelines"][f"{signal}/local"]
+        assert managed["exporters"] == ["otlp_http/managed"]
+        assert local["exporters"][0] == f"file/{signal}"
+        assert managed["receivers"] == local["receivers"]
+
+
+def test_the_token_never_reaches_the_job_directory_copies():
+    doc = _rendered()
+    assert "Authorization" in _attrs(doc, "resource/managed")
+    assert "Authorization" not in _attrs(doc, "resource/local")
+    local_keys = {a["key"] for a in doc["processors"]["resource/local"]["attributes"]}
+    assert local_keys == {a["key"] for a in doc["processors"]["resource/managed"]["attributes"]} - {"Authorization"}
+    for name, pipeline in doc["service"]["pipelines"].items():
+        writes_files = any(e.startswith("file/") for e in pipeline["exporters"])
+        assert writes_files == ("resource/local" in pipeline["processors"]), name
+        assert writes_files == name.endswith("/local"), name
+        assert ("otlp_http/managed" in pipeline["exporters"]) == ("resource/managed" in pipeline["processors"]), name
+
+
+def test_collector_log_level_does_not_print_batches():
+    assert _rendered()["service"]["telemetry"]["logs"]["level"] == "info"
 
 
 def test_collector_receives_otlp_for_the_job_processes():

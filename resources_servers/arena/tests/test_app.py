@@ -1362,6 +1362,18 @@ class TestArenaResourcesServer:
         assert metrics["win_rate_lmarena_v2_prompts"] == approx(1.0, abs=0.05)
         assert metrics["win_rate_no_SC_lmarena_v2_prompts"] == approx(1.0, abs=0.05)
 
+    def test_compute_metrics_takes_prompt_slices_from_the_first_rollout_that_has_them(
+        self, server: ArenaResourcesServer
+    ):
+        """A row counted as zero for a rollout that never ran can come first and carries no slices."""
+        with_slices = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)
+        with_slices["prompt_slices"] = {"arena": ["english"]}
+        without_slices = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)
+
+        metrics = server.compute_metrics([[without_slices, with_slices]] * 50)
+
+        assert metrics["arena/english/prompts"] == 50
+
     def test_compute_metrics_prompt_slice_verbosity(self, config: ArenaResourcesServerConfig):
         config.style_control_method = "reference_length"
         config.style_length_ratio_range = (0.5, 1.75)
