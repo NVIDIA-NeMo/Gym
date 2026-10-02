@@ -119,6 +119,14 @@ def trajectory_to_responses(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
 
         observation = step.get("observation", {})
         results = observation.get("results", [])
+        if len(tool_calls) > 1 and len(results) == 1 and not results[0].get("source_call_id"):
+            tool_calls = [
+                {
+                    "tool_call_id": f"call_{agent_step_index}_batch",
+                    "function_name": "terminal_step",
+                    "arguments": {"tool_calls": tool_calls},
+                }
+            ]
 
         for tc in tool_calls:
             arguments = tc.get("arguments", {})
@@ -133,7 +141,7 @@ def trajectory_to_responses(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
             output_items.append(fc.model_dump())
 
         for i, result in enumerate(results):
-            call_id = (
+            call_id = result.get("source_call_id") or (
                 tool_calls[i].get("tool_call_id", f"call_{uuid4().hex[:8]}")
                 if i < len(tool_calls)
                 else f"call_{uuid4().hex[:8]}"
