@@ -5,7 +5,9 @@ agentic_vbench_agent:
     agentic_vbench_agent:
       entrypoint: app.py
       benchmark_root: ${oc.env:AGENTIC_VBENCH_ROOT}
-      evalkit_root: ${oc.env:AGENTIC_VBENCH_EVALKIT_ROOT}
+      harbor_python: ${oc.env:AGENTIC_VBENCH_HARBOR_PYTHON}
+      model_context_tokens: ${oc.env:AGENTIC_VBENCH_CONTEXT_TOKENS,262144}
+      model_output_capability_tokens: ${oc.env:AGENTIC_VBENCH_OUTPUT_TOKENS,100000}
       output_root: ${oc.env:AGENTIC_VBENCH_OUTPUT_ROOT}
       runtime_root: ${oc.env:AGENTIC_VBENCH_RUNTIME_ROOT}
       model_base_url: ${oc.env:AGENTIC_VBENCH_MODEL_BASE_URL}
