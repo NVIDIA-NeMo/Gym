@@ -433,3 +433,30 @@ async def test_closing_a_session_stops_its_running_activation() -> None:
     assert done and task.cancelled()
     assert len(model_calls) == calls_at_close
     assert not participant.has_session("s")
+
+
+async def test_a_commit_that_no_longer_continues_a_restored_session_releases_it(tmp_path: Path) -> None:
+    hooks = Hooks()
+    participant = AgentSessionParticipant(hooks)
+    await participant.install(
+        [
+            AgentSessionRecord(
+                session_key="kept", episode_id=EpisodeId(rollout_id="k"), session={}, boundary=None, episode=None
+            ),
+            AgentSessionRecord(
+                session_key="dropped", episode_id=EpisodeId(rollout_id="d"), session={}, boundary=None, episode=None
+            ),
+        ]
+    )
+    await participant.open_admission()
+    controller = ParticipantController(participant, instance_name="agent", lease_grace_seconds=60)
+    await controller.prepare(CheckpointRequest(**control("c2")))
+    # The controller continues only rollout k from this checkpoint.
+    await controller.commit(
+        CommitRequest(
+            **control("c2", checkpoint_dir=str(tmp_path), episode_ids=[EpisodeId(rollout_id="k", attempt=1)])
+        )
+    )
+
+    assert hooks.retired == ["dropped"]
+    assert participant.has_session("kept") and not participant.has_session("dropped")

@@ -109,6 +109,8 @@ class _Session:
     continuation: Optional[dict[str, JsonValue]] = None
     task: Optional[asyncio.Task] = None
     resume: asyncio.Event = field(default_factory=asyncio.Event)
+    # Installed by a restore and not activated since: a commit that no longer continues its episode retires it.
+    restored_unused: bool = False
 
 
 class Activation:
@@ -118,6 +120,7 @@ class Activation:
         self._participant = participant
         self._session = session
         self.continuation, session.continuation = session.continuation, None
+        session.restored_unused = False
 
     async def boundary(self, snapshot: BoundarySnapshot) -> None:
         """Record a complete loop step and park here if a checkpoint asked for it.
@@ -346,13 +349,19 @@ class AgentSessionParticipant(CheckpointParticipant):
         await self.hooks.restore_agent_sessions(restored)
         for record, session in zip(records, restored):
             self._sessions[session.session_key] = _Session(
-                key=session.session_key, episode_id=session.episode_id, continuation=record.boundary
+                key=session.session_key,
+                episode_id=session.episode_id,
+                continuation=record.boundary,
+                restored_unused=True,
             )
             if record.episode is not None:
                 self._restored_episodes[session.session_key] = record.episode
 
     def restore_records(self, records: list[CheckpointRecord]) -> None:
         raise NotImplementedError("agent sessions restore through install(), which awaits the agent's hooks")
+
+    async def restored_pending(self) -> list[EpisodeId]:
+        return [session.episode_id for session in self._sessions.values() if session.restored_unused]
 
     def status_extra(self) -> dict[str, Any]:
         return {"accepting": self.accepting}
