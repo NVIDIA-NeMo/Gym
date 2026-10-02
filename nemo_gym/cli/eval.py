@@ -255,6 +255,14 @@ def _is_preparable_dataset(dataset: DictConfig | dict) -> bool:
     )
 
 
+def _preparation_dataset_config(dataset: DictConfig | dict) -> BenchmarkDatasetConfig:
+    """Adapt a preparable dataset without changing its runtime dataset type."""
+
+    preparation_config = dict(dataset)
+    preparation_config["type"] = "benchmark"
+    return BenchmarkDatasetConfig.model_validate(preparation_config)
+
+
 @exit_cleanly_on_config_error
 def prepare_benchmark() -> None:
     """CLI command: prepare benchmark data."""
@@ -286,7 +294,7 @@ def prepare_benchmark() -> None:
             if not _is_preparable_dataset(dataset):
                 continue
 
-            datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
+            datasets.append(_preparation_dataset_config(dataset))
 
         if len(datasets) < 1:
             continue
