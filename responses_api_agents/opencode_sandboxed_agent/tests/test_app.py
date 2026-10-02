@@ -208,6 +208,38 @@ class TestOpenCodeSandboxedAgent:
 
         assert expected_usages == actual_usages
 
+    @mark.parametrize("reasoning", [0, 4396])
+    def test_usage_includes_reasoning_in_output_total(self, reasoning: int) -> None:
+        export = {
+            "messages": [
+                {"info": {"role": "user"}},
+                {"info": {"role": "assistant"}},
+                *[
+                    {
+                        "info": {
+                            "role": "assistant",
+                            "tokens": {
+                                "input": 100,
+                                "output": output,
+                                "reasoning": reasoning,
+                                "cache": {"read": 0, "write": 0},
+                                "total": 100 + output + reasoning,
+                            },
+                        }
+                    }
+                    for output in (3509, 0)
+                ],
+            ]
+        }
+        usages = OpenCodeSandboxedAgent._opencode_export_to_usages(None, export)
+        assert len(usages) == 2
+        assert usages[0].output_tokens == 3509 + reasoning
+        assert usages[1].output_tokens == reasoning
+        combined = NeMoGymResponseUsage.sum_from_list(usages)
+        assert combined.output_tokens == 3509 + 2 * reasoning
+        assert combined.output_tokens_details.reasoning_tokens == 2 * reasoning
+        assert combined.total_tokens == combined.input_tokens + combined.output_tokens
+
     async def test_responses_sanity(self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch) -> None:
         config = self._create_config()
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
