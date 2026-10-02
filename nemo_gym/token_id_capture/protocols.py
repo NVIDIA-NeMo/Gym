@@ -275,6 +275,25 @@ class TokenSource(Protocol):
         """
         ...
 
+    async def retire(self, rollout_ids: Sequence[str]) -> dict:
+        """Remove rollouts' records and keep a fence, whatever their state.
+
+        This is ``drop`` without the snapshot check, for rollouts the consumer is done with but won't
+        drop as a consumed snapshot, such as masked or failed captures and abandoned attempts. Later
+        writes for a retired rollout must fail. Retiring again is a no-op. ``CaptureLedger.retire`` is the same operation for external staging.
+        The result validates as ``staging.records.RolloutRemoval``.
+        """
+        ...
+
+    async def delete(self, rollout_ids: Sequence[str]) -> dict:
+        """Remove rollouts' records and fences.
+
+        Delete retired rollouts once nothing of those attempts can still write, or a rollout ID before
+        reusing it. Deleting again is a no-op. ``CaptureLedger.delete`` is the same operation for
+        external staging. The result validates as ``staging.records.RolloutRemoval``.
+        """
+        ...
+
     async def close(self) -> None:
         """Release resources idempotently."""
         ...
