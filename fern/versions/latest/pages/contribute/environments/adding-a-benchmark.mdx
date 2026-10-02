@@ -10,6 +10,43 @@ A benchmark contribution should let any user prepare the same tasks, run them un
 
 When onboarding a benchmark, it is important to keep the task contract independent of the harness wherever possible. The task defines the inputs, tools, state, required artifacts, and scoring rules; the harness chooses how to solve it. If the harness itself is part of the subject being measured, this must be stated explicitly. See [Component Ownership](/main/contribute/environments/new-environment#component-ownership) for the agent/environment separation design and the current implementation boundaries.
 
+## Overview
+
+Adding a benchmark is five steps:
+
+| Step | What you do |
+| --- | --- |
+| 1. Reuse components and scaffold | `gym env init --benchmark` to generate the file skeleton; reuse an existing harness/verifier where possible |
+| 2. Prepare data and complete the manifest | Write `prepare()`, run `gym eval prepare`, fill in the manifest's authored metadata |
+| 3. Check the declaration and scoring | `gym env validate` and `gym env test` against the manifest and verifier fixture |
+| 4. Run a representative evaluation | `gym eval run` with a small `--limit` to confirm it scores sensibly end to end |
+| 5. Reward profiling | Baseline against a few models to catch verifier and harness issues before trusting the score |
+
+The detailed walkthrough below covers each step in full. If you just want to see the shape of the whole process first, start with the Hello World example.
+
+## Hello World
+
+The smallest possible benchmark end to end, before diving into the detail below:
+
+```bash
+# 1. Scaffold a benchmark using the default agent loop and a new verifier
+gym env init --benchmark hello_world --profile custom-gym-verifier
+
+# 2. Prepare its (sample) data
+gym eval prepare --benchmark hello_world
+
+# 3. Confirm the manifest and verifier are valid
+gym env validate hello_world
+gym env test --resources-server hello_world
+
+# 4. Run it against a small sample
+gym eval run --benchmark hello_world --model-type openai_model \
+    --split benchmark --limit 5 --num-repeats 1 \
+    --output results/hello_world_smoke.jsonl
+```
+
+This creates `benchmarks/hello_world/` and `resources_servers/hello_world/` with working sample data and a passthrough verifier — nothing here is specific to your real benchmark yet. Replace the sample task, data, and verifier logic with your own as you go through the detailed steps below.
+
 ## Before implementation
 
 The measurement contract should be recorded in the benchmark's README:
@@ -93,3 +130,16 @@ gym eval run --benchmark my_benchmark --model-type openai_model \
 ```
 
 For workloads with a verifier fixture, finish the local onboarding checks with `gym env publish my_benchmark`. This reruns validation and the fixture, rejects unfinished metadata, and confirms catalog discovery. It does not upload data, register a hosted workload, or push changes.
+
+### 5. Reward profiling
+
+Baseline the benchmark against a mixture of open-source and closed-source models to catch software bugs before relying on the score.
+
+- **Open-source floor:** a small open model (e.g. Qwen 3 30B A3B Instruct) should score in a meaningful range (roughly 30%+). If no open model clears that bar, suspect a verifier or harness issue before suspecting task difficulty.
+- **Closed-source models:** OpenAI models are typically sufficient for this check; they should score at or above the open-source baseline. If a closed-source model scores *below* open-source, suspect a verifier or harness issue.
+- **Suite:** your policy model of interest, plus a small/large open-source pair (e.g. Qwen 3 30B and 235B variants) and a couple of closed-source models, spanning both instruct and thinking variants to confirm the benchmark is model-agnostic rather than tuned to one model's output shape.
+- **Inspect failures, not just scores:** read actual rollouts for each model's failure cases — this catches scoring bugs that a headline number alone won't surface.
+- **Variance:** run the highest-scoring model with repeats (`--num-repeats`) until variance is below ~1%, to confirm the benchmark is stable enough to compare against.
+- **For benchmarks wrapping an existing eval:** reproduce the published numbers in the *original* repository first, before integrating into Gym — this isolates whether a discrepancy is in your integration or upstream.
+
+See [Aggregate Metrics](/main/evaluation/aggregate-metrics) for the `gym eval profile` workflow.
