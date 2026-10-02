@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
+from nemo_gym._checkpoint.collection import CollectionCheckpointer, CollectionStopped
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_model import (
     clear_model_call_captures_for_rollouts,
@@ -293,15 +294,21 @@ def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> s
     )
 
 
-def _native_episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
-    attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
-    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
-        raise ValueError(f"Invalid episode attempt: {attempt!r}")
+def _episode_rollout_id(row: Mapping[str, Any]) -> str:
+    """The logical rollout ID of a row's episode: the same for every attempt of the row."""
     base_identity_row = dict(row)
     base_identity_row[ATTEMPT_INDEX_KEY_NAME] = 0
     rollout_id = maybe_rollout_id_from_run_body(base_identity_row)
     if rollout_id is None:
         rollout_id = f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+    return rollout_id
+
+
+def _native_episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
+    attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
+        raise ValueError(f"Invalid episode attempt: {attempt!r}")
+    rollout_id = _episode_rollout_id(row)
     return {
         "episode_id": {"rollout_id": rollout_id, "attempt": attempt},
         "task": {
@@ -1469,6 +1476,29 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
     )
+    checkpoint_dir: Optional[str] = Field(
+        default=None,
+        description=(
+            "Directory for partial-rollout checkpoints of this run; needs the global `checkpoint:` block. "
+            "SIGUSR1 checkpoints the rows in flight and continues, SIGTERM checkpoints them and stops (send it "
+            "before a preemption, for example with Slurm's `--signal=B:TERM@120`), and `checkpoint_every_s` "
+            "checkpoints on a timer. Rerun with resume_from_cache=true to continue the checkpointed rows from "
+            "where they were instead of from their inputs."
+        ),
+    )
+    checkpoint_every_s: Optional[float] = Field(
+        default=None, gt=0, description="Checkpoint the rows in flight this often. Needs `checkpoint_dir`."
+    )
+    checkpoint_timeout_s: float = Field(
+        default=300, gt=0, description="Deadline for one checkpoint, or one restore, of this run."
+    )
+
+    @model_validator(mode="after")
+    def _checkpoint_timer_needs_checkpoint_dir(self) -> "RolloutCollectionConfig":
+        if self.checkpoint_every_s is not None and self.checkpoint_dir is None:
+            raise ValueError("checkpoint_every_s needs checkpoint_dir")
+        return self
+
     prompt_config: Optional[str] = Field(
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
@@ -2356,11 +2386,37 @@ class RolloutCollectionHelper(BaseModel):
         its own bounded root trace.
         """
         if not is_span_group_enabled(GymSpanGroup.JOB):
-            return await self._run_from_config(config)
+            return await self._run_with_checkpoints(config)
         with managed_span(GymSpanGroup.JOB, "gym.job"):
-            return await self._run_from_config(config)
+            return await self._run_with_checkpoints(config)
 
-    async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
+    async def _run_with_checkpoints(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
+        """Run collection, as the checkpoint controller of its rows when ``checkpoint_dir`` is set.
+
+        Raises ``CollectionStopped`` when a preemption signal checkpointed the run and stopped it.
+        """
+        if config.checkpoint_dir is None:
+            return await self._run_from_config(config)
+        checkpointer = CollectionCheckpointer(
+            Path(config.checkpoint_dir),
+            self.setup_server_client(),
+            every_s=config.checkpoint_every_s,
+            timeout_s=config.checkpoint_timeout_s,
+        )
+        collection = asyncio.create_task(self._run_from_config(config, checkpointer=checkpointer))
+        checkpointer.start(collection)
+        try:
+            return await collection
+        except asyncio.CancelledError:
+            if not checkpointer.stopped:
+                raise
+            raise CollectionStopped(checkpointer.last_published) from None
+        finally:
+            await checkpointer.close()
+
+    async def _run_from_config(
+        self, config: RolloutCollectionConfig, checkpointer: Optional[CollectionCheckpointer] = None
+    ) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
         failures_fpath = failures_path_for(output_fpath)
         # Any run that stamps environment servers on rows (a non-default routing mode, or routes for
@@ -2440,6 +2496,18 @@ class RolloutCollectionHelper(BaseModel):
             # from an older run that used the same output path.
             failures_fpath.unlink(missing_ok=True)
             aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
+
+        if checkpointer is not None:
+            if config.resume_from_cache:
+                # Continue the rows the latest checkpoint holds, as their next attempt, before anything else is
+                # dispatched; the rest of the unfinished rows start from their input as before.
+                attempts = await checkpointer.restore(_episode_rollout_id(row) for row in input_rows)
+                for row in input_rows:
+                    attempt = attempts.get(_episode_rollout_id(row))
+                    if attempt is not None:
+                        row[ATTEMPT_INDEX_KEY_NAME] = attempt
+            else:
+                checkpointer.reset()
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -2583,6 +2651,8 @@ class RolloutCollectionHelper(BaseModel):
                 dispatch_budget_s=config.dispatch_budget_s,
                 drain_margin_s=config.drain_margin_s,
                 latency_tracker=latency_tracker,
+                # Only when set, so overrides of this internal method that predate checkpointing keep working.
+                **({"checkpointer": checkpointer} if checkpointer is not None else {}),
             )
             for future in completion_iterator:
                 completed = await future
@@ -3350,9 +3420,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
+        checkpointer: Optional[CollectionCheckpointer] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
+
+        With a ``checkpointer``, a row waits while a checkpoint is open before its ``/run`` is sent, and counts
+        as in flight, which is what a checkpoint continues, until that ``/run`` replies.
 
         When ``max_resident_tasks`` is set, at most that many rollout tasks are admitted
         at once. When unset, all examples are scheduled as before. The collection
@@ -3418,9 +3492,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                             environment_server_type=server_type,
                         )
 
+                rollout_id = _episode_rollout_id(row) if checkpointer is not None else None
+                if checkpointer is not None:
+                    await checkpointer.before_dispatch(rollout_id, row.get(ATTEMPT_INDEX_KEY_NAME, 0))
                 started = time.monotonic()
                 started_at = time.time()
                 res = None
+                succeeded = False
                 try:
                     request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
@@ -3430,6 +3508,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000
                     tracker.record(time.monotonic() - started)
+                    # A reply, even a failure, means the environment server ended the episode and released it.
+                    succeeded = True
                     return _CompletedRollout(
                         row=row,
                         result=result,
@@ -3458,6 +3538,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server=server_name,
                         environment_server_type=server_type,
                     )
+                finally:
+                    if checkpointer is not None:
+                        checkpointer.after_dispatch(rollout_id, failed=not succeeded)
 
         awaitables = map(_post_subroutine, examples)
         if max_resident_tasks is not None:
