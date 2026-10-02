@@ -202,6 +202,8 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     output_fingerprint=row.get("output_fingerprint") or None,
                     continuation_fingerprint=row.get("continuation_fingerprint") or None,
                     fingerprint_version=int(row.get("fingerprint_version") or 0),
+                    # Set on rows a checkpoint restore carried over from an earlier attempt.
+                    capture_key=row.get("capture_key"),
                 )
             )
     manifest = RolloutManifest(rollout_id=rollout_id, records=records, failures=failures)

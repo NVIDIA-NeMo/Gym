@@ -340,6 +340,10 @@ class CallRecord(_DigestWireModel):
     # Canonicalization version of the fingerprints above; 0 means none were
     # recorded. Attribution ignores fingerprints from a different version.
     fingerprint_version: NonNegativeInt = 0
+    # The capture key this call was staged under, when it is not the receipt's own. A checkpoint restore
+    # continues an episode under its next attempt, and the calls made before the checkpoint stay staged
+    # under the earlier attempt's key. ``None`` means the receipt's own rollout staged the call.
+    capture_key: Identifier | None = None
 
     @model_validator(mode="after")
     def _validate_lengths(self) -> Self:
