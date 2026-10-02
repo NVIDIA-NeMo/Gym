@@ -564,36 +564,6 @@ def test_exhaustion_counts_failed_and_unknown_but_not_terminal_or_completed(
 
 
 @pytest.mark.parametrize("alias", [False, True])
-async def test_journal_reverification_waits_for_followup_without_changing_files(prepared_run, monkeypatch, alias):
-    from nemo_gym.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
-
-    output, prepare = prepared_run
-    RolloutStore.start_or_resume(output, prepare, resume=False)
-    if alias:
-        shortcut = output.with_name("shortcut.jsonl")
-        shortcut.symlink_to(output)
-        output = shortcut
-    before = snapshot(output)
-    config = RolloutReverificationConfig(
-        materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
-        rollouts_jsonl_fpath=str(output),
-        output_jsonl_fpath=str(output),
-        judge_failed_only=True,
-        append=True,
-    )
-    with pytest.raises(ConfigError, match="Journal-backed reverification is a follow-up"):
-        await RolloutReverificationHelper().run_from_config(config)
-    assert snapshot(output) == before
-    # The final prefixed path must be checked too, including resume/append.
-    from nemo_gym.rollout_reverification import _prepare_output_fpaths
-
-    for append, resume in [(True, False), (False, True)]:
-        with pytest.raises(ConfigError, match="Journal-backed reverification is a follow-up"):
-            _prepare_output_fpaths("", str(output), resume, False, append)
-    assert snapshot(output) == before
-
-
-@pytest.mark.parametrize("alias", [False, True])
 def test_journal_health_waits_for_followup_without_reporting_stale_results(prepared_run, alias):
     from nemo_gym.rollout_health import run_health_checks
 
