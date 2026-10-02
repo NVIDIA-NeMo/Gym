@@ -1,0 +1,5 @@
+# The prepare script composes the upstream condition and textual tool descriptions. Gym applies
+# these two row fields at rollout time so the benchmark follows the manifest prompt contract while
+# preserving the exact upstream prompt.
+system: "{system_prompt}"
+user: "{first_document}"
