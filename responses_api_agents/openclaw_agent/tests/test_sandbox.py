@@ -197,7 +197,7 @@ def test_http_native_flow_runs_openclaw_in_borrowed_sandbox(setup):
             created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
             assert created.status_code == 200, created.text
             session_id = created.json()["agent_session_id"]
-            directory = agent._sandbox_sessions[session_id].directory
+            directory = agent._session_records[session_id].state.directory
             installer = f"{directory}/install_openclaw_runtime.sh"
             assert installer in sandbox.files
             assert agent.config.resources_server is None
@@ -243,7 +243,7 @@ def test_http_native_flow_runs_openclaw_in_borrowed_sandbox(setup):
             # so a plain transcript cannot establish full usage coverage either.
             assert "auxiliary_model_usage_unavailable" in [gap["code"] for gap in observations["gaps"]]
             assert len(observations["records"][0]["model_calls"]) == 2
-    assert not agent._sandbox_sessions
+    assert all(record.state is None for record in agent._session_records.values())
     assert agent._local_setup_task is None
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
@@ -277,7 +277,11 @@ def test_unsupported_seed_rejected_before_connection(setup, option):
             {"kind": "direct_http", "name": "tools", "base_url": "http://resources", "required": True}
         ]
     with TestClient(agent.setup_webserver()) as client:
-        assert client.post("/v1/agent_sessions", json=body).status_code == 422
+        if option == "worker":
+            with pytest.raises(ValueError, match="num_workers=1"):
+                client.post("/v1/agent_sessions", json=body)
+        else:
+            assert client.post("/v1/agent_sessions", json=body).status_code == 422
     sandbox.exec.assert_not_awaited()
 
 
@@ -291,23 +295,41 @@ def test_cookie_identity_and_single_activation(setup):
         bad = close_body(session_id)
         bad["episode_id"]["attempt"] = 99
         assert client.post("/v1/agent_sessions/close", json=bad).status_code == 409
-        assert client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
-        assert client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"}).status_code == 409
+        first = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        retry = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert first.status_code == retry.status_code == 200
+        assert first.json() == retry.json()
+        assert (
+            client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "different"}).status_code == 409
+        )
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
     sandbox.launch.assert_awaited_once()
 
 
-@pytest.mark.parametrize("reason,expected", [("error", "failed"), ("aborted", "failed"), ("length", "incomplete")])
-def test_failed_or_partial_openclaw_output_is_preserved(setup, reason, expected):
+@pytest.mark.parametrize("reason", ["error", "aborted", "length"])
+def test_failed_or_partial_openclaw_output_is_preserved(setup, reason):
     agent, sandbox = setup
     sandbox.events = events(stop_reason=reason)
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
-        result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
-        assert result.status_code == 200
-        assert result.json()["status"] == expected
-        assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
-        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+        path = "/ng-rollout/openclaw-smoke-a2/v1/responses"
+        result = client.post(path, json={"input": "task"})
+        if reason == "length":
+            assert result.status_code == 200
+            assert result.json()["status"] == "incomplete"
+            assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
+        else:
+            assert result.status_code == 502
+            assert "model" in result.json()["detail"]
+            retry = client.post(path, json={"input": "task"})
+            assert retry.status_code == 502
+            assert retry.json() == result.json()
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200
+        invocation = closed.json()["agent_observations"]["records"][0]
+        assert invocation["status"] == ("incomplete" if reason == "length" else "failed")
+        assert invocation["conversation"][-1]["content"][0]["text"] == "Fixed"
+    sandbox.launch.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -341,7 +363,7 @@ def test_rejected_request_does_not_consume_activation(setup):
         sandbox.launch.assert_not_awaited()
         accepted = client.post(path, json={"input": "task"})
         assert accepted.status_code == 200, accepted.text
-        assert client.post(path, json={"input": "task"}).status_code == 409
+        assert client.post(path, json={"input": "task"}).json() == accepted.json()
     sandbox.launch.assert_awaited_once()
 
 
@@ -377,6 +399,83 @@ async def test_close_cancels_active_openclaw_before_detaching(setup):
     sandbox.stop.assert_not_awaited()
 
 
+async def test_disconnected_waiter_and_identical_retry_share_one_activation(setup):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    request, session_id, waiter = await activate(agent, sandbox)
+    retry = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    state = agent._session_records[session_id].state
+    assert not state.task.done()
+    sandbox.request_stop.assert_not_awaited()
+    with pytest.raises(HTTPException, match="retry the same request"):
+        await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="different task"))
+    sandbox.exited.set()
+    response = await asyncio.wait_for(retry, 2)
+    original = response.model_copy(deep=True)
+    response.output.clear()
+    replay = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert replay == original
+    sandbox.launch.assert_awaited_once()
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+@pytest.mark.parametrize("stop_reason", ["stop", "aborted"])
+def test_wall_limit_returns_gradable_partial_output(setup, stop_reason):
+    agent, sandbox = setup
+    sandbox.result.update(timed_out=True, return_code=-15)
+    sandbox.events = events(stop_reason=stop_reason)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200
+        assert response.json()["status"] == "incomplete"
+        assert response.json()["output"][-1]["content"][0]["text"] == "Fixed"
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+
+
+@pytest.mark.parametrize("failure", ["runner", "exit"])
+def test_runtime_failures_cannot_become_successful_responses(setup, failure):
+    agent, sandbox = setup
+    sandbox.result.update(error="runner failed" if failure == "runner" else None, return_code=1)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 502
+        assert ("runner failed" if failure == "runner" else "exited 1") in response.json()["detail"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        invocation = closed.json()["agent_observations"]["records"][0]
+        assert invocation["status"] == "failed"
+        assert invocation["conversation"][-1]["content"][0]["text"] == "Fixed"
+
+
+async def test_local_and_native_prompts_include_the_same_instructions(setup):
+    agent, _ = setup
+    agent.config.system_prompt = "configured system"
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        instructions="request instructions",
+        input=[{"role": "system", "content": "input system"}, {"role": "user", "content": "task"}],
+    )
+    expected = ("task", "configured system\n\nrequest instructions\n\ninput system")
+    assert agent._sandbox_input(body) == expected
+    with patch.object(agent, "_run_openclaw", AsyncMock(return_value=([], {}, "test-model"))) as run:
+        await agent._create_response(body)
+    assert run.await_args.args == expected
+
+
+@pytest.mark.parametrize("marker", [None, "expired"])
+async def test_obsolete_native_cookie_never_falls_back_to_host(setup, marker):
+    agent, sandbox = setup
+    request = Request({"type": "http", "session": {"nemo_gym_openclaw_sandbox_session": marker}})
+    with patch.object(agent, "_create_response", AsyncMock(side_effect=AssertionError("host fallback"))):
+        with pytest.raises(HTTPException, match="Obsolete"):
+            await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    sandbox.exec.assert_not_awaited()
+
+
 async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
@@ -385,7 +484,7 @@ async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
         await task
     with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
         await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert session_id in agent._sandbox_sessions
+    assert agent._session_records[session_id].state is not None
     sandbox.disconnect.assert_not_awaited()
     assert not any("rm -rf" in call.args[0] for call in sandbox.exec.await_args_list)
 
@@ -397,9 +496,9 @@ async def test_disconnect_failure_retains_session_for_retry(setup):
     sandbox.disconnect.side_effect = [RuntimeError("provider unavailable"), None]
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert session_id in agent._sandbox_sessions
+    assert agent._session_records[session_id].state is not None
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert session_id not in agent._sandbox_sessions
+    assert agent._session_records[session_id].state is None
     sandbox.launch.assert_awaited_once()
 
 
@@ -463,13 +562,14 @@ def test_close_retry_and_stale_activation_do_not_run_host_openclaw(setup):
         assert client.post("/v1/agent_sessions/close", json=bad).status_code == 409
         with patch.object(agent, "_run_openclaw", AsyncMock(side_effect=AssertionError("host OpenClaw must not run"))):
             assert client.post("/v1/responses", json={"input": "task"}).status_code == 409
+        client.cookies.clear()
         assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
     sandbox.disconnect.assert_awaited_once()
 
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     agent, sandbox = setup
-    monkeypatch.setattr("responses_api_agents.openclaw_agent.app.monotonic", lambda: 100.0)
+    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: 100.0)
     with TestClient(agent.setup_webserver()) as client:
 
         def seed_and_close(index):
@@ -498,7 +598,7 @@ def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
 async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.openclaw_agent.app.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -510,7 +610,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
     with pytest.raises(HTTPException) as error:
         await agent.close_agent_session(request, close)
     assert error.value.status_code == 409
-    assert not agent._closed_sandbox_sessions
+    assert not agent._closed_session_records
     with patch.object(agent, "_create_episode", AsyncMock(side_effect=AssertionError("host fallback"))):
         with pytest.raises(HTTPException) as error:
             await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
@@ -521,7 +621,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
 async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.openclaw_agent.app.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -555,20 +655,21 @@ async def test_concurrent_closes_share_receipt(setup):
     await asyncio.sleep(0)
     release.set()
     first_result, second_result = await asyncio.wait_for(asyncio.gather(first, second), 2)
-    assert first_result is second_result
+    assert first_result == second_result
+    assert first_result is not second_result
     sandbox.disconnect.assert_awaited_once()
 
 
 async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     agent, _ = setup
     clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.openclaw_agent.app.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     clock[0] += agent.config.session_close_retry_window_seconds
-    await agent.seed_agent_session(request, seed())
-    assert not agent._closed_sandbox_sessions
+    await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
+    assert not agent._closed_session_records
 
 
 @pytest.mark.parametrize("window", [0, -1, float("inf")])
@@ -587,7 +688,7 @@ async def test_unknown_launch_outcome_fails_closed(setup):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     with pytest.raises(RuntimeError, match="launch outcome is unknown"):
         await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert session_id in agent._sandbox_sessions
+    assert agent._session_records[session_id].state is not None
     sandbox.disconnect.assert_not_awaited()
     sandbox.stop.assert_not_awaited()
 
@@ -602,7 +703,7 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
     request = Request({"type": "http", "session": {}})
     with pytest.raises(RuntimeError, match="npm failed"):
         await agent.seed_agent_session(request, seed())
-    assert not agent._sandbox_sessions
+    assert all(record.state is None for record in agent._session_records.values())
     assert not request.session
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
@@ -618,7 +719,7 @@ async def test_cancelled_install_never_publishes_session_or_launches_openclaw(se
     request = Request({"type": "http", "session": {}})
     with pytest.raises(asyncio.CancelledError):
         await agent.seed_agent_session(request, seed())
-    assert not agent._sandbox_sessions
+    assert all(record.state is None for record in agent._session_records.values())
     assert not request.session
     sandbox.launch.assert_not_awaited()
     sandbox.disconnect.assert_awaited_once()
@@ -700,18 +801,23 @@ async def test_cancelled_activation_keeps_partial_observations_for_close(setup):
     assert len(invocation.model_calls) == 2
 
 
-def test_usage_sums_cache_writes_and_failed_calls(setup):
+async def test_usage_sums_cache_writes_and_failed_calls(setup):
     agent, sandbox = setup
     transcript = [json.loads(line) for line in events(stop_reason="error").splitlines()]
     transcript[0]["message"]["usage"]["cacheWrite"] = 4
     sandbox.events = "\n".join(json.dumps(event) for event in transcript)
-    with TestClient(agent.setup_webserver()) as client:
-        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
-        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
-    assert response.json()["status"] == "failed"
-    assert response.json()["usage"]["input_tokens"] == 21
-    assert response.json()["usage"]["output_tokens"] == 5
-    assert response.json()["usage"]["total_tokens"] == 26
+    request, session_id, task = await activate(agent, sandbox)
+    with pytest.raises(HTTPException, match="model error"):
+        await task
+    state = agent._session_records[session_id].state
+    response = await agent._collect_sandbox_response(
+        state, NeMoGymResponseCreateParamsNonStreaming(input="task"), prompt="task", system=""
+    )
+    assert response.status == "failed"
+    assert response.usage.input_tokens == 21
+    assert response.usage.output_tokens == 5
+    assert response.usage.total_tokens == 26
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
 @pytest.mark.parametrize(
@@ -847,15 +953,8 @@ def test_rewritten_transcript_and_cli_mirror_count_each_model_call_once(setup):
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
-        assert response.status_code == 200, response.text
-        body = response.json()
-        assert body["status"] == "failed"
-        assert body["error"]["message"] == "Context overflow recovery exhausted"
-        assert body["usage"]["input_tokens"] == 93255
-        assert body["usage"]["output_tokens"] == 214
-        assert body["usage"]["total_tokens"] == 93469
-        assert sum(item["type"] == "function_call" for item in body["output"]) == 11
-        assert body["output"][-1]["content"][0]["text"] == "Context overflow recovery exhausted"
+        assert response.status_code == 502, response.text
+        assert response.json()["detail"] == "Context overflow recovery exhausted"
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
     observations = closed.json()["agent_observations"]
@@ -947,7 +1046,7 @@ async def test_invalid_or_expired_native_cookie_never_uses_local_execution(setup
     request = Request(
         {
             "type": "http",
-            "session": {"nemo_gym_openclaw_sandbox_session": marker},
+            "session": {"agent_session_id": marker},
             "path_params": {"rollout_id": "openclaw-smoke-a2"},
         }
     )
@@ -995,7 +1094,7 @@ async def test_invalid_envelope_usage_does_not_discard_valid_transcript(setup):
     agent, sandbox = setup
     request, session_id, task = await activate(agent, sandbox)
     await task
-    state = agent._sandbox_sessions[session_id]
+    state = agent._session_records[session_id].state
     response = await agent._collect_sandbox_response(
         state,
         NeMoGymResponseCreateParamsNonStreaming(input="task"),
@@ -1027,7 +1126,7 @@ async def test_native_envelope_fallback_preserves_known_and_unknown_cache_detail
     agent, sandbox = setup
     request, session_id, task = await activate(agent, sandbox)
     await task
-    state = agent._sandbox_sessions[session_id]
+    state = agent._session_records[session_id].state
     sandbox.files[f"{state.directory}/home/.openclaw/agents/main/sessions/{Path(state.directory).name}.jsonl"] = ""
     response = await agent._collect_sandbox_response(
         state,
@@ -1130,7 +1229,7 @@ async def test_caller_id_seed_retries_share_one_session_without_cookies(setup):
     requests = [Request({"type": "http", "session": {}}) for _ in range(2)]
     first, second = await asyncio.gather(*(agent.seed_agent_session(request, body) for request in requests))
     assert first.agent_session_id == second.agent_session_id == body.agent_session_id
-    assert len(agent._sandbox_sessions) == 1
+    assert len(agent._session_records) == 1
     assert sandbox.exec.await_count == 2  # One path check and one installation.
     assert requests[0].session == requests[1].session
     await agent.close_agent_session(
@@ -1153,7 +1252,7 @@ async def test_caller_id_rejects_changed_seed_binding(setup, field):
         changed.task_id = changed.task_id.model_copy(update={"task_id": "another-task"})
     else:
         changed.sandbox_access.workdir = "/another-repository"
-    with pytest.raises(HTTPException, match="different seed"):
+    with pytest.raises(HTTPException, match="another seed"):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), changed)
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(body.agent_session_id)))
 
@@ -1164,7 +1263,7 @@ async def test_close_before_seed_prevents_late_creation(setup):
     request = Request({"type": "http", "session": {}})
     close = AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id)
     first = await agent.close_agent_session(request, close)
-    assert await agent.close_agent_session(Request({"type": "http", "session": {}}), close) is first
+    assert await agent.close_agent_session(Request({"type": "http", "session": {}}), close) == first
     with pytest.raises(HTTPException, match="already closed"):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
     sandbox.exec.assert_not_awaited()
@@ -1174,14 +1273,14 @@ async def test_close_serializes_with_inflight_seed(setup):
     agent, sandbox = setup
     body = seed()
     entered, release = asyncio.Event(), asyncio.Event()
-    original = agent._initialize_agent_session_state
+    original = agent._seed_agent_session_state
 
     async def blocked_initialize(*args):
         entered.set()
         await release.wait()
         return await original(*args)
 
-    with patch.object(agent, "_initialize_agent_session_state", side_effect=blocked_initialize):
+    with patch.object(agent, "_seed_agent_session_state", side_effect=blocked_initialize):
         pending = asyncio.create_task(agent.seed_agent_session(Request({"type": "http", "session": {}}), body))
         await entered.wait()
         close = asyncio.create_task(
@@ -1194,7 +1293,7 @@ async def test_close_serializes_with_inflight_seed(setup):
         assert not close.done()
         release.set()
         await asyncio.wait_for(asyncio.gather(pending, close), 2)
-    assert not agent._sandbox_sessions
+    assert all(record.state is None for record in agent._session_records.values())
     sandbox.disconnect.assert_awaited_once()
 
 
@@ -1204,60 +1303,29 @@ async def test_caller_id_never_controls_filesystem_path(setup):
     request = Request({"type": "http", "session": {}})
     response = await agent.seed_agent_session(request, body)
     assert response.agent_session_id == body.agent_session_id
-    directory = agent._sandbox_sessions[body.agent_session_id].directory
+    directory = agent._session_records[body.agent_session_id].state.directory
     assert Path(directory).parent == Path("/tmp/nemo-gym-openclaw-sessions")
     assert len(Path(directory).name) == 32
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(body.agent_session_id)))
 
 
-async def test_abandoned_session_expires_through_normal_cleanup(setup):
-    agent, sandbox = setup
-    agent.config.session_lifetime_seconds = 0.01
-    body = seed()
-    await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
-    expiry = agent._session_expiry_tasks[body.agent_session_id]
-    await asyncio.wait_for(asyncio.shield(expiry), 2)
-    assert not agent._sandbox_sessions
-    assert body.agent_session_id in agent._closed_sandbox_sessions
-    sandbox.disconnect.assert_awaited_once()
-    sandbox.stop.assert_not_awaited()
-
-
-async def test_failed_expiry_retains_state_and_rejects_activation(setup, caplog):
-    agent, sandbox = setup
-    agent.config.session_lifetime_seconds = 0.01
-    body = seed()
-    request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": body.episode_id.capture_key}})
-    await agent.seed_agent_session(request, body)
-    sandbox.disconnect.side_effect = RuntimeError("disconnect unavailable")
-    await asyncio.wait_for(asyncio.shield(agent._session_expiry_tasks[body.agent_session_id]), 2)
-    assert agent._sandbox_sessions[body.agent_session_id].closing
-    assert "retaining failed state" in caplog.text
-    with pytest.raises(HTTPException):
-        await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    sandbox.launch.assert_not_awaited()
-    sandbox.disconnect.side_effect = None
-    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(body.agent_session_id)))
-
-
-@pytest.mark.parametrize("lifetime", [0, -1, float("inf"), float("nan")])
-def test_session_lifetime_is_positive_and_finite(setup, lifetime):
+@pytest.mark.parametrize("field", ["timeout", "sandbox_install_timeout_seconds", "session_close_timeout_seconds"])
+@pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
+def test_deadlines_are_positive_and_finite(setup, field, value):
     agent, _ = setup
     with pytest.raises(ValidationError):
-        OpenClawAgentConfig(**(agent.config.model_dump() | {"session_lifetime_seconds": lifetime}))
+        OpenClawAgentConfig(**(agent.config.model_dump() | {field: value}))
 
 
-async def test_native_recipe_routes_collector_through_environment_run(setup, monkeypatch):
+@pytest.mark.parametrize("failed", [False, True])
+async def test_independent_configs_route_prepared_rows_through_environment_run(setup, monkeypatch, failed):
     from http.cookies import SimpleCookie
 
     import orjson
 
     import nemo_gym.rollout_collection as collection
-    from benchmarks.swebench.pro.materialize_single_agent_tasks import materialize_row
-    from environment_servers.single_agent_turn.app import (
-        SingleAgentTurnEnvironmentServer,
-        SingleAgentTurnEnvironmentServerConfig,
-    )
+    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
+    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
     from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
     agent, sandbox = setup
@@ -1265,7 +1333,22 @@ async def test_native_recipe_routes_collector_through_environment_run(setup, mon
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.create(
                 {
-                    "config_paths": ["benchmarks/swebench/pro/openclaw_native.yaml"],
+                    "config_paths": [
+                        "resources_servers/swebench_pro/configs/swebench_pro.yaml",
+                        "responses_api_agents/openclaw_agent/configs/openclaw_agent_native.yaml",
+                        "environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml",
+                    ],
+                    "single_agent_turn_legacy": {
+                        "environment_servers": {
+                            "single_agent_turn_legacy": {
+                                "resources_server": {
+                                    "type": "resources_servers",
+                                    "name": "swebench_pro_resources_server",
+                                },
+                                "agent_server": {"type": "responses_api_agents", "name": "openclaw_agent_native"},
+                            }
+                        }
+                    },
                     "policy_model_name": "test-model",
                     "policy_model": {"responses_api_models": {"openai_model": {"entrypoint": "app.py"}}},
                 }
@@ -1275,8 +1358,13 @@ async def test_native_recipe_routes_collector_through_environment_run(setup, mon
             offline=True,
         )
     )
-    env_name = global_config.environment_server_routes["swebench_pro:smoke"]
-    env_config = global_config[env_name].environment_servers.single_agent_turn
+    # The benchmark's legacy allowlist predates this native harness. Keep its
+    # definition untouched and explicitly opt in, as the CLI smoke does.
+    monkeypatch.setenv("NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING", "1")
+    if failed:
+        sandbox.events = events(stop_reason="error")
+    env_name = "single_agent_turn_legacy"
+    env_config = global_config[env_name].environment_servers.single_agent_turn_legacy
     agent_name = env_config.agent_server.name
     resources_name = env_config.resources_server.name
     agent.config = OpenClawAgentConfig(
@@ -1287,7 +1375,7 @@ async def test_native_recipe_routes_collector_through_environment_run(setup, mon
     assert not agent.config.openclaw_config
     agent.server_client.global_config_dict = global_config
     agent.server_client._resolve_base_url.return_value = "http://resources.example:8000"
-    environment = SingleAgentTurnEnvironmentServer(
+    environment = SingleAgentTurnLegacyEnvironmentServer(
         config=SingleAgentTurnEnvironmentServerConfig(name=env_name, **OmegaConf.to_container(env_config)),
         server_client=agent.server_client,
     )
@@ -1322,8 +1410,8 @@ async def test_native_recipe_routes_collector_through_environment_run(setup, mon
             assert cookies == {"resources": resources_id}
             if url_path == "/verify":
                 sandbox.disconnect.assert_awaited_once()
-                assert payload["verification_input"]["response"]["status"] == "completed"
-                return Reply({"reward": 1.0, **payload["verification_input"]})
+                assert payload["response"]["status"] == "completed"
+                return Reply({"reward": 1.0, **payload})
             assert url_path == "/close_session"
             assert payload["resources_session_id"] == resources_id
             return Reply({"resources_session_id": resources_id})
@@ -1337,40 +1425,49 @@ async def test_native_recipe_routes_collector_through_environment_run(setup, mon
 
     agent.server_client.post = AsyncMock(side_effect=post)
     monkeypatch.setattr(collection, "setup_server_client_utils", lambda *args, **kwargs: agent.server_client)
-    materialized = materialize_row(
-        {"responses_create_params": {"input": "Fix the code"}, "instance_id": "smoke-instance"},
-        taskset="swebench_pro:smoke",
-    )
+    prepared = {
+        "responses_create_params": {"input": "Fix the code"},
+        "instance_id": "smoke-instance",
+        "task_source": resources_name,
+    }
     config = collection.RolloutCollectionConfig(
         input_jsonl_fpath="unused.jsonl",
         output_jsonl_fpath="unused-rollouts.jsonl",
-        environment_routing_mode=global_config.environment_routing_mode,
-        environment_server_routes=OmegaConf.to_container(global_config.environment_server_routes),
+        environment_routing_mode="legacy",
+        environment_server_name=env_name,
         num_repeats=1,
     )
     rows = collection.RolloutCollectionHelper._preprocess_raw_rows(
-        [(0, orjson.dumps(materialized).decode(), materialized)], config
+        [(0, orjson.dumps(prepared).decode(), prepared)], config
     )
     with (
         TestClient(agent.setup_webserver()) as agent_http,
         TestClient(environment.setup_webserver()) as environment_http,
     ):
         _, result = await next(collection.RolloutCollectionHelper().run_examples(rows))
-    assert result.get("result") is not None, result
-    assert result["result"]["verification"]["reward"] == 1.0
-    assert result["result"]["agent_observations"]["source"] == "openclaw"
-    assert [(server_name, path) for server_name, path, _ in calls] == [
+    if failed:
+        assert result["_ng_failure_class"] == "environment_server_failed", result
+        assert result["_ng_failure_stage"] == "agent"
+        assert "reward" not in result
+    else:
+        assert "verification" not in result
+        assert result.get("reward") == 1.0, result
+        assert result["ng_agent_observations"]["source"] == "openclaw"
+    expected = [
         (env_name, "/run"),
         (resources_name, "/seed_session"),
         (agent_name, "/v1/agent_sessions"),
         (agent_name, "/ng-rollout/0-0/v1/responses"),
         (agent_name, "/v1/agent_sessions/close"),
-        (resources_name, "/verify"),
-        (resources_name, "/close_session"),
     ]
+    if not failed:
+        expected.append((resources_name, "/verify"))
+    expected.append((resources_name, "/close_session"))
+    assert [(server_name, path) for server_name, path, _ in calls] == expected
     assert calls[2][2]["agent_session_id"] == calls[4][2]["agent_session_id"]
-    assert calls[0][2]["task"]["task_input"] == materialized["task_input"]
-    assert not agent._sandbox_sessions
+    assert calls[0][2]["instance_id"] == prepared["instance_id"]
+    assert calls[0][2]["responses_create_params"]["input"] == prepared["responses_create_params"]["input"]
+    assert all(record.state is None for record in agent._session_records.values())
     sandbox.stop.assert_not_awaited()
 
 
@@ -1388,7 +1485,7 @@ async def test_failed_seed_with_confirmed_cleanup_accepts_cookie_less_close(setu
     result = await agent.close_agent_session(Request({"type": "http", "session": {}}), close)
     assert result.agent_session_id == body.agent_session_id
     sandbox.disconnect.assert_awaited_once()
-    assert not agent._sandbox_sessions
+    assert all(record.state is None for record in agent._session_records.values())
 
 
 async def test_failed_seed_cleanup_retains_state_until_explicit_retry(setup):
@@ -1402,23 +1499,23 @@ async def test_failed_seed_cleanup_retains_state_until_explicit_retry(setup):
     sandbox.disconnect.side_effect = RuntimeError("disconnect unavailable")
     with pytest.raises(RuntimeError, match="npm unavailable"):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
-    assert agent._sandbox_sessions[body.agent_session_id].closing
-    assert body.agent_session_id not in agent._closed_sandbox_sessions
+    assert agent._session_records[body.agent_session_id].state.closing
+    assert body.agent_session_id not in agent._closed_session_records
     with pytest.raises(HTTPException, match="closing"):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
     sandbox.exec.side_effect = None
     sandbox.disconnect.side_effect = None
     close = AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id)
     await agent.close_agent_session(Request({"type": "http", "session": {}}), close)
-    assert not agent._sandbox_sessions
+    assert all(record.state is None for record in agent._session_records.values())
     sandbox.stop.assert_not_awaited()
 
 
 @pytest.mark.parametrize("marker", [None, [], {}, 7])
 async def test_seed_rejects_malformed_native_cookie_before_connecting(setup, marker):
     agent, sandbox = setup
-    request = Request({"type": "http", "session": {"nemo_gym_openclaw_sandbox_session": marker}})
-    with pytest.raises(HTTPException, match="Invalid OpenClaw session marker"):
+    request = Request({"type": "http", "session": {"agent_session_id": marker}})
+    with pytest.raises(HTTPException, match="Invalid agent session marker"):
         await agent.seed_agent_session(request, seed())
     sandbox.exec.assert_not_awaited()
 
@@ -1426,8 +1523,7 @@ async def test_seed_rejects_malformed_native_cookie_before_connecting(setup, mar
 async def test_stale_cookie_cannot_recreate_session_or_close_receipt_after_full_retention(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("responses_api_agents.openclaw_agent.app.monotonic", lambda: clock[0])
-    agent.config.session_lifetime_seconds = 10
+    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 5
     request = Request({"type": "http", "session": {}})
     body = seed()
@@ -1439,7 +1535,7 @@ async def test_stale_cookie_cannot_recreate_session_or_close_receipt_after_full_
         await agent.close_agent_session(request, close)
     with pytest.raises(HTTPException, match="expired"):
         await agent.seed_agent_session(request, body)
-    assert not agent._closed_sandbox_sessions
-    assert not agent._sandbox_sessions
-    assert not agent._session_locks
+    assert not agent._closed_session_records
+    assert all(record.state is None for record in agent._session_records.values())
+    assert not agent._session_records
     sandbox.disconnect.assert_awaited_once()

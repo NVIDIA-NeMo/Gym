@@ -24,11 +24,9 @@ import shlex
 import shutil
 import signal
 from asyncio import Semaphore
-from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Mapping
 from pathlib import Path
-from time import monotonic, time
+from time import time
 from typing import Any, Callable, ClassVar, Optional
 from uuid import uuid4
 
@@ -38,16 +36,15 @@ from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
-    AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
-    AgentSeedSessionResponse,
+    AgentSessionSetupError,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.episode_types import EpisodeId
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -405,22 +402,15 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     thinking: str = "off"
     system_prompt: Optional[str] = None
     setup_timeout: int = 900
-    timeout: int = 900
+    timeout: int = Field(default=900, gt=0)
     extra_args: list[str] = []
     openclaw_config: dict[str, Any] = Field(default_factory=dict)
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
     # required: every config must pin an explicit version so runs are reproducible and cannot silently drift
     openclaw_version: str
-    sandbox_install_timeout_seconds: float = Field(default=600, gt=0)
-    session_close_timeout_seconds: float = Field(default=60, gt=0)
-    session_lifetime_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
-    session_close_retry_window_seconds: float = Field(
-        default=300.0,
-        gt=0,
-        allow_inf_nan=False,
-        description="Keep successful close receipts for this many seconds; cover the caller's retry horizon.",
-    )
+    sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
     @property
     def command_parts(self) -> list[str]:
@@ -455,99 +445,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     # deny the interactive "message" channel so the headless agent finishes
     _HEADLESS_TOOL_DENY: ClassVar[tuple[str, ...]] = ("message",)
 
-    _sandbox_sessions: dict[str, OpenClawSandboxSession] = PrivateAttr(default_factory=dict)
-    _closed_sandbox_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse, float]] = PrivateAttr(
-        default_factory=OrderedDict
-    )
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
-    _session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
-    _session_lock_users: dict[str, int] = PrivateAttr(default_factory=dict)
-    _session_expiry_tasks: dict[str, asyncio.Task[None]] = PrivateAttr(default_factory=dict)
-    _closed_session_ids: dict[str, tuple[EpisodeId, float]] = PrivateAttr(default_factory=dict)
 
-    @asynccontextmanager
-    async def _session_lock(self, session_id: str) -> AsyncIterator[None]:
-        """Count holders and waiters so pruning cannot replace an in-flight ID lock."""
-        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-        self._session_lock_users[session_id] = self._session_lock_users.get(session_id, 0) + 1
-        try:
-            async with lock:
-                yield
-        finally:
-            remaining = self._session_lock_users[session_id] - 1
-            if remaining:
-                self._session_lock_users[session_id] = remaining
-            else:
-                self._session_lock_users.pop(session_id)
-                if session_id not in self._sandbox_sessions and session_id not in self._closed_session_ids:
-                    self._session_locks.pop(session_id, None)
-
-    async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
-        """Borrow the Resources-owned task sandbox and install a pinned OpenClaw runtime inside it."""
-        self._expire_closed_agent_sessions()
-        session_id = body.agent_session_id
-        previous = request.session.get(_SANDBOX_SESSION_KEY)
-        if _SANDBOX_SESSION_KEY in request.session and not isinstance(previous, str):
-            raise HTTPException(409, "Invalid OpenClaw session marker")
-        if previous != session_id and previous in self._sandbox_sessions:
-            raise HTTPException(409, "OpenClaw cookie belongs to another active session")
-        async with self._session_lock(session_id):
-            if session_id in self._closed_session_ids:
-                raise HTTPException(409, "OpenClaw session is already closed")
-            state = self._sandbox_sessions.get(session_id)
-            if state is not None:
-                if state.seed != body:
-                    raise HTTPException(409, "OpenClaw session ID is bound to a different seed request")
-                if state.closing:
-                    raise HTTPException(409, "OpenClaw session is closing")
-            else:
-                if previous == session_id:
-                    raise HTTPException(409, "OpenClaw session cookie has expired")
-                try:
-                    state = await self._initialize_agent_session_state(session_id, body)
-                except BaseException:
-                    if session_id not in self._sandbox_sessions:
-                        # Initialization either never connected or confirmed its cleanup.
-                        self._closed_sandbox_sessions[session_id] = (
-                            body.episode_id,
-                            AgentCloseSessionResponse(agent_session_id=session_id),
-                            monotonic() + self.config.session_close_retry_window_seconds,
-                        )
-                        self._remember_closed_session(session_id, body.episode_id)
-                    else:
-                        self._session_expiry_tasks[session_id] = asyncio.create_task(
-                            self._expire_agent_session(session_id, body.episode_id)
-                        )
-                    raise
-                self._sandbox_sessions[session_id] = state
-                self._session_expiry_tasks[session_id] = asyncio.create_task(
-                    self._expire_agent_session(session_id, body.episode_id)
-                )
-            request.session[_SANDBOX_SESSION_KEY] = session_id
-            return AgentSeedSessionResponse(agent_session_id=session_id)
-
-    async def _expire_agent_session(self, session_id: str, episode_id: EpisodeId) -> None:
-        """Bound abandoned sessions through the same fail-closed teardown as explicit close."""
-        try:
-            await asyncio.sleep(self.config.session_lifetime_seconds)
-            await self.close_agent_session(
-                Request({"type": "http", "session": {}}),
-                AgentCloseSessionRequest(agent_session_id=session_id, episode_id=episode_id),
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            LOG.exception("Could not clean up expired OpenClaw session %s; retaining failed state", session_id)
-        finally:
-            self._session_expiry_tasks.pop(session_id, None)
-
-    async def _initialize_agent_session_state(
-        self, agent_session_id: str, body: AgentSeedSessionRequest
-    ) -> OpenClawSandboxSession:
-        # Match Hermes: session initialization owns the sandbox runtime setup,
-        # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
-        if self.config.num_workers not in (None, 1):
-            raise HTTPException(422, "Native OpenClaw sessions require num_workers=1")
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenClawSandboxSession:
+        """Install a pinned runtime in the Resources-owned sandbox using the shared session lifecycle."""
         if body.sandbox_access is None or not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
             raise HTTPException(422, "Native OpenClaw requires direct, Resources-owned SandboxAccess")
         if not body.sandbox_access.workdir.startswith("/") or body.sandbox_access.workdir in ("/", "/tmp"):
@@ -617,7 +518,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     f"{installed.stderr or installed.stdout}"
                 )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
-        except BaseException:
+        except BaseException as error:
             try:
                 if prepared_directory:
                     await state.close(self.config.session_close_timeout_seconds)
@@ -627,71 +528,30 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     await sandbox.disconnect()
                     state.closed = True
             except BaseException:
-                self._sandbox_sessions[agent_session_id] = state
-                LOG.exception("OpenClaw seed cleanup failed; retaining session %s", agent_session_id)
+                LOG.exception("OpenClaw seed cleanup failed; retaining session %s", body.agent_session_id)
+                raise AgentSessionSetupError(state, error=error) from error
             raise
         return state
 
-    async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
-        """Confirm OpenClaw teardown before allowing verification; never destroy the borrowed sandbox."""
-        self._expire_closed_agent_sessions()
-        session_id = body.agent_session_id
-        cookie = request.session.get(_SANDBOX_SESSION_KEY)
-        if cookie is not None and cookie != session_id:
-            raise HTTPException(409, "OpenClaw close cookie does not match the requested session")
-        async with self._session_lock(session_id):
-            closed = self._closed_sandbox_sessions.get(session_id)
-            if closed is not None:
-                if body.episode_id != closed[0]:
-                    raise HTTPException(409, "OpenClaw close does not match the seeded episode")
-                request.session[_SANDBOX_SESSION_KEY] = session_id
-                return closed[1]
-            if session_id in self._closed_session_ids:
-                raise HTTPException(409, "OpenClaw close receipt has expired")
-            state = self._sandbox_sessions.get(session_id)
-            if state is None:
-                if cookie is not None:
-                    raise HTTPException(409, "OpenClaw close receipt has expired")
-                result = AgentCloseSessionResponse(agent_session_id=session_id)
-            else:
-                if body.episode_id != state.seed.episode_id:
-                    raise HTTPException(409, "OpenClaw close does not match the seeded episode")
-                await state.close(self.config.session_close_timeout_seconds)
-                observations = state.observations or AgentObservationBundle(
-                    source="openclaw", gaps=[ObservationGap(code="agent_activation_interrupted")]
-                )
-                result = AgentCloseSessionResponse(agent_session_id=session_id, agent_observations=observations)
-                self._sandbox_sessions.pop(session_id, None)
-                expiry = self._session_expiry_tasks.pop(session_id, None)
-                if expiry is not None and expiry is not asyncio.current_task():
-                    expiry.cancel()
-            request.session[_SANDBOX_SESSION_KEY] = session_id
-            self._closed_sandbox_sessions[session_id] = (
-                body.episode_id,
-                result,
-                monotonic() + self.config.session_close_retry_window_seconds,
-            )
-            self._remember_closed_session(session_id, body.episode_id)
-            return result
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        """Confirm teardown and return observations without destroying the borrowed sandbox."""
+        assert isinstance(state, OpenClawSandboxSession)
+        await state.close(self.config.session_close_timeout_seconds)
+        observations = state.observations or AgentObservationBundle(
+            source="openclaw", gaps=[ObservationGap(code="agent_activation_interrupted")]
+        )
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id, agent_observations=observations
+        )
 
-    def _remember_closed_session(self, session_id: str, episode_id: EpisodeId) -> None:
-        """Prevent delayed seeds through the session lifetime and close retry horizon."""
-        retention = max(self.config.session_lifetime_seconds, self.config.session_close_retry_window_seconds)
-        self._closed_session_ids[session_id] = (episode_id, monotonic() + retention)
-        asyncio.get_running_loop().call_later(retention, self._expire_closed_agent_sessions)
-
-    def _expire_closed_agent_sessions(self) -> None:
-        """Prune receipts and tombstones by elapsed time, never by traffic or retry order."""
-        now = monotonic()
-        while self._closed_sandbox_sessions:
-            if next(iter(self._closed_sandbox_sessions.values()))[2] > now:
-                break
-            self._closed_sandbox_sessions.popitem(last=False)
-        for session_id, (_, deadline) in tuple(self._closed_session_ids.items()):
-            if deadline <= now:
-                self._closed_session_ids.pop(session_id)
-                if not self._session_lock_users.get(session_id, 0):
-                    self._session_locks.pop(session_id, None)
+    def _prompt_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+        """Normalize prompts identically for local and borrowed-sandbox execution."""
+        items = (
+            [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
+        )
+        prompt, input_system = _extract_instruction(items)
+        system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
+        return prompt, system
 
     def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         """Validate and normalize input before consuming the session's activation."""
@@ -743,8 +603,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 for part in item.content
             ):
                 raise HTTPException(422, "Native OpenClaw only supports text input")
-        prompt, input_system = _extract_instruction(items)
-        system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
+        prompt, system = self._prompt_input(body)
         if not prompt.strip():
             raise HTTPException(422, "Native OpenClaw requires a nonempty user prompt")
         return prompt, system
@@ -759,7 +618,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         # The pinned CLI reads configuration directly; onboarding would create
         # workspace bootstrap files and unrelated provider/channel state.
-        native_config = self._build_openclaw_config({}, state.seed.episode_id.capture_key)
+        native_config = self._build_openclaw_config({}, state.request.episode_id.capture_key)
         # OpenClaw conservatively disables stream usage for custom origins. Gym
         # supports it; request the final usage chunk instead of retaining zero counters.
         native_config["models"]["providers"]["nemo"]["models"][0]["compat"] = {
@@ -769,7 +628,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             {
                 "agents": {
                     "defaults": {
-                        "workspace": state.seed.sandbox_access.workdir,
+                        "workspace": state.request.sandbox_access.workdir,
                         "skipBootstrap": True,
                         "skills": [],
                         "model": {"primary": self._effective_model()},
@@ -808,7 +667,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             "directory": state.directory,
             "command": command,
             "prompt": f"{system}\n\n{prompt}" if system else prompt,
-            "cwd": state.seed.sandbox_access.workdir,
+            "cwd": state.request.sandbox_access.workdir,
             "env": {
                 "HOME": f"{state.directory}/home",
                 "XDG_CACHE_HOME": f"{state.directory}/home/.cache",
@@ -834,7 +693,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             except Exception:
                 LOG.exception("Could not salvage interrupted OpenClaw observations")
             raise
-        return await self._collect_sandbox_response(state, body, prompt=prompt, system=system, stdout=stdout)
+        response = await self._collect_sandbox_response(state, body, prompt=prompt, system=system, stdout=stdout)
+        if response.error is not None:
+            # Preserve the transcript in session observations, but let the environment
+            # classify runtime/provider failures before it invokes the verifier.
+            raise HTTPException(502, response.error.message)
+        return response
 
     async def _collect_sandbox_response(
         self,
@@ -954,7 +818,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         result = state.result
         error = result.error if result else "OpenClaw activation ended without a cleanup receipt"
         last = assistants[-1] if assistants else {}
-        if last.get("stopReason") in {"error", "aborted"}:
+        if last.get("stopReason") == "error" or (
+            last.get("stopReason") == "aborted" and not (result and result.timed_out)
+        ):
             error = error or last.get("errorMessage") or f"OpenClaw model call {last['stopReason']}"
         if result and result.return_code and not result.timed_out:
             try:
@@ -1325,9 +1191,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
-        user_message, input_system = _extract_instruction(body.input)
-        system_parts = [p for p in [self.config.system_prompt, input_system] if p]
-        system_prompt = "\n\n".join(system_parts) if system_parts else None
+        user_message, system_prompt = self._prompt_input(body)
 
         try:
             output_items, usage, model_name = await self._run_openclaw(
@@ -1381,29 +1245,30 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        session_id = self._agent_session_id_from_request(request)
         try:
-            session_id = request.session.get(_SANDBOX_SESSION_KEY)
-            has_session = isinstance(request.session, Mapping) and _SANDBOX_SESSION_KEY in request.session
+            legacy_marker = _SANDBOX_SESSION_KEY in request.session
         except (AssertionError, AttributeError):
-            session_id, has_session = None, False
-        if has_session:
-            if not isinstance(session_id, str):
-                raise HTTPException(409, "Invalid OpenClaw session marker")
-            state = self._sandbox_sessions.get(session_id)
-            rollout_id = request.path_params.get("rollout_id")
-            if state is None or state.seed.episode_id.capture_key != rollout_id:
+            legacy_marker = False
+        if legacy_marker:
+            raise HTTPException(409, "Obsolete OpenClaw session cookie; seed a new agent session")
+        if session_id is not None:
+            state = self._require_agent_session(session_id)
+            assert isinstance(state, OpenClawSandboxSession)
+            if state.request.episode_id.capture_key != request.path_params.get("rollout_id"):
                 raise HTTPException(409, "OpenClaw activation does not match the seeded session and rollout route")
-            if state.activated or state.closing:
-                raise HTTPException(409, "OpenClaw sandbox sessions support one activation")
             prompt, system = self._sandbox_input(body)
-            state.activated = True
-            state.task = asyncio.create_task(self._sandbox_response(state, body, prompt=prompt, system=system))
-            try:
-                return await asyncio.shield(state.task)
-            except asyncio.CancelledError:
-                if not state.task.done() and not state.task.cancelling():
-                    state.task.cancel()
-                raise
+            if state.task is None:
+                # Bind the immutable request before yielding, so identical retries
+                # share one invocation and different requests cannot replace it.
+                state.activation_request = body.model_copy(deep=True)
+                state.task = asyncio.create_task(
+                    self._sandbox_response(state, state.activation_request, prompt=prompt, system=system)
+                )
+            elif body != state.activation_request:
+                raise HTTPException(409, "OpenClaw sandbox sessions support one activation; retry the same request")
+            # Session close owns cancellation, not an individual HTTP waiter.
+            return (await asyncio.shield(state.task)).model_copy(deep=True)
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         if not isinstance(rollout_id, str):
@@ -1493,6 +1358,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         return AgentEpisode(response=response, observations=observations)
 
     async def run(self, request: Request, body: OpenClawAgentRunRequest) -> OpenClawAgentVerifyResponse:
+        if self._agent_session_id_from_request(request) is not None:
+            raise HTTPException(409, "Native OpenClaw sessions must use EnvironmentServer /run")
         try:
             if isinstance(request.session, Mapping) and _SANDBOX_SESSION_KEY in request.session:
                 raise HTTPException(409, "Native OpenClaw sessions must use EnvironmentServer /run")

@@ -78,7 +78,7 @@ def payload(state, code, timeout=0.5):
     return {
         "directory": state.directory,
         "prompt": "task",
-        "cwd": state.seed.sandbox_access.workdir,
+        "cwd": state.request.sandbox_access.workdir,
         "command": [sys.executable, "-c", code],
         "env": {},
         "timeout": timeout,

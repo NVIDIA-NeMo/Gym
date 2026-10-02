@@ -73,51 +73,48 @@ Resources. The agent server borrows `SandboxAccess`, installs the pinned runtime
 invocation in `SandboxAccess.workdir`, and disconnects after confirmed cleanup. Resources retains
 ownership of task preparation, verification, and sandbox destruction.
 
-Bind the agent, Resources, model server, and sandbox provider in your environment config. For
-example, the following agent/environment blocks refer to an existing Resources server named
-`task_resources` and a Gym model server named `policy`:
+Load the independent benchmark, harness, and generic EnvironmentServer definitions. For example,
+with an already prepared SWE-Pro JSONL and a reachable policy model, create a run config:
 
 ```yaml
-openclaw_native:
-  responses_api_agents:
-    openclaw_agent:
-      entrypoint: app.py
-      num_workers: 1
-      openclaw_version: 2026.6.11
-      model_server: {type: responses_api_models, name: policy}
-      model: your-served-model-id
-      timeout: 900
-      sandbox_install_timeout_seconds: 900
-      session_close_timeout_seconds: 60
-      session_close_retry_window_seconds: 300
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
+  - responses_api_agents/openclaw_agent/configs/openclaw_agent_native.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
-native_environment:
+# Route existing prepared flat rows through native session orchestration.
+environment_routing_mode: legacy
+environment_server_name: single_agent_turn_legacy
+
+single_agent_turn_legacy:
   environment_servers:
-    single_agent_turn:
-      entrypoint: app.py
-      resources_server: {type: resources_servers, name: task_resources}
-      agent_server: {type: responses_api_agents, name: openclaw_native}
+    single_agent_turn_legacy:
+      resources_server: {type: resources_servers, name: swebench_pro_resources_server}
+      agent_server: {type: responses_api_agents, name: openclaw_agent_native}
 ```
 
-The runnable SWE-Pro composition is `benchmarks/swebench/pro/openclaw_native.yaml`. It selects
-`environment_routing_mode: taskset` and binds `swebench_pro:smoke` to the native `single_agent_turn`
-EnvironmentServer. The separate native agent config has no legacy Resources reference or local
-provider overrides. With sandbox and policy model configuration ready:
+Save it as `native-run.yaml`, then run:
 
 ```bash
-python benchmarks/swebench/pro/materialize_single_agent_tasks.py \
-  resources_servers/swebench_pro/data/example.jsonl /tmp/swe-pro-native.jsonl
+gym env start --config native-run.yaml --model-type openai_model
 
-gym env start --config benchmarks/swebench/pro/openclaw_native.yaml --model-type openai_model
-
-gym eval run --no-serve --config benchmarks/swebench/pro/openclaw_native.yaml \
-  --model-type openai_model --input /tmp/swe-pro-native.jsonl \
-  --output outputs/openclaw-native.jsonl --limit 1
+gym eval run --no-serve --config native-run.yaml --model-type openai_model \
+  --agent openclaw_agent_native --allow-unsupported-pairing \
+  --input /path/to/prepared-swe-pro.jsonl --output outputs/openclaw-native.jsonl --limit 1
 ```
 
 Supply the sandbox provider config through `env.yaml` or an additional `--config` file, and ensure
 `policy_model_name`, `policy_base_url`, and `policy_api_key` match the reachable model endpoint.
-Do not add `--agent`: this recipe routes materialized tasks by taskset.
+Prepared rows keep benchmark task data and prompts; `task_source`, when present, must name the
+selected Resources server. `--agent` selects the harness for existing rows. No extra standalone
+materialization script is required.
+
+SWE-Pro currently has a legacy `allowed_agents` list that excludes OpenClaw. The explicit
+`--allow-unsupported-pairing` opt-in permits this smoke without replacing benchmark or verifier
+settings. It does not establish compatibility with other benchmarks. Switch compatible components
+by changing their independent config paths and the two EnvironmentServer references; keep
+benchmark data, preparation, and verifier settings with Resources. There is no combined
+benchmark/harness preset.
 
 Submit episodes to **EnvironmentServer `/run`**. It seeds Resources, opens the agent session,
 calls the rollout-scoped Responses endpoint, closes the agent, verifies, and closes Resources.
@@ -135,8 +132,8 @@ the failed command, exit status, and stderr. Supporting these architectures does
 validation on every task image; record the actual image digest and runtime versions with each run.
 
 The runner uses ordinary sandbox `exec`; no PTY/session API is required. Its internal deadline
-leaves time for descendant cleanup before the provider deadline. Cancellation requests a stop and
-waits for a cleanup receipt before detaching. A missing or failed receipt blocks verification.
+leaves time for descendant cleanup before the provider deadline. Session close requests a stop and
+waits for a cleanup receipt before detaching. A disconnected HTTP waiter leaves the shared invocation running. A missing or failed receipt blocks verification.
 For old musl images, a checksum-pinned C++ runtime is extracted privately and used only by the
 private Node binary; task Node/Python and the global library search path are not replaced.
 
@@ -150,6 +147,8 @@ exec host refers to the embedded CLI process inside the borrowed sandbox.
 Native request support is deliberately explicit:
 
 - One activation per session; one worker per agent server. Concurrent sessions are independent.
+  Identical activation requests join the running task or replay its result/error. A different request
+  is rejected with HTTP 409. Session close owns cancellation; waiter cancellation does not stop the harness.
 - EnvironmentServer assigns the session ID. Repeating the full seed request is idempotent, even
   without the original cookie; reusing its ID for different inputs is rejected. Close accepts the
   explicit ID and episode without a cookie, including after a lost seed response. Closing an
@@ -165,9 +164,12 @@ Native request support is deliberately explicit:
   effective captured requests. An episode-wide token budget is not implemented.
 - Custom command, environment, OpenClaw config, Node path, extra arguments, and agent-ID overrides
   are rejected for native sessions. Existing callers without an agent-session cookie retain the
-  local CLI behavior and configuration.
+  local CLI behavior and configuration. Both paths now include request `instructions` in the
+  same configured-system, request-instructions, input-system order.
 
-Responses retain reasoning, tool calls/results, final or partial text, and terminal failure status.
+Successful and limit-truncated Responses retain reasoning, tool calls/results, and final or partial text.
+Runtime, provider, and upstream model failures raise an error before verification, with transcript
+evidence and failed status retained in the observations returned by close.
 Usage sums observed assistant model calls, including cache reads/writes and failed final calls.
 Transcript rewrites retaining the same response ID and message count once; synthetic CLI summary
 messages carrying cumulative usage do not count again or override the model's terminal status.
@@ -177,8 +179,8 @@ Auxiliary model calls, such as compaction, are absent from the transcript. A cov
 reported because interrupted compaction need not leave an event. Totals therefore need not equal
 all backend calls. Missing per-call usage and
 unavailable reasoning-token details are also reported as observation gaps; the full branch history is retained.
-A timeout returns partial output as `incomplete`; model errors remain `failed` even when a useful
-patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
+An explicit wall or model-output limit returns partial output as `incomplete`; upstream/model errors
+raise HTTP 502 even when a useful patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.
 
 A Linux child subreaper supervises each activation and reaps detached/background descendants before
@@ -189,9 +191,12 @@ retryable for `session_close_retry_window_seconds` after cleanup (300 seconds by
 and retries do not shorten or extend the window. Stale cookies continue to reject activations after
 receipt expiry and never enter the host CLI path.
 
-Abandoned sessions expire after `session_lifetime_seconds` (21600 seconds by default) through the
-same cleanup path. Expiry failures retain closing state and block activation. Closed-ID tombstones
-remain for the longer of the session lifetime and close retry window, then are pruned.
+The shared `SimpleResponsesAPIAgent` lifecycle owns session identity, serialization, and close
+receipts. `session_lifetime_seconds` has been removed: the episode owner and provider TTL govern
+abandoned-session recovery; there is no adapter timer cancelling active sessions. Setup failures
+whose cleanup fails retain cleanup-only state through `AgentSessionSetupError`.
+`timeout`, `sandbox_install_timeout_seconds`, and `session_close_timeout_seconds` must be positive
+and finite. The shared `session_close_retry_window_seconds` bounds close receipts and tombstones.
 
 Session state is process-local. Keep requests on one worker. Failed cleanup sessions are retained
 until owner/provider recovery and agent restart; they are never relabeled as successfully closed.

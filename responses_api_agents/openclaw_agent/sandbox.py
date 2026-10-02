@@ -13,8 +13,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.base_responses_api_agent import AgentSessionState
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
@@ -47,10 +47,9 @@ class OpenClawSandboxResult(BaseModel):
 
 
 @dataclass
-class OpenClawSandboxSession:
+class OpenClawSandboxSession(AgentSessionState):
     """Worker-local session with retryable, fail-closed runner teardown."""
 
-    seed: AgentSeedSessionRequest
     sandbox: AsyncSandbox
     directory: str
     runtime: str
@@ -58,7 +57,7 @@ class OpenClawSandboxSession:
     exec_task: asyncio.Task[SandboxExecResult] | None = None
     result: OpenClawSandboxResult | None = None
     observations: AgentObservationBundle | None = None
-    activated: bool = False
+    activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     closing: bool = False
     launch_started: bool = False
     closed: bool = False
@@ -114,7 +113,7 @@ class OpenClawSandboxSession:
                 f"for _ in $(seq 1 {max(1, int(timeout))}); do "
                 f"[ -f {quote(receipt_path)} ] && exit 0; sleep 1; done; exit 1"
             )
-            await self.sandbox.exec(script, cwd=self.seed.sandbox_access.workdir, timeout_s=timeout + 5)
+            await self.sandbox.exec(script, cwd=self.request.sandbox_access.workdir, timeout_s=timeout + 5)
             try:
                 result = OpenClawSandboxResult.model_validate_json(await self.read_text("result.json"))
             except Exception as error:
@@ -183,7 +182,7 @@ class OpenClawSandboxSession:
             # Leave extra time for cleanup and transport before provider timeout.
             self.exec_task = asyncio.create_task(
                 self.sandbox.exec(
-                    command, cwd=self.seed.sandbox_access.workdir, timeout_s=timeout + close_timeout * 3 + 30
+                    command, cwd=self.request.sandbox_access.workdir, timeout_s=timeout + close_timeout * 3 + 30
                 )
             )
             # HTTP cancellation must not propagate into provider exec before
