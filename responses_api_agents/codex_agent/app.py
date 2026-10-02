@@ -692,7 +692,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
             # Codex 0.144.4 serializes these known warnings as error items.
             # Its compaction warning can occur during a successful turn. Keep
             # exact advisories visible without masking other errors or failed exits.
-            if successful_exit and event.get("type") == "item.completed" and item.get("type") == "error":
+            # Their final classification also permits a gradable output/wall-time limit.
+            if event.get("type") == "item.completed" and item.get("type") == "error":
                 if message == _COMPACTION_ADVISORY:
                     compaction_warnings.append(message)
                     continue
@@ -712,10 +713,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
             include_partial=True,
             conservative_usage_details=True,
         )
-        if (startup_warnings or compaction_warnings) and usage.get("errors"):
-            usage["errors"] = [*startup_warnings, *compaction_warnings, *usage["errors"]]
-            startup_warnings = []
-            compaction_warnings = []
         error = result.error if result else "Codex runner result unavailable"
         errors = usage.get("errors") or []
         output_limited = (
@@ -729,6 +726,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
             and not result.error
             and failure is None
         )
+        gradable_limit = (
+            result is not None
+            and not result.error
+            and failure is None
+            and (output_limited or (result.timed_out and not errors))
+        )
+        if not ((successful_exit and not errors) or gradable_limit):
+            errors = [*startup_warnings, *compaction_warnings, *errors]
+            startup_warnings = []
+            compaction_warnings = []
         if errors and not output_limited:
             error = error or "; ".join(errors)
         if result and result.return_code != 0 and not result.timed_out and not output_limited:

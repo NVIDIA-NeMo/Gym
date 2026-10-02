@@ -134,7 +134,10 @@ def test_pinned_cli_incomplete_stream_retries_preserve_usage_gaps(tmp_path: Path
         activated = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Say done."})
         assert activated.status_code == 200, activated.text
         native = activated.json()
-        assert native["status"] == ("completed" if recover else "failed")
+        assert native["status"] == ("completed" if recover else "incomplete")
+        assert native["error"] is None
+        if not recover:
+            assert native["incomplete_details"]["reason"] == "max_output_tokens"
         assert native["usage"]["total_tokens"] == (10 if recover else 0)
         assert native["usage"]["total_tokens"] < sum(response["usage"]["total_tokens"] for _ in requests)
         # The fake backend omitted both details; CLI zeros cannot prove known zero usage.

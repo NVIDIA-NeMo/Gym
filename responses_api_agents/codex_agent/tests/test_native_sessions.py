@@ -441,7 +441,7 @@ def test_startup_model_metadata_advisory_requires_successful_turn(setup, conditi
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
-        assert response.status_code == (200 if condition == "completed" else 502), response.text
+        assert response.status_code == (200 if condition in ("completed", "timed-out") else 502), response.text
         body = response.json()
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
@@ -468,7 +468,7 @@ def test_startup_model_metadata_advisory_requires_successful_turn(setup, conditi
     "condition",
     ["completed", "failed-turn", "failed-exit", "timed-out", "no-terminal", "other-error", "near-match", "no-start"],
 )
-def test_compaction_advisories_require_clean_completion_and_remain_visible(setup, condition) -> None:
+def test_advisories_remain_visible_on_completion_or_gradable_limits(setup, condition) -> None:
     agent, sandbox = setup
     warning = (
         "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
@@ -513,20 +513,21 @@ def test_compaction_advisories_require_clean_completion_and_remain_visible(setup
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
-        assert result.status_code == (200 if condition == "completed" else 502), result.text
+        assert result.status_code == (200 if condition in ("completed", "timed-out") else 502), result.text
         body = result.json()
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
     observations = closed.json()["agent_observations"]
     advisories = [gap for gap in observations["gaps"] if gap["code"] == "compaction_accuracy_advisory"]
     startup_gaps = [gap for gap in observations["gaps"] if gap["code"] == "model_metadata_fallback"]
-    if condition == "completed":
-        assert body["status"] == "completed"
+    if condition in ("completed", "timed-out"):
+        expected_status = "incomplete" if condition == "timed-out" else "completed"
+        assert body["status"] == expected_status
         assert body["error"] is None
         assert body["usage"]["total_tokens"] == 22
         assert [gap["detail"] for gap in advisories] == [warning] * 6
         assert [gap["detail"] for gap in startup_gaps] == [startup]
-        assert observations["records"][0]["status"] == "completed"
+        assert observations["records"][0]["status"] == expected_status
     else:
         assert "detail" in body
         assert warning in body["detail"]

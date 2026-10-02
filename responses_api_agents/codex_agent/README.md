@@ -116,7 +116,7 @@ failures raise execution errors and bypass verification. Only Resources determin
 CLI events omit exact model-call join IDs and can omit failed-call usage even after a recovered
 retry. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
-Known model-metadata/compaction warnings remain visible as gaps only after clean completion.
+Known model-metadata/compaction warnings remain visible as gaps after clean completion or a gradable model/wall-time limit.
 
 `sandbox_install_timeout_seconds` defaults to 600 and `session_close_timeout_seconds` to 60;
 both must be finite and positive. Measure setup time, supervisor process/memory cost, and close
