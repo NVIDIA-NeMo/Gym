@@ -226,3 +226,24 @@ def test_unknown_task_lookup(tmp_path, monkeypatch, taskset, task_id, status):
     body["task_id"] = {"taskset": taskset, "task_id": task_id}
     assert client.post("/v1/agent_sessions", json=body).status_code == 200
     assert client.post("/v1/responses", json=RESPONSES_BODY).status_code == status
+
+
+def test_transfer_failure_is_an_oracle_failure_not_a_500(tmp_path, monkeypatch):
+    from resources_servers.harbor.sandbox_io import SandboxTransferError
+
+    agent, _, sandbox, _ = make_agent(tmp_path, monkeypatch)
+
+    async def refuse(sandbox, source, target, **kwargs):
+        raise SandboxTransferError("Failed to unpack solution into /solution: operation not permitted")
+
+    monkeypatch.setattr(module, "upload_dir", refuse)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    response = client.post("/v1/responses", json=RESPONSES_BODY)
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["metadata"] == {"oracle": "failed", "oracle_error_type": "transfer"}
+    assert "operation not permitted" in payload["output"][0]["content"][0]["text"]
+    assert not any("solve.sh" in call["command"] for call in sandbox.execs)
