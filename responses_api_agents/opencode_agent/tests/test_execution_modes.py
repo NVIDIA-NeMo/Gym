@@ -74,10 +74,14 @@ async def test_native_markers_never_enter_other_modes(mode: str, marker: str | N
 
 
 @pytest.mark.parametrize("mode", ["local", "legacy_sandbox"])
-async def test_native_seed_requires_explicit_sandbox_mode(mode: str) -> None:
+async def test_native_seed_dispatch_is_independent_of_legacy_mode(mode: str) -> None:
     agent = make_agent(mode)
-    with pytest.raises(HTTPException, match="execution_mode=sandbox"):
-        await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
+    with patch.object(
+        agent, "_initialize_agent_session_state", AsyncMock(side_effect=RuntimeError("native setup reached"))
+    ) as initialize:
+        with pytest.raises(RuntimeError, match="native setup reached"):
+            await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
+    initialize.assert_awaited_once()
     assert not agent._native_sessions
 
 

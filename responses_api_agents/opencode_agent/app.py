@@ -68,7 +68,7 @@ from nemo_gym.rollout_observability import (
     SandboxObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, create_provider
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import (
@@ -474,7 +474,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
         session_id = self._native_session_marker(request)
-        if self.config.execution_mode == "sandbox":
+        if session_id is not None or self.config.execution_mode == "sandbox":
             if session_id is None:
                 raise HTTPException(409, "Native OpenCode requires a seeded agent session")
             state = self._native_sessions.get(session_id)
@@ -603,8 +603,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
         """Install OpenCode once under the EnvironmentServer's caller-assigned identity."""
-        if self.config.execution_mode != "sandbox":
-            raise HTTPException(422, "Native OpenCode sessions require execution_mode=sandbox")
         self._expire_native_receipts()
         session_id = body.agent_session_id
         marker = self._native_session_marker(request)
@@ -651,9 +649,20 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "Native OpenCode requires model_server")
         if self.config.num_workers not in (None, 1):
             raise HTTPException(422, "Native OpenCode sessions require num_workers=1")
-        if body.sandbox_access is None or not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
-            raise HTTPException(422, "Native OpenCode requires Resources-owned direct SandboxAccess")
-        workdir = body.sandbox_access.workdir
+        owns_sandbox = body.sandbox_access is None
+        if owns_sandbox:
+            if not self.config.sandbox_provider:
+                raise HTTPException(422, "OpenCode requires sandbox_access or a configured sandbox_provider")
+            spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config})
+            workdir = spec.workdir
+            provider_ref = self.config.sandbox_provider
+        else:
+            if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
+                raise HTTPException(422, "OpenCode requires direct SandboxAccess")
+            workdir = body.sandbox_access.workdir
+            provider_ref = body.sandbox_access.connection.provider_config_ref
+        if not isinstance(workdir, str):
+            raise HTTPException(422, "OpenCode sandbox workdir must be absolute")
         normalized_workdir = PurePosixPath(workdir)
         if (
             not normalized_workdir.is_absolute()
@@ -686,18 +695,28 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "A staged OpenCode installer requires remote_opencode_binary_path")
         if self.config.remote_opencode_musl_binary_path and not self.config.remote_opencode_install_script_path:
             raise HTTPException(422, "A staged musl binary requires a compatible staged installer")
-        connection = body.sandbox_access.connection
-        provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
-        try:
-            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
-        except BaseException:
-            await provider.aclose()
-            raise
+        provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
+        if owns_sandbox:
+            sandbox = AsyncSandbox(provider)
+        else:
+            try:
+                sandbox = await AsyncSandbox.connect(body.sandbox_access.connection.descriptor, provider=provider)
+            except BaseException:
+                await provider.aclose()
+                raise
         # Caller-assigned IDs are wire identifiers, never filesystem paths.
         directory = f"/tmp/nemo-gym-opencode-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-opencode-runtime-{self.config.opencode_version}"
-        state = OpenCodeSandboxSession(body, sandbox, directory, runtime)
+        state = OpenCodeSandboxSession(body, sandbox, directory, runtime, workdir=workdir, owns_sandbox=owns_sandbox)
         try:
+            if owns_sandbox:
+                await sandbox.start(spec)
+                # Providers need not create SandboxSpec.workdir. Never prepare a borrowed task here.
+                workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
+                if workspace.return_code != 0 or workspace.error_type:
+                    raise RuntimeError(
+                        f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
+                    )
             # Resolve inside the sandbox: host-side lexical checks cannot detect task symlinks.
             validate_paths = (
                 "from pathlib import Path; import sys; "
@@ -990,7 +1009,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             config["instructions"] = [f"{state.directory}/instructions.md"]
         payload = {
             "directory": state.directory,
-            "cwd": state.seed.sandbox_access.workdir,
+            "cwd": state.workdir,
             "command": [f"{state.runtime}/opencode", "run", "--format", "json", "--thinking", "--title", "NeMo Gym"],
             "prompt": prompt,
             "env": {
@@ -1098,8 +1117,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             state.observations.records.append(
                 SandboxObservation(
                     role="agent",
-                    provider=state.seed.sandbox_access.connection.provider_config_ref,
-                    sandbox_id=str(state.seed.sandbox_access.connection.descriptor.get("sandbox_id", "unknown")),
+                    provider=(
+                        self.config.sandbox_provider
+                        if state.owns_sandbox
+                        else state.seed.sandbox_access.connection.provider_config_ref
+                    ),
+                    sandbox_id=(
+                        None
+                        if state.owns_sandbox
+                        else str(state.seed.sandbox_access.connection.descriptor.get("sandbox_id", "unknown"))
+                    ),
                     outcome="timeout" if result.timed_out else "failed" if error else "completed",
                     exit_code=result.return_code,
                 )

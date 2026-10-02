@@ -16,3 +16,13 @@ vLLM sampling overrides. Do not copy it unchanged to a generic OpenAI endpoint.
 
 See the [OpenCode wiring and migration guide](../../fern/versions/latest/pages/evaluation/opencode.mdx)
 for configuration, runtime requirements, and lifecycle guarantees.
+
+Without `sandbox_access`, configure `sandbox_provider` and `sandbox_config`
+(`SandboxSpec` fields such as `image`, `workdir`, and `ttl_s`) on the agent.
+It creates a sandbox, runs there, and destroys it on close; the default workdir is
+`/app`. A supplied access always wins, including its workdir; connection failure
+never triggers a replacement or host execution. With neither access nor a usable
+provider, setup fails. Verifiers that inspect task files must keep using a
+Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+Native sessions are selected by the session cookie, regardless of `execution_mode`.
+That setting still controls unseeded local/legacy calls; `sandbox` rejects unseeded calls.

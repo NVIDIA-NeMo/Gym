@@ -69,7 +69,9 @@ def make_session(tmp_path):
     request = seed()
     request.sandbox_access.workdir = str(workdir)
     provider = ExecOnlySandbox()
-    state = OpenCodeSandboxSession(request, provider, str(directory), str(tmp_path / "runtime"))
+    state = OpenCodeSandboxSession(
+        request, provider, str(directory), str(tmp_path / "runtime"), workdir=request.sandbox_access.workdir
+    )
     shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
     return state, provider, workdir
 
