@@ -125,6 +125,9 @@ ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME = "NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING"
 ENVIRONMENT_SERVER_NAME_KEY_NAME = "environment_server_name"
 ENVIRONMENT_SERVER_ROUTES_KEY_NAME = "environment_server_routes"
 ENVIRONMENT_ROUTING_MODE_KEY_NAME = "environment_routing_mode"
+# When set, an agent that no environment server fronts fails config validation instead of getting a generated
+# legacy_agent relay.
+ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME = "error_on_agent_without_environment_server"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -1067,10 +1070,17 @@ the check."""
             elif OmegaConf.is_missing(original, key):
                 composed[key] = MISSING
 
-    def _raise_on_agent_without_environment_server(self, global_config_dict: DictConfig) -> None:
-        """Reject an agent that rollout collection would otherwise have to call directly.
+    def _front_agents_without_environment_server(self, global_config_dict: DictConfig) -> None:
+        """Give every agent an environment server, since rollout collection reaches agents only through one.
 
-        Runs after composition, so every agent left is one a run can dispatch to.
+        Runs after composition, so every agent left is one a run can dispatch to. An agent that no environment
+        server names gets a generated `legacy_agent` relay, the same block
+        scripts/add_legacy_agent_environment_servers.py declares, and one warning lists every generated relay.
+        This keeps configs written before environment servers running. With
+        `error_on_agent_without_environment_server` set, such an agent is an error instead.
+
+        Only agents with no environment server are touched, so a generated relay can never make an agent's
+        routing ambiguous, and an existing reference is never rewritten.
         """
         with_environment_server = set()
         for instance in global_config_dict.values():
@@ -1084,23 +1094,48 @@ the check."""
                 if isinstance(reference, DictConfig):
                     with_environment_server.add(reference.get("name"))
 
-        without_environment_server = [
+        without_environment_server = sorted(
             agent.name
             for agent in self._agent_instances(global_config_dict)
             if not self._is_unbound_agent(agent.server_config)
             and agent.name not in with_environment_server
             and agent.server_config.get("entrypoint") is not None
-        ]
+        )
         if not without_environment_server:
             return
 
-        listing = "\n".join(f"  - {name}" for name in sorted(without_environment_server))
-        raise AgentWithoutEnvironmentServerError(
-            f"""Agent instance(s) have no environment server, so rollout collection cannot reach them:
+        if global_config_dict.get(ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME, False):
+            listing = "\n".join(f"  - {name}" for name in without_environment_server)
+            raise AgentWithoutEnvironmentServerError(
+                f"""Agent instance(s) have no environment server, so rollout collection cannot reach them:
 {listing}
 
 Declare one for each, naming the agent in its `{AGENT_SERVER_REF_KEY_NAME}` reference, or run
-scripts/add_legacy_agent_environment_servers.py to update your config."""
+scripts/add_legacy_agent_environment_servers.py to update your config. Unset
+{ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME} to generate a legacy_agent relay for each instead."""
+            )
+
+        generated = {}
+        for agent_name in without_environment_server:
+            server_name = f"{agent_name}_environment_server"
+            while server_name in global_config_dict:
+                server_name = f"{server_name}_environment_server"
+            with open_dict(global_config_dict):
+                global_config_dict[server_name] = {
+                    ENVIRONMENT_SERVER_TYPE_KEY_NAME: {
+                        "legacy_agent": {
+                            "entrypoint": "app.py",
+                            AGENT_SERVER_REF_KEY_NAME: {"type": AGENT_SERVER_TYPE_KEY_NAME, "name": agent_name},
+                        }
+                    }
+                }
+            generated[agent_name] = server_name
+
+        relays = ", ".join(f"`{agent}` -> `{server}`" for agent, server in generated.items())
+        logger.warning(
+            f"Agents without an environment server are deprecated; generated legacy_agent relays for {relays}. "
+            "Declare them in your config (scripts/add_legacy_agent_environment_servers.py writes them), or set "
+            f"{ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME}=true to make this an error."
         )
 
     def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
@@ -1311,8 +1346,8 @@ Pass each config with --config (it builds the list for you), e.g.:
         # a '???' in a deleted or overwritten branch is not reported. Otherwise the first unset
         # value surfaces as an opaque MissingMandatoryValue deep in the pipeline.
         self.raise_on_missing_values(global_config_dict)
-        # NOTE(martas): this is for catching agents not attached to an environment server
-        self._raise_on_agent_without_environment_server(global_config_dict)
+        # NOTE(martas): this is for agents not attached to an environment server; see the method for strict mode
+        self._front_agents_without_environment_server(global_config_dict)
 
         # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
         with open_dict(global_config_dict):
