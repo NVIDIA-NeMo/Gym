@@ -25,7 +25,6 @@ import asyncio
 import json
 import logging
 import multiprocessing
-import os
 import subprocess
 import sys
 from time import time
@@ -342,35 +341,70 @@ def test_token_store_freeze_is_atomic_and_conditional_drop_is_race_safe(tmp_path
     with pytest.raises(RuntimeError, match="retired"):
         asyncio.run(store.put(entry.model_copy(update={"model_call_id": "late-after-drop"})))
 
-    store.delete("r0")
+    store.delete_now(["r0"])
     replacement = entry.model_copy(update={"model_call_id": "replacement"})
     asyncio.run(store.put(replacement))
     assert store.read_entries("r0") == [replacement]
 
 
-def test_token_store_sweeps_only_old_retired_tombstones(tmp_path):
+def _store_entry(store: TokenCaptureStore, rollout_id: str) -> None:
+    entry = TokenEntry(
+        rollout_id=rollout_id,
+        model_call_id=f"{rollout_id}-c1",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    store.append(entry)
+
+
+def test_token_store_retire_fences_a_rollout_whatever_its_state(tmp_path):
     store = TokenCaptureStore(tmp_path)
-    for rollout_id in ("old", "recent", "live"):
-        entry = TokenEntry(
-            rollout_id=rollout_id,
-            model_call_id=f"{rollout_id}-c1",
-            prompt_token_ids=PTOKS,
-            generation_token_ids=GTOKS,
-            generation_log_probs=LPS,
-        )
-        stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
-        store.append(entry)
-    for rollout_id in ("old", "recent"):
-        snapshot = store.freeze_now(rollout_id)
-        assert asyncio.run(store.drop(rollout_id, snapshot_id=snapshot.snapshot_id, version=snapshot.version))
+    _store_entry(store, "live")
+    _store_entry(store, "frozen")
+    store.freeze_now("frozen")
+    asyncio.run(store.mark_incomplete("live", "lost-call"))
 
-    old = time() - 3600
-    os.utime(store.state_path_for("old"), (old, old))
+    result = asyncio.run(store.retire(["live", "frozen", "never-captured"]))
 
-    assert store.sweep_retired(older_than_seconds=600) == 1
-    assert not store.state_path_for("old").exists()
-    assert store.state_path_for("recent").exists()
-    assert store.path_for("live").exists()
+    assert result == {"removed": ["live", "frozen"], "absent": ["never-captured"]}
+    for rollout_id in ("live", "frozen", "never-captured"):
+        assert store.read_entries(rollout_id) == []
+        assert not store.incomplete_path_for(rollout_id).exists()
+        # The tombstone fences later writes, as after ``drop``.
+        with pytest.raises(RuntimeError, match="retired"):
+            _store_entry(store, rollout_id)
+        with pytest.raises(RuntimeError, match="retired"):
+            asyncio.run(store.mark_incomplete(rollout_id, "late"))
+        with pytest.raises(RuntimeError, match="retired"):
+            store.freeze_now(rollout_id)
+    # Retiring again is a no-op.
+    assert asyncio.run(store.retire(["live"])) == {"removed": [], "absent": ["live"]}
+
+
+def test_token_store_delete_removes_the_tombstone_so_the_rollout_id_can_be_reused(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r0")
+    store.retire_now(["r0"])
+
+    assert asyncio.run(store.delete(["r0"])) == {"removed": [], "absent": ["r0"]}
+
+    assert not store.state_path_for("r0").exists()
+    _store_entry(store, "r0")
+    assert [entry.model_call_id for entry in store.read_entries("r0")] == ["r0-c1"]
+
+
+@pytest.mark.parametrize("method", ["retire_now", "delete_now"])
+def test_token_store_rejects_a_bare_rollout_id_and_invalid_batches(tmp_path, method):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r1")
+    # A string is a sequence of one-character IDs; treating it as a batch would remove the wrong rollouts.
+    with pytest.raises(TypeError, match="sequence of rollout ids"):
+        getattr(store, method)("r1")
+    with pytest.raises(ValueError, match="Invalid rollout id"):
+        getattr(store, method)(["r1", "../escape"])
+    assert [entry.model_call_id for entry in store.read_entries("r1")] == ["r1-c1"]
 
 
 def test_token_store_recovers_state_lag_from_the_durable_jsonl_tail(tmp_path):
@@ -1152,11 +1186,11 @@ def test_delete_removes_records_and_marker(tmp_path):
     )
     asyncio.run(store.mark_incomplete("gone-0", "c"))
     assert store.path_for("gone-0").exists() and store.is_incomplete("gone-0")
-    store.delete("gone-0")
+    store.delete_now(["gone-0"])
     assert not store.path_for("gone-0").exists()
     assert not store.is_incomplete("gone-0")
     # Idempotent: consuming a rollout twice must not raise.
-    store.delete("gone-0")
+    store.delete_now(["gone-0"])
 
 
 def test_concurrent_appends_to_one_rollout_stay_intact(tmp_path):
