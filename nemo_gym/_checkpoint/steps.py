@@ -49,6 +49,8 @@ class _Episode:
     boundary: Optional[Boundary] = None
     resume: asyncio.Event = field(default_factory=asyncio.Event)
     suspended_remaining: Optional[float] = None
+    # Set when the owner's final cleanup starts: a retire then waits for the episode without cancelling it.
+    finishing: bool = False
 
     def suspend_deadline(self) -> None:
         if self.deadline is None or self.deadline.when() is None or self.suspended_remaining is not None:
@@ -91,12 +93,12 @@ class EpisodeSteps:
     def finishing(self, key: str) -> None:
         """The episode's protocol is over and its owner is releasing what it created.
 
-        A retire from here on stops tracking the episode but does not cancel its task: the owner's cleanup,
-        which closes the episode's sessions, must run to completion.
+        A retire from here on waits for the episode but does not cancel its task: the owner's cleanup, which
+        closes the episode's sessions, must run to completion.
         """
         episode = self._episodes.get(key)
         if episode is not None:
-            episode.task = None
+            episode.finishing = True
 
     async def end(self, key: str) -> None:
         self._episodes.pop(key, None)
@@ -166,10 +168,13 @@ class EpisodeSteps:
         return list(self._episodes)
 
     async def retire(self, key: str) -> None:
+        """Stop the episode: cancel it unless its final cleanup already started, then wait until it has ended."""
         episode = self._episodes.pop(key, None)
         if episode is None:
             return
         episode.resume.set()
         if episode.task is not None and episode.task is not asyncio.current_task():
-            episode.task.cancel()
+            if not episode.finishing:
+                episode.task.cancel()
+            await asyncio.wait([episode.task])
         await self._notify()

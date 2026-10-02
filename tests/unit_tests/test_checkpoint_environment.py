@@ -14,7 +14,7 @@ from nemo_gym._checkpoint.control import (
     RetireRequest,
 )
 from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
-from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
+from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError
 from nemo_gym.episode_types import EpisodeId
 
 
@@ -106,14 +106,13 @@ async def test_new_episodes_are_refused_while_closed_but_restored_ones_start() -
             )
         ]
     )
-    # The participant controller fences every restored attempt.
-    fresh.retiring.retire(EpisodeId(rollout_id="r", attempt=2))
     await fresh.close_admission(CLOSE)
     fresh.begin(EpisodeId(rollout_id="r", attempt=3), TASK, None)
 
     assert fresh.continuation(EpisodeId(rollout_id="r", attempt=3)) == {"k": 1}
     assert fresh.continuation(EpisodeId(rollout_id="r", attempt=3)) is None
-    with pytest.raises(StaleAttemptError):
+    # Only a restored replacement starts while closed; any other attempt is a new episode.
+    with pytest.raises(AdmissionClosedError):
         fresh.begin(EpisodeId(rollout_id="r", attempt=2), TASK, None)
 
 
@@ -289,5 +288,38 @@ async def test_a_commit_that_no_longer_continues_a_restored_episode_releases_it(
 
     assert committed["episode_ids"] == ["r-a1"]
     assert controller.status()["restored_pending"] == []
-    with pytest.raises(StaleAttemptError):
-        restored.begin(EpisodeId(rollout_id="r", attempt=1), TASK, None)
+    # Released: a later /run for attempt 1 starts from its input, not from the restored boundary.
+    restored.begin(EpisodeId(rollout_id="r", attempt=1), TASK, None)
+    assert restored.continuation(EpisodeId(rollout_id="r", attempt=1)) is None
+
+
+async def test_a_retire_replies_only_after_the_episode_and_its_cleanup_have_ended() -> None:
+    from nemo_gym.base_environment_server import CleanupContext
+    from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
+
+    sessions_closed = asyncio.Event()
+    running = asyncio.Event()
+
+    class LongEpisodeServer(_EnvironmentServer):
+        async def run(self, request, cleanup: CleanupContext):
+            async def close_sessions() -> None:
+                await asyncio.sleep(0.1)
+                sessions_closed.set()
+
+            cleanup.register_cleanup("sessions", close_sessions)
+            running.set()
+            await asyncio.sleep(60)
+
+    config = _environment_server().config.model_copy(update={"cleanup_timeout_seconds": 5})
+    server = LongEpisodeServer(config=config, server_client=_environment_server().server_client)
+    server._checkpoint = EnvironmentParticipant()
+    controller = controller_for(server._checkpoint)
+    episode = _request()
+    run = asyncio.create_task(server.run_request(episode))
+    await running.wait()
+
+    await controller.retire(RetireRequest(**request("retire", episode_ids=[episode.episode_id.model_dump()])))
+
+    # The retire replied after the episode stopped and its sessions were closed, not before.
+    assert sessions_closed.is_set() and run.done()
+    assert len(server._checkpoint.retiring) == 0
