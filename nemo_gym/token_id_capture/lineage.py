@@ -137,6 +137,7 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
     """
     # Deferred: staging.records pulls in the digest module; lineage stays light.
     from nemo_gym.token_id_capture.records import (
+        ENGINE_REFUSED_CALL_REASON,
         LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
         LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
     )
@@ -149,8 +150,17 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
     records = []
     failures = []
     completed = {row["model_call_id"] for row in rows if row.get("staging_key")}
+    # A DEFINITE failure resolves its intent: the engine refused the request,
+    # so nothing was staged and the call can never commit. Leaving it pending
+    # would make the attempt's terminal receipt unreconcilable (the consumer
+    # must preserve staging forever), wedging the rollout. Ambiguous failures
+    # (a response lost after the worker may have staged) stay pending on
+    # purpose: custody of the possibly staged tokens awaits reconciliation.
+    resolved = completed | {
+        row["model_call_id"] for row in rows if row.get("failure_reason") == ENGINE_REFUSED_CALL_REASON
+    }
     attempted = list(dict.fromkeys(row["model_call_id"] for row in rows if row.get("intent")))
-    pending = [row["model_call_id"] for row in rows if row.get("intent") and row["model_call_id"] not in completed]
+    pending = [row["model_call_id"] for row in rows if row.get("intent") and row["model_call_id"] not in resolved]
     for row in rows:
         if row.get("intent"):
             continue

@@ -110,6 +110,14 @@ class CaptureContext:
     parent_staging_chain: list[str] = field(default_factory=list)
     # Intent registration checks the observed ledger head, not the selected candidate.
     admitted_latest_call_id: str | None = None
+    # ``register_call_intent`` sets this once the durable intent row exists, so
+    # failure recording can tell an admitted-and-begun call (whose intent must
+    # be resolved) from an admitted measurement that writes no ledger rows.
+    intent_registered: bool = False
+    # Set once a definite engine refusal has been recorded for this call, so
+    # the middleware's end-of-request sweep does not add the ambiguous
+    # uncommitted-call row on top of it.
+    refusal_recorded: bool = False
     parent_chain_hash: str = ""
     # The request items as received from the harness, stashed by
     # ``resolve_parent`` so the commit hook can publish the ledger row with
@@ -432,6 +440,7 @@ async def register_call_intent() -> None:
         if begin is None or context.capture_admission is None:
             raise ValueError("Framework-owned capture requires durable call intents")
         await begin(context.rollout_id, context.model_call_id, context.admitted_latest_call_id)
+        context.intent_registered = True
         return
     if context is None or context.token_sink is None:
         return

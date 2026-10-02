@@ -60,8 +60,16 @@ _EMPTY_DIGEST = hashlib.sha256(_DIGEST_DOMAIN).hexdigest()
 # Parent resolution could not admit the call. Written by ``resolve_parent``.
 UNRESOLVED_PARENT_REASON = "unresolved_parent"
 # The call was admitted but finished without worker commit coordinates.
-# Written by the capture middleware.
+# Written by the capture middleware. Custody is ambiguous: the worker may have
+# staged tokens whose acknowledgement was lost, so the call stays pending
+# until reconciliation.
 UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
+# The engine answered the admitted call with a client-error refusal (a
+# context-window overflow, a validation error), so generation never ran and
+# nothing was staged. The outcome is definite: this failure resolves the
+# call's pending intent, and the attempt's terminal receipt can be sealed.
+# Written by the model server at the engine call site.
+ENGINE_REFUSED_CALL_REASON = "engine_refused_request"
 # A committed ledger row lacks the served response id that terminal attribution joins on.
 LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
 # A committed ledger row lacks the chain or cumulative digest that verification anchors on.

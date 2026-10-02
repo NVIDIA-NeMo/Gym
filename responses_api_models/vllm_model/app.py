@@ -33,6 +33,7 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
     _decode_capture_parent,
     _request_messages,
+    fail_refused_external_call,
     start_model_execution,
 )
 from nemo_gym.openai_utils import (
@@ -542,6 +543,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             response_dict = await client.create_response(**body_dict)
         except ClientResponseError as error:
             execution.update(response_source="upstream", upstream_status_code=error.status)
+            # A definite engine refusal (overflow, validation): resolve the
+            # admitted call's capture intent so the attempt stays sealable.
+            await fail_refused_external_call(error)
             raise
         execution["response_source"] = "upstream"
 
@@ -961,6 +965,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             chat_completion_dict = await client.create_chat_completion(**body_dict)
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
+            # A definite engine refusal (overflow, validation): resolve the
+            # admitted call's capture intent so the attempt stays sealable,
+            # whether or not the overflow branch below swallows the error.
+            await fail_refused_external_call(e)
             if transport_io_enabled:
                 finished_ns = time_ns()
                 _append_transport_io(
@@ -1325,6 +1333,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             completion_dict = await client.create_completion(**completion_body)
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
+            # A definite engine refusal (overflow, validation): resolve the
+            # admitted call's capture intent so the attempt stays sealable,
+            # whether or not the overflow branch below swallows the error.
+            await fail_refused_external_call(e)
             result_content_str = e.response_content.decode()
             is_out_of_context_length = e.status == 400 and (
                 "context length" in result_content_str or "max_tokens" in result_content_str

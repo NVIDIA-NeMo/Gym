@@ -92,7 +92,7 @@ from nemo_gym.token_id_capture.config import NonGeneratingRequest, token_id_capt
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
-from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.token_id_capture.records import ENGINE_REFUSED_CALL_REASON, UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.sink import CAPTURE_PARENT_HEADER
 from nemo_gym.token_id_capture.store import make_token_store
 
@@ -1316,6 +1316,45 @@ def _record(
             logger.warning("Could not mark rollout %s capture as incomplete.", rollout_id, exc_info=True)
 
 
+async def fail_refused_external_call(error: BaseException) -> None:
+    """Resolve an admitted call's intent when the engine refused the request.
+
+    A client-error answer (a context-window overflow, a validation error) means
+    generation never ran and nothing was staged, so the outcome is definite:
+    the intent is resolved with ``ENGINE_REFUSED_CALL_REASON`` and the
+    attempt's terminal receipt stays sealable. Transport losses and server
+    errors are NOT recorded here; their custody is ambiguous and the
+    middleware's end-of-request sweep keeps them pending for reconciliation.
+    """
+    status = getattr(error, "status", None)
+    if not isinstance(status, int) or not 400 <= status < 500:
+        return
+    context = current_capture_context()
+    if (
+        context is None
+        or not context.external_staging
+        or context.capture_admission is None
+        or not context.intent_registered
+        or context.committed
+        or context.refusal_recorded
+        or not isinstance(context.lineage_store, CaptureLedger)
+    ):
+        return
+    try:
+        await context.lineage_store.record_failure(
+            context.rollout_id,
+            context.model_call_id,
+            ENGINE_REFUSED_CALL_REASON,
+        )
+        context.refusal_recorded = True
+    except Exception:
+        logger.exception(
+            "Could not record the engine refusal of call %s for rollout %s.",
+            context.model_call_id,
+            context.rollout_id,
+        )
+
+
 async def _fail_uncommitted_external_call(context: CaptureContext | None) -> None:
     """Record a failure when an admitted worker call returns without commit coordinates."""
     if (
@@ -1323,6 +1362,7 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         or not context.external_staging
         or context.capture_admission is None
         or context.committed
+        or context.refusal_recorded
         or context.lineage_store is None
     ):
         return

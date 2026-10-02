@@ -315,6 +315,42 @@ def test_tool_arguments_beyond_the_64_bit_range_still_admit(monkeypatch, tmp_pat
     assert len(manifest.records) == 2 and not manifest.failures and not manifest.pending_call_ids
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_an_engine_refusal_resolves_the_intent_as_a_failure(monkeypatch, tmp_path, stream):
+    """A request the engine refuses (a context-window overflow) must leave a FAILURE
+    row behind, not a pending intent: a pending intent makes the attempt's terminal
+    receipt unreconcilable and the trainer refuses to seal it, killing the run."""
+    import json as _json
+
+    from aiohttp import ClientResponseError
+
+    async def refusing_worker(client, **body):
+        request_info = MagicMock(real_url="http://worker.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = _json.dumps(
+            {"object": "error", "message": "maximum context length is 32768 tokens", "code": 400}
+        ).encode()
+        raise error
+
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", refusing_worker)
+    response = harness.client.post(
+        "/ng-rollout/attempt/training-token-capture/v1/responses",
+        json={"input": HISTORY, "stream": stream},
+    )
+    if stream:
+        # The streaming contract reports the refusal as a terminal event.
+        assert response.status_code == 200, response.text
+        assert "response.failed" in response.text
+    else:
+        # Without propagate_context_overflow_errors the refusal surfaces as a
+        # plain server error; the ledger contract below is what matters.
+        assert response.status_code >= 400, response.text
+    manifest = harness.manifest("attempt")
+    assert not manifest.pending_call_ids, manifest
+    assert [f.reason for f in manifest.failures] == ["engine_refused_request"]
+
+
 def test_streaming_responses_capture_like_their_non_streaming_twin(monkeypatch, tmp_path):
     """SSE-only Responses harnesses (the Codex CLI) send ``stream: true``. The dispatch
     makes exactly one non-streaming worker call through capture and replays the finished
