@@ -71,6 +71,7 @@ from nemo_gym.rollout_reverification import (
     _rs_for_row,
     _run_verification_payloads,
     _seed_output_with_successes,
+    _verification_request_body,
     _yield_inputs_and_rollouts_paired,
     summarize_cache_usage,
 )
@@ -541,7 +542,9 @@ class TestAtifPreflight:
         with pytest.raises(ConfigError, match="cannot find a resources server for row"):
             await _guard_atif_preflight([payload])
 
-    async def test_run_rejects_before_preparing_output_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_run_rejects_before_preparing_output_paths(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=True))
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification._resolve_under_cwd_or_install",
@@ -560,7 +563,7 @@ class TestAtifPreflight:
             materialized_inputs_jsonl_fpath="inputs.jsonl",
             rollouts_jsonl_fpath=None,
             atif_manifest_jsonl_fpath="manifest.jsonl",
-            output_jsonl_fpath="existing-output.jsonl",
+            output_jsonl_fpath=str(tmp_path / "existing-output.jsonl"),
             overwrite=True,
         )
 
@@ -796,6 +799,25 @@ class TestYieldInputsAndRolloutsPaired:
 
 
 class TestBuildVerifyPayload:
+    def test_preserves_generation_evidence_without_stale_verifier_fields(self) -> None:
+        trajectory = {"turns": [{"answer": "saved answer"}]}
+        pair = InputRolloutPair(
+            input={"task": "q1"},
+            rollout={
+                "response": {"output": "saved answer"},
+                "ng_trajectory": trajectory,
+                "reward": 0.0,
+                "mask_sample": True,
+                "failure_reason": "old judge failure",
+                NG_FAILURE_CLASS_KEY: "judge_failed",
+            },
+        )
+        result = _build_verify_payload(pair)
+        assert result == {"task": "q1", "response": pair.rollout["response"], "ng_trajectory": trajectory}
+        assert _verification_request_body(result) == {"task": "q1", "response": pair.rollout["response"]}
+        assert result["ng_trajectory"] == trajectory
+        assert pair.input == {"task": "q1"}
+
     def test_merges_input_row_with_response(self) -> None:
         pair = InputRolloutPair(
             input={"task": "q1", "verifier_metadata": {"answer": 42}},
@@ -817,9 +839,11 @@ class TestBuildVerifyPayload:
             rollout={"response": {"output": "hello"}, "reward": 1.0},
         )
 
-        result = _build_verify_payload(pair)
-
-        assert result == {
+        payload = _build_verify_payload(pair)
+        assert payload["task_id"] == pair.input["task_id"]
+        assert payload["task_input"] == pair.input["task_input"]
+        # Recovery validates the original task before the HTTP body is flattened.
+        assert _verification_request_body(payload) == {
             "_ng_task_index": 0,
             "_ng_environment_server": "environment",
             "instance_id": "a",
@@ -833,17 +857,25 @@ class TestBuildVerifyPayload:
             input={"task_id": {"taskset": "t", "task_id": "a"}, "task_input": fields, "_ng_task_index": 0},
             rollout={"response": {"output": "hello"}},
         )
-        assert _build_verify_payload(pair) == {"_ng_task_index": 0, **fields, "response": {"output": "hello"}}
+        assert _verification_request_body(_build_verify_payload(pair)) == {
+            "_ng_task_index": 0,
+            **fields,
+            "response": {"output": "hello"},
+        }
 
     def test_mixed_input_preserves_fields_and_rejects_conflicts(self) -> None:
         pair = InputRolloutPair(
             input={"task_input": {"task_data": {"answer": 42}, "instance_id": "a"}},
             rollout={"response": {}},
         )
-        assert _build_verify_payload(pair) == {"answer": 42, "instance_id": "a", "response": {}}
+        assert _verification_request_body(_build_verify_payload(pair)) == {
+            "answer": 42,
+            "instance_id": "a",
+            "response": {},
+        }
         pair.input["task_input"]["answer"] = 43
         with pytest.raises(ConfigError, match="conflicting task field 'answer'"):
-            _build_verify_payload(pair)
+            _verification_request_body(_build_verify_payload(pair))
 
     def test_rows_stamped_with_an_environment_server_route_to_its_resources_server(self) -> None:
         config = {
@@ -915,7 +947,10 @@ class TestBuildVerifyPayload:
             },
         )
 
-        result = _build_verify_payload(pair)
+        payload = _build_verify_payload(pair)
+        result = _verification_request_body(payload)
+        if shape != "legacy":
+            assert payload["task_input"] == input_row["task_input"]
 
         assert result["deliverables_dir"] == "/artifacts/task-1/repeat_0"
         assert result["reference_ids"] == ["ref-b"]
@@ -1910,6 +1945,7 @@ class TestCallAggregateMetrics:
         results = [
             {
                 "reward": 0.8,
+                "_ng_environment_server": "original-environment",
                 TASK_INDEX_KEY_NAME: 0,
                 # no AGENT_REF_KEY_NAME — agent routing must come from rows, not results
                 "response": {
@@ -1917,6 +1953,9 @@ class TestCallAggregateMetrics:
                     "usage": {"prompt_tokens": 10, "completion_tokens": 5},
                 },
                 "responses_create_params": {"input": "large prompt content", "model": "llm"},
+                "ng_trajectory": {"model_calls": [{"request": "large captured request"}]},
+                "ng_agent_observations": {"turns": ["large saved observation"]},
+                "ng_model_call_capture": {"calls": ["large captured response"]},
                 ATIF_PROVENANCE_KEY: {
                     "trajectory_id": "trajectory-1",
                     "source_sha256": "a" * 64,
@@ -1943,6 +1982,9 @@ class TestCallAggregateMetrics:
         # response body stripped, responses_create_params stripped
         assert "responses_create_params" not in sent
         assert ATIF_PROVENANCE_KEY not in sent
+        assert "ng_trajectory" not in sent
+        assert "ng_agent_observations" not in sent
+        assert "ng_model_call_capture" not in sent
         assert sent.get("response") == {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}
 
         # other fields preserved
@@ -1952,6 +1994,7 @@ class TestCallAggregateMetrics:
         assert returned_path is not None
         assert returned_path == tmp_path / "my_run_rollouts_aggregate_metrics.json"
         assert returned_path.exists()
+        assert orjson.loads(returned_path.read_bytes())[0]["_ng_environment_server"] == "original-environment"
 
     async def test_returns_none_when_no_results(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """No results → no aggregate file written and None returned."""

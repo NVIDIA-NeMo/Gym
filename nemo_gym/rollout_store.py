@@ -21,8 +21,10 @@ execution numbers. There is no dispatch journal or second outcome commit.
 
 import logging
 import os
+import warnings
 from collections.abc import Callable
 from contextlib import ExitStack
+from itertools import chain
 from pathlib import Path
 
 import orjson
@@ -344,6 +346,74 @@ class RolloutStore:
     def failures(self) -> list[dict]:
         """Latest failure payloads, including terminal skips classified as omitted."""
         return [row for row in self.selected("failure") + self.selected("omitted") if not row.get("_ng_omitted")]
+
+    @classmethod
+    def append_existing(cls, output: Path) -> "RolloutStore | None":
+        """Reverification may append to a validated manifest-backed run."""
+        output = output.resolve()
+        if not manifest_path_for(output).exists():
+            if journal_path_for(output).exists() or any(
+                RUN_ID_KEY in row for path in (output, failures_path_for(output)) for row in read_records(path)
+            ):
+                raise ConfigError("Cannot append without a run manifest; explicitly recover the run first.")
+            return None
+        reader = cls.read(output)
+        return cls(output, reader._state)
+
+    def reverification_failures(self, max_attempts: int) -> list[dict]:
+        """Find saved judge inputs without changing the latest attempt's status.
+
+        Skip interrupted attempts, but stop at the newest recorded outcome.
+        An interruption must not make an answer from an older outcome eligible again.
+        Eligibility, terminality, and the retry budget still use the latest state.
+        """
+        eligible = [logical_rollout_id(row) for row in self.pending(max_attempts)]
+        unknown = {identity for identity in eligible if self._state.disposition(identity) == "unknown"}
+        newest_known: dict[str, int] = {}
+        for identity, attempt in chain(self._state.payloads, self._state.omitted):
+            newest_known[identity] = max(attempt, newest_known.get(identity, -1))
+        rows = []
+        for identity in eligible:
+            attempt = newest_known.get(identity)
+            outcome = self._state.payloads.get((identity, attempt))
+            if (
+                outcome is not None
+                and outcome.failure_class in {"judge_failed", "judge_invalid"}
+                and not outcome.terminal
+            ):
+                # The pairing step reports/skips missing responses for both known
+                # and interrupted latest attempts. Never search past this outcome.
+                rows.append(outcome.record.read())
+            elif identity in unknown and identity in self._state.latest:
+                reason = (
+                    "no outcome has been recorded"
+                    if attempt is None
+                    else f"the newest recorded outcome (attempt {attempt}) is not a retryable judge failure"
+                )
+                warnings.warn(
+                    f"Skipping judge-only recovery for rollout {identity}: {reason}. "
+                    "No agent request was made. Resume rollout collection separately to retry the agent.",
+                    stacklevel=2,
+                )
+        return rows
+
+    def for_reverification(self, payloads: list[dict]) -> list[dict]:
+        """Prepare judge requests; the controller reserves their IDs immediately before dispatch."""
+        rows = []
+        for payload in payloads:
+            identity = logical_rollout_id(payload)
+            if identity not in self._state.expected:
+                raise ConfigError("Reverification input is outside the saved run's inventory.")
+            if any(payload.get(key) != value for key, value in self._state.expected[identity].items()):
+                raise ConfigError("Reverification inputs differ from the saved run's materialized inputs.")
+            rows.append(
+                payload
+                | {
+                    RUN_ID_KEY: self.manifest.run_id,
+                    ATTEMPT_INDEX_KEY_NAME: self.manifest.next_attempt.get(identity, 0),
+                }
+            )
+        return rows
 
     def inputs_for(self, results: list[dict]) -> list[dict]:
         return [self._state.expected[logical_rollout_id(result)] for result in results]
