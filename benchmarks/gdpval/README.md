@@ -228,6 +228,7 @@ full run:
 | `nested_tasks` | `false` | `true` makes each stage's task sample a superset of the previous; default samples each stage independently. |
 | `seed` | *(none)* | Seed for reproducible task sampling, per-task reference assignment, and reference selection. |
 | `reuse_cached_deliverables` | `true` | Judge a task's cached deliverable in later stages instead of re-running the policy. |
+| `replace_transport_ineligible_tasks` | `false` | In strict, sampled non-final stages, replace a task rejected by every judge's deterministic transport preflight with an unused task from the same distribution bucket. The replacement keeps the same reference assignment. Full/final stages are unchanged. |
 
 ### Resuming an interrupted multi-stage run
 
