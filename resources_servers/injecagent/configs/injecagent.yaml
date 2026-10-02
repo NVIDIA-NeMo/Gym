@@ -1,0 +1,30 @@
+injecagent:
+  resources_servers:
+    injecagent:
+      entrypoint: app.py
+      domain: safety
+      verified: false
+      description: Faithful tool-simulation environment for the InjecAgent indirect prompt injection benchmark
+      value: Measure direct-harm and two-stage data-stealing attack success from auditable tool-call trajectories
+      simulated_responses_path: benchmarks/injecagent/data/attacker_simulated_responses.json
+      sandbox_provider: ${oc.decode:${oc.env:INJECAGENT_SANDBOX_PROVIDER,null}}
+      sandbox_spec: ${oc.decode:${oc.env:INJECAGENT_SANDBOX_SPEC,null}}
+      sandbox_exec_timeout_s: ${oc.decode:${oc.env:INJECAGENT_SANDBOX_EXEC_TIMEOUT_S,30}}
+
+injecagent_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      # Upstream evaluate_finetuned_agent.py makes one model call per step and at most two steps
+      # (data-stealing stage 2 only after a successful stage 1). Two turns reproduce that budget.
+      max_steps: 2
+      resources_server:
+        type: resources_servers
+        name: injecagent
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/injecagent/data/example.jsonl

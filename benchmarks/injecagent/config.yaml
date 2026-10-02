@@ -1,0 +1,15 @@
+config_paths:
+  - resources_servers/injecagent/configs/injecagent.yaml
+
+injecagent_benchmark:
+  _inherit_from: injecagent_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: injecagent-base
+          type: benchmark
+          jsonl_fpath: benchmarks/injecagent/data/injecagent_base.jsonl
+          prepare_script: benchmarks/injecagent/prepare.py
+          prompt_config: null
+          num_repeats: 1
+          license: MIT

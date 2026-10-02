@@ -96,6 +96,7 @@ gym list benchmarks --json   # machine-readable output for scripting or CI
 | [inverse_if](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/inverse_if) | Inverse instruction-following benchmark — instructions that counter conventional expectations | LLM judge (per-task) | ✓ |
 | [structured_outputs](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/structured_outputs) | Schema adherence across structured output formats | Rule-based (schema validation) | ✓ |
 | [indirect_prompt_injection](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/indirect_prompt_injection) | Resistance to injected instructions in tool-use trajectories | Rule-based (attack detection) | ✓ |
+| [injecagent](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/injecagent) | InjecAgent base setting: indirect prompt injection through poisoned tool results (510 direct-harm, 544 two-stage data-stealing cases) | Rule-based (upstream first-tool-call rule) | ✓ |
 | [jailbreak_detection](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/jailbreak_detection) | Jailbreak resistance with Nemotron judge | LLM judge | ✓ |
 | [xstest](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/xstest) | Over-refusal calibration (XSTest) | Rule-based | ✓ |
 | [instruction_following](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/instruction_following) | IFEval and IFBench-style instruction following | LLM judge | |
