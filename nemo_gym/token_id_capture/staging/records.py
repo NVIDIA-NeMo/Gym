@@ -404,6 +404,9 @@ class RolloutManifest(_WireModel):
     records: list[CallRecord] = Field(default_factory=list)
     failures: list[ManifestFailure] = Field(default_factory=list)
     attempted_call_ids: list[Identifier] = Field(default_factory=list)
+    # No successful custody acknowledgement, not proof that a worker is active
+    # or wrote nothing. A terminal consumer may mask the attempt, but must leave
+    # these calls' possible late staging writes out of immediate cleanup.
     pending_call_ids: list[Identifier] = Field(default_factory=list)
 
 

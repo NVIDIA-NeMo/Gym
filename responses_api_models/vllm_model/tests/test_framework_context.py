@@ -254,6 +254,31 @@ def test_lost_capture_ack_is_terminal_and_preserves_attempt_identity(monkeypatch
     assert len(harness.worker_calls) == 1
 
 
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_failed_call_keeps_intent_without_claiming_worker_custody(monkeypatch, tmp_path, cancelled):
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    first = assert_clean(harness.post("attempt", HISTORY))
+
+    async def failed_worker(client, **body):
+        if cancelled:
+            raise asyncio.CancelledError()
+        raise RuntimeError("engine failed before staging")
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", failed_worker)
+    assert harness.post("attempt", HISTORY + first["output"]).status_code == 500
+    manifest = harness.manifest("attempt")
+    assert len(manifest.records) == len(harness.sink.records) == 1
+    assert len(manifest.attempted_call_ids) == 2
+    assert len(manifest.pending_call_ids) == 1
+    assert manifest.failures[0].model_call_id == manifest.pending_call_ids[0]
+    # The framework can mask this attempt. A failure row must not fabricate a
+    # successful acknowledgement or permit another call under the same owner.
+    assert harness.post("attempt", HISTORY).status_code == 500
+    assert harness.manifest("attempt") == manifest
+    harness.client.close()
+    asyncio.run(harness.ledger.close())
+
+
 @pytest.mark.parametrize(
     "dialect, body",
     [
