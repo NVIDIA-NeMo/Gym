@@ -470,7 +470,7 @@ async def commit_entry(
         # and break conditional retirement of the snapshot finalize consumed.
         logger.warning(
             "Training-token capture for model call %s of rollout %s arrived after the capture "
-            "was frozen; the late record is dropped.",
+            "was frozen or retired; the late record is dropped.",
             context.model_call_id,
             context.rollout_id,
         )

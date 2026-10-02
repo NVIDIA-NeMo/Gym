@@ -25,7 +25,6 @@ import asyncio
 import json
 import logging
 import multiprocessing
-import os
 import subprocess
 import sys
 from time import time
@@ -84,7 +83,7 @@ from nemo_gym.token_id_capture.lineage import (
     LineageIndex,
     RolloutLineage,
 )
-from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenSource
+from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenCaptureRetiredError, TokenSource
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -342,7 +341,7 @@ def test_token_store_freeze_is_atomic_and_conditional_drop_is_race_safe(tmp_path
     with pytest.raises(RuntimeError, match="retired"):
         asyncio.run(store.put(entry.model_copy(update={"model_call_id": "late-after-drop"})))
 
-    store.delete("r0")
+    store.delete_now(["r0"])
     replacement = entry.model_copy(update={"model_call_id": "replacement"})
     asyncio.run(store.put(replacement))
     assert store.read_entries("r0") == [replacement]
@@ -388,71 +387,115 @@ def test_a_late_capture_after_freeze_is_dropped_without_marking_the_frozen_rollo
     assert asyncio.run(store.drop("late-r0", snapshot_id=snapshot.snapshot_id, version=snapshot.version))
 
 
-def test_token_store_sweeps_only_old_retired_tombstones(tmp_path):
+def test_a_late_capture_after_retire_is_dropped_like_one_after_freeze(tmp_path, caplog):
+    """An abandoned attempt that keeps running must not be reported as a capture failure."""
     store = TokenCaptureStore(tmp_path)
-    for rollout_id in ("old", "recent", "live"):
-        entry = TokenEntry(
-            rollout_id=rollout_id,
-            model_call_id=f"{rollout_id}-c1",
-            prompt_token_ids=PTOKS,
-            generation_token_ids=GTOKS,
-            generation_log_probs=LPS,
-        )
-        stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
-        store.append(entry)
-    for rollout_id in ("old", "recent"):
-        snapshot = store.freeze_now(rollout_id)
-        assert asyncio.run(store.drop(rollout_id, snapshot_id=snapshot.snapshot_id, version=snapshot.version))
+    entry = TokenEntry(
+        rollout_id="abandoned",
+        model_call_id="c1",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    asyncio.run(store.put(entry))
+    store.retire_now(["abandoned"])
 
-    old = time() - 3600
-    os.utime(store.state_path_for("old"), (old, old))
+    context = CaptureContext(rollout_id="abandoned", model_call_id="c2", token_sink=store)
+    token = set_token_sink(context)
+    try:
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(commit_entry(entry.model_copy(update={"model_call_id": "c2"})))
+    finally:
+        reset_token_sink(token)
 
-    assert store.sweep_retired(older_than_seconds=600) == 1
-    assert not store.state_path_for("old").exists()
-    assert store.state_path_for("recent").exists()
-    assert store.path_for("live").exists()
+    assert context.committed is False
+    assert any("arrived after the capture was frozen or retired" in record.message for record in caplog.records)
+    assert all(record.exc_info is None for record in caplog.records)
+    assert not any("failed to" in record.message for record in caplog.records)
+    assert store.read_entries("abandoned") == []
+    assert not store.incomplete_path_for("abandoned").exists()
 
 
-def test_token_store_sweeps_abandoned_unretired_captures(tmp_path):
-    """A capture whose rollout was cancelled before the retire is reclaimed
-    with its token records once every file of it is older than the cutoff; a
-    capture with any fresh file is in flight and stays, and retired tombstones
-    are sweep_retired's, not sweep_stale's."""
+def _store_entry(store: TokenCaptureStore, rollout_id: str) -> None:
+    entry = TokenEntry(
+        rollout_id=rollout_id,
+        model_call_id=f"{rollout_id}-c1",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    store.append(entry)
+
+
+def test_token_store_retire_fences_a_rollout_whatever_its_state(tmp_path):
     store = TokenCaptureStore(tmp_path)
-    for rollout_id in ("abandoned", "inflight", "tombstone"):
-        entry = TokenEntry(
-            rollout_id=rollout_id,
-            model_call_id=f"{rollout_id}-c1",
-            prompt_token_ids=PTOKS,
-            generation_token_ids=GTOKS,
-            generation_log_probs=LPS,
-        )
-        stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
-        store.append(entry)
-    snapshot = store.freeze_now("tombstone")
-    assert asyncio.run(store.drop("tombstone", snapshot_id=snapshot.snapshot_id, version=snapshot.version))
+    _store_entry(store, "live")
+    _store_entry(store, "frozen")
+    store.freeze_now("frozen")
+    asyncio.run(store.mark_incomplete("live", "lost-call"))
 
-    old = time() - 3600
-    for rollout_id in ("abandoned", "inflight", "tombstone"):
-        for path in (store.state_path_for(rollout_id), store.path_for(rollout_id)):
-            if path.exists():
-                os.utime(path, (old, old))
-    # One fresh file keeps the in-flight capture: a recent append means the
-    # rollout is still running, however old its registration-time state is.
-    os.utime(store.path_for("inflight"), None)
+    result = asyncio.run(store.retire(["live", "frozen", "never-captured"]))
 
-    # A caller may already hold an open descriptor while waiting for the sweep.
-    # Replacing its inode would let a later writer bypass that caller's lock.
-    lock_inode = store.lock_path_for("abandoned").stat().st_ino
+    assert result == {"removed": ["live", "frozen"], "absent": ["never-captured"]}
+    for rollout_id in ("live", "frozen", "never-captured"):
+        assert store.read_entries(rollout_id) == []
+        assert not store.incomplete_path_for(rollout_id).exists()
+        # The fence refuses later writes, as after ``drop``.
+        with pytest.raises(TokenCaptureRetiredError):
+            _store_entry(store, rollout_id)
+        with pytest.raises(TokenCaptureRetiredError):
+            asyncio.run(store.begin_call(rollout_id, "late"))
+        with pytest.raises(TokenCaptureRetiredError):
+            asyncio.run(store.mark_incomplete(rollout_id, "late"))
+        with pytest.raises(TokenCaptureRetiredError):
+            store.freeze_now(rollout_id)
+    # Retiring again is a no-op.
+    assert asyncio.run(store.retire(["live"])) == {"removed": [], "absent": ["live"]}
 
-    assert store.sweep_stale(older_than_seconds=600) == 1
-    assert not store.state_path_for("abandoned").exists()
-    assert not store.path_for("abandoned").exists()
-    assert store.lock_path_for("abandoned").stat().st_ino == lock_inode
-    assert store.path_for("inflight").exists()
-    # The retired tombstone is untouched here and still sweeps as retired.
-    assert store.state_path_for("tombstone").exists()
-    assert store.sweep_retired(older_than_seconds=600) == 1
+
+def test_token_store_retire_syncs_the_directory_once_per_batch(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    for rollout_id in ("r1", "r2", "r3"):
+        _store_entry(store, rollout_id)
+
+    with patch.object(store, "_fsync_root", wraps=store._fsync_root) as fsync_root:
+        store.retire_now(["r1", "r2", "r3"])
+        assert fsync_root.call_count == 1
+        # Nothing changed, so a repeat does not sync at all.
+        store.retire_now(["r1", "r2", "r3"])
+        assert fsync_root.call_count == 1
+
+    _store_entry(store, "r4")
+    snapshot = store.freeze_now("r4")
+    with patch.object(store, "_fsync_root", wraps=store._fsync_root) as fsync_root:
+        assert asyncio.run(store.drop("r4", snapshot_id=snapshot.snapshot_id, version=snapshot.version))
+    # The state replace's directory fsync also covers the payload unlinks before it.
+    assert fsync_root.call_count == 1
+
+
+def test_token_store_delete_removes_the_fence_so_the_rollout_id_can_be_reused(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r0")
+    store.retire_now(["r0"])
+
+    assert asyncio.run(store.delete(["r0"])) == {"removed": [], "absent": ["r0"]}
+
+    assert not store.state_path_for("r0").exists()
+    _store_entry(store, "r0")
+    assert [entry.model_call_id for entry in store.read_entries("r0")] == ["r0-c1"]
+
+
+@pytest.mark.parametrize("method", ["retire_now", "delete_now"])
+def test_token_store_rejects_a_bare_rollout_id_and_invalid_batches(tmp_path, method):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r1")
+    # A string is a sequence of one-character IDs; treating it as a batch would remove the wrong rollouts.
+    with pytest.raises(TypeError, match="sequence of rollout ids"):
+        getattr(store, method)("r1")
+    with pytest.raises(ValueError, match="Invalid rollout id"):
+        getattr(store, method)(["r1", "../escape"])
+    assert [entry.model_call_id for entry in store.read_entries("r1")] == ["r1-c1"]
 
 
 def test_token_store_recovers_state_lag_from_the_durable_jsonl_tail(tmp_path):
@@ -1234,11 +1277,11 @@ def test_delete_removes_records_and_marker(tmp_path):
     )
     asyncio.run(store.mark_incomplete("gone-0", "c"))
     assert store.path_for("gone-0").exists() and store.is_incomplete("gone-0")
-    store.delete("gone-0")
+    store.delete_now(["gone-0"])
     assert not store.path_for("gone-0").exists()
     assert not store.is_incomplete("gone-0")
     # Idempotent: consuming a rollout twice must not raise.
-    store.delete("gone-0")
+    store.delete_now(["gone-0"])
 
 
 def test_concurrent_appends_to_one_rollout_stay_intact(tmp_path):
