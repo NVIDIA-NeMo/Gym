@@ -15,6 +15,7 @@ from nemo_gym._checkpoint.control import (
     CommitRequest,
     ParticipantController,
     RestoreRequest,
+    RetireRequest,
     install_participant,
 )
 from nemo_gym._checkpoint.errors import ControlError, StaleAttemptError
@@ -25,9 +26,11 @@ from nemo_gym._checkpoint.model import (
     PolicyModelParticipant,
     attach_capture_context,
     import_model_records,
+    ledger_removal_refusal,
 )
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_rollout_id
+from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.lineage import FileLineageStore
 from nemo_gym.token_id_capture.records import ParentResolutionStatus
 from nemo_gym.token_id_capture.sink import CaptureContext
@@ -614,3 +617,42 @@ async def test_an_episode_with_a_retried_call_keeps_only_the_latest_cut(tmp_path
     )
 
     assert restored._restored_cuts["r-a1"].model_call_id == "c2"
+
+
+async def test_ledger_retire_and_delete_wait_out_an_open_checkpoint(tmp_path: Path) -> None:
+    ledger, participant, controller = await _ledger_participant(tmp_path)
+    await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r"))
+    app = FastAPI()
+    install_rollout_control_routes(app, ledger, auth_token="t", refuse_removal=lambda: ledger_removal_refusal(app))
+    app.state.nemo_gym_policy_gate = participant.gate
+    headers = {"authorization": "Bearer t"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
+        await controller.prepare(CheckpointRequest(**control()))
+        # A commit still reads the ledger of every live episode, so removing one now would empty its lineage.
+        refused = await client.post(
+            "/training-token-capture/control/rollouts/retire", json={"rollout_ids": ["r"]}, headers=headers
+        )
+        deleted = await client.post(
+            "/training-token-capture/control/rollouts/delete", json={"rollout_ids": ["r"]}, headers=headers
+        )
+        commit = await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
+        await controller.resume(CheckpointRequest(**control()))
+        retired = await client.post(
+            "/training-token-capture/control/rollouts/retire", json={"rollout_ids": ["r"]}, headers=headers
+        )
+
+    assert refused.status_code == 409 and deleted.status_code == 409
+    assert commit["manifest"]["record_count"] == 1
+    assert retired.status_code == 200 and retired.json()["removed"] == ["r"]
+
+
+async def test_retiring_an_attempt_retires_the_ledgers_of_it_and_every_earlier_attempt(tmp_path: Path) -> None:
+    ledger, _, controller = await _ledger_participant(tmp_path)
+    for key in ("r", "r-a1", "r-a2"):
+        await ledger.record(_commit(_call_record(f"call-{key}"), [USER_1], [ASSISTANT_1], rollout_id=key))
+
+    await controller.retire(RetireRequest(**control(episode_ids=[{"rollout_id": "r", "attempt": 1}])))
+
+    assert not await ledger.has_rows("r") and not await ledger.has_rows("r-a1")
+    assert (tmp_path / "r.lineage.retired").exists() and (tmp_path / "r-a1.lineage.retired").exists()
+    assert await ledger.has_rows("r-a2")

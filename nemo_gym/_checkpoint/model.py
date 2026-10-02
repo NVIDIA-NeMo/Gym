@@ -27,7 +27,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol, runtime_checkable
@@ -108,6 +108,8 @@ class CheckpointableLedger(Protocol):
     def export_rows(self, rollout_id: str) -> list[dict]: ...
 
     def import_rows(self, rollout_id: str, rows: list[dict]) -> None: ...
+
+    async def retire(self, rollout_ids: Sequence[str]) -> dict: ...
 
 
 class EpisodeCut(BaseModel):
@@ -475,6 +477,25 @@ def retained_staging_keys(records: Iterable[CheckpointRecord]) -> list[str]:
     return sorted(keys)
 
 
+async def retire_ledgers(ledger: Optional[CheckpointableLedger], episode_id: EpisodeId) -> None:
+    """Retire the ledgers of ``episode_id`` and every earlier attempt, which a checkpoint retire fences too."""
+    if ledger is not None:
+        await ledger.retire(
+            [
+                EpisodeId(rollout_id=episode_id.rollout_id, attempt=attempt).capture_key
+                for attempt in range(episode_id.attempt + 1)
+            ]
+        )
+
+
+def ledger_removal_refusal(app: Any) -> Optional[str]:
+    """Why the capture ledger must not retire or delete now: a commit may still read any live episode's ledger."""
+    gate = getattr(app.state, "nemo_gym_policy_gate", None)
+    if gate is not None and not gate.accepting:
+        return "a checkpoint is open on this model server; retry ledger retire and delete after it resumes"
+    return None
+
+
 def import_model_records(
     ledger: Optional[CheckpointableLedger], records: list[ModelRecord]
 ) -> dict[str, GenerationCutRecord]:
@@ -549,6 +570,7 @@ class PolicyModelParticipant(CheckpointParticipant):
         await self.gate.retire(episode_id)
         for capture_key in [key for key in self._restored_cuts if covers(episode_id, key)]:
             del self._restored_cuts[capture_key]
+        await retire_ledgers(self.ledger, episode_id)
 
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         if self.ledger is None:

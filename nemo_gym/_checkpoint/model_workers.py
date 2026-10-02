@@ -57,6 +57,7 @@ from nemo_gym._checkpoint.model import (
     import_model_records,
     merge_reports,
     retained_staging_keys,
+    retire_ledgers,
 )
 from nemo_gym.episode_types import EpisodeId
 
@@ -330,6 +331,8 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
         await self._broadcast(
             "retire", {"episode_id": episode_id.model_dump(mode="json")}, timeout=_MESSAGE_TIMEOUT_SECONDS
         )
+        # After every worker cancelled the attempts' calls, so no late row recreates a ledger.
+        await retire_ledgers(self.ledger, episode_id)
 
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         raise NotImplementedError("the coordinated policy participant exports asynchronously; use export()")
