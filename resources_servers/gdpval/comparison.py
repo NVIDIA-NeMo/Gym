@@ -32,6 +32,7 @@ import shutil
 import stat
 import tempfile
 import time
+import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -40,6 +41,12 @@ from typing import Any, Optional
 from openai import APITimeoutError
 
 from resources_servers.gdpval.judge_panel import AUDIO_EXTS, VIDEO_EXTS, merge_create_kwargs, sample_judge
+from resources_servers.gdpval.judge_telemetry import (
+    JudgeTelemetrySink,
+    classify_judge_error,
+    compact_request_profile,
+    profile_judge_request,
+)
 from resources_servers.gdpval.preconvert import (
     OFFICE_EXTENSIONS,
     AttachmentBudget,
@@ -1401,6 +1408,10 @@ def send_judge_request(
     messages: list[dict],
     max_output_tokens: int = 65535,
     create_overrides: Optional[dict] = None,
+    *,
+    telemetry: JudgeTelemetrySink | None = None,
+    telemetry_context: Optional[dict[str, Any]] = None,
+    transport_receipt: Optional[dict[str, Any]] = None,
 ) -> str:
     """Send a judge request with exponential-backoff retry.  Returns response text.
 
@@ -1418,14 +1429,54 @@ def send_judge_request(
         },
         create_overrides,
     )
+    context = dict(telemetry_context or {})
+    context.setdefault("model", model)
+    context.setdefault("request_id", uuid.uuid4().hex)
+    request_profile = (
+        profile_judge_request(messages, receipt=transport_receipt, include_files=True)
+        if telemetry is not None and telemetry.enabled
+        else None
+    )
+    request_started = time.monotonic()
 
     for attempt in range(1, REQUEST_MAX_ATTEMPTS + 1):
+        attempt_started = time.monotonic()
         try:
             response = client.chat.completions.create(**create_kwargs)
+            if telemetry is not None and request_profile is not None:
+                telemetry.emit(
+                    "judge_request_completed",
+                    **context,
+                    outcome="recovered" if attempt > 1 else "success",
+                    attempts=attempt,
+                    latency_ms=round((time.monotonic() - request_started) * 1000),
+                    request=compact_request_profile(request_profile),
+                )
             return (response.choices[0].message.content or "").strip()
         except Exception as error:
             retryable = _is_retryable(error)
             is_last = attempt == REQUEST_MAX_ATTEMPTS
+            terminal = not retryable or is_last
+            if telemetry is not None and request_profile is not None:
+                telemetry.emit(
+                    "judge_attempt_failed",
+                    **context,
+                    attempt=attempt,
+                    max_attempts=REQUEST_MAX_ATTEMPTS,
+                    latency_ms=round((time.monotonic() - attempt_started) * 1000),
+                    terminal=terminal,
+                    error=classify_judge_error(error, retryable=retryable),
+                    request=request_profile,
+                )
+                if terminal:
+                    telemetry.emit(
+                        "judge_request_completed",
+                        **context,
+                        outcome="failed",
+                        attempts=attempt,
+                        latency_ms=round((time.monotonic() - request_started) * 1000),
+                        request=compact_request_profile(request_profile),
+                    )
             if not retryable or is_last:
                 raise
             print(
@@ -1845,6 +1896,9 @@ def preflight_judge_transport(
     judge: Judge,
     task_prompt: str,
     sections: dict[str, list[dict]],
+    *,
+    telemetry: JudgeTelemetrySink | None = None,
+    telemetry_context: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Project one provider request and reject lossy or oversized transport."""
     messages = construct_judge_messages(
@@ -1900,7 +1954,7 @@ def preflight_judge_transport(
         reasons.append("provider_total_image_byte_cap")
     if judge.max_video_files is not None and video_count > judge.max_video_files:
         reasons.append("provider_video_count_cap")
-    return {
+    receipt = {
         "eligible": not reasons,
         "judge": judge.name,
         "media_mode": judge.media_mode,
@@ -1915,6 +1969,15 @@ def preflight_judge_transport(
         "loss_markers": markers,
         "reasons": reasons,
     }
+    if reasons and telemetry is not None and telemetry.enabled:
+        telemetry.emit(
+            "judge_preflight_excluded",
+            **dict(telemetry_context or {}),
+            judge=judge.name,
+            model=judge.model,
+            request=profile_judge_request(messages, receipt=receipt, include_files=True),
+        )
+    return receipt
 
 
 def run_trials(
@@ -1928,6 +1991,9 @@ def run_trials(
     max_output_tokens: int = 65535,
     return_raw_responses: bool = False,
     rng: Optional[random.Random] = None,
+    telemetry: JudgeTelemetrySink | None = None,
+    telemetry_context: Optional[dict[str, Any]] = None,
+    transport_by_judge: Optional[dict[str, dict[str, Any]]] = None,
 ) -> dict:
     """Run ``num_trials`` judge calls, alternating swapped/unswapped positions.
 
@@ -1984,8 +2050,25 @@ def run_trials(
             submission_a=current_a,
             submission_b=current_b,
         )
+        request_id = uuid.uuid4().hex
+        request_context = {
+            **dict(telemetry_context or {}),
+            "request_id": request_id,
+            "trial_index": i,
+            "swapped": swapped,
+            "judge": judge.name,
+            "model": judge.model,
+        }
+        transport_receipt = (transport_by_judge or {}).get(judge.name)
         response_text = send_judge_request(
-            judge.client, judge.model, messages, max_output_tokens, judge.create_overrides
+            judge.client,
+            judge.model,
+            messages,
+            max_output_tokens,
+            judge.create_overrides,
+            telemetry=telemetry,
+            telemetry_context=request_context,
+            transport_receipt=transport_receipt,
         )
         if return_raw_responses:
             raw_responses.append(response_text)
@@ -1998,6 +2081,15 @@ def run_trials(
             {"win_count_a": 0, "win_count_b": 0, "tie_count": 0, "trials": 0, "invalid_count": 0},
         )
         if judgement is None:
+            if telemetry is not None and telemetry.enabled:
+                telemetry.emit(
+                    "judge_response_invalid",
+                    **request_context,
+                    response_chars=len(response_text),
+                    request=compact_request_profile(
+                        profile_judge_request(messages, receipt=transport_receipt, include_files=False)
+                    ),
+                )
             invalid_count += 1
             jc["invalid_count"] += 1
             continue
