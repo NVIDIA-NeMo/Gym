@@ -1,0 +1,11 @@
+# Oracle agent: runs a Harbor task's solution/solve.sh in the seeded sandbox instead of calling a model.
+# `gym dataset validate <folder | harbor:dataset>` selects it; `gym eval run ... --agent oracle` works too.
+oracle_agent:
+  responses_api_agents:
+    oracle_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      max_solve_timeout_s: 3600
+      output_tail_chars: 4000
