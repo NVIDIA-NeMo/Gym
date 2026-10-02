@@ -34,6 +34,8 @@ from Gym; offline images need its locally cached binary setup.
 The hosted-inference example normalizes structured reasoning for Gym's chat
 contract. Select the model adapter appropriate for your endpoint; training that
 requires token IDs needs a compatible training model server.
+The OpenCode config includes upstream's `legacy_agent` environment server for
+rollout routing; it forwards requests without changing task rows or grading.
 
 The five public reference solutions passed A-to-B verification, and all five null
 controls scored zero. `data/example_rollouts.jsonl` contains one GLM-5.3/OpenCode

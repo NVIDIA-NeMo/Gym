@@ -26,3 +26,11 @@ deepswe_external1_opencode_sandboxed_agent:
         name: deepswe_external1_opencode_resources_server
 
       sandbox_timeout: 10800
+
+deepswe_external1_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: deepswe_external1_opencode_sandboxed_agent
