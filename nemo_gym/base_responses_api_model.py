@@ -55,6 +55,7 @@ from nemo_gym._checkpoint.model import (
     PolicyModelParticipant,
     attach_capture_context,
     generation_cut_requester,
+    ledger_removal_refusal,
 )
 from nemo_gym._checkpoint.model_workers import (
     COORDINATOR_SOCKET_ENV,
@@ -389,6 +390,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             gate = link.gate
         # Outermost of this app's middleware: a refused call must not register capture intent.
         app.add_middleware(PolicyAdmissionMiddleware, gate=gate)
+        app.state.nemo_gym_policy_gate = gate
 
     @abstractmethod
     async def chat_completions(
@@ -1961,6 +1963,7 @@ def install_model_call_capture(
             app,
             capture_ledger,
             auth_token=capture_settings.token_id_capture.resolve_control_auth_token(),
+            refuse_removal=lambda: ledger_removal_refusal(app),
         )
 
     owned_endpoints = [
