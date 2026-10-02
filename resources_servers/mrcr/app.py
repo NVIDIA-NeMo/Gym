@@ -59,6 +59,7 @@ class MRCRVerifyResponse(MRCRVerifyRequest, BaseVerifyResponse):
 
 
 class MRCRResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: MRCRResourcesServerConfig
 
     async def verify(self, body: MRCRVerifyRequest) -> MRCRVerifyResponse:

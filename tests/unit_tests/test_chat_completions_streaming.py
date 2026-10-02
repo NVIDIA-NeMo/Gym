@@ -41,6 +41,7 @@ from nemo_gym.chat_streaming import (
     synthesize_chat_completion_sse,
 )
 from nemo_gym.openai_utils import (
+    CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
@@ -121,6 +122,19 @@ class TestSanitizeStreamingChatBody:
             {"messages": [], "stream": True, "client_bookkeeping": {"x": 1}, "temperature": 0.5}
         )
         assert set(cleaned) == {"messages", "temperature"}
+        NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_drops_provider_extension_fields(self) -> None:
+        # The non-streaming schema accepts these; the streaming path keeps dropping them, including
+        # values the strict schema would reject (e.g. ``thinking: true``).
+        extensions = {
+            "chat_template_kwargs": {"enable_thinking": True},
+            "thinking": True,
+            "output_config": {"effort": "high"},
+        }
+        assert set(extensions) == CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+        cleaned, _ = sanitize_streaming_chat_body({"messages": [], "stream": True, **extensions})
+        assert set(cleaned) == {"messages"}
         NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(cleaned)
 
     def test_keeps_known_sampling_and_tool_fields(self) -> None:

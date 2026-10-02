@@ -17,3 +17,11 @@ verifiers_agent:
       max_tokens: 16000
       temperature: 1.0
       top_p: 1.0
+
+verifiers_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: verifiers_agent
