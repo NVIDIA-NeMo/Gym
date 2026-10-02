@@ -794,9 +794,9 @@ class FileLineageStore(IncrementalLineageStore):
         return self._ledger_root / f"{validate_rollout_id(rollout_id)}.lineage.jsonl"
 
     def _locked(self, rollout_id: str):
-        # Ledger rows share the token store's per-rollout lock file. The two
+        # Ledger rows share the token store's striped rollout lock. The two
         # record families are never both written for one rollout, so one lock
-        # discipline covers both and no second lock file is minted.
+        # discipline covers both and no second set of lock files is minted.
         return self._store._locked(rollout_id)
 
     def _read(self, rollout_id: str) -> list[dict]:

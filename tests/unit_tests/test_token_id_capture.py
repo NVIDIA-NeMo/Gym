@@ -77,6 +77,7 @@ from nemo_gym.token_id_capture import (
     stamp_continuation,
     stamp_lineage,
 )
+from nemo_gym.token_id_capture import store as token_store_module
 from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
 from nemo_gym.token_id_capture.lineage import (
@@ -371,6 +372,66 @@ def test_token_store_sweeps_only_old_retired_tombstones(tmp_path):
     assert not store.state_path_for("old").exists()
     assert store.state_path_for("recent").exists()
     assert store.path_for("live").exists()
+
+
+def _store_entry(store: TokenCaptureStore, rollout_id: str) -> None:
+    entry = TokenEntry(
+        rollout_id=rollout_id,
+        model_call_id=f"{rollout_id}-c1",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    store.append(entry)
+
+
+def test_token_store_lock_files_are_bounded_and_never_deleted(tmp_path, monkeypatch):
+    monkeypatch.setattr(token_store_module, "LOCK_STRIPES", 4)
+    store = TokenCaptureStore(tmp_path)
+    for index in range(20):
+        _store_entry(store, f"r{index}")
+        snapshot = store.freeze_now(f"r{index}")
+        assert asyncio.run(store.drop(f"r{index}", snapshot_id=snapshot.snapshot_id, version=snapshot.version))
+    lock_files = sorted(path.name for path in (tmp_path / token_store_module.LOCK_DIR).iterdir())
+    assert len(lock_files) <= 4
+
+    for state_path in tmp_path.glob("*.tokens.state.json"):
+        os.utime(state_path, (0, 0))
+    assert store.sweep_retired(older_than_seconds=0) == 20
+    # Sweeping removes every rollout file but keeps the shared lock files, and no rollout has its own.
+    assert sorted(path.name for path in tmp_path.iterdir()) == [token_store_module.LOCK_DIR]
+    assert sorted(path.name for path in (tmp_path / token_store_module.LOCK_DIR).iterdir()) == lock_files
+
+
+def test_token_store_lock_stripe_is_the_same_in_every_process(tmp_path):
+    """String hashing is randomized per process; the stripe must not depend on it."""
+    script = (
+        "import sys; from nemo_gym.token_id_capture.store import TokenCaptureStore; "
+        "print(TokenCaptureStore(sys.argv[1]).lock_path_for('rollout-7-a1'))"
+    )
+    paths = {
+        subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path)],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        for seed in ("1", "2")
+    }
+    assert paths == {str(TokenCaptureStore(tmp_path).lock_path_for("rollout-7-a1"))}
+
+
+def test_token_store_refuses_to_nest_rollout_locks(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    with store._locked("r1"):
+        with pytest.raises(RuntimeError, match="while holding the lock of rollout 'r1'"):
+            with store._locked("r2"):
+                pass
+    # The guard is released with the lock.
+    with store._locked("r2"):
+        pass
 
 
 def test_token_store_recovers_state_lag_from_the_durable_jsonl_tail(tmp_path):
