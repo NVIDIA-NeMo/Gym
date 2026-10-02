@@ -233,6 +233,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 | Component | License | Upstream | Notes |
 |-----------|---------|----------|-------|
 | PinchBench skill | MIT | https://github.com/pinchbench/skill | Cloned and patched at image build (modification). |
+| ORAgentBench | MIT (code); CC BY 4.0 (documentation and data, per upstream README) | https://github.com/ORAgentBench/ORAgentBench | Cloned at run time at commit `c9eb952` by `resources_servers/oragentbench/scripts/prepare_oragentbench.py`; not redistributed. `resources_servers/oragentbench/docker/Dockerfile` reproduces upstream's `docker/base/Dockerfile` and adds a tmux layer (modification). `resources_servers/oragentbench/tests/fixtures/toy_assignment/tests/test.sh` is a verbatim copy of upstream's shared scoring script with a provenance header. |
 
 ---
 

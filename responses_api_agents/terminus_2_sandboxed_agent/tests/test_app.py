@@ -143,7 +143,13 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output(reasoning
     assert second.content == "answer 2"
     assert third.content == "answer 3"
     expected_reasoning = (
-        [{"id": "", "summary": [{"text": reasoning_content, "type": "summary_text"}], "type": "reasoning"}]
+        [
+            {
+                "id": NeMoGymLLM._item_id("rs", 1, reasoning_content),
+                "summary": [{"text": reasoning_content, "type": "summary_text"}],
+                "type": "reasoning",
+            }
+        ]
         if reasoning_content
         else []
     )
@@ -155,7 +161,7 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output(reasoning
                 {"content": "first", "role": "user", "type": "message"},
                 *expected_reasoning,
                 {
-                    "id": "",
+                    "id": NeMoGymLLM._item_id("msg", 1, "answer 1"),
                     "content": [{"annotations": [], "text": "answer 1", "type": "output_text"}],
                     "role": "assistant",
                     "status": "completed",
@@ -304,3 +310,19 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         ("tmux setup", {"timeout_s": None, "cwd": None, "user": None, "env": None}),
         ("tmux run", {"timeout_s": None, "cwd": None, "user": None, "env": None}),
     ]
+
+
+def test_echoed_assistant_history_carries_valid_deterministic_item_ids():
+    import re
+
+    from responses_api_agents.terminus_2_sandboxed_agent.app import NeMoGymLLM
+
+    history = [
+        {"role": "user", "content": "do the thing"},
+        {"role": "assistant", "content": '{"commands": []}', "reasoning_content": "thinking"},
+    ]
+    items = NeMoGymLLM._input_items(history, "next")
+    ids = [item.id for item in items if hasattr(item, "id")]
+    assert len(ids) == 2 and all(re.fullmatch(r"[A-Za-z0-9_-]+", i) for i in ids)
+    assert ids[0].startswith("rs_") and ids[1].startswith("msg_")
+    assert ids == [item.id for item in NeMoGymLLM._input_items(history, "next") if hasattr(item, "id")]
